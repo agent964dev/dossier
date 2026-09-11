@@ -1,0 +1,17 @@
+flowchart TB
+  subgraph doc["A served dossier document · opaque origin · CSP sandbox"]
+    S["inline script runs\ncharts · tabs · interactivity"]
+    CSS["styles · /a/theme.css · Google Fonts"]
+    IMG["images from any https host"]
+    L["links to anywhere (new tab)"]
+  end
+  subgraph blocked["Blocked at upload"]
+    X1["script src=https://cdn…"]
+    X2["iframe / object / embed"]
+    X3["form · fetch · XHR"]
+    X4["onclick= · javascript:"]
+  end
+  X1 -. "third party can change the code later\nand read every document you open" .-> R1["reader"]
+  X2 -. "embedded page can phish for your\nsession or fingerprint readers" .-> R1
+  X3 -. "page can post what it reads\nto an attacker's server" .-> R1
+  doc -- "cannot reach" --> COOKIE[("dossier session cookie\nother documents · API")]

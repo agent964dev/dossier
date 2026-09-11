@@ -1,0 +1,82 @@
+erDiagram
+  workspaces ||--o{ memberships : "has"
+  accounts ||--o{ memberships : "joins"
+  accounts ||--o{ identities : "signs in via"
+  accounts ||--o{ api_keys : "mints"
+  workspaces ||--o{ documents : "owns"
+  accounts ||--o{ documents : "authors"
+  documents |o--o{ documents : "parent of"
+  documents ||--o{ document_versions : "versions"
+  documents ||--o{ document_shares : "invites"
+  deletion_batches |o--o{ documents : "archives"
+  workspaces ||--o{ assets : "owns"
+  assets ||--o{ asset_versions : "versions"
+
+  workspaces {
+    text id PK
+    text slug UK
+    text kind "team or personal"
+    text email_domain UK
+  }
+  memberships {
+    text workspace_id FK
+    text account_id FK
+    text role "admin or member"
+  }
+  accounts {
+    text id PK
+    text kind "user or service"
+    text disabled_at
+  }
+  identities {
+    text account_id FK
+    text email
+    text email_verified
+  }
+  api_keys {
+    text account_id FK
+    text workspace_id FK
+    text key_hash UK
+    text revoked_at
+  }
+  documents {
+    text id PK "12 chars"
+    text workspace_id FK
+    text created_by FK
+    text parent_id FK
+    text path "binary index"
+    text depth "0 to 16"
+    text kind
+    text visibility "public team private null"
+    text current_version_id
+    text next_version_number
+    text deleted_at
+    text deletion_batch_id FK
+    text disabled_at
+  }
+  document_versions {
+    text document_id FK
+    text version_number UK
+    text object_key "R2"
+    text idempotency_key UK
+    text request_hash
+  }
+  document_shares {
+    text document_id FK
+    text email
+  }
+  deletion_batches {
+    text id PK
+    text root_document_id
+    text restored_at
+  }
+  assets {
+    text workspace_id FK
+    text slug UK
+    text ext "css or woff2"
+  }
+  asset_versions {
+    text asset_id FK
+    text version_number UK
+    text object_key "R2"
+  }

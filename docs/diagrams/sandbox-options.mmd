@@ -1,0 +1,5 @@
+flowchart LR
+  A["Option 1 · keep v3 policy\ninline scripts yes · external code no\niframes no · network no"] --> A1["safest · what postplan does today\nplans stay self-contained"]
+  B["Option 2 · allowlisted embeds\niframes only from hosts an admin lists\n(youtube, figma, excalidraw, github…)"] --> B1["covers 'reference something else'\nCSP frame-src per host · one config var"]
+  C["Option 3 · allowlisted external scripts\nscript src from listed CDNs"] --> C1["CDN can change code later\nsubresource integrity required\nstill no network from the page"]
+  D["Option 4 · open (allow everything)"] --> D1["a document can exfiltrate\nother documents a reader opens\nand phish the reader · not recommended"]

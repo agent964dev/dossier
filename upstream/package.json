@@ -1,0 +1,33 @@
+{
+  "name": "postplan",
+  "version": "0.0.4",
+  "description": "Static HTML draft publishing for agents.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    "README.md"
+  ],
+  "bin": {
+    "postplan": "./bin/postplan.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.835.0",
+    "commander": "^14.0.0",
+    "express": "^5.1.0",
+    "jose": "^6.2.3",
+    "nanoid": "^5.1.5",
+    "parse5": "^7.3.0",
+    "pg": "^8.16.2"
+  }
+}

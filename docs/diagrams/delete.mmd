@@ -1,0 +1,17 @@
+flowchart LR
+  subgraph before["Before · you own the ticket"]
+    T["T ticket · you"] --> R["R research · intern"]
+    T --> N["N notes · you"]
+    R --> F["F findings · intern"]
+  end
+  subgraph a["Option A · promote (v2.1)"]
+    Ta["T · trash"] --> Na["N · trash"]
+    Ra["R research · intern\nbecomes a root"] --> Fa["F findings · intern"]
+  end
+  subgraph b["Option B · archive the subtree (proposed)"]
+    Tb["T · trash (batch 7)"] --> Rb["R · trash (batch 7)"]
+    Tb --> Nb["N · trash (batch 7)"]
+    Rb --> Fb["F · trash (batch 7)"]
+  end
+  before ==> a
+  before ==> b
