@@ -1,0 +1,10 @@
+:root {
+  --brand-300: oklch(0.83 0.12 205);
+  --neutral-950: oklch(0.15 0.01 260);
+  --card-border: color-mix(in oklch, var(--brand-300) 24%, transparent);
+}
+
+body {
+  color: var(--brand-300);
+  background: var(--neutral-950);
+}

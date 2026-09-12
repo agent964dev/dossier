@@ -147,6 +147,64 @@ export const UploadResponse = Schema.Struct({
 })
 export type UploadResponse = typeof UploadResponse.Type
 
+export const AssetSlug = Schema.String.pipe(
+  Schema.pattern(/^[a-z0-9][a-z0-9-]{0,63}$/),
+)
+export type AssetSlug = typeof AssetSlug.Type
+
+export const AssetExtension = Schema.Literal('css', 'woff2')
+export type AssetExtension = typeof AssetExtension.Type
+export const AssetExt = AssetExtension
+export type AssetExt = AssetExtension
+
+export const AssetPushRequest = Schema.Struct({
+  slug: AssetSlug,
+  ext: AssetExtension,
+  contentBase64: Schema.String,
+})
+export type AssetPushRequest = typeof AssetPushRequest.Type
+export const AssetUploadRequest = AssetPushRequest
+export type AssetUploadRequest = AssetPushRequest
+
+export const AssetPushResponse = Schema.Struct({
+  slug: AssetSlug,
+  ext: AssetExtension,
+  versionNumber: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  url: Schema.String,
+  pinnedUrl: Schema.String,
+})
+export type AssetPushResponse = typeof AssetPushResponse.Type
+export const Asset = AssetPushResponse
+export type Asset = AssetPushResponse
+
+export const AssetListItem = Schema.Struct({
+  slug: AssetSlug,
+  ext: AssetExtension,
+  latestVersionNumber: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  url: Schema.String,
+  pinnedUrl: Schema.String,
+  updatedAt: Schema.String,
+})
+export type AssetListItem = typeof AssetListItem.Type
+
+export const AssetListResponse = Schema.Struct({
+  ok: Schema.Literal(true),
+  assets: Schema.Array(AssetListItem),
+})
+export type AssetListResponse = typeof AssetListResponse.Type
+
+export const AssetDeleteResponse = Schema.Struct({
+  ok: Schema.Literal(true),
+})
+export type AssetDeleteResponse = typeof AssetDeleteResponse.Type
+
+export const AssetSlugTakenError = Schema.Struct({
+  ok: Schema.Literal(false),
+  code: Schema.Literal('slug_taken'),
+  message: Schema.optional(Schema.String),
+})
+export type AssetSlugTakenError = typeof AssetSlugTakenError.Type
+
 export const Me = Schema.Struct({
   accountId: Schema.String,
   accountName: Schema.String,
@@ -344,6 +402,24 @@ export const UploadsApiGroup = HttpApiGroup.make('uploads').add(
     .addSuccess(UploadResponse),
 )
 
+const AssetPath = Schema.Struct({ slug: AssetSlug })
+
+export const AssetsApiGroup = HttpApiGroup.make('assets')
+  .add(
+    HttpApiEndpoint.post('push', '/api/assets')
+      .setPayload(AssetPushRequest)
+      .addSuccess(AssetPushResponse)
+      .addError(AssetSlugTakenError, { status: 409 }),
+  )
+  .add(
+    HttpApiEndpoint.get('list', '/api/assets').addSuccess(AssetListResponse),
+  )
+  .add(
+    HttpApiEndpoint.del('delete', '/api/assets/:slug')
+      .setPath(AssetPath)
+      .addSuccess(AssetDeleteResponse),
+  )
+
 const DocumentPath = Schema.Struct({ id: DocumentId })
 const RestorePayload = Schema.Struct({ batchId: Schema.String })
 const DisablePayload = Schema.Struct({ reason: OptionalNullableString })
@@ -444,6 +520,7 @@ export const SystemApi = HttpApi.make('dossier').add(SystemApiGroup)
 
 export const DossierApi = SystemApi
   .add(UploadsApiGroup)
+  .add(AssetsApiGroup)
   .add(DocumentsApiGroup)
   .add(KeysApiGroup)
   .add(MeApiGroup)

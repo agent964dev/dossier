@@ -35,6 +35,37 @@ describe('dossierFetch', () => {
     )
   })
 
+  it('includes structured server policy errors', async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json(
+        {
+          code: 'policy_rejected',
+          message: 'CSS failed the dossier asset policy.',
+          details: {
+            errors: [
+              'CSS URL destination is not allowed. Destination: "https://evil.example/x".',
+              'Second policy reason.',
+            ],
+          },
+        },
+        { status: 422, statusText: 'Unprocessable Entity' },
+      ),
+    )
+    await expect(
+      dossierFetch('/api/assets', {
+        apiUrl: 'https://dossier.example',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CliError>>({
+        message:
+          '422 Unprocessable Entity: CSS failed the dossier asset policy.\n' +
+          '  - CSS URL destination is not allowed. Destination: "https://evil.example/x".\n' +
+          '  - Second policy reason.',
+      }),
+    )
+  })
+
   it('requires HTTPS except for loopback API origins', async () => {
     await expect(
       dossierFetch('/api/me', {

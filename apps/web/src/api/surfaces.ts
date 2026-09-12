@@ -1,5 +1,6 @@
 import {
   ApiKeyCreate,
+  AssetUploadRequest,
   DocumentPatch,
   DossierApi,
   ShareDelta,
@@ -17,6 +18,8 @@ import {
 import { Context, Effect, Layer, Schema } from 'effect'
 
 import {
+  AssetSlugTaken,
+  Assets,
   CoreServicesLive,
   Db,
   Documents,
@@ -147,6 +150,60 @@ const UploadsLive = HttpApiBuilder.group(DossierApi, 'uploads', (handlers) =>
       }),
     ),
   ),
+)
+
+function slugTakenResponse(slug: string): HttpServerResponse.HttpServerResponse {
+  return HttpServerResponse.unsafeJson(
+    {
+      ok: false,
+      code: 'slug_taken',
+      message: `Asset slug ${slug} is reserved by another workspace.`,
+    },
+    { status: 409, headers: { 'cache-control': 'no-store' } },
+  )
+}
+
+const AssetsLive = HttpApiBuilder.group(DossierApi, 'assets', (handlers) =>
+  handlers
+    .handleRaw('push', ({ request }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const state = yield* ApiRequest
+          const assets = yield* Assets
+          const payload = yield* decodeJsonBody(request, AssetUploadRequest)
+          const result = yield* assets.push(payload, state.principal).pipe(Effect.either)
+          if (result._tag === 'Left') {
+            if (result.left instanceof AssetSlugTaken) {
+              return slugTakenResponse(result.left.slug)
+            }
+            return yield* Effect.fail(result.left)
+          }
+          return jsonServerResponse(result.right)
+        }),
+      ),
+    )
+    .handleRaw('list', () =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const state = yield* ApiRequest
+          const assets = yield* Assets
+          return jsonServerResponse({
+            ok: true,
+            assets: yield* assets.list(state.principal),
+          })
+        }),
+      ),
+    )
+    .handleRaw('delete', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const state = yield* ApiRequest
+          const assets = yield* Assets
+          yield* assets.delete(path.slug, state.principal)
+          return jsonServerResponse({ ok: true })
+        }),
+      ),
+    ),
 )
 
 const DocumentsLive = HttpApiBuilder.group(
@@ -530,6 +587,7 @@ const LegacyLive = HttpApiBuilder.group(DossierApi, 'legacy', (handlers) =>
 const GroupsLive = Layer.mergeAll(
   SystemLive,
   UploadsLive,
+  AssetsLive,
   DocumentsLive,
   KeysLive,
   MeLive,
@@ -609,7 +667,10 @@ export async function handleProtectedApiRequest(
   }
 
   const uploadRequest = pathname === '/api/uploads'
-  if (uploadRequest) {
+  const assetMutation =
+    (pathname === '/api/assets' && input.method === 'POST') ||
+    (/^\/api\/assets\/[^/]+$/.test(pathname) && input.method === 'DELETE')
+  if (uploadRequest || assetMutation) {
     const publisherResult = await Effect.runPromise(
       Effect.gen(function* () {
         const principals = yield* Principal

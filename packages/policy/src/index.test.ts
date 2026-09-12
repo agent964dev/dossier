@@ -161,10 +161,32 @@ describe('validateHtml', () => {
   it('rejects a non-allowlisted external stylesheet and accepts an allowlisted one', () => {
     const fixture = html('', '<title>Styles</title><link rel="stylesheet" href="https://evil.example/x.css">')
 
-    expect(validateHtml(fixture, OPTIONS).errors).toContain('Blocked <link> tag found.')
+    expect(validateHtml(fixture, OPTIONS).errors).toContain(
+      'Blocked stylesheet <link href="https://evil.example/x.css">; host is not in STYLE_HOST_ALLOWLIST.',
+    )
     expect(
       validateHtml(fixture, { ...OPTIONS, styleHostAllowlist: ['evil.example'] }).ok,
     ).toBe(true)
+  })
+
+
+  it('explains why rejected stylesheet links are blocked', () => {
+    expect(
+      validateHtml(
+        html('', '<title>Preload</title><link rel="preload" href="/a/theme.css">'),
+        OPTIONS,
+      ).errors,
+    ).toContain(
+      'Blocked <link rel="preload">; only rel="stylesheet" is allowed.',
+    )
+    expect(
+      validateHtml(
+        html('', '<title>Path</title><link rel="stylesheet" href="/assets/theme.css">'),
+        OPTIONS,
+      ).errors,
+    ).toContain(
+      'Blocked stylesheet <link href="/assets/theme.css">; first-party stylesheets must be /a/<slug>.css or /a/<slug>@<n>.css.',
+    )
   })
 
   it('allows same-origin document iframes and gates external iframe hosts', () => {
@@ -326,6 +348,19 @@ describe('validateCss', () => {
     expect(validateCss('.x { background: url(javascript:alert(1)) }', OPTIONS).errors).toContain(
       'CSS contains an unparsed URL or @import.',
     )
+  })
+
+
+  it('rejects browser-normalized backslash URLs in custom-property image candidates', () => {
+    const fixture = String.raw`:root { --image: "\\\\evil.invalid/review-pixel" } .x { background-image: image-set(var(--image) 1x) }`
+    expect(validateCss(fixture, OPTIONS).errors.some((error) =>
+      error.includes('CSS custom-property URL destination is not allowed.'),
+    )).toBe(true)
+  })
+
+  it('does not scan comments or quoted content as executable CSS', () => {
+    expect(validateCss('/* Use url (value) syntax. */ body { color: red }', OPTIONS).ok).toBe(true)
+    expect(validateCss('.a::after { content: "Use url (value) syntax" }', OPTIONS).ok).toBe(true)
   })
 
   it('does not allow an allowlisted host over HTTP', () => {

@@ -1,0 +1,5 @@
+:root {
+  --space-unit: 0.25rem;
+  --font-stack: "Geist", system-ui, sans-serif;
+  --shadow-alpha: 0.24;
+}

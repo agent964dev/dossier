@@ -10,6 +10,8 @@ const exec = promisify(execFile)
 const packageDirectory = new URL('..', import.meta.url).pathname
 const artifact = join(packageDirectory, 'dist/index.js')
 const bomFixture = join(packageDirectory, 'test/fixtures/bom.html')
+const cssFixture = join(packageDirectory, 'test/fixtures/shared-theme.css')
+const woff2Fixture = join(packageDirectory, 'test/fixtures/test-font.woff2')
 let server: Server
 let apiUrl: string
 const homes: string[] = []
@@ -29,12 +31,23 @@ interface StoredDocument {
   deletedBy: string | null
 }
 
+interface StoredAsset {
+  ext: 'css' | 'woff2'
+  bytes: Buffer
+  version: number
+  updatedAt: string
+  deleted: boolean
+}
+
 const documents = new Map<string, StoredDocument>()
+const assets = new Map<string, StoredAsset>()
 const idempotencyKeys: string[] = []
 const listQueries: Array<{ scope: string | null; parent: string | null }> = []
 let nextId = 1
 let retryFailureSeen = false
 let redirectWasFollowed = false
+let uploadRequests = 0
+let assetRequests = 0
 
 async function bodyJson(
   request: IncomingMessage,
@@ -160,6 +173,13 @@ function authenticated(request: IncomingMessage): boolean {
   return request.headers.authorization === 'Bearer ds_integration'
 }
 
+function assetUrls(slug: string, ext: 'css' | 'woff2', version: number) {
+  return {
+    url: `${apiUrl}/a/${slug}.${ext}`,
+    pinnedUrl: `${apiUrl}/a/${slug}@${version}.${ext}`,
+  }
+}
+
 beforeAll(async () => {
   await exec('bun', ['run', 'build'], { cwd: packageDirectory })
 
@@ -211,7 +231,119 @@ beforeAll(async () => {
       return
     }
 
+    if (url.pathname === '/api/assets') {
+      assetRequests += 1
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+
+      if (request.method === 'POST') {
+        const payload = await bodyJson(request)
+        const slug = String(payload.slug ?? '')
+        const ext = payload.ext
+        if (slug === 'taken-theme') {
+          response.statusCode = 409
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'slug_taken',
+              message: 'slug_taken: asset slug is reserved by another workspace',
+            }),
+          )
+          return
+        }
+        if (ext !== 'css' && ext !== 'woff2') {
+          response.statusCode = 422
+          response.end(JSON.stringify({ ok: false, code: 'invalid_asset' }))
+          return
+        }
+        const bytes = Buffer.from(String(payload.contentBase64 ?? ''), 'base64')
+        if (
+          ext === 'woff2' &&
+          bytes.subarray(0, 4).toString('ascii') !== 'wOF2'
+        ) {
+          response.statusCode = 422
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'invalid_asset',
+              message: 'WOFF2 magic bytes are missing',
+            }),
+          )
+          return
+        }
+        const previous = assets.get(slug)
+        if (previous && previous.ext !== ext) {
+          response.statusCode = 409
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'slug_taken',
+              message: 'slug_taken: asset extension cannot change',
+            }),
+          )
+          return
+        }
+        const version = (previous?.version ?? 0) + 1
+        const updatedAt = '2026-09-12T00:00:00.000Z'
+        assets.set(slug, { ext, bytes, version, updatedAt, deleted: false })
+        response.end(
+          JSON.stringify({
+            slug,
+            ext,
+            versionNumber: version,
+            ...assetUrls(slug, ext, version),
+          }),
+        )
+        return
+      }
+
+      if (request.method === 'GET') {
+        response.end(
+          JSON.stringify({
+            ok: true,
+            assets: [...assets]
+              .filter(([, asset]) => !asset.deleted)
+              .map(([slug, asset]) => ({
+                slug,
+                ext: asset.ext,
+                latestVersionNumber: asset.version,
+                ...assetUrls(slug, asset.ext, asset.version),
+                updatedAt: asset.updatedAt,
+              })),
+          }),
+        )
+        return
+      }
+    }
+
+    const assetDelete = /^\/api\/assets\/([a-z0-9][a-z0-9-]{0,63})$/.exec(
+      url.pathname,
+    )
+    if (assetDelete && request.method === 'DELETE') {
+      assetRequests += 1
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const stored = assets.get(assetDelete[1]!)
+      if (!stored || stored.deleted) {
+        response.statusCode = 404
+        response.end(JSON.stringify({ ok: false, code: 'not_found' }))
+        return
+      }
+      stored.deleted = true
+      response.end(JSON.stringify({ ok: true }))
+      return
+    }
+
     if (url.pathname === '/api/uploads' && request.method === 'POST') {
+      uploadRequests += 1
       response.setHeader('content-type', 'application/json')
       if (!authenticated(request)) {
         response.statusCode = 401
@@ -624,8 +756,62 @@ describe('built CLI', () => {
       home,
     })
     expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain('Blocked <form> tag found.')
+    expect(result.stderr).toContain(`dossier: policy rejected ${file}\n`)
+    expect(result.stderr).toContain('  - Blocked <form> tag found.')
     expect(result.stderr).not.toContain('not authenticated')
+  })
+
+  it('defers foreign stylesheet allowlists to the server', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'foreign-stylesheet.html')
+    await writeFile(
+      file,
+      '<!doctype html><title>Foreign</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">',
+      'utf8',
+    )
+    const before = uploadRequests
+    const result = await cli(
+      'node',
+      ['upload', file, '--api-url', apiUrl, '--json'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(uploadRequests).toBe(before + 1)
+  })
+
+  it('rejects unsafe CSS before credentials or an asset request', async () => {
+    const home = await temporaryHome()
+    const file = join(home, 'unsafe.css')
+    await writeFile(file, '.card { behavior: url("/a/unsafe.htc"); }', 'utf8')
+    const before = assetRequests
+    const result = await cli(
+      'node',
+      ['assets', 'push', file, '--api-url', apiUrl],
+      { home },
+    )
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('Blocked unsafe CSS behavior property.')
+    expect(result.stderr).not.toContain('not authenticated')
+    expect(assetRequests).toBe(before)
+  })
+
+
+  it('explains invalid slugs derived from filenames', async () => {
+    const home = await temporaryHome()
+    const file = join(home, 'Shared_Theme.css')
+    await writeFile(file, ':root { color: black }', 'utf8')
+    const result = await cli(
+      'node',
+      ['assets', 'push', file, '--api-url', apiUrl],
+      { home },
+    )
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain(
+      'slug "Shared_Theme" derived from the filename is not valid',
+    )
+    expect(result.stderr).toContain('pass --slug shared-theme')
   })
 
   it('stores credentials and prints workspace role through the typed client', async () => {
@@ -642,6 +828,109 @@ describe('built CLI', () => {
       workspace: { id: 'ws_test', slug: 'test', kind: 'team', role: 'admin' },
       email: 'test@example.com',
     })
+  })
+
+  it('pushes CSS using the basename slug and prints its URLs', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const result = await cli('node', ['assets', 'push', cssFixture], { home })
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(result.stdout.startsWith('Created\n')).toBe(true)
+    expect(result.stdout).toContain('Slug: shared-theme')
+    expect(result.stdout).toContain('Version: 1')
+    expect(result.stdout).toContain(`${apiUrl}/a/shared-theme.css`)
+    expect(result.stdout).toContain(`${apiUrl}/a/shared-theme@1.css`)
+    expect(assets.get('shared-theme')?.bytes).toEqual(await readFile(cssFixture))
+  })
+
+  it('pushes WOFF2 bytes with an explicit slug', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const result = await cli(
+      'bun',
+      ['assets', 'push', woff2Fixture, '--slug', 'dossier-font', '--json'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(JSON.parse(result.stdout)).toEqual({
+      slug: 'dossier-font',
+      ext: 'woff2',
+      versionNumber: 1,
+      url: `${apiUrl}/a/dossier-font.woff2`,
+      pinnedUrl: `${apiUrl}/a/dossier-font@1.woff2`,
+    })
+    const bytes = assets.get('dossier-font')?.bytes
+    expect(bytes?.subarray(0, 4).toString('ascii')).toBe('wOF2')
+    expect(bytes).toEqual(await readFile(woff2Fixture))
+  })
+
+  it('prints the server slug_taken conflict message', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const result = await cli(
+      'node',
+      ['assets', 'push', cssFixture, '--slug', 'taken-theme'],
+      { home },
+    )
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('409 Conflict')
+    expect(result.stderr).toContain('slug_taken')
+    expect(result.stderr).toContain('another workspace')
+  })
+
+  it('lists uploaded shared assets', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const result = await cli('node', ['assets', 'list', '--json'], { home })
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(JSON.parse(result.stdout)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          slug: 'shared-theme',
+          ext: 'css',
+          latestVersionNumber: 1,
+          url: `${apiUrl}/a/shared-theme.css`,
+          pinnedUrl: `${apiUrl}/a/shared-theme@1.css`,
+        }),
+        expect.objectContaining({
+          slug: 'dossier-font',
+          ext: 'woff2',
+          latestVersionNumber: 1,
+        }),
+      ]),
+    )
+  })
+
+  it('prints compact human asset listings', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const result = await cli('node', ['assets', 'list'], { home })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('shared-theme.css\n  v1 · updated 2026-09-12')
+    expect(result.stdout).toContain(`  pinned ${apiUrl}/a/shared-theme@1.css`)
+  })
+
+  it('deletes a shared asset from listings', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const deleted = await cli(
+      'node',
+      ['assets', 'delete', 'shared-theme', '--json'],
+      { home },
+    )
+    expect(deleted.exitCode).toBe(0)
+    expect(deleted.stderr).toBe('')
+    expect(JSON.parse(deleted.stdout)).toEqual({ ok: true })
+
+    const listed = await cli('node', ['assets', 'list', '--json'], { home })
+    expect(
+      JSON.parse(listed.stdout).some(
+        (asset: { slug: string }) => asset.slug === 'shared-theme',
+      ),
+    ).toBe(false)
   })
 
   it('creates then updates through the origin-account-path mapping', async () => {

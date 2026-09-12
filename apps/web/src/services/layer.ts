@@ -2,6 +2,7 @@ import { Layer } from 'effect'
 
 import { AccessLive } from './access'
 import { AllowlistLive } from './allowlist'
+import { AssetsLive } from './assets'
 import { DbLive } from './db'
 import { DocumentsLive } from './documents'
 import { IdsLive } from './ids'
@@ -22,8 +23,9 @@ const SignInLive = Layer.mergeAll(AllowlistLive, ShooLive).pipe(
   Layer.provideMerge(AuthenticationLive),
 )
 
-/** Core document, tree, ACL, publication, and authentication services. */
+/** Core document, asset, tree, ACL, publication, and authentication services. */
 export const CoreServicesLive = Layer.mergeAll(
+  AssetsLive,
   PublishLive,
   DocumentsLive,
   ServingLive,

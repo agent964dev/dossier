@@ -1,0 +1,9 @@
+@font-face {
+  font-family: "Dossier Test";
+  src: url("/a/test-font.woff2") format("woff2");
+}
+
+:root {
+  color-scheme: dark;
+  --accent: oklch(0.82 0.13 205);
+}

@@ -1,0 +1,11 @@
+.card {
+  color: oklch(0.92 0.01 260);
+
+  &:hover {
+    color: oklch(0.83 0.12 205);
+  }
+
+  > .title {
+    font-weight: 600;
+  }
+}

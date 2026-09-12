@@ -136,9 +136,12 @@ function validateHtmlWithMode(
       if (tagName === 'link') {
         const href = attributes.get('href') ?? ''
         if (href) stylesheetRefs.add(href)
-        if (!isAllowedStylesheetLink(attributes, options, enforceServerConfig)) {
-          errors.push('Blocked <link> tag found.')
-        }
+        const linkError = stylesheetLinkError(
+          attributes,
+          options,
+          enforceServerConfig,
+        )
+        if (linkError) errors.push(linkError)
       }
 
       if (tagName === 'script') {
@@ -295,28 +298,49 @@ function isAllowedIframeSource(
   )
 }
 
-function isAllowedStylesheetLink(
+function stylesheetLinkError(
   attributes: Map<string, string>,
   options: HtmlPolicyOptions,
   enforceHostAllowlist: boolean,
-): boolean {
-  if ((attributes.get('rel') ?? '').trim().toLowerCase() !== 'stylesheet') return false
+): string | null {
+  const rel = (attributes.get('rel') ?? '').trim().toLowerCase()
+  if (rel !== 'stylesheet') {
+    return `Blocked <link rel=${renderAttributeValue(rel)}>; only rel="stylesheet" is allowed.`
+  }
 
   const href = attributes.get('href') ?? ''
+  const renderedHref = renderAttributeValue(href)
   const resolved = resolveUrl(href, options.publicOrigin)
   const publicUrl = resolveUrl(options.publicOrigin, options.publicOrigin)
-  if (!resolved || !publicUrl) return false
+  if (!resolved || !publicUrl) {
+    return `Blocked stylesheet <link href=${renderedHref}>; href must be /a/<slug>.css, /a/<slug>@<n>.css, or an allowlisted HTTPS URL.`
+  }
 
   if (resolved.origin === publicUrl.origin) {
     return STYLESHEET_PATH.test(resolved.pathname)
+      ? null
+      : `Blocked stylesheet <link href=${renderedHref}>; first-party stylesheets must be /a/<slug>.css or /a/<slug>@<n>.css.`
   }
 
-  return (
-    resolved.protocol === 'https:' &&
-    hasDefaultHttpsPort(resolved) &&
-    (!enforceHostAllowlist ||
-      hostIsAllowed(resolved.hostname, options.styleHostAllowlist))
-  )
+  if (resolved.protocol !== 'https:' || !hasDefaultHttpsPort(resolved)) {
+    return `Blocked stylesheet <link href=${renderedHref}>; external stylesheets must use HTTPS on the default port.`
+  }
+
+  if (
+    enforceHostAllowlist &&
+    !hostIsAllowed(resolved.hostname, options.styleHostAllowlist)
+  ) {
+    return `Blocked stylesheet <link href=${renderedHref}>; host is not in STYLE_HOST_ALLOWLIST.`
+  }
+
+  return null
+}
+
+function renderAttributeValue(value: string): string {
+  const normalized = value.replace(/[\r\n]+/gu, ' ').trim()
+  const abbreviated =
+    normalized.length > 160 ? `${normalized.slice(0, 157)}...` : normalized
+  return JSON.stringify(abbreviated)
 }
 
 function isAllowedExternalScript(

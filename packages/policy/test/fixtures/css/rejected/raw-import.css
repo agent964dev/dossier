@@ -1,0 +1,3 @@
+.card {
+  broken: @import "https://evil.example/theme.css";
+}

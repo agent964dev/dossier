@@ -2,6 +2,11 @@
 
 import { Args, Command, Options, ValidationError } from '@effect/cli'
 import {
+  AssetDeleteResponse,
+  AssetExtension,
+  AssetListResponse,
+  AssetPushRequest,
+  AssetPushResponse,
   DossierApi,
   isDocumentEditor,
   type DocumentEditor,
@@ -12,7 +17,7 @@ import {
   type UploadRequest,
   type UploadResponse,
 } from '@dossier/contracts'
-import { validateHtmlStatic } from '@dossier/policy'
+import { validateCssStatic, validateHtmlStatic } from '@dossier/policy'
 import {
   FetchHttpClient,
   HttpApiClient,
@@ -20,16 +25,23 @@ import {
   HttpClientRequest,
 } from '@effect/platform'
 import { NodeContext } from '@effect/platform-node'
-import { Console as EffectConsole, Effect, Either, Layer, Option } from 'effect'
+import {
+  Console as EffectConsole,
+  Effect,
+  Either,
+  Layer,
+  Option,
+  Schema,
+} from 'effect'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { readFile, writeFile } from 'node:fs/promises'
-import { basename, dirname, resolve } from 'node:path'
+import { basename, dirname, extname, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { pathToFileURL } from 'node:url'
 import { CliError, ExitCode, exitCodeFor } from './lib/errors.js'
-import { dossierFetch, normalizeApiUrl } from './lib/http.js'
+import { dossierFetch, dossierJson, normalizeApiUrl } from './lib/http.js'
 import { parseRef } from './lib/ref.js'
 import {
   mutateCredentials,
@@ -181,6 +193,7 @@ async function readStdin(): Promise<string> {
 
 async function readUpload(
   file: string,
+  publicOrigin: string,
 ): Promise<{ absolutePath: string; html: string }> {
   const absolutePath = resolve(file)
   let html: string
@@ -192,13 +205,200 @@ async function readUpload(
     )
   }
 
-  const result = validateHtmlStatic(html)
+  const result = validateHtmlStatic(html, { publicOrigin })
   if (!result.ok) {
     throw new CliError(
-      `upload policy rejected ${absolutePath}: ${result.errors[0] ?? 'document did not pass static policy'}`,
+      formatPolicyRejection(
+        absolutePath,
+        result.errors,
+        'Document did not pass the static policy.',
+      ),
     )
   }
   return { absolutePath, html }
+}
+
+function formatPolicyRejection(
+  absolutePath: string,
+  errors: readonly string[],
+  fallback: string,
+): string {
+  const reasons = errors.length > 0 ? errors : [fallback]
+  return `policy rejected ${absolutePath}\n${reasons
+    .map((reason) => `  - ${reason}`)
+    .join('\n')}`
+}
+
+interface AssetFile {
+  readonly absolutePath: string
+  readonly ext: AssetExtension
+  readonly bytes: Buffer
+}
+
+async function readAssetFile(
+  file: string,
+  publicOrigin: string,
+): Promise<AssetFile> {
+  const absolutePath = resolve(file)
+  const extension = extname(absolutePath).toLowerCase()
+  if (extension !== '.css' && extension !== '.woff2') {
+    throw new CliError(
+      `unsupported asset extension ${extension || '(none)'}; expected .css or .woff2`,
+      ExitCode.Usage,
+    )
+  }
+
+  let bytes: Buffer
+  try {
+    bytes = await readFile(absolutePath)
+  } catch (error) {
+    throw new CliError(
+      `cannot read ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  const ext: AssetExtension = extension.slice(1) as AssetExtension
+  if (ext === 'css') {
+    let css: string
+    try {
+      css = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch {
+      throw new CliError(
+        formatPolicyRejection(absolutePath, [], 'CSS must be valid UTF-8.'),
+      )
+    }
+    const result = validateCssStatic(css, { publicOrigin })
+    if (!result.ok) {
+      throw new CliError(
+        formatPolicyRejection(
+          absolutePath,
+          result.errors,
+          'Stylesheet did not pass the static policy.',
+        ),
+      )
+    }
+  }
+
+  return { absolutePath, ext, bytes }
+}
+
+function suggestedAssetSlug(value: string): string {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/g, '')
+  return normalized || 'shared-asset'
+}
+
+function validateAssetSlug(
+  slug: string,
+  source: 'explicit' | 'filename' = 'explicit',
+): string {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) {
+    if (source === 'filename') {
+      throw new CliError(
+        `slug ${JSON.stringify(slug)} derived from the filename is not valid (lowercase letters, digits, and hyphens only); pass --slug ${suggestedAssetSlug(slug)}`,
+        ExitCode.Usage,
+      )
+    }
+    throw new CliError(
+      `asset slug ${JSON.stringify(slug)} must start with a lowercase letter or digit and contain only lowercase letters, digits, or hyphens (maximum 64 characters)`,
+      ExitCode.Usage,
+    )
+  }
+  return slug
+}
+
+function assetUpdatedDate(value: string): string {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.valueOf())
+    ? value
+    : parsed.toISOString().slice(0, 10)
+}
+
+function invalidAssetResponse(kind: string, error: unknown): CliError {
+  return new CliError(
+    `server returned an invalid ${kind} response`,
+    ExitCode.Failure,
+    error,
+  )
+}
+
+function decodeAssetPushResponse(value: unknown): AssetPushResponse {
+  try {
+    return Schema.decodeUnknownSync(AssetPushResponse, {
+      onExcessProperty: 'error',
+    })(value)
+  } catch (error) {
+    throw invalidAssetResponse('asset push', error)
+  }
+}
+
+function decodeAssetListResponse(value: unknown): AssetListResponse {
+  try {
+    return Schema.decodeUnknownSync(AssetListResponse, {
+      onExcessProperty: 'error',
+    })(value)
+  } catch (error) {
+    throw invalidAssetResponse('asset list', error)
+  }
+}
+
+function decodeAssetDeleteResponse(value: unknown): AssetDeleteResponse {
+  try {
+    return Schema.decodeUnknownSync(AssetDeleteResponse, {
+      onExcessProperty: 'error',
+    })(value)
+  } catch (error) {
+    throw invalidAssetResponse('asset delete', error)
+  }
+}
+
+async function pushAsset(
+  runtime: RuntimeConfig,
+  payload: AssetPushRequest,
+): Promise<AssetPushResponse> {
+  const checkedPayload = Schema.decodeUnknownSync(AssetPushRequest, {
+    onExcessProperty: 'error',
+  })(payload)
+  const response = await dossierJson<unknown>(
+    '/api/assets',
+    { apiUrl: runtime.apiUrl, apiKey: runtime.apiKey },
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(checkedPayload),
+    },
+  )
+  return decodeAssetPushResponse(response)
+}
+
+async function listAssets(runtime: RuntimeConfig): Promise<AssetListResponse> {
+  const response = await dossierJson<unknown>('/api/assets', {
+    apiUrl: runtime.apiUrl,
+    apiKey: runtime.apiKey,
+  })
+  return decodeAssetListResponse(response)
+}
+
+async function deleteAsset(
+  runtime: RuntimeConfig,
+  slug: string,
+): Promise<AssetDeleteResponse> {
+  const response = await dossierFetch(
+    `/api/assets/${encodeURIComponent(slug)}`,
+    { apiUrl: runtime.apiUrl, apiKey: runtime.apiKey },
+    { method: 'DELETE' },
+  )
+  if (response.status === 204) return { ok: true }
+  try {
+    return decodeAssetDeleteResponse(await response.json())
+  } catch (error) {
+    if (error instanceof CliError) throw error
+    throw invalidAssetResponse('asset delete', error)
+  }
 }
 
 async function createApiClient(
@@ -617,7 +817,7 @@ const uploadCommand = Command.make(
           ExitCode.Usage,
         )
       }
-      const { absolutePath, html } = await readUpload(file)
+      const { absolutePath, html } = await readUpload(file, runtime.apiUrl)
       const me = await requireMe(runtime)
       const documents = await readDocuments(runtime.paths)
       const known = documents[runtime.apiOrigin]?.[me.accountId]?.[absolutePath]
@@ -1123,6 +1323,98 @@ const enableCommand = Command.make(
     }),
 ).pipe(Command.withDescription('Enable document serving'))
 
+const assetsPushCommand = Command.make(
+  'push',
+  {
+    slug: Options.text('slug').pipe(Options.optional),
+    file: Args.text({ name: 'file' }),
+  },
+  ({ slug, file }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const asset = await readAssetFile(file, runtime.apiUrl)
+      const requestedSlug = Option.getOrUndefined(slug)
+      const selectedSlug = validateAssetSlug(
+        requestedSlug ??
+          basename(asset.absolutePath, extname(asset.absolutePath)),
+        requestedSlug === undefined ? 'filename' : 'explicit',
+      )
+      await requireMe(runtime)
+      const result = await pushAsset(runtime, {
+        slug: selectedSlug,
+        ext: asset.ext,
+        contentBase64: asset.bytes.toString('base64'),
+      })
+
+      if (runtime.json) {
+        printJson(result)
+      } else if (runtime.quiet) {
+        process.stdout.write(`${result.url}\n`)
+      } else {
+        process.stdout.write(
+          `${result.versionNumber === 1 ? 'Created' : 'Updated'}\nSlug: ${result.slug}\nVersion: ${result.versionNumber}\nURL: ${result.url}\nPinned URL: ${result.pinnedUrl}\n`,
+        )
+      }
+    }),
+).pipe(Command.withDescription('Validate and upload a shared CSS or WOFF2 asset'))
+
+const assetsListCommand = Command.make('list', {}, () =>
+  withGlobals(async (globals) => {
+    const runtime = await runtimeConfig(globals)
+    await requireMe(runtime)
+    const result = await listAssets(runtime)
+    if (runtime.json) {
+      printJson(result.assets)
+      return
+    }
+    if (runtime.quiet) return
+    if (result.assets.length === 0) {
+      process.stdout.write('No shared assets yet.\n')
+      return
+    }
+    for (const asset of result.assets) {
+      process.stdout.write(
+        `${asset.slug}.${asset.ext}\n  v${asset.latestVersionNumber} · updated ${assetUpdatedDate(asset.updatedAt)}\n  ${asset.url}\n  pinned ${asset.pinnedUrl}\n`,
+      )
+    }
+  }),
+).pipe(Command.withDescription('List shared assets'))
+
+const assetsDeleteCommand = Command.make(
+  'delete',
+  { slug: Args.text({ name: 'slug' }) },
+  ({ slug }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const selectedSlug = validateAssetSlug(slug)
+      await requireMe(runtime)
+      const existing = (await listAssets(runtime)).assets.find(
+        (asset) => asset.slug === selectedSlug,
+      )
+      const result = await deleteAsset(runtime, selectedSlug)
+      if (runtime.json) printJson(result)
+      else if (!runtime.quiet) {
+        const consequence = existing
+          ? ` /a/${existing.slug}.${existing.ext} now returns 404; pinned /a/${existing.slug}@${existing.latestVersionNumber}.${existing.ext} keeps serving.`
+          : ''
+        process.stdout.write(`Deleted asset ${selectedSlug}.${consequence}\n`)
+      }
+    }),
+).pipe(
+  Command.withDescription(
+    "Stop serving an asset's latest URL (pinned versions keep serving)",
+  ),
+)
+
+const assetsCommand = Command.make('assets').pipe(
+  Command.withDescription('Manage shared CSS and WOFF2 assets'),
+  Command.withSubcommands([
+    assetsPushCommand,
+    assetsListCommand,
+    assetsDeleteCommand,
+  ]),
+)
+
 const dossierCommand = rootCommand.pipe(
   Command.withSubcommands([
     authCommand,
@@ -1139,6 +1431,7 @@ const dossierCommand = rootCommand.pipe(
     restoreCommand,
     disableCommand,
     enableCommand,
+    assetsCommand,
   ]),
 )
 
@@ -1163,6 +1456,17 @@ interface NormalizedArguments {
 
 function optionsBeforeArguments(command: readonly string[]): string[] {
   const [name, ...argumentsAndOptions] = command
+  const nestedCommand =
+    name === 'assets' && argumentsAndOptions[0]
+      ? `${name} ${argumentsAndOptions[0]}`
+      : undefined
+  const commandName = nestedCommand ?? name ?? ''
+  const commandPrefix = nestedCommand
+    ? [name!, argumentsAndOptions[0]!]
+    : [name!]
+  const commandArguments = nestedCommand
+    ? argumentsAndOptions.slice(1)
+    : argumentsAndOptions
   const valuedByCommand: Record<string, ReadonlySet<string>> = {
     upload: new Set([
       '--parent',
@@ -1177,27 +1481,28 @@ function optionsBeforeArguments(command: readonly string[]): string[] {
     move: new Set(['--parent']),
     share: new Set(['--add', '--remove']),
     restore: new Set(['--batch']),
+    'assets push': new Set(['--slug']),
   }
   const booleanByCommand: Record<string, ReadonlySet<string>> = {
     upload: new Set(['--new']),
     list: new Set(['--all', '--tree', '--trash']),
     delete: new Set(['--force']),
   }
-  const valued = valuedByCommand[name ?? '']
-  const boolean = booleanByCommand[name ?? '']
+  const valued = valuedByCommand[commandName]
+  const boolean = booleanByCommand[commandName]
   if (!valued && !boolean) return [...command]
 
   const options: string[] = []
   const arguments_: string[] = []
-  for (let index = 0; index < argumentsAndOptions.length; index += 1) {
-    const argument = argumentsAndOptions[index]!
+  for (let index = 0; index < commandArguments.length; index += 1) {
+    const argument = commandArguments[index]!
     const equalsName = argument.includes('=')
       ? argument.slice(0, argument.indexOf('='))
       : argument
     if (valued?.has(equalsName)) {
       options.push(argument)
-      if (!argument.includes('=') && index + 1 < argumentsAndOptions.length) {
-        options.push(argumentsAndOptions[++index]!)
+      if (!argument.includes('=') && index + 1 < commandArguments.length) {
+        options.push(commandArguments[++index]!)
       }
     } else if (boolean?.has(argument)) {
       options.push(argument)
@@ -1205,7 +1510,7 @@ function optionsBeforeArguments(command: readonly string[]): string[] {
       arguments_.push(argument)
     }
   }
-  return [name!, ...options, ...arguments_]
+  return [...commandPrefix, ...options, ...arguments_]
 }
 
 export function normalizeGlobalOptions(

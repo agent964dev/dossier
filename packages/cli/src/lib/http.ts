@@ -42,8 +42,26 @@ async function decodeError(response: Response): Promise<string> {
   if (contentType.includes('json') || text.trimStart().startsWith('{')) {
     try {
       const body = JSON.parse(text) as Record<string, unknown>
-      for (const key of ['message', 'error', 'code']) {
-        if (typeof body[key] === 'string' && body[key] !== '') return body[key]
+      const message = ['message', 'error', 'code']
+        .map((key) => body[key])
+        .find((value): value is string =>
+          typeof value === 'string' && value !== '',
+        )
+      if (message) {
+        const details = body.details
+        const rawErrors =
+          typeof details === 'object' && details !== null
+            ? (details as Record<string, unknown>).errors
+            : undefined
+        const detailErrors = Array.isArray(rawErrors)
+          ? rawErrors.filter(
+              (error: unknown): error is string =>
+                typeof error === 'string' && error.trim() !== '',
+            )
+          : []
+        return detailErrors.length > 0
+          ? `${message}\n${detailErrors.map((error) => `  - ${error}`).join('\n')}`
+          : message
       }
     } catch {
       // Fall through to the raw response below.

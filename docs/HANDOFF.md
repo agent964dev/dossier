@@ -8,6 +8,10 @@
 ## Phase 2 — committed on main (session 2)
 - tree/access/shares/archive services, API handlers for tree/patch/shares, hub `/d/:id/tree` (`apps/web/src/api/hub.ts`, nonce CSP), dashboard tree + access panel + move/archive dialogs + trash batches, CLI `tree`, `list --tree`, `move`, `visibility`, `share`, `trash`, `restore --batch`; `apps/web/test/tree-api.test.ts` covers the phase-2 acceptance list over HTTP. 169 tests. Migration 0002 applied to remote dev D1; env.dev deployed.
 
+## Phase 3 — committed on main (session 2)
+- `apps/web/src/services/assets.ts` + `apps/web/src/api/assets.ts`: POST/GET/DELETE `/api/assets`, `/a/:file` with MIME/CORS/CORP/nosniff and latest-vs-pinned cache headers; global slug reservation; `packages/policy/test/fixtures` (38 adversarial/accepted CSS+HTML fixtures); CLI `assets push|list|delete` with static CSS pre-check; `apps/web/browser/` Playwright render and embed harnesses with results JSON (Chromium 147, WebKit 26.4, both passed). 228 tests.
+- Open owner decision recorded in PLAN section 15: script-driven top-level navigation from a sandboxed document.
+
 ## Historical note: partial phase 2 core at start of session 2 (now merged)
 `git status` shows ~23 changed files. What landed and passes:
 - `apps/web/src/services/access.ts` — recursive-CTE access predicate (public/team/private/invites, node-only availability); `serving.ts`, `documents.ts` already call it

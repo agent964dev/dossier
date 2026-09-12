@@ -1,0 +1,292 @@
+{
+  "status": "passed",
+  "startedAt": "2026-09-12T15:01:59.492Z",
+  "baseUrl": "http://localhost:8787",
+  "managedServer": true,
+  "cases": {
+    "empty": {
+      "status": "passed",
+      "configuredAllowlist": "",
+      "documents": {
+        "inner": {
+          "id": "p0pj0rh1h9b9",
+          "url": "http://localhost:8787/d/p0pj0rh1h9b9"
+        },
+        "outer": {
+          "id": "ijru93fhu987",
+          "url": "http://localhost:8787/d/ijru93fhu987"
+        }
+      },
+      "browsers": [
+        {
+          "engine": "chromium",
+          "status": "passed",
+          "version": "147.0.7727.15",
+          "navigation": {
+            "status": 200,
+            "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+            "frameSources": [
+              "http://localhost:8787"
+            ],
+            "frameCount": 2
+          },
+          "console": [],
+          "inner": {
+            "url": "http://localhost:8787/d/p0pj0rh1h9b9",
+            "probe": {
+              "scriptRan": true,
+              "origin": "null",
+              "cookieResult": {
+                "value": null,
+                "error": "SecurityError: Failed to read the 'cookie' property from 'Document': The document is sandboxed and lacks the 'allow-same-origin' flag."
+              },
+              "parentReadable": false
+            },
+            "requests": [
+              {
+                "url": "http://localhost:8787/d/p0pj0rh1h9b9",
+                "method": "GET",
+                "resourceType": "document",
+                "headers": {
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                  "accept-encoding": "gzip, deflate, br, zstd",
+                  "connection": "keep-alive",
+                  "host": "localhost:8787",
+                  "sec-fetch-dest": "iframe",
+                  "sec-fetch-mode": "navigate",
+                  "sec-fetch-site": "cross-site",
+                  "sec-fetch-storage-access": "active",
+                  "upgrade-insecure-requests": "1",
+                  "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.7727.15 Safari/537.36",
+                  "sec-ch-ua": "\"HeadlessChrome\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
+                  "sec-ch-ua-mobile": "?0",
+                  "sec-ch-ua-platform": "\"macOS\""
+                }
+              }
+            ]
+          },
+          "findings": {
+            "nestedFramesInheritSandbox": true,
+            "innerSameOriginFrameCanReadCookies": false,
+            "sessionCookieSentOnInnerNavigation": false
+          },
+          "assertions": {
+            "innerScriptRan": true,
+            "nestedFrameOriginIsOpaque": true,
+            "nestedFrameCannotReadParent": true,
+            "nestedFrameCannotReadProbeCookie": true,
+            "sessionCookieNotSentOnInnerNavigation": true,
+            "nestedFrameRequestObserved": true,
+            "frameCount": true,
+            "noUnexpectedCspViolation": true
+          }
+        },
+        {
+          "engine": "webkit",
+          "status": "passed",
+          "version": "26.4",
+          "navigation": {
+            "status": 200,
+            "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+            "frameSources": [
+              "http://localhost:8787"
+            ],
+            "frameCount": 2
+          },
+          "console": [],
+          "inner": {
+            "url": "http://localhost:8787/d/p0pj0rh1h9b9",
+            "probe": {
+              "scriptRan": true,
+              "origin": "null",
+              "cookieResult": {
+                "value": null,
+                "error": "SecurityError: The operation is insecure."
+              },
+              "parentReadable": false
+            },
+            "requests": [
+              {
+                "url": "http://localhost:8787/d/p0pj0rh1h9b9",
+                "method": "GET",
+                "resourceType": "document",
+                "headers": {
+                  "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                  "sec-fetch-site": "cross-site",
+                  "accept-encoding": "gzip, deflate",
+                  "upgrade-insecure-requests": "1",
+                  "sec-fetch-mode": "navigate",
+                  "host": "localhost:8787",
+                  "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.4 Safari/605.1.15",
+                  "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+                  "sec-fetch-dest": "iframe",
+                  "connection": "keep-alive"
+                }
+              }
+            ]
+          },
+          "findings": {
+            "nestedFramesInheritSandbox": true,
+            "innerSameOriginFrameCanReadCookies": false,
+            "sessionCookieSentOnInnerNavigation": false
+          },
+          "assertions": {
+            "innerScriptRan": true,
+            "nestedFrameOriginIsOpaque": true,
+            "nestedFrameCannotReadParent": true,
+            "nestedFrameCannotReadProbeCookie": true,
+            "sessionCookieNotSentOnInnerNavigation": true,
+            "nestedFrameRequestObserved": true,
+            "frameCount": true,
+            "noUnexpectedCspViolation": true
+          }
+        }
+      ]
+    },
+    "allowlisted": {
+      "status": "passed",
+      "configuredAllowlist": "example.com",
+      "document": {
+        "id": "mo7m63cryms4",
+        "url": "http://localhost:8787/d/mo7m63cryms4"
+      },
+      "allowedUrl": "https://example.com/",
+      "blockedUrl": "https://example.org/",
+      "browsers": [
+        {
+          "engine": "chromium",
+          "status": "passed",
+          "version": "147.0.7727.15",
+          "navigation": {
+            "status": 200,
+            "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+            "frameSources": [
+              "http://localhost:8787",
+              "https://example.com"
+            ],
+            "frameCount": 3,
+            "frameNavigations": [
+              {
+                "name": "",
+                "url": "http://localhost:8787/d/mo7m63cryms4"
+              },
+              {
+                "name": "blocked-frame",
+                "url": "chrome-error://chromewebdata/"
+              },
+              {
+                "name": "allowlisted-frame",
+                "url": "https://example.com/"
+              }
+            ]
+          },
+          "console": [
+            {
+              "type": "error",
+              "text": "Framing 'https://example.org/' violates the following Content Security Policy directive: \"frame-src http://localhost:8787 https://example.com\". The request has been blocked.\n"
+            }
+          ],
+          "allowedFrame": {
+            "expectedOrigin": "https://example.com",
+            "finalUrl": "https://example.com/",
+            "originInsideFrame": "null",
+            "originInspectionError": null
+          },
+          "blockedFrame": {
+            "expectedOrigin": "https://example.org",
+            "violation": {
+              "blockedURI": "https://example.org",
+              "effectiveDirective": "frame-src",
+              "originalPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+              "violatedDirective": "frame-src"
+            },
+            "allViolations": [
+              {
+                "blockedURI": "https://example.org",
+                "effectiveDirective": "frame-src",
+                "originalPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+                "violatedDirective": "frame-src"
+              }
+            ]
+          },
+          "findings": {
+            "allowlistedFrameNavigated": true,
+            "allowlistedNestedFrameInheritsSandbox": true,
+            "nonAllowlistedFrameBlockedByCsp": true
+          },
+          "assertions": {
+            "frameCount": true,
+            "allowlistedFrameNavigated": true,
+            "allowlistedFramePresent": true,
+            "nonAllowlistedFrameBlockedByCsp": true
+          }
+        },
+        {
+          "engine": "webkit",
+          "status": "passed",
+          "version": "26.4",
+          "navigation": {
+            "status": 200,
+            "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+            "frameSources": [
+              "http://localhost:8787",
+              "https://example.com"
+            ],
+            "frameCount": 3,
+            "frameNavigations": [
+              {
+                "name": "",
+                "url": "http://localhost:8787/d/mo7m63cryms4"
+              },
+              {
+                "name": "allowlisted-frame",
+                "url": "https://example.com/"
+              }
+            ]
+          },
+          "console": [
+            {
+              "type": "error",
+              "text": "Refused to load https://example.org/ because it does not appear in the frame-src directive of the Content Security Policy."
+            }
+          ],
+          "allowedFrame": {
+            "expectedOrigin": "https://example.com",
+            "finalUrl": "https://example.com/",
+            "originInsideFrame": "null",
+            "originInspectionError": null
+          },
+          "blockedFrame": {
+            "expectedOrigin": "https://example.org",
+            "violation": {
+              "blockedURI": "https://example.org",
+              "effectiveDirective": "frame-src",
+              "originalPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+              "violatedDirective": "frame-src"
+            },
+            "allViolations": [
+              {
+                "blockedURI": "https://example.org",
+                "effectiveDirective": "frame-src",
+                "originalPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+                "violatedDirective": "frame-src"
+              }
+            ]
+          },
+          "findings": {
+            "allowlistedFrameNavigated": true,
+            "allowlistedNestedFrameInheritsSandbox": true,
+            "nonAllowlistedFrameBlockedByCsp": true
+          },
+          "assertions": {
+            "frameCount": true,
+            "allowlistedFrameNavigated": true,
+            "allowlistedFramePresent": true,
+            "nonAllowlistedFrameBlockedByCsp": true
+          }
+        }
+      ]
+    }
+  },
+  "finishedAt": "2026-09-12T15:02:09.931Z"
+}

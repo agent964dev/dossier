@@ -1,5 +1,6 @@
 export * from './access'
 export * from './allowlist'
+export * from './assets'
 export * from './db'
 export * from './documents'
 export * from './env'

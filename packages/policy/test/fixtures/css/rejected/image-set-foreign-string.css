@@ -1,0 +1,6 @@
+.hero {
+  background-image: image-set(
+    "/a/hero.png" 1x,
+    "https://evil.example/hero@2x.png" 2x
+  );
+}

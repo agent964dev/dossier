@@ -30,7 +30,7 @@ export interface StaticCssPolicyOptions {
 const STATIC_PUBLIC_ORIGIN = 'https://dossier.invalid'
 
 type CssContext = 'stylesheet' | 'declarationList'
-type DestinationKind = 'url' | 'import' | 'image-set' | 'custom-property'
+type DestinationKind = 'url' | 'import' | 'image-set' | 'custom-property' | 'font'
 
 const UNSAFE_CSS_PROTOCOLS = ['javascript:', 'vbscript:', 'file:'] as const
 
@@ -84,6 +84,13 @@ function validateCssInContext(
   const errors = new Set<string>()
   const warnings: string[] = []
 
+  const obfuscatedUrlFunction = findObfuscatedUrlFunction(css)
+  if (obfuscatedUrlFunction) {
+    errors.add(
+      `CSS contains an obfuscated URL function. Near "${obfuscatedUrlFunction}".`,
+    )
+  }
+
   let ast: CssTree.CssNode
   try {
     ast = parse(css, {
@@ -107,6 +114,9 @@ function validateCssInContext(
         if (property === 'behavior') {
           errors.add('Blocked unsafe CSS behavior property.')
         }
+        if (property === '-moz-binding') {
+          errors.add('Blocked unsafe CSS -moz-binding property.')
+        }
         return
       }
 
@@ -127,7 +137,13 @@ function validateCssInContext(
             firstChild?.type === 'String'
               ? firstChild.value
               : Array.from(node.children as Iterable<CssTree.CssNode>, (child) => generate(child)).join('')
-          checkDestination(value, 'url', options, errors, enforceHostAllowlist)
+          checkDestination(
+            value,
+            destinationKindForContext(this.atrule, this.declaration),
+            options,
+            errors,
+            enforceHostAllowlist,
+          )
         }
         return
       }
@@ -138,7 +154,9 @@ function validateCssInContext(
           : null
         checkDestination(
           node.value,
-          atruleName === 'import' ? 'import' : 'url',
+          atruleName === 'import'
+            ? 'import'
+            : destinationKindForContext(this.atrule, this.declaration),
           options,
           errors,
           enforceHostAllowlist,
@@ -164,7 +182,13 @@ function validateCssInContext(
           // candidates when they are inside image-set().
           checkDestination(node.value, 'image-set', options, errors, enforceHostAllowlist)
         } else if (functionName === 'url') {
-          checkDestination(node.value, 'url', options, errors, enforceHostAllowlist)
+          checkDestination(
+            node.value,
+            destinationKindForContext(this.atrule, this.declaration),
+            options,
+            errors,
+            enforceHostAllowlist,
+          )
         } else if (declarationName?.startsWith('--') && looksLikeDestination(node.value)) {
           checkDestination(
             node.value,
@@ -234,18 +258,32 @@ function checkDestination(
   }
 
   if (!isAllowedDestination(value, kind, options, enforceHostAllowlist)) {
+    const rendered = renderDestination(value)
     switch (kind) {
       case 'import':
-        errors.add('CSS @import destination is not allowed.')
+        errors.add(
+          `CSS @import destination is not allowed. Destination: ${rendered}; use /a/<slug>.css or an HTTPS URL on STYLE_HOST_ALLOWLIST.`,
+        )
         break
       case 'image-set':
-        errors.add('CSS image-set() destination is not allowed.')
+        errors.add(
+          `CSS image-set() destination is not allowed. Destination: ${rendered}; use /a/<slug>.<ext> or an HTTPS URL on STYLE_HOST_ALLOWLIST.`,
+        )
         break
       case 'custom-property':
-        errors.add('CSS custom-property URL destination is not allowed.')
+        errors.add(
+          `CSS custom-property URL destination is not allowed. Destination: ${rendered}; use /a/<slug>.<ext> or an HTTPS URL on STYLE_HOST_ALLOWLIST.`,
+        )
+        break
+      case 'font':
+        errors.add(
+          `CSS font destination is not allowed. Destination: ${rendered}; push WOFF2 with dossier assets push and use /a/<slug>.woff2, or use an HTTPS URL on STYLE_HOST_ALLOWLIST.`,
+        )
         break
       default:
-        errors.add('CSS URL destination is not allowed.')
+        errors.add(
+          `CSS URL destination is not allowed. Destination: ${rendered}; use /a/<slug>.<ext> or an HTTPS URL on STYLE_HOST_ALLOWLIST.`,
+        )
     }
   }
 }
@@ -270,7 +308,7 @@ function isAllowedDestination(
   }
 
   if (destination.protocol === 'data:') {
-    return kind !== 'import'
+    return kind !== 'import' && kind !== 'font'
   }
 
   if (destination.protocol !== 'http:' && destination.protocol !== 'https:') {
@@ -289,9 +327,21 @@ function isAllowedDestination(
   )
 }
 
+
+function destinationKindForContext(
+  atrule: CssTree.Atrule | null,
+  declaration: CssTree.Declaration | null,
+): DestinationKind {
+  const atruleName = atrule ? decodeIdentifier(atrule.name).toLowerCase() : null
+  const declarationName = declaration
+    ? decodeIdentifier(declaration.property).toLowerCase()
+    : null
+  return atruleName === 'font-face' && declarationName === 'src' ? 'font' : 'url'
+}
+
 function looksLikeDestination(value: string): boolean {
   const raw = value.trim()
-  return /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/|\.\.?\/|#)/i.test(raw)
+  return /^(?:\\+|[a-z][a-z0-9+.-]*:|\/\/|\/|\.\.?\/|#)/i.test(raw)
 }
 
 function decodeIdentifier(value: string): string {
@@ -300,6 +350,64 @@ function decodeIdentifier(value: string): string {
   } catch {
     return value
   }
+}
+
+function findObfuscatedUrlFunction(value: string): string | null {
+  const codeOnly = maskCssStringsAndComments(value)
+  const match = /(?:u\s+r\s*l|u\s*r\s+l|url\s+)\s*\(/iu.exec(codeOnly)
+  return match ? match[0].replace(/\s+/gu, ' ').trim() : null
+}
+
+function maskCssStringsAndComments(value: string): string {
+  let masked = ''
+  let quote: '"' | "'" | null = null
+  let inComment = false
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index] ?? ''
+    const next = value[index + 1] ?? ''
+
+    if (inComment) {
+      if (character === '*' && next === '/') {
+        masked += '  '
+        index += 1
+        inComment = false
+      } else {
+        masked += character === '\n' || character === '\r' ? character : ' '
+      }
+      continue
+    }
+
+    if (quote) {
+      if (character === '\\' && next !== '') {
+        masked += '  '
+        index += 1
+      } else {
+        masked += character === '\n' || character === '\r' ? character : ' '
+        if (character === quote) quote = null
+      }
+      continue
+    }
+
+    if (character === '/' && next === '*') {
+      masked += '  '
+      index += 1
+      inComment = true
+    } else if (character === '"' || character === "'") {
+      masked += ' '
+      quote = character
+    } else {
+      masked += character
+    }
+  }
+
+  return masked
+}
+
+function renderDestination(value: string): string {
+  const trimmed = value.trim()
+  const abbreviated = trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed
+  return JSON.stringify(abbreviated)
 }
 
 function normalizeRawCss(value: string): string {

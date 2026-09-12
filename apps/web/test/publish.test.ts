@@ -349,4 +349,22 @@ describe('Publish', () => {
       left: { code: 'policy_rejected' },
     })
   })
+
+  it('persists stylesheet_refs on the document_versions row for a linked stylesheet', async () => {
+    const principal = await setup('publish_stylesheet_refs')
+    const linked =
+      '<!doctype html><html><head><title>Themed</title>' +
+      '<link rel="stylesheet" href="/a/theme.css"></head><body>Themed</body></html>'
+    const receipt = await publish(principal, {
+      html: linked,
+      idempotencyKey: 'publish-stylesheet-refs',
+    })
+    const row = await env.DB.prepare(
+      `SELECT stylesheet_refs FROM document_versions
+        WHERE document_id = ? AND version_number = ?`,
+    )
+      .bind(receipt.document.id, receipt.versionNumber)
+      .first<{ stylesheet_refs: string | null }>()
+    expect(JSON.parse(row?.stylesheet_refs ?? 'null')).toEqual(['/a/theme.css'])
+  })
 })

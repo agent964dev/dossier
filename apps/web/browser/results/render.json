@@ -1,0 +1,375 @@
+{
+  "status": "passed",
+  "startedAt": "2026-09-12T15:01:35.801Z",
+  "baseUrl": "http://localhost:8787",
+  "managedServer": true,
+  "fontSource": "/Users/malhashemi/dev/dossier/packages/cli/test/fixtures/test-font.woff2",
+  "browsers": [
+    {
+      "engine": "chromium",
+      "status": "passed",
+      "version": "147.0.7727.15",
+      "navigation": {
+        "status": 200,
+        "url": "http://localhost:8787/d/bw0m7jq5kljh",
+        "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
+      },
+      "console": [],
+      "assertions": {
+        "background": {
+          "source": "oklch(0.62 0.14 240)",
+          "expectedComputed": "oklch(0.62 0.14 240)",
+          "actualComputed": "oklch(0.62 0.14 240)",
+          "passed": true
+        },
+        "font": {
+          "family": "Dossier Browser Probe",
+          "check": true,
+          "loadError": null,
+          "matchingFace": {
+            "family": "Dossier Browser Probe",
+            "status": "loaded",
+            "style": "normal",
+            "weight": "100 900"
+          },
+          "faces": [
+            {
+              "family": "Dossier Browser Probe",
+              "status": "loaded",
+              "style": "normal",
+              "weight": "100 900"
+            }
+          ],
+          "passed": true
+        },
+        "csp": {
+          "consoleViolations": [],
+          "eventViolations": [],
+          "passed": true
+        },
+        "stylesheetCookie": {
+          "requests": [
+            {
+              "url": "http://localhost:8787/a/browser-theme-mtyijpv5-3xbkko39.css",
+              "method": "GET",
+              "resourceType": "stylesheet",
+              "headers": {
+                "accept": "text/css,*/*;q=0.1",
+                "accept-encoding": "gzip, deflate, br, zstd",
+                "connection": "keep-alive",
+                "host": "localhost:8787",
+                "sec-fetch-dest": "style",
+                "sec-fetch-mode": "no-cors",
+                "sec-fetch-site": "cross-site",
+                "sec-fetch-storage-access": "active",
+                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.7727.15 Safari/537.36",
+                "sec-ch-ua": "\"HeadlessChrome\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"macOS\""
+              }
+            }
+          ],
+          "cookieHeaders": [],
+          "passed": true
+        },
+        "opaqueOrigin": {
+          "actual": "null",
+          "expected": "null",
+          "passed": true
+        }
+      },
+      "navigationObservation": {
+        "target": "https://example.com/dossier-navigation-probe",
+        "finalUrl": "https://example.com/dossier-navigation-probe",
+        "stayedOnDocument": false,
+        "frameNavigations": [
+          {
+            "url": "http://localhost:8787/d/t86nr1pga69h",
+            "main": true
+          },
+          {
+            "url": "https://example.com/dossier-navigation-probe",
+            "main": true
+          }
+        ],
+        "externalRequests": [
+          {
+            "url": "https://example.com/dossier-navigation-probe",
+            "method": "GET",
+            "resourceType": "document",
+            "headers": {
+              ":authority": "example.com",
+              ":method": "GET",
+              ":path": "/dossier-navigation-probe",
+              ":scheme": "https",
+              "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+              "accept-encoding": "gzip, deflate, br, zstd",
+              "priority": "u=0, i",
+              "sec-ch-ua": "\"HeadlessChrome\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
+              "sec-ch-ua-mobile": "?0",
+              "sec-ch-ua-platform": "\"macOS\"",
+              "sec-fetch-dest": "document",
+              "sec-fetch-mode": "navigate",
+              "sec-fetch-site": "cross-site",
+              "upgrade-insecure-requests": "1",
+              "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.7727.15 Safari/537.36"
+            }
+          }
+        ],
+        "console": [
+          {
+            "type": "error",
+            "text": "Failed to load resource: the server responded with a status of 404 ()"
+          }
+        ],
+        "cspViolations": []
+      }
+    },
+    {
+      "engine": "webkit",
+      "status": "passed",
+      "version": "26.4",
+      "navigation": {
+        "status": 200,
+        "url": "http://localhost:8787/d/bw0m7jq5kljh",
+        "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"
+      },
+      "console": [],
+      "assertions": {
+        "background": {
+          "source": "oklch(0.62 0.14 240)",
+          "expectedComputed": "oklch(0.62 0.14 240)",
+          "actualComputed": "oklch(0.62 0.14 240)",
+          "passed": true
+        },
+        "font": {
+          "family": "Dossier Browser Probe",
+          "check": true,
+          "loadError": null,
+          "matchingFace": {
+            "family": "Dossier Browser Probe",
+            "status": "loaded",
+            "style": "normal",
+            "weight": "100 900"
+          },
+          "faces": [
+            {
+              "family": "Dossier Browser Probe",
+              "status": "loaded",
+              "style": "normal",
+              "weight": "100 900"
+            }
+          ],
+          "passed": true
+        },
+        "csp": {
+          "consoleViolations": [],
+          "eventViolations": [],
+          "passed": true
+        },
+        "stylesheetCookie": {
+          "requests": [
+            {
+              "url": "http://localhost:8787/a/browser-theme-mtyijpv5-3xbkko39.css",
+              "method": "GET",
+              "resourceType": "stylesheet",
+              "headers": {
+                "accept": "text/css,*/*;q=0.1",
+                "sec-fetch-site": "cross-site",
+                "accept-encoding": "gzip, deflate",
+                "sec-fetch-mode": "no-cors",
+                "host": "localhost:8787",
+                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.4 Safari/605.1.15",
+                "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+                "sec-fetch-dest": "style",
+                "connection": "keep-alive"
+              }
+            }
+          ],
+          "cookieHeaders": [],
+          "passed": true
+        },
+        "opaqueOrigin": {
+          "actual": "null",
+          "expected": "null",
+          "passed": true
+        }
+      },
+      "navigationObservation": {
+        "target": "https://example.com/dossier-navigation-probe",
+        "finalUrl": "https://example.com/dossier-navigation-probe",
+        "stayedOnDocument": false,
+        "frameNavigations": [
+          {
+            "url": "http://localhost:8787/d/t86nr1pga69h",
+            "main": true
+          },
+          {
+            "url": "https://example.com/dossier-navigation-probe",
+            "main": true
+          }
+        ],
+        "externalRequests": [
+          {
+            "url": "https://example.com/dossier-navigation-probe",
+            "method": "GET",
+            "resourceType": "document",
+            "headers": {
+              "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "sec-fetch-site": "cross-site",
+              "sec-fetch-dest": "document",
+              "accept-encoding": "gzip, deflate, br",
+              "sec-fetch-mode": "navigate",
+              "host": "example.com",
+              "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.4 Safari/605.1.15",
+              "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+              "connection": "keep-alive",
+              "priority": "u=0, i"
+            }
+          }
+        ],
+        "console": [],
+        "cspViolations": []
+      }
+    }
+  ],
+  "assets": {
+    "font": {
+      "slug": "browser-font-mtyijpv5-26d7030u",
+      "response": {
+        "slug": "browser-font-mtyijpv5-26d7030u",
+        "ext": "woff2",
+        "versionNumber": 1,
+        "url": "http://localhost:8787/a/browser-font-mtyijpv5-26d7030u.woff2",
+        "pinnedUrl": "http://localhost:8787/a/browser-font-mtyijpv5-26d7030u@1.woff2"
+      },
+      "preflight": {
+        "url": "http://localhost:8787/a/browser-font-mtyijpv5-26d7030u.woff2",
+        "status": 200,
+        "bytes": 69436,
+        "headers": {
+          "access-control-allow-origin": "*",
+          "cache-control": "public, max-age=60",
+          "connection": "keep-alive",
+          "content-length": "69436",
+          "content-type": "font/woff2",
+          "cross-origin-resource-policy": "cross-origin",
+          "date": "Sat, 12 Sep 2026 15:01:41 GMT",
+          "keep-alive": "timeout=5",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff"
+        },
+        "attempts": 1
+      }
+    },
+    "stylesheet": {
+      "slug": "browser-theme-mtyijpv5-3xbkko39",
+      "response": {
+        "slug": "browser-theme-mtyijpv5-3xbkko39",
+        "ext": "css",
+        "versionNumber": 1,
+        "url": "http://localhost:8787/a/browser-theme-mtyijpv5-3xbkko39.css",
+        "pinnedUrl": "http://localhost:8787/a/browser-theme-mtyijpv5-3xbkko39@1.css"
+      },
+      "preflight": {
+        "url": "http://localhost:8787/a/browser-theme-mtyijpv5-3xbkko39.css",
+        "status": 200,
+        "bytes": 299,
+        "headers": {
+          "access-control-allow-origin": "*",
+          "cache-control": "public, max-age=60",
+          "connection": "keep-alive",
+          "content-length": "299",
+          "content-type": "text/css; charset=utf-8",
+          "cross-origin-resource-policy": "cross-origin",
+          "date": "Sat, 12 Sep 2026 15:01:41 GMT",
+          "keep-alive": "timeout=5",
+          "vary": "Origin",
+          "x-content-type-options": "nosniff"
+        },
+        "attempts": 1
+      }
+    }
+  },
+  "document": {
+    "id": "bw0m7jq5kljh",
+    "url": "http://localhost:8787/d/bw0m7jq5kljh",
+    "receipt": {
+      "ok": true,
+      "document": {
+        "id": "bw0m7jq5kljh",
+        "title": "Dossier render browser probe",
+        "description": null,
+        "kind": null,
+        "parentId": null,
+        "effectiveVisibility": "public",
+        "workspaceSlug": "agent964",
+        "authorAccountId": "acct_bootstrap",
+        "authorName": "Bootstrap service",
+        "latestVersionNumber": 1,
+        "disabled": false,
+        "url": "http://localhost:8787/d/bw0m7jq5kljh",
+        "rawUrl": "http://localhost:8787/d/bw0m7jq5kljh/raw",
+        "hubUrl": "http://localhost:8787/d/bw0m7jq5kljh/tree",
+        "createdAt": "2026-09-12T15:01:41.027Z",
+        "updatedAt": "2026-09-12T15:01:41.027Z",
+        "visibility": "public",
+        "accessSource": "own",
+        "versionCount": 1,
+        "revision": 1,
+        "deletionBatchId": null,
+        "deletionRootTitle": null,
+        "deletedAt": null,
+        "deletedBy": null,
+        "disabledAt": null
+      },
+      "versionNumber": 1,
+      "versionUrl": "http://localhost:8787/d/bw0m7jq5kljh/v/1",
+      "warnings": [],
+      "draftId": "bw0m7jq5kljh",
+      "publicUrl": "http://localhost:8787/d/bw0m7jq5kljh",
+      "rawUrl": "http://localhost:8787/d/bw0m7jq5kljh/raw"
+    }
+  },
+  "navigationDocument": {
+    "id": "t86nr1pga69h",
+    "url": "http://localhost:8787/d/t86nr1pga69h",
+    "receipt": {
+      "ok": true,
+      "document": {
+        "id": "t86nr1pga69h",
+        "title": "Dossier navigation containment probe",
+        "description": null,
+        "kind": null,
+        "parentId": null,
+        "effectiveVisibility": "public",
+        "workspaceSlug": "agent964",
+        "authorAccountId": "acct_bootstrap",
+        "authorName": "Bootstrap service",
+        "latestVersionNumber": 1,
+        "disabled": false,
+        "url": "http://localhost:8787/d/t86nr1pga69h",
+        "rawUrl": "http://localhost:8787/d/t86nr1pga69h/raw",
+        "hubUrl": "http://localhost:8787/d/t86nr1pga69h/tree",
+        "createdAt": "2026-09-12T15:01:41.046Z",
+        "updatedAt": "2026-09-12T15:01:41.046Z",
+        "visibility": "public",
+        "accessSource": "own",
+        "versionCount": 1,
+        "revision": 1,
+        "deletionBatchId": null,
+        "deletionRootTitle": null,
+        "deletedAt": null,
+        "deletedBy": null,
+        "disabledAt": null
+      },
+      "versionNumber": 1,
+      "versionUrl": "http://localhost:8787/d/t86nr1pga69h/v/1",
+      "warnings": [],
+      "draftId": "t86nr1pga69h",
+      "publicUrl": "http://localhost:8787/d/t86nr1pga69h",
+      "rawUrl": "http://localhost:8787/d/t86nr1pga69h/raw"
+    }
+  },
+  "finishedAt": "2026-09-12T15:01:46.073Z"
+}

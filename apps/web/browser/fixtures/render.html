@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dossier render browser probe</title>
+  <script>
+    globalThis.__dossierCspViolations = [];
+    addEventListener('securitypolicyviolation', function (event) {
+      globalThis.__dossierCspViolations.push({
+        blockedURI: event.blockedURI,
+        effectiveDirective: event.effectiveDirective,
+        originalPolicy: event.originalPolicy,
+        violatedDirective: event.violatedDirective
+      });
+    });
+  </script>
+  <link rel="stylesheet" href="{{STYLE_URL}}">
+</head>
+<body>
+  <p id="probe">The quick brown fox jumps over the lazy dog.</p>
+</body>
+</html>

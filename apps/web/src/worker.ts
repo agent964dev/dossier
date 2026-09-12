@@ -1,5 +1,6 @@
 import tanstackServer from '@tanstack/react-start/server-entry'
 import { handleApiRequest } from './api'
+import { handleAssetRequest } from './api/assets'
 import { handleAuthRequest } from './api/auth'
 import { handleServingRequest } from './api/serving'
 
@@ -12,6 +13,9 @@ export default {
     const pathname = new URL(request.url).pathname
     if (hasPrefix(pathname, '/api')) {
       return handleApiRequest(request, env)
+    }
+    if (hasPrefix(pathname, '/a')) {
+      return handleAssetRequest(request, env)
     }
     if (hasPrefix(pathname, '/d')) {
       return handleServingRequest(request, env)
