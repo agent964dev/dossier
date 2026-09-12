@@ -9,6 +9,8 @@ import { ObjectsLive } from './objects'
 import { PrincipalLive } from './principal'
 import { PublishLive } from './publish'
 import { ServingLive } from './serving'
+import { SharesLive } from './shares'
+import { TreeLive } from './tree'
 import { SessionLive } from './session'
 import { ShooLive } from './shoo'
 
@@ -20,9 +22,11 @@ const SignInLive = Layer.mergeAll(AllowlistLive, ShooLive).pipe(
   Layer.provideMerge(AuthenticationLive),
 )
 
-/** All phase-one services; surface builders only need to provide WorkerEnv. */
+/** Core document, tree, ACL, publication, and authentication services. */
 export const CoreServicesLive = Layer.mergeAll(
   PublishLive,
   DocumentsLive,
   ServingLive,
+  SharesLive,
+  TreeLive,
 ).pipe(Layer.provideMerge(SignInLive))

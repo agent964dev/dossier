@@ -13,17 +13,25 @@ const bomFixture = join(packageDirectory, 'test/fixtures/bom.html')
 let server: Server
 let apiUrl: string
 const homes: string[] = []
-const documents = new Map<
-  string,
-  {
-    html: Buffer
-    version: number
-    filename: string
-    kind: string | null
-    visibility: string
-  }
->()
+interface StoredDocument {
+  html: Buffer
+  version: number
+  revision: number
+  filename: string
+  kind: string | null
+  visibility: 'public' | 'team' | 'private' | null
+  parentId: string | null
+  authorAccountId: string
+  authorName: string
+  shares: string[]
+  deletionBatchId: string | null
+  deletionRootTitle: string | null
+  deletedBy: string | null
+}
+
+const documents = new Map<string, StoredDocument>()
 const idempotencyKeys: string[] = []
+const listQueries: Array<{ scope: string | null; parent: string | null }> = []
 let nextId = 1
 let retryFailureSeen = false
 let redirectWasFollowed = false
@@ -39,15 +47,7 @@ async function bodyJson(
   >
 }
 
-function documentDto(
-  id: string,
-  stored: {
-    version: number
-    filename: string
-    kind: string | null
-    visibility: string
-  },
-) {
+function documentDto(id: string, stored: StoredDocument) {
   const now = '2026-09-12T00:00:00.000Z'
   const title = basename(stored.filename, '.html')
   return {
@@ -55,11 +55,11 @@ function documentDto(
     title,
     description: null,
     kind: stored.kind,
-    parentId: null,
-    effectiveVisibility: stored.visibility,
+    parentId: stored.parentId,
+    effectiveVisibility: stored.visibility ?? 'team',
     workspaceSlug: 'test',
-    authorAccountId: 'acct_test',
-    authorName: 'Test User',
+    authorAccountId: stored.authorAccountId,
+    authorName: stored.authorName,
     latestVersionNumber: stored.version,
     disabled: false,
     url: `${apiUrl}/d/${id}`,
@@ -68,14 +68,92 @@ function documentDto(
     createdAt: now,
     updatedAt: now,
     visibility: stored.visibility,
-    accessSource: 'own',
+    accessSource: stored.visibility === null ? 'inherited' : 'own',
     versionCount: stored.version,
-    revision: stored.version,
-    deletionBatchId: null,
-    deletedAt: null,
-    deletedBy: null,
+    revision: stored.revision,
+    deletionBatchId: stored.deletionBatchId,
+    deletionRootTitle: stored.deletionRootTitle,
+    deletedAt: stored.deletionBatchId === null ? null : now,
+    deletedBy: stored.deletedBy,
     disabledAt: null,
   }
+}
+
+function readerDto(id: string, stored: StoredDocument) {
+  const document = documentDto(id, stored)
+  return {
+    id: document.id,
+    title: document.title,
+    description: document.description,
+    kind: document.kind,
+    parentId: document.parentId,
+    effectiveVisibility: document.effectiveVisibility,
+    workspaceSlug: document.workspaceSlug,
+    authorAccountId: document.authorAccountId,
+    authorName: document.authorName,
+    latestVersionNumber: document.latestVersionNumber,
+    disabled: document.disabled,
+    url: document.url,
+    rawUrl: document.rawUrl,
+    hubUrl: document.hubUrl,
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+  }
+}
+
+function storedDocument(
+  filename: string,
+  overrides: Partial<StoredDocument> = {},
+): StoredDocument {
+  return {
+    html: Buffer.from(`<!doctype html><title>${basename(filename, '.html')}</title>`),
+    version: 1,
+    revision: 1,
+    filename,
+    kind: null,
+    visibility: 'team',
+    parentId: null,
+    authorAccountId: 'acct_test',
+    authorName: 'Test User',
+    shares: [],
+    deletionBatchId: null,
+    deletionRootTitle: null,
+    deletedBy: null,
+    ...overrides,
+  }
+}
+
+function descendantIds(rootId: string): string[] {
+  const descendants: string[] = []
+  const pending = [rootId]
+  while (pending.length > 0) {
+    const parentId = pending.shift()!
+    for (const [id, stored] of documents) {
+      if (stored.parentId === parentId && stored.deletionBatchId === null) {
+        descendants.push(id)
+        pending.push(id)
+      }
+    }
+  }
+  return descendants
+}
+
+function authorSummaries(ids: readonly string[]) {
+  const byAccount = new Map<
+    string,
+    { accountId: string; name: string; count: number }
+  >()
+  for (const id of ids) {
+    const stored = documents.get(id)!
+    const summary = byAccount.get(stored.authorAccountId) ?? {
+      accountId: stored.authorAccountId,
+      name: stored.authorName,
+      count: 0,
+    }
+    summary.count += 1
+    byAccount.set(stored.authorAccountId, summary)
+  }
+  return [...byAccount.values()]
 }
 
 function authenticated(request: IncomingMessage): boolean {
@@ -160,9 +238,25 @@ beforeAll(async () => {
       }
       const id = requestedId ?? `doc${String(nextId++).padStart(9, '0')}`
       const previous = documents.get(id)
-      const stored = {
+      if (
+        previous &&
+        Object.hasOwn(payload, 'parentId') &&
+        (payload.parentId ?? null) !== previous.parentId
+      ) {
+        response.statusCode = 409
+        response.end(
+          JSON.stringify({
+            ok: false,
+            code: 'conflict',
+            message: 'Use the move operation to change a document parent.',
+          }),
+        )
+        return
+      }
+      const stored: StoredDocument = {
         html: Buffer.from(String(payload.html), 'utf8'),
         version: (previous?.version ?? 0) + 1,
+        revision: (previous?.revision ?? 0) + 1,
         filename:
           typeof payload.filename === 'string'
             ? payload.filename
@@ -172,9 +266,22 @@ beforeAll(async () => {
             ? payload.kind
             : (previous?.kind ?? null),
         visibility:
-          typeof payload.visibility === 'string'
-            ? payload.visibility
+          payload.visibility === null || typeof payload.visibility === 'string'
+            ? (payload.visibility as StoredDocument['visibility'])
             : (previous?.visibility ?? 'team'),
+        parentId:
+          payload.parentId === null || typeof payload.parentId === 'string'
+            ? payload.parentId
+            : (previous?.parentId ?? null),
+        authorAccountId: previous?.authorAccountId ?? 'acct_test',
+        authorName: previous?.authorName ?? 'Test User',
+        shares:
+          Array.isArray(payload.shares) && payload.shares.every((email) => typeof email === 'string')
+            ? payload.shares
+            : (previous?.shares ?? []),
+        deletionBatchId: previous?.deletionBatchId ?? null,
+        deletionRootTitle: previous?.deletionRootTitle ?? null,
+        deletedBy: previous?.deletedBy ?? null,
       }
       documents.set(id, stored)
       const document = documentDto(id, stored)
@@ -195,7 +302,7 @@ beforeAll(async () => {
     }
 
     const documentApi =
-      /^\/api\/documents\/([a-z0-9]{12})(?:\/(restore|disable|enable))?$/.exec(
+      /^\/api\/documents\/([a-z0-9]{12})(?:\/(restore|disable|enable|tree|shares))?$/.exec(
         url.pathname,
       )
     if (documentApi) {
@@ -205,40 +312,164 @@ beforeAll(async () => {
         response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
         return
       }
-      const stored = documents.get(documentApi[1]!)
+      const id = documentApi[1]!
+      const action = documentApi[2]
+      const stored = documents.get(id)
       if (!stored) {
         response.statusCode = 404
         response.end(JSON.stringify({ ok: false, code: 'not_found' }))
         return
       }
-      if (request.method === 'GET' && !documentApi[2]) {
+      if (request.method === 'GET' && action === undefined) {
         response.end(
           JSON.stringify({
             ok: true,
-            document: documentDto(documentApi[1]!, stored),
+            document: documentDto(id, stored),
             versions: [],
           }),
         )
         return
       }
-      if (request.method === 'DELETE' && !documentApi[2]) {
+      if (request.method === 'GET' && action === 'tree') {
+        const breadcrumb = []
+        let parentId = stored.parentId
+        while (parentId !== null) {
+          const parent = documents.get(parentId)
+          if (!parent) break
+          breadcrumb.unshift(readerDto(parentId, parent))
+          parentId = parent.parentId
+        }
         response.end(
           JSON.stringify({
-            ok: true,
-            batchId: 'batch_test',
-            deleted: 1,
-            authors: ['acct_test'],
+            breadcrumb,
+            document: readerDto(id, stored),
+            siblings: [...documents]
+              .filter(
+                ([candidateId, candidate]) =>
+                  candidateId !== id &&
+                  candidate.parentId === stored.parentId &&
+                  candidate.deletionBatchId === null,
+              )
+              .map(([candidateId, candidate]) =>
+                readerDto(candidateId, candidate),
+              ),
+            children: [...documents]
+              .filter(
+                ([, candidate]) =>
+                  candidate.parentId === id && candidate.deletionBatchId === null,
+              )
+              .map(([candidateId, candidate]) =>
+                readerDto(candidateId, candidate),
+              ),
           }),
         )
         return
       }
-      if (request.method === 'POST' && documentApi[2]) {
-        if (documentApi[2] !== 'enable') await bodyJson(request)
+      if (request.method === 'PATCH' && action === undefined) {
+        const payload = await bodyJson(request)
+        if ('parentId' in payload) {
+          stored.parentId =
+            payload.parentId === null ? null : String(payload.parentId)
+        }
+        if ('visibility' in payload) {
+          stored.visibility =
+            payload.visibility === null
+              ? null
+              : (String(payload.visibility) as 'public' | 'team' | 'private')
+        }
+        stored.revision += 1
+        response.end(
+          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+        )
+        return
+      }
+      if (action === 'shares' && request.method === 'GET') {
+        response.end(
+          JSON.stringify({
+            configured: stored.shares,
+            effective: stored.shares,
+            accessSource: 'own',
+          }),
+        )
+        return
+      }
+      if (action === 'shares' && request.method === 'POST') {
+        const payload = await bodyJson(request)
+        const shares = new Set(stored.shares)
+        if (Array.isArray(payload.add)) {
+          for (const email of payload.add) shares.add(String(email))
+        }
+        if (Array.isArray(payload.remove)) {
+          for (const email of payload.remove) shares.delete(String(email))
+        }
+        stored.shares = [...shares]
+        stored.revision += 1
+        response.end(
+          JSON.stringify({
+            configured: stored.shares,
+            effective: stored.shares,
+            accessSource: 'own',
+          }),
+        )
+        return
+      }
+      if (request.method === 'DELETE' && action === undefined) {
+        const descendants = descendantIds(id)
+        const affected = [id, ...descendants]
+        const authors = authorSummaries(affected)
+        if (descendants.length > 0 && url.searchParams.get('force') !== '1') {
+          response.statusCode = 409
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'has_children',
+              message: 'Document has live descendants.',
+              details: { count: descendants.length, authors },
+            }),
+          )
+          return
+        }
+        const rootTitle = basename(stored.filename, '.html')
+        for (const affectedId of affected) {
+          const affectedDocument = documents.get(affectedId)!
+          affectedDocument.deletionBatchId = 'batch_test'
+          affectedDocument.deletionRootTitle = rootTitle
+          affectedDocument.deletedBy = 'Test User'
+        }
         response.end(
           JSON.stringify({
             ok: true,
-            document: documentDto(documentApi[1]!, stored),
+            batchId: 'batch_test',
+            deleted: affected.length,
+            authors,
           }),
+        )
+        return
+      }
+      if (request.method === 'POST' && action === 'restore') {
+        const payload = await bodyJson(request)
+        for (const candidate of documents.values()) {
+          if (candidate.deletionBatchId === payload.batchId) {
+            candidate.deletionBatchId = null
+            candidate.deletionRootTitle = null
+            candidate.deletedBy = null
+          }
+        }
+        response.end(
+          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+        )
+        return
+      }
+      if (request.method === 'POST' && action === 'disable') {
+        await bodyJson(request)
+        response.end(
+          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+        )
+        return
+      }
+      if (request.method === 'POST' && action === 'enable') {
+        response.end(
+          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
         )
         return
       }
@@ -251,7 +482,18 @@ beforeAll(async () => {
         response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
         return
       }
-      const all = [...documents].map(([id, stored]) => documentDto(id, stored))
+      const scope = url.searchParams.get('scope') ?? 'mine'
+      const parent = url.searchParams.get('parent')
+      listQueries.push({ scope, parent })
+      const filtered = [...documents].filter(([, stored]) => {
+        if (scope === 'trash') return stored.deletionBatchId !== null
+        if (stored.deletionBatchId !== null) return false
+        if (parent === null) return true
+        return parent === 'root'
+          ? stored.parentId === null
+          : stored.parentId === parent
+      })
+      const all = filtered.map(([id, stored]) => documentDto(id, stored))
       const offset = Number(url.searchParams.get('cursor') ?? '0')
       const pageSize = 1
       const page = all.slice(offset, offset + pageSize)
@@ -530,6 +772,270 @@ describe('built CLI', () => {
       JSON.parse(listed.stdout).map((document: { id: string }) => document.id),
     ).toEqual([...documents.keys()])
     expect(documents.size).toBeGreaterThan(1)
+  })
+
+  it('keeps the same parent on re-upload and points moves to the move command', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const firstParentFile = join(home, 'first-parent.html')
+    const secondParentFile = join(home, 'second-parent.html')
+    const childFile = join(home, 'parented-child.html')
+    await writeFile(firstParentFile, '<!doctype html><title>First</title>', 'utf8')
+    await writeFile(secondParentFile, '<!doctype html><title>Second</title>', 'utf8')
+    await writeFile(childFile, '<!doctype html><title>Child</title>', 'utf8')
+    const firstParent = JSON.parse(
+      (await cli('node', ['upload', firstParentFile, '--new', '--json'], { home }))
+        .stdout,
+    )
+    const secondParent = JSON.parse(
+      (await cli('node', ['upload', secondParentFile, '--new', '--json'], { home }))
+        .stdout,
+    )
+    const created = await cli(
+      'node',
+      ['upload', childFile, '--new', '--parent', firstParent.id, '--json'],
+      { home },
+    )
+    expect(created.exitCode).toBe(0)
+    expect(JSON.parse(created.stdout).parentId).toBe(firstParent.id)
+
+    await writeFile(childFile, '<!doctype html><title>Child v2</title>', 'utf8')
+    const sameParent = await cli(
+      'node',
+      ['upload', childFile, '--parent', firstParent.id, '--json'],
+      { home },
+    )
+    expect(sameParent.exitCode).toBe(0)
+    expect(JSON.parse(sameParent.stdout)).toMatchObject({
+      versionNumber: 2,
+      parentId: firstParent.id,
+    })
+
+    const changedParent = await cli(
+      'node',
+      ['upload', childFile, '--parent', secondParent.id],
+      { home },
+    )
+    expect(changedParent.exitCode).toBe(1)
+    expect(changedParent.stderr).toContain('use dossier move')
+    expect(changedParent.stderr).toContain(secondParent.id)
+  })
+
+  it('lists a readable branch as a client-side nested tree', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('navr00000001', storedDocument('Navigation Root.html'))
+    documents.set(
+      'navc00000001',
+      storedDocument('Navigation Child.html', { parentId: 'navr00000001' }),
+    )
+    documents.set(
+      'navg00000001',
+      storedDocument('Navigation Grandchild.html', {
+        parentId: 'navc00000001',
+      }),
+    )
+    const before = listQueries.length
+    const result = await cli(
+      'node',
+      ['list', '--tree', '--all', '--parent', 'navr00000001', '--json'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual([
+      expect.objectContaining({
+        id: 'navc00000001',
+        children: [
+          expect.objectContaining({ id: 'navg00000001', children: [] }),
+        ],
+      }),
+    ])
+    expect(listQueries.slice(before)).toEqual(
+      expect.arrayContaining([
+        { scope: 'readable', parent: 'navr00000001' },
+        { scope: 'readable', parent: null },
+      ]),
+    )
+  })
+
+  it('shows breadcrumb, siblings, and children with tree', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('treeroot0001', storedDocument('Tree Root.html'))
+    documents.set(
+      'treenode0001',
+      storedDocument('Tree Node.html', { parentId: 'treeroot0001' }),
+    )
+    documents.set(
+      'treesibl0001',
+      storedDocument('Tree Sibling.html', { parentId: 'treeroot0001' }),
+    )
+    documents.set(
+      'treechld0001',
+      storedDocument('Tree Child.html', { parentId: 'treenode0001' }),
+    )
+    const result = await cli('node', ['tree', 'treenode0001', '--json'], {
+      home,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      breadcrumb: [{ id: 'treeroot0001' }],
+      document: { id: 'treenode0001' },
+      siblings: [{ id: 'treesibl0001' }],
+      children: [{ id: 'treechld0001' }],
+    })
+  })
+
+  it('moves a document to a parent or root', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('movepar00001', storedDocument('Move Parent.html'))
+    documents.set('movedoc00001', storedDocument('Move Document.html'))
+    const moved = await cli(
+      'node',
+      ['move', 'movedoc00001', '--parent', 'movepar00001', '--json'],
+      { home },
+    )
+    expect(moved.exitCode).toBe(0)
+    expect(JSON.parse(moved.stdout).parentId).toBe('movepar00001')
+    const rooted = await cli(
+      'node',
+      ['move', 'movedoc00001', '--parent', 'root', '--json'],
+      { home },
+    )
+    expect(rooted.exitCode).toBe(0)
+    expect(JSON.parse(rooted.stdout).parentId).toBeNull()
+  })
+
+  it('sets visibility and clears it to inherit', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'visidoc00001',
+      storedDocument('Visibility Document.html', { visibility: 'public' }),
+    )
+    const result = await cli(
+      'node',
+      ['visibility', 'visidoc00001', 'inherit', '--json'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      id: 'visidoc00001',
+      visibility: null,
+      effectiveVisibility: 'team',
+      accessSource: 'inherited',
+    })
+  })
+
+  it('adds and removes shares through the delta endpoint', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'sharedoc0001',
+      storedDocument('Shared Document.html', { shares: ['old@example.com'] }),
+    )
+    const result = await cli(
+      'node',
+      [
+        'share',
+        'sharedoc0001',
+        '--add',
+        'one@example.com,two@example.com',
+        '--remove',
+        'old@example.com',
+        '--json',
+      ],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      configured: ['one@example.com', 'two@example.com'],
+      effective: ['one@example.com', 'two@example.com'],
+      accessSource: 'own',
+    })
+  })
+
+  it('shows trash batch roots with root titles and authors', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'trashrot0001',
+      storedDocument('Archived Ticket.html', {
+        deletionBatchId: 'batch_trash',
+        deletionRootTitle: 'Archived Ticket',
+        deletedBy: 'Test User',
+      }),
+    )
+    documents.set(
+      'trashchd0001',
+      storedDocument('Archived Research.html', {
+        parentId: 'trashrot0001',
+        authorAccountId: 'acct_intern',
+        authorName: 'Intern User',
+        deletionBatchId: 'batch_trash',
+        deletionRootTitle: 'Archived Ticket',
+        deletedBy: 'Test User',
+      }),
+    )
+    const result = await cli('node', ['trash'], { home })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Archived Ticket')
+    expect(result.stdout).toContain('batch_trash')
+    expect(result.stdout).toContain('Authors: Test User, Intern User')
+  })
+
+  it('prints has_children impact and exits one without force', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('deleter00001', storedDocument('Delete Root.html'))
+    documents.set(
+      'deletea00001',
+      storedDocument('Delete A.html', {
+        parentId: 'deleter00001',
+        authorAccountId: 'acct_other_a',
+        authorName: 'Other A',
+      }),
+    )
+    documents.set(
+      'deleteb00001',
+      storedDocument('Delete B.html', {
+        parentId: 'deleter00001',
+        authorAccountId: 'acct_other_b',
+        authorName: 'Other B',
+      }),
+    )
+    documents.set(
+      'deletec00001',
+      storedDocument('Delete C.html', { parentId: 'deletea00001' }),
+    )
+    const result = await cli('node', ['delete', 'deleter00001'], { home })
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(
+      'this also archives 3 documents by 2 other people',
+    )
+    expect(result.stderr).toContain('--force')
+  })
+
+  it('restores the batch discovered from document detail', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'restored0001',
+      storedDocument('Restore Document.html', {
+        deletionBatchId: 'batch_restore',
+        deletionRootTitle: 'Restore Document',
+        deletedBy: 'Test User',
+      }),
+    )
+    const result = await cli('node', ['restore', 'restored0001', '--json'], {
+      home,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      id: 'restored0001',
+      deletionBatchId: null,
+    })
   })
 
   it('uses the reader-safe message for missing fetches', async () => {

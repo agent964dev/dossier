@@ -116,21 +116,15 @@ export const ServingLive = Layer.effect(
         const bearerSupplied =
           authorization !== null && /^Bearer(?:\s|$)/i.test(authorization)
         const principalResult = yield* principals.resolve(request).pipe(Effect.either)
-        if (principalResult._tag === 'Left') {
+        if (principalResult._tag === 'Left' && bearerSupplied) {
           const error = principalResult.left
-          if (
-            bearerSupplied &&
-            error instanceof DossierError &&
-            error.code === 'unauthenticated'
-          ) {
+          if (error instanceof DossierError && error.code === 'unauthenticated') {
             return errorResponse(error)
           }
           return notFound(env)
         }
-        const canRead = yield* access.canReadContent(
-          target.documentId,
-          principalResult.right,
-        )
+        const principal = principalResult._tag === 'Right' ? principalResult.right : null
+        const canRead = yield* access.canReadContent(target.documentId, principal)
         if (!canRead) return notFound(env)
 
         const row = yield* Effect.tryPromise({

@@ -20,6 +20,7 @@ export type {
 
 const OptionalString = Schema.optional(Schema.String)
 const OptionalNullableString = Schema.optional(Schema.NullOr(Schema.String))
+const Revision = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 
 export const DocumentId = Schema.String.pipe(
   Schema.pattern(/^[a-z0-9]{12}$/),
@@ -29,9 +30,20 @@ export type DocumentId = typeof DocumentId.Type
 export const Visibility = Schema.Literal('public', 'team', 'private')
 export type Visibility = typeof Visibility.Type
 
+export const AccessSource = Schema.Literal('own', 'inherited', 'default')
+export type AccessSource = typeof AccessSource.Type
+
 export const WorkspaceRole = Schema.Literal('admin', 'member')
 export type WorkspaceRole = typeof WorkspaceRole.Type
 
+export const AuthorSummary = Schema.Struct({
+  accountId: Schema.String,
+  name: Schema.String,
+  count: Schema.Number,
+})
+export type AuthorSummary = typeof AuthorSummary.Type
+
+/** Safe on reader-facing surfaces: no storage paths, depths, or ACL provenance. */
 export const DocumentReader = Schema.Struct({
   id: DocumentId,
   title: Schema.String,
@@ -52,18 +64,29 @@ export const DocumentReader = Schema.Struct({
 })
 export type DocumentReader = typeof DocumentReader.Type
 
+/** Management projection returned only to the author or a workspace admin. */
 export const DocumentEditor = Schema.Struct({
   ...DocumentReader.fields,
   visibility: Schema.NullOr(Visibility),
-  accessSource: Schema.Literal('own', 'inherited'),
+  accessSource: AccessSource,
   versionCount: Schema.Number,
-  revision: Schema.Number,
+  revision: Revision,
   deletionBatchId: Schema.NullOr(Schema.String),
+  deletionRootTitle: Schema.NullOr(Schema.String),
   deletedAt: Schema.NullOr(Schema.String),
   deletedBy: Schema.NullOr(Schema.String),
   disabledAt: Schema.NullOr(Schema.String),
+  /** Present on scope=trash batch roots. */
+  authors: Schema.optional(Schema.Array(AuthorSummary)),
 })
 export type DocumentEditor = typeof DocumentEditor.Type
+
+export const DocumentView = Schema.Union(DocumentEditor, DocumentReader)
+export type DocumentView = typeof DocumentView.Type
+
+export function isDocumentEditor(document: DocumentView): document is DocumentEditor {
+  return 'revision' in document
+}
 
 export const Version = Schema.Struct({
   id: Schema.String,
@@ -149,9 +172,7 @@ export const ApiKey = Schema.Struct({
 })
 export type ApiKey = typeof ApiKey.Type
 
-export const ApiKeyCreate = Schema.Struct({
-  name: Schema.String,
-})
+export const ApiKeyCreate = Schema.Struct({ name: Schema.String })
 export type ApiKeyCreate = typeof ApiKeyCreate.Type
 
 export const ApiKeyCreateResponse = Schema.Struct({
@@ -169,23 +190,67 @@ export type ApiKeyListResponse = typeof ApiKeyListResponse.Type
 
 export const DocumentGetResponse = Schema.Struct({
   ok: Schema.Literal(true),
-  document: DocumentEditor,
+  document: DocumentView,
   versions: Schema.Array(Version),
 })
 export type DocumentGetResponse = typeof DocumentGetResponse.Type
 
+export const DocumentListScope = Schema.Literal(
+  'mine',
+  'workspace',
+  'readable',
+  'trash',
+)
+export type DocumentListScope = typeof DocumentListScope.Type
+
 export const DocumentListResponse = Schema.Struct({
   ok: Schema.Literal(true),
-  documents: Schema.Array(DocumentEditor),
+  documents: Schema.Array(DocumentView),
   nextCursor: Schema.NullOr(Schema.String),
 })
 export type DocumentListResponse = typeof DocumentListResponse.Type
+
+export const TreeResponse = Schema.Struct({
+  breadcrumb: Schema.Array(DocumentReader),
+  document: DocumentReader,
+  siblings: Schema.Array(DocumentReader),
+  children: Schema.Array(DocumentReader),
+})
+export type TreeResponse = typeof TreeResponse.Type
+
+export const DocumentPatch = Schema.Struct({
+  kind: Schema.optional(Schema.NullOr(Schema.String)),
+  description: OptionalNullableString,
+  visibility: Schema.optional(Schema.NullOr(Visibility)),
+  parentId: Schema.optional(Schema.NullOr(DocumentId)),
+  ifRevision: Schema.optional(Revision),
+})
+export type DocumentPatch = typeof DocumentPatch.Type
+
+export const ShareDelta = Schema.Struct({
+  add: Schema.optional(Schema.Array(Schema.String)),
+  remove: Schema.optional(Schema.Array(Schema.String)),
+})
+export type ShareDelta = typeof ShareDelta.Type
+
+export const ShareReplacement = Schema.Struct({
+  emails: Schema.Array(Schema.String),
+  ifRevision: Revision,
+})
+export type ShareReplacement = typeof ShareReplacement.Type
+
+export const SharesResponse = Schema.Struct({
+  configured: Schema.Array(Schema.String),
+  effective: Schema.Array(Schema.String),
+  accessSource: AccessSource,
+})
+export type SharesResponse = typeof SharesResponse.Type
 
 export const DeleteResponse = Schema.Struct({
   ok: Schema.Literal(true),
   batchId: Schema.String,
   deleted: Schema.Number,
-  authors: Schema.Array(Schema.String),
+  authors: Schema.Array(AuthorSummary),
 })
 export type DeleteResponse = typeof DeleteResponse.Type
 
@@ -226,7 +291,15 @@ export const UnauthenticatedError = errorSchema('unauthenticated')
 export const NotFoundError = errorSchema('not_found')
 export const EditorRequiredError = errorSchema('editor_required')
 export const PublisherRequiredError = errorSchema('publisher_required')
-export const HasChildrenError = errorSchema('has_children')
+export const HasChildrenError = Schema.Struct({
+  ok: Schema.Literal(false),
+  code: Schema.Literal('has_children'),
+  message: Schema.optional(Schema.String),
+  details: Schema.Struct({
+    count: Schema.Number,
+    authors: Schema.Array(AuthorSummary),
+  }),
+})
 export const ConflictError = errorSchema('conflict')
 export const IdempotencyConflictError = errorSchema('idempotency_conflict')
 export const BodyTooLargeError = errorSchema('body_too_large')
@@ -254,17 +327,11 @@ export const HealthzResponse = Schema.Struct({
 })
 export type HealthzResponse = typeof HealthzResponse.Type
 
-export const PolicyCheckPayload = HttpApiSchema.Text({
-  contentType: 'text/html',
-})
+export const PolicyCheckPayload = HttpApiSchema.Text({ contentType: 'text/html' })
 export type PolicyCheckPayload = typeof PolicyCheckPayload.Type
 
 export const SystemApiGroup = HttpApiGroup.make('system')
-  .add(
-    HttpApiEndpoint.get('healthz', '/api/healthz').addSuccess(
-      HealthzResponse,
-    ),
-  )
+  .add(HttpApiEndpoint.get('healthz', '/api/healthz').addSuccess(HealthzResponse))
   .add(
     HttpApiEndpoint.post('policyCheck', '/api/policy/check')
       .setPayload(PolicyCheckPayload)
@@ -291,14 +358,25 @@ export const DocumentsApiGroup = HttpApiGroup.make('documents')
     HttpApiEndpoint.get('list', '/api/documents')
       .setUrlParams(
         Schema.Struct({
-          scope: Schema.optional(
-            Schema.Literal('mine', 'workspace', 'trash'),
-          ),
+          scope: Schema.optional(DocumentListScope),
+          parent: Schema.optional(Schema.Union(DocumentId, Schema.Literal('root'))),
+          tree: OptionalString,
           limit: OptionalString,
           cursor: OptionalString,
         }),
       )
       .addSuccess(DocumentListResponse),
+  )
+  .add(
+    HttpApiEndpoint.get('tree', '/api/documents/:id/tree')
+      .setPath(DocumentPath)
+      .addSuccess(TreeResponse),
+  )
+  .add(
+    HttpApiEndpoint.patch('patch', '/api/documents/:id')
+      .setPath(DocumentPath)
+      .setPayload(DocumentPatch)
+      .addSuccess(MutationResponse),
   )
   .add(
     HttpApiEndpoint.del('delete', '/api/documents/:id')
@@ -323,6 +401,23 @@ export const DocumentsApiGroup = HttpApiGroup.make('documents')
       .setPath(DocumentPath)
       .addSuccess(MutationResponse),
   )
+  .add(
+    HttpApiEndpoint.get('sharesGet', '/api/documents/:id/shares')
+      .setPath(DocumentPath)
+      .addSuccess(SharesResponse),
+  )
+  .add(
+    HttpApiEndpoint.post('sharesDelta', '/api/documents/:id/shares')
+      .setPath(DocumentPath)
+      .setPayload(ShareDelta)
+      .addSuccess(SharesResponse),
+  )
+  .add(
+    HttpApiEndpoint.put('sharesPut', '/api/documents/:id/shares')
+      .setPath(DocumentPath)
+      .setPayload(ShareReplacement)
+      .addSuccess(SharesResponse),
+  )
 
 export const KeysApiGroup = HttpApiGroup.make('keys')
   .add(
@@ -330,11 +425,7 @@ export const KeysApiGroup = HttpApiGroup.make('keys')
       .setPayload(ApiKeyCreate)
       .addSuccess(ApiKeyCreateResponse),
   )
-  .add(
-    HttpApiEndpoint.get('list', '/api/api-keys').addSuccess(
-      ApiKeyListResponse,
-    ),
-  )
+  .add(HttpApiEndpoint.get('list', '/api/api-keys').addSuccess(ApiKeyListResponse))
   .add(
     HttpApiEndpoint.post('revoke', '/api/api-keys/:id')
       .setPath(Schema.Struct({ id: Schema.String }))
@@ -346,9 +437,7 @@ export const MeApiGroup = HttpApiGroup.make('me').add(
 )
 
 export const LegacyApiGroup = HttpApiGroup.make('legacy').add(
-  HttpApiEndpoint.get('drafts', '/api/drafts').addSuccess(
-    LegacyDraftListResponse,
-  ),
+  HttpApiEndpoint.get('drafts', '/api/drafts').addSuccess(LegacyDraftListResponse),
 )
 
 export const SystemApi = HttpApi.make('dossier').add(SystemApiGroup)

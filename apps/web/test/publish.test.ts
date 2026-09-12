@@ -323,7 +323,7 @@ describe('Publish', () => {
     expect(count?.count).toBe(0)
   })
 
-  it('rejects parent placement until tree support ships', async () => {
+  it('returns not_found for an unreadable or missing parent', async () => {
     const principal = await setup('publish_parent_unsupported')
     const result = await publishEither(principal, {
       html: html('Unsupported parent'),
@@ -332,10 +332,7 @@ describe('Publish', () => {
     })
     expect(result).toMatchObject({
       _tag: 'Left',
-      left: {
-        code: 'policy_rejected',
-        message: expect.stringContaining('phase 2'),
-      },
+      left: { code: 'not_found' },
     })
   })
 

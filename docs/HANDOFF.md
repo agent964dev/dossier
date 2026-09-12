@@ -1,11 +1,14 @@
-# Handoff — state on 2026-09-12 (end of session 1)
+# Handoff — state on 2026-09-12 (session 2 in progress)
 
 ## Committed on main
 - `5be3f93` plan v4 (approved) + upstream reference
 - `e0944f5` phase 0 (scaffold, stack proof, dev deploy)
 - `6e22c78` phase 1 (accounts, allowlist sign-in, publication, serving, dashboard, CLI) — 143 tests, verified against env.dev
 
-## Uncommitted: partial phase 2 core (from a builder that ran out of context)
+## Phase 2 — committed on main (session 2)
+- tree/access/shares/archive services, API handlers for tree/patch/shares, hub `/d/:id/tree` (`apps/web/src/api/hub.ts`, nonce CSP), dashboard tree + access panel + move/archive dialogs + trash batches, CLI `tree`, `list --tree`, `move`, `visibility`, `share`, `trash`, `restore --batch`; `apps/web/test/tree-api.test.ts` covers the phase-2 acceptance list over HTTP. 169 tests. Migration 0002 applied to remote dev D1; env.dev deployed.
+
+## Historical note: partial phase 2 core at start of session 2 (now merged)
 `git status` shows ~23 changed files. What landed and passes:
 - `apps/web/src/services/access.ts` — recursive-CTE access predicate (public/team/private/invites, node-only availability); `serving.ts`, `documents.ts` already call it
 - `apps/web/src/services/tree.ts` — create-child placement guards, guarded single-statement move, kind normalisation

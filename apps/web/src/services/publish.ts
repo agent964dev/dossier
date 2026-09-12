@@ -6,9 +6,9 @@ import type {
 import { validateHtml } from '@dossier/policy'
 import { Context, Effect, Layer } from 'effect'
 
-import { Access } from './access'
+import { Access, accessBindValues, accessCteSql } from './access'
 import { Db } from './db'
-import { loadDocumentEditor } from './documents'
+import { loadDocumentRow, toDocumentEditor } from './documents'
 import { WorkerEnv } from './env'
 import {
   apiError,
@@ -19,6 +19,7 @@ import {
 import { Ids } from './ids'
 import { Objects } from './objects'
 import { Principal, type PrincipalIdentity } from './principal'
+import { normalizeDocumentKind } from './tree'
 
 type IdempotencyRow = {
   id: string
@@ -167,9 +168,43 @@ export const PublishLive = Layer.effect(
           }),
       })
 
+    const loadReceiptDocument = (
+      documentId: string,
+      principal: PrincipalIdentity,
+    ): Effect.Effect<DocumentEditor, DossierError | PersistenceError> =>
+      Effect.gen(function* () {
+        const decision = (yield* access.resolve([documentId], principal))[0]
+        const row = yield* Effect.tryPromise({
+          try: () => loadDocumentRow(db.raw, documentId),
+          catch: (cause) => new PersistenceError({ operation: 'load publication receipt', cause }),
+        })
+        if (!decision?.editor || !row) {
+          return yield* Effect.fail(apiError('not_found', 'Published document not found.'))
+        }
+        const parentReadable = row.parent_id !== null &&
+          (yield* access.resolve([row.parent_id], principal))[0]?.canRead === true
+        return toDocumentEditor(row, decision, parentReadable, env.PUBLIC_BASE_URL)
+      })
+
+    const response = (
+      row: IdempotencyRow,
+      document: DocumentEditor,
+      warnings: readonly string[],
+    ): UploadResponse => ({
+      ok: true as const,
+      document,
+      versionNumber: row.version_number,
+      versionUrl: `${origin}/d/${row.document_id}/v/${row.version_number}`,
+      warnings: [...warnings],
+      draftId: row.document_id,
+      publicUrl: `${origin}/d/${row.document_id}`,
+      rawUrl: `${origin}/d/${row.document_id}/raw`,
+    })
+
     const receipt = (
       row: IdempotencyRow,
       warnings: readonly string[],
+      principal: PrincipalIdentity,
     ): Effect.Effect<UploadResponse, DossierError | PersistenceError> =>
       Effect.gen(function* () {
         let document: DocumentEditor | null = null
@@ -185,31 +220,9 @@ export const PublishLive = Layer.effect(
           }
         }
         if (document === null) {
-          document = yield* Effect.tryPromise({
-            try: () =>
-              loadDocumentEditor(db.raw, row.document_id, env.PUBLIC_BASE_URL),
-            catch: (cause) =>
-              new PersistenceError({
-                operation: 'load publication receipt',
-                cause,
-              }),
-          })
+          document = yield* loadReceiptDocument(row.document_id, principal)
         }
-        if (!document) {
-          return yield* Effect.fail(
-            apiError('not_found', 'Published document not found.'),
-          )
-        }
-        return {
-          ok: true as const,
-          document,
-          versionNumber: row.version_number,
-          versionUrl: `${origin}/d/${row.document_id}/v/${row.version_number}`,
-          warnings: [...warnings],
-          draftId: row.document_id,
-          publicUrl: `${origin}/d/${row.document_id}`,
-          rawUrl: `${origin}/d/${row.document_id}/raw`,
-        }
+        return response(row, document, warnings)
       })
 
     const publish: PublishService['publish'] = (payload, principal, context) =>
@@ -269,15 +282,7 @@ export const PublishLive = Layer.effect(
             apiError('policy_rejected', 'idempotencyKey must not be empty.'),
           )
         }
-        if (payload.parentId !== undefined && payload.parentId !== null) {
-          return yield* Effect.fail(
-            apiError(
-              'policy_rejected',
-              'Parent document placement is not available until dossier phase 2.',
-            ),
-          )
-        }
-
+        const normalizedKind = yield* normalizeDocumentKind(payload.kind)
         const targetId = payload.documentId ?? legacyId
         if (targetId) {
           yield* access.requireEditor(targetId, principal)
@@ -285,12 +290,13 @@ export const PublishLive = Layer.effect(
             try: () =>
               db.raw
                 .prepare(
-                  `SELECT workspace_id, deleted_at, disabled_at
+                  `SELECT workspace_id, parent_id, deleted_at, disabled_at
                      FROM documents WHERE id = ? LIMIT 1`,
                 )
                 .bind(targetId)
                 .first<{
                   workspace_id: string
+                  parent_id: string | null
                   deleted_at: string | null
                   disabled_at: string | null
                 }>(),
@@ -306,8 +312,46 @@ export const PublishLive = Layer.effect(
             target.deleted_at !== null ||
             target.disabled_at !== null
           ) {
+            return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          }
+          if (hasOwn(payload, 'parentId') && (payload.parentId ?? null) !== target.parent_id) {
             return yield* Effect.fail(
-              apiError('not_found', 'Document not found.'),
+              apiError('conflict', 'Use the move operation to change a document parent.'),
+            )
+          }
+        } else if (payload.parentId !== undefined && payload.parentId !== null) {
+          const parentDecision = (yield* access.resolve([payload.parentId], principal))[0]
+          const parent = yield* Effect.tryPromise({
+            try: () =>
+              db.raw
+                .prepare(
+                  `SELECT workspace_id, depth, deleted_at, disabled_at
+                     FROM documents WHERE id = ? LIMIT 1`,
+                )
+                .bind(payload.parentId)
+                .first<{
+                  workspace_id: string
+                  depth: number
+                  deleted_at: string | null
+                  disabled_at: string | null
+                }>(),
+            catch: (cause) =>
+              new PersistenceError({ operation: 'load publication parent', cause }),
+          })
+          if (
+            !parent ||
+            parent.workspace_id !== principal.workspaceId ||
+            parent.deleted_at !== null ||
+            parent.disabled_at !== null ||
+            parentDecision?.canRead !== true
+          ) {
+            return yield* Effect.fail(
+              apiError('not_found', 'Parent document not found.'),
+            )
+          }
+          if (parent.depth >= 16) {
+            return yield* Effect.fail(
+              apiError('policy_rejected', 'A child cannot be created below depth 16.'),
             )
           }
         }
@@ -362,7 +406,7 @@ export const PublishLive = Layer.effect(
                 ),
               )
             }
-            return yield* receipt(previous, policy.warnings)
+            return yield* receipt(previous, policy.warnings, principal)
           }
         }
 
@@ -376,6 +420,9 @@ export const PublishLive = Layer.effect(
           policy.title?.trim() || filenameTitle(payload.filename) || 'Untitled'
         const metadata = payload.metadata
         const sharesPresent = hasOwn(payload, 'shares')
+        const clearingVisibility = hasOwn(payload, 'visibility') && payload.visibility === null
+        const writeShares = sharesPresent && !clearingVisibility
+        const clearShares = sharesPresent || clearingVisibility
         const sharesJson = JSON.stringify(
           [
             ...new Set(
@@ -415,18 +462,68 @@ export const PublishLive = Layer.effect(
                 principal.workspaceId,
               ),
           )
+        } else if (payload.parentId !== undefined && payload.parentId !== null) {
+          const [accountId, emails] = accessBindValues(principal)
+          statements.push(
+            db.raw
+              .prepare(
+                `${accessCteSql('SELECT ?3')}
+                 INSERT INTO publication_guards (id, ok)
+                 VALUES (?4, CASE WHEN EXISTS (
+                   SELECT 1 FROM accounts actor
+                   JOIN workspaces workspace ON workspace.id = ?5
+              LEFT JOIN memberships publisher
+                     ON publisher.workspace_id = workspace.id
+                    AND publisher.account_id = actor.id
+                  WHERE actor.id = ?1 AND actor.disabled_at IS NULL
+                    AND (actor.kind = 'service' OR publisher.account_id IS NOT NULL)
+                    AND EXISTS (
+                      SELECT 1 FROM documents parent
+                      JOIN access_decisions decision ON decision.document_id = parent.id
+                       WHERE parent.id = ?3 AND parent.workspace_id = workspace.id
+                         AND parent.deleted_at IS NULL AND parent.disabled_at IS NULL
+                         AND parent.depth < 16 AND decision.can_read = 1
+                    )
+                 ) THEN 1 ELSE 0 END)`,
+              )
+              .bind(accountId, emails, payload.parentId, guardId, principal.workspaceId),
+            db.raw
+              .prepare(
+                `INSERT INTO documents
+                   (id, workspace_id, created_by, parent_id, path, depth, kind,
+                    title, description, visibility, current_version_id,
+                    next_version_number, revision, created_at, updated_at,
+                    deleted_at, deletion_batch_id, disabled_at, disabled_reason)
+                 SELECT ?, ?, ?, parent.id, parent.path || parent.id || '/',
+                        parent.depth + 1, ?, ?, ?, ?, NULL, 1, 0, ?, ?,
+                        NULL, NULL, NULL, NULL
+                   FROM documents parent WHERE parent.id = ?`,
+              )
+              .bind(
+                documentId,
+                principal.workspaceId,
+                principal.accountId,
+                normalizedKind ?? null,
+                title,
+                payload.description ?? null,
+                payload.visibility ?? null,
+                now,
+                now,
+                payload.parentId,
+              ),
+          )
         } else {
           statements.push(
             db.raw
               .prepare(
                 `INSERT INTO publication_guards (id, ok)
                  VALUES (?, CASE WHEN EXISTS (
-                   SELECT 1 FROM accounts a
-                   JOIN workspaces w ON w.id = ?
-                   LEFT JOIN memberships publisher
-                     ON publisher.workspace_id = w.id AND publisher.account_id = a.id
-                   WHERE a.id = ? AND a.disabled_at IS NULL
-                     AND (a.kind = 'service' OR publisher.account_id IS NOT NULL)
+                   SELECT 1 FROM accounts actor
+                   JOIN workspaces workspace ON workspace.id = ?
+              LEFT JOIN memberships publisher
+                     ON publisher.workspace_id = workspace.id AND publisher.account_id = actor.id
+                  WHERE actor.id = ? AND actor.disabled_at IS NULL
+                    AND (actor.kind = 'service' OR publisher.account_id IS NOT NULL)
                  ) THEN 1 ELSE 0 END)`,
               )
               .bind(guardId, principal.workspaceId, principal.accountId),
@@ -444,7 +541,7 @@ export const PublishLive = Layer.effect(
                 documentId,
                 principal.workspaceId,
                 principal.accountId,
-                payload.kind ?? null,
+                normalizedKind ?? null,
                 title,
                 payload.description ?? null,
                 payload.visibility ?? null,
@@ -505,6 +602,32 @@ export const PublishLive = Layer.effect(
             ),
           db.raw
             .prepare(
+              `WITH RECURSIVE ancestors(id, parent_id, visibility, hops) AS (
+                 SELECT parent.id, parent.parent_id, parent.visibility, 1
+                   FROM documents target
+                   JOIN documents parent ON parent.id = target.parent_id
+                  WHERE target.id = ?
+                 UNION ALL
+                 SELECT parent.id, parent.parent_id, parent.visibility, ancestors.hops + 1
+                   FROM ancestors
+                   JOIN documents parent ON parent.id = ancestors.parent_id
+                  WHERE ancestors.hops < 16
+               ), boundary AS (
+                 SELECT visibility FROM ancestors
+                  WHERE visibility IS NOT NULL ORDER BY hops LIMIT 1
+               )
+               UPDATE documents
+                  SET visibility = COALESCE((SELECT visibility FROM boundary), 'team')
+                WHERE id = ? AND visibility IS NULL AND ? = 1 AND ? = 0`,
+            )
+            .bind(
+              documentId,
+              documentId,
+              sharesPresent ? 1 : 0,
+              hasOwn(payload, 'visibility') ? 1 : 0,
+            ),
+          db.raw
+            .prepare(
               `UPDATE documents
                   SET current_version_id = ?, title = ?,
                       kind = CASE WHEN ? = 1 THEN ? ELSE kind END,
@@ -517,7 +640,7 @@ export const PublishLive = Layer.effect(
               versionId,
               title,
               hasOwn(payload, 'kind') ? 1 : 0,
-              payload.kind ?? null,
+              normalizedKind ?? null,
               hasOwn(payload, 'description') ? 1 : 0,
               payload.description ?? null,
               hasOwn(payload, 'visibility') ? 1 : 0,
@@ -530,7 +653,7 @@ export const PublishLive = Layer.effect(
               `DELETE FROM document_shares
                 WHERE document_id = ? AND ? = 1`,
             )
-            .bind(documentId, sharesPresent ? 1 : 0),
+            .bind(documentId, clearShares ? 1 : 0),
           db.raw
             .prepare(
               `INSERT INTO document_shares
@@ -542,7 +665,7 @@ export const PublishLive = Layer.effect(
               principal.accountId,
               now,
               sharesJson,
-              sharesPresent ? 1 : 0,
+              writeShares ? 1 : 0,
             ),
           db.raw
             .prepare(
@@ -555,32 +678,7 @@ export const PublishLive = Layer.effect(
                         'requestHash', ?,
                         'filename', ?,
                         'metadata', json(?),
-                        'receiptDocument', json_object(
-                          'id', d.id,
-                          'title', d.title,
-                          'description', d.description,
-                          'kind', d.kind,
-                          'parentId', d.parent_id,
-                          'effectiveVisibility', COALESCE(d.visibility, 'team'),
-                          'workspaceSlug', w.slug,
-                          'authorAccountId', d.created_by,
-                          'authorName', author.name,
-                          'latestVersionNumber', v.version_number,
-                          'disabled', json(CASE WHEN d.disabled_at IS NULL THEN 'false' ELSE 'true' END),
-                          'url', ? || '/d/' || d.id,
-                          'rawUrl', ? || '/d/' || d.id || '/raw',
-                          'hubUrl', ? || '/d/' || d.id || '/tree',
-                          'createdAt', d.created_at,
-                          'updatedAt', d.updated_at,
-                          'visibility', d.visibility,
-                          'accessSource', CASE WHEN d.visibility IS NULL THEN 'inherited' ELSE 'own' END,
-                          'versionCount', (SELECT COUNT(*) FROM document_versions counted WHERE counted.document_id = d.id),
-                          'revision', d.revision,
-                          'deletionBatchId', d.deletion_batch_id,
-                          'deletedAt', d.deleted_at,
-                          'deletedBy', NULL,
-                          'disabledAt', d.disabled_at
-                        )
+                        'receiptDocument', NULL
                       ), ?
                  FROM documents d
                  JOIN workspaces w ON w.id = d.workspace_id
@@ -596,9 +694,6 @@ export const PublishLive = Layer.effect(
               requestHash,
               payload.filename ?? null,
               JSON.stringify(metadata ?? null),
-              origin,
-              origin,
-              origin,
               now,
               versionId,
               documentId,
@@ -635,7 +730,7 @@ export const PublishLive = Layer.effect(
                   ),
                 )
               }
-              return yield* receipt(winner, policy.warnings)
+              return yield* receipt(winner, policy.warnings, principal)
             }
           } else if (isDefiniteRollbackFailure(failure)) {
             yield* objects
@@ -680,7 +775,21 @@ export const PublishLive = Layer.effect(
             }),
           )
         }
-        return yield* receipt(row, policy.warnings)
+        const document = yield* loadReceiptDocument(documentId, principal)
+        yield* Effect.tryPromise({
+          try: () =>
+            db.raw
+              .prepare(
+                `UPDATE upload_events
+                    SET metadata_json = json_set(metadata_json, '$.receiptDocument', json(?))
+                  WHERE document_version_id = ? AND event_type = 'published'`,
+              )
+              .bind(JSON.stringify(document), versionId)
+              .run(),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'persist publication receipt', cause }),
+        })
+        return response(row, document, policy.warnings)
       })
 
     return { publish }

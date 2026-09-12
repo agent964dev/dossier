@@ -14,6 +14,8 @@ import {
   PrincipalLive,
   PublishLive,
   ServingLive,
+  SharesLive,
+  TreeLive,
   SessionLayer,
   WorkerEnv,
 } from '../src/services'
@@ -59,8 +61,10 @@ export function makeCoreLayer(
   const publish = PublishLive.pipe(Layers.provide(auth))
   const documents = DocumentsLive.pipe(Layers.provide(auth))
   const serving = ServingLive.pipe(Layers.provide(auth))
+  const shares = SharesLive.pipe(Layers.provide(auth))
+  const tree = TreeLive.pipe(Layers.provide(auth))
   const allowlist = AllowlistLive.pipe(Layers.provide(foundation))
-  return Layers.mergeAll(auth, publish, documents, serving, allowlist)
+  return Layers.mergeAll(auth, publish, documents, serving, shares, tree, allowlist)
 }
 
 export async function sha256(value: string): Promise<string> {

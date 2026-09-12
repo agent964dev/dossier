@@ -1,0 +1,1 @@
+ALTER TABLE `deletion_batches` ADD `root_title` text;

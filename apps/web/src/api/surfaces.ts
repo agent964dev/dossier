@@ -1,6 +1,10 @@
 import {
   ApiKeyCreate,
+  DocumentPatch,
   DossierApi,
+  ShareDelta,
+  ShareReplacement,
+  isDocumentEditor,
   type DocumentEditor,
   UploadRequest,
 } from '@dossier/contracts'
@@ -21,6 +25,8 @@ import {
   PersistenceError,
   Principal,
   Publish,
+  Shares,
+  Tree,
   type PrincipalIdentity,
   WorkerEnv,
 } from '../services'
@@ -104,6 +110,16 @@ function parseLimit(
   return Effect.succeed(parsed)
 }
 
+function parseTree(
+  tree: string | undefined,
+): Effect.Effect<boolean, DossierError> {
+  if (tree === undefined) return Effect.succeed(false)
+  if (tree !== '1') {
+    return Effect.fail(malformedInput('tree must be 1 when supplied.'))
+  }
+  return Effect.succeed(true)
+}
+
 function parseForce(
   force: string | undefined,
 ): Effect.Effect<boolean, DossierError> {
@@ -153,9 +169,11 @@ const DocumentsLive = HttpApiBuilder.group(
           Effect.gen(function* () {
             const state = yield* ApiRequest
             const documents = yield* Documents
+            const tree = yield* parseTree(urlParams.tree)
             const limit = yield* parseLimit(urlParams.limit)
             const result = yield* documents.list(
               {
+                ...(tree ? { tree: true } : {}),
                 ...(urlParams.scope === undefined
                   ? {}
                   : { scope: urlParams.scope }),
@@ -163,10 +181,62 @@ const DocumentsLive = HttpApiBuilder.group(
                 ...(urlParams.cursor === undefined
                   ? {}
                   : { cursor: urlParams.cursor }),
+                ...(urlParams.parent === undefined
+                  ? {}
+                  : { parent: urlParams.parent === 'root' ? null : urlParams.parent }),
               },
               state.principal,
             )
             return jsonServerResponse(result)
+          }),
+        ),
+      )
+      .handleRaw('tree', ({ path }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const state = yield* ApiRequest
+            const tree = yield* Tree
+            return jsonServerResponse(yield* tree.get(path.id, state.principal))
+          }),
+        ),
+      )
+      .handleRaw('patch', ({ path, request }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const state = yield* ApiRequest
+            const tree = yield* Tree
+            const payload = yield* decodeJsonBody(request, DocumentPatch)
+            const document = yield* tree.patch(path.id, payload, state.principal)
+            return jsonServerResponse({ ok: true, document })
+          }),
+        ),
+      )
+      .handleRaw('sharesGet', ({ path }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const state = yield* ApiRequest
+            const shares = yield* Shares
+            return jsonServerResponse(yield* shares.get(path.id, state.principal))
+          }),
+        ),
+      )
+      .handleRaw('sharesDelta', ({ path, request }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const state = yield* ApiRequest
+            const shares = yield* Shares
+            const payload = yield* decodeJsonBody(request, ShareDelta)
+            return jsonServerResponse(yield* shares.delta(path.id, payload, state.principal))
+          }),
+        ),
+      )
+      .handleRaw('sharesPut', ({ path, request }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const state = yield* ApiRequest
+            const shares = yield* Shares
+            const payload = yield* decodeJsonBody(request, ShareReplacement)
+            return jsonServerResponse(yield* shares.replace(path.id, payload, state.principal))
           }),
         ),
       )
@@ -421,7 +491,7 @@ const LegacyLive = HttpApiBuilder.group(DossierApi, 'legacy', (handlers) =>
             { scope: 'mine', limit: 100, ...(cursor ? { cursor } : {}) },
             state.principal,
           )
-          owned.push(...page.documents)
+          owned.push(...page.documents.filter(isDocumentEditor))
           cursor = page.nextCursor ?? undefined
         } while (cursor !== undefined)
 

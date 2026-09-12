@@ -228,6 +228,10 @@ a:hover > .mark-glow {
   animation: rise-in 0.5s var(--ease-agent) both;
 }
 
+.dossier-modal[open] {
+  animation: rise-in 0.36s var(--ease-agent) both;
+}
+
 /* A hard contract: reduced motion collapses every animation and transition. */
 @media (prefers-reduced-motion: reduce) {
   *,

@@ -210,6 +210,7 @@
 :root,
 .dark {
   --radius: 0.625rem; /* 10px */
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
 
   /* Canvas & text */
   --background: oklch(16.90% 0.0286 232.6); /* neutral-950 #031119 */

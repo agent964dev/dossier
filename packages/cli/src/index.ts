@@ -3,7 +3,10 @@
 import { Args, Command, Options, ValidationError } from '@effect/cli'
 import {
   DossierApi,
+  isDocumentEditor,
   type DocumentEditor,
+  type DocumentListScope,
+  type DocumentView,
   type HealthzResponse,
   type Me,
   type UploadRequest,
@@ -349,6 +352,88 @@ function configuredVisibility(document: DocumentEditor): string {
     : document.visibility
 }
 
+function parseEmails(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined
+  return value
+    .split(',')
+    .map((email) => email.trim())
+    .filter(Boolean)
+}
+
+async function listDocuments(
+  runtime: RuntimeConfig,
+  scope: DocumentListScope,
+  parent?: string | null,
+): Promise<DocumentView[]> {
+  const documents: DocumentView[] = []
+  let cursor: string | undefined
+  do {
+    const page = await apiCall(runtime, (client) =>
+      client.documents.list({
+        urlParams: {
+          scope,
+          ...(parent === undefined
+            ? {}
+            : { parent: parent === null ? 'root' : parent }),
+          ...(cursor === undefined ? {} : { cursor }),
+        },
+      }),
+    )
+    documents.push(...page.documents)
+    cursor = page.nextCursor ?? undefined
+  } while (cursor !== undefined)
+  return documents
+}
+
+type DocumentTreeNode = DocumentView & {
+  readonly children: DocumentTreeNode[]
+}
+
+function documentForest(
+  documents: readonly DocumentView[],
+  parent?: string | null,
+): DocumentTreeNode[] {
+  const nodes = new Map<string, DocumentTreeNode>()
+  for (const document of documents) {
+    nodes.set(document.id, { ...document, children: [] })
+  }
+  for (const node of nodes.values()) {
+    if (node.parentId !== null) nodes.get(node.parentId)?.children.push(node)
+  }
+  if (parent !== undefined) {
+    return [...nodes.values()].filter((node) => node.parentId === parent)
+  }
+  return [...nodes.values()].filter(
+    (node) => node.parentId === null || !nodes.has(node.parentId),
+  )
+}
+
+function printTreeNodes(
+  nodes: readonly DocumentTreeNode[],
+  depth = 0,
+): void {
+  for (const node of nodes) {
+    const indent = '  '.repeat(depth)
+    process.stdout.write(
+      `${indent}- ${node.title} (${node.id}) · ${node.kind ?? 'document'} · ${node.authorName}\n`,
+    )
+    printTreeNodes(node.children, depth + 1)
+  }
+}
+
+function hasChildrenMessage(error: unknown): string | undefined {
+  if (errorCode(error) !== 'has_children') return undefined
+  const candidate = error instanceof CliError ? error.details : error
+  const details = objectValue(candidate, 'details')
+  const count = objectValue(details, 'count')
+  const authors = objectValue(details, 'authors')
+  if (typeof count !== 'number' || !Array.isArray(authors)) {
+    return 'this also archives descendant documents; rerun with --force'
+  }
+  const otherPeople = Math.max(0, authors.length - 1)
+  return `this also archives ${count} document${count === 1 ? '' : 's'} by ${otherPeople} other ${otherPeople === 1 ? 'person' : 'people'}; rerun with --force`
+}
+
 function printDocumentMutation(
   action: string,
   document: DocumentEditor,
@@ -547,6 +632,16 @@ const uploadCommand = Command.make(
           ? parseDocumentId(explicitDocument, runtime)
           : mappedDocument
       const parentValue = Option.getOrUndefined(parent)
+      const requestedParent = parentValue
+        ? parentValue === 'root'
+          ? null
+          : parseDocumentId(parentValue, runtime)
+        : undefined
+      // Reader DTOs virtualise an unreadable physical parent to `null`, so the
+      // client cannot safely compare placement. Forward an explicitly supplied
+      // parent unchanged; the upload service compares it with the stored parent
+      // and returns the authoritative move hint on a mismatch.
+      const uploadParent = requestedParent
       const visibilityValue = Option.getOrUndefined(visibility)
       const shareValue = Option.getOrUndefined(share)
       const payload: UploadRequest = {
@@ -555,14 +650,7 @@ const uploadCommand = Command.make(
         idempotencyKey: randomUUID(),
         metadata: collectMetadata(dirname(absolutePath)),
         ...(target ? { documentId: target } : {}),
-        ...(parentValue
-          ? {
-              parentId:
-                parentValue === 'root'
-                  ? null
-                  : parseDocumentId(parentValue, runtime),
-            }
-          : {}),
+        ...(uploadParent !== undefined ? { parentId: uploadParent } : {}),
         ...(Option.isSome(kind) ? { kind: Option.getOrUndefined(kind)! } : {}),
         ...(visibilityValue
           ? {
@@ -587,6 +675,15 @@ const uploadCommand = Command.make(
       try {
         receipt = await publishWithRetry(runtime, payload)
       } catch (error) {
+        if (
+          target &&
+          requestedParent !== undefined &&
+          errorCode(error) === 'conflict'
+        ) {
+          throw new CliError(
+            `re-upload cannot change parent; use dossier move ${target} --parent ${requestedParent ?? 'root'}`,
+          )
+        }
         if (
           !explicitDocument &&
           mappedDocument &&
@@ -625,7 +722,7 @@ const uploadCommand = Command.make(
         return
       }
       process.stdout.write(
-        `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nVisibility: ${configuredVisibility(receipt.document)}\n`,
+        `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nParent: ${receipt.document.parentId ?? 'root'}\nVisibility: ${configuredVisibility(receipt.document)}\n`,
       )
       for (const warning of receipt.warnings)
         process.stderr.write(`Warning: ${warning}\n`)
@@ -713,43 +810,232 @@ const fetchCommand = Command.make(
 
 const listCommand = Command.make(
   'list',
-  { trash: Options.boolean('trash') },
-  ({ trash }) =>
+  {
+    all: Options.boolean('all'),
+    tree: Options.boolean('tree'),
+    parent: Options.text('parent').pipe(Options.optional),
+    trash: Options.boolean('trash'),
+  },
+  ({ all, tree, parent, trash }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
       await requireMe(runtime)
-      const documents: DocumentEditor[] = []
-      let cursor: string | undefined
-      do {
-        const page = await apiCall(runtime, (client) =>
-          client.documents.list({
-            urlParams: {
-              scope: trash ? 'trash' : 'mine',
-              ...(cursor === undefined ? {} : { cursor }),
-            },
-          }),
+      const parentValue = Option.getOrUndefined(parent)
+      if (trash && (all || tree || parentValue !== undefined)) {
+        throw new CliError(
+          '--trash cannot be combined with --all, --tree, or --parent',
+          ExitCode.Usage,
         )
-        documents.push(...page.documents)
-        cursor = page.nextCursor ?? undefined
-      } while (cursor !== undefined)
+      }
+      const parentId = parentValue
+        ? parentValue === 'root'
+          ? null
+          : parseDocumentId(parentValue, runtime)
+        : undefined
+      const scope: DocumentListScope = trash
+        ? 'trash'
+        : all
+          ? 'readable'
+          : 'mine'
+      if (tree && parentId !== undefined) {
+        await listDocuments(runtime, scope, parentId)
+      }
+      const documents = await listDocuments(
+        runtime,
+        scope,
+        tree ? undefined : parentId,
+      )
+      if (tree) {
+        const forest = documentForest(documents, parentId)
+        if (runtime.json) printJson(forest)
+        else if (!runtime.quiet) {
+          if (forest.length === 0) process.stdout.write('No documents yet.\n')
+          else printTreeNodes(forest)
+        }
+        return
+      }
       if (runtime.json) {
         printJson(documents)
         return
       }
       if (runtime.quiet) return
       if (documents.length === 0) {
-        process.stdout.write(
-          trash ? 'Trash is empty.\n' : 'No documents yet.\n',
-        )
+        process.stdout.write(trash ? 'Trash is empty.\n' : 'No documents yet.\n')
         return
       }
       for (const document of documents) {
+        const visibility = isDocumentEditor(document)
+          ? configuredVisibility(document)
+          : document.effectiveVisibility
         process.stdout.write(
-          `${document.title}\n  ${document.id} · v${document.latestVersionNumber} · ${configuredVisibility(document)}${document.disabled ? ' · disabled' : ''}\n  ${document.url}\n${document.description ? `  ${document.description}\n` : ''}\n`,
+          `${document.title}\n  ${document.id} · v${document.latestVersionNumber} · ${visibility}${document.disabled ? ' · disabled' : ''}\n  ${document.url}\n${document.description ? `  ${document.description}\n` : ''}`,
         )
       }
     }),
-).pipe(Command.withDescription('List your documents or trash'))
+).pipe(Command.withDescription('List documents, optionally as a nested tree'))
+
+const treeCommand = Command.make(
+  'tree',
+  { ref: Args.text({ name: 'id' }) },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const id = parseDocumentId(ref, runtime)
+      const tree = await apiCall(runtime, (client) =>
+        client.documents.tree({ path: { id } }),
+      )
+      if (runtime.json) {
+        printJson(tree)
+        return
+      }
+      if (runtime.quiet) return
+      process.stdout.write(
+        `Breadcrumb: ${tree.breadcrumb.map((document) => document.title).join(' / ') || '(root)'}\nDocument: ${tree.document.title} (${tree.document.id}) · ${tree.document.kind ?? 'document'} · ${tree.document.authorName}\n`,
+      )
+      process.stdout.write('Siblings:\n')
+      if (tree.siblings.length === 0) process.stdout.write('  None\n')
+      else
+        for (const document of tree.siblings)
+          process.stdout.write(
+            `  - ${document.title} (${document.id}) · ${document.authorName}\n`,
+          )
+      process.stdout.write('Children:\n')
+      if (tree.children.length === 0) process.stdout.write('  None\n')
+      else
+        for (const document of tree.children)
+          process.stdout.write(
+            `  - ${document.title} (${document.id}) · ${document.authorName}\n`,
+          )
+    }),
+).pipe(Command.withDescription('Show a document breadcrumb, siblings, and children'))
+
+const moveCommand = Command.make(
+  'move',
+  {
+    parent: Options.text('parent'),
+    ref: Args.text({ name: 'id' }),
+  },
+  ({ parent, ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const id = parseDocumentId(ref, runtime)
+      const parentId =
+        parent === 'root' ? null : parseDocumentId(parent, runtime)
+      const result = await apiCall(runtime, (client) =>
+        client.documents.patch({ path: { id }, payload: { parentId } }),
+      )
+      if (runtime.json) printJson(result.document)
+      else if (!runtime.quiet)
+        process.stdout.write(
+          `Moved\nID: ${result.document.id}\nParent: ${result.document.parentId ?? 'root'}\n`,
+        )
+    }),
+).pipe(Command.withDescription('Move a document and its subtree'))
+
+const visibilityCommand = Command.make(
+  'visibility',
+  {
+    ref: Args.text({ name: 'id' }),
+    visibility: Args.choice(
+      [
+        ['public', 'public' as const],
+        ['team', 'team' as const],
+        ['private', 'private' as const],
+        ['inherit', 'inherit' as const],
+      ],
+      { name: 'visibility' },
+    ),
+  },
+  ({ visibility, ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const id = parseDocumentId(ref, runtime)
+      const result = await apiCall(runtime, (client) =>
+        client.documents.patch({
+          path: { id },
+          payload: { visibility: visibility === 'inherit' ? null : visibility },
+        }),
+      )
+      if (runtime.json) printJson(result.document)
+      else if (!runtime.quiet)
+        process.stdout.write(
+          `Visibility: ${configuredVisibility(result.document)}\nID: ${result.document.id}\n`,
+        )
+    }),
+).pipe(Command.withDescription('Set or inherit document visibility'))
+
+const shareCommand = Command.make(
+  'share',
+  {
+    add: Options.text('add').pipe(Options.optional),
+    remove: Options.text('remove').pipe(Options.optional),
+    ref: Args.text({ name: 'id' }),
+  },
+  ({ add, remove, ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const id = parseDocumentId(ref, runtime)
+      const addEmails = parseEmails(Option.getOrUndefined(add))
+      const removeEmails = parseEmails(Option.getOrUndefined(remove))
+      if (addEmails === undefined && removeEmails === undefined) {
+        throw new CliError(
+          'share requires --add and/or --remove',
+          ExitCode.Usage,
+        )
+      }
+      const result = await apiCall(runtime, (client) =>
+        client.documents.sharesDelta({
+          path: { id },
+          payload: {
+            ...(addEmails === undefined ? {} : { add: addEmails }),
+            ...(removeEmails === undefined ? {} : { remove: removeEmails }),
+          },
+        }),
+      )
+      if (runtime.json) printJson(result)
+      else if (!runtime.quiet)
+        process.stdout.write(
+          `Configured: ${result.configured.join(', ') || 'none'}\nEffective: ${result.effective.join(', ') || 'none'}\nAccess source: ${result.accessSource}\n`,
+        )
+    }),
+).pipe(Command.withDescription('Add or remove document share emails'))
+
+const trashCommand = Command.make('trash', {}, () =>
+  withGlobals(async (globals) => {
+    const runtime = await runtimeConfig(globals)
+    await requireMe(runtime)
+    const documents = (await listDocuments(runtime, 'trash')).filter(
+      isDocumentEditor,
+    )
+    if (runtime.json) {
+      printJson(documents)
+      return
+    }
+    if (runtime.quiet) return
+    if (documents.length === 0) {
+      process.stdout.write('Trash is empty.\n')
+      return
+    }
+    const batches = new Map<string, DocumentEditor[]>()
+    for (const document of documents) {
+      const batchId = document.deletionBatchId ?? `document:${document.id}`
+      const batch = batches.get(batchId) ?? []
+      batch.push(document)
+      batches.set(batchId, batch)
+    }
+    for (const [batchId, batch] of batches) {
+      const rootTitle =
+        batch.find((document) => document.deletionRootTitle)?.deletionRootTitle ??
+        batch[0]!.title
+      const root =
+        batch.find((document) => document.title === rootTitle) ?? batch[0]!
+      const authors = [...new Set(batch.map((document) => document.authorName))]
+      process.stdout.write(
+        `${rootTitle}\n  ${root.id} · batch ${batchId}\n  Authors: ${authors.join(', ')}\n`,
+      )
+    }
+  }),
+).pipe(Command.withDescription('List restorable deletion batches'))
 
 const deleteCommand = Command.make(
   'delete',
@@ -758,12 +1044,19 @@ const deleteCommand = Command.make(
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
       const id = parseDocumentId(ref, runtime)
-      const result = await apiCall(runtime, (client) =>
-        client.documents.delete({
-          path: { id },
-          urlParams: force ? { force: '1' } : {},
-        }),
-      )
+      let result
+      try {
+        result = await apiCall(runtime, (client) =>
+          client.documents.delete({
+            path: { id },
+            urlParams: force ? { force: '1' } : {},
+          }),
+        )
+      } catch (error) {
+        const message = hasChildrenMessage(error)
+        if (message) throw new CliError(message, ExitCode.Failure, error)
+        throw error
+      }
       if (runtime.json) printJson(result)
       else if (!runtime.quiet) {
         process.stdout.write(
@@ -788,7 +1081,9 @@ const restoreCommand = Command.make(
         const detail = await apiCall(runtime, (client) =>
           client.documents.get({ path: { id } }),
         )
-        batchId = detail.document.deletionBatchId ?? undefined
+        batchId = isDocumentEditor(detail.document)
+          ? detail.document.deletionBatchId ?? undefined
+          : undefined
       }
       if (!batchId) {
         throw new CliError(`document ${id} has no restorable deletion batch`)
@@ -835,6 +1130,11 @@ const dossierCommand = rootCommand.pipe(
     uploadCommand,
     fetchCommand,
     listCommand,
+    treeCommand,
+    moveCommand,
+    visibilityCommand,
+    shareCommand,
+    trashCommand,
     deleteCommand,
     restoreCommand,
     disableCommand,
@@ -873,10 +1173,14 @@ function optionsBeforeArguments(command: readonly string[]): string[] {
       '--doc',
     ]),
     fetch: new Set(['--version', '--output', '-o']),
+    list: new Set(['--parent']),
+    move: new Set(['--parent']),
+    share: new Set(['--add', '--remove']),
     restore: new Set(['--batch']),
   }
   const booleanByCommand: Record<string, ReadonlySet<string>> = {
     upload: new Set(['--new']),
+    list: new Set(['--all', '--tree', '--trash']),
     delete: new Set(['--force']),
   }
   const valued = valuedByCommand[name ?? '']

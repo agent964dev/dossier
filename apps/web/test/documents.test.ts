@@ -1,6 +1,7 @@
 import { env as workerEnv } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
+import { isDocumentEditor } from '@dossier/contracts'
 
 import {
   Documents,
@@ -87,9 +88,8 @@ describe('Documents', () => {
     expect(trash.documents.map((document) => document.id)).toContain(
       published.document.id,
     )
-    expect(
-      trash.documents.find((document) => document.id === published.document.id)?.deletedAt,
-    ).not.toBeNull()
+    const trashed = trash.documents.find((document) => document.id === published.document.id)
+    expect(trashed && isDocumentEditor(trashed) ? trashed.deletedAt : null).not.toBeNull()
 
     const restored = await run(
       Effect.gen(function* () {

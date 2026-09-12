@@ -15,6 +15,13 @@
       "when": 1789177017920,
       "tag": "0001_flowery_archangel",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789188627595,
+      "tag": "0002_lame_daredevil",
+      "breakpoints": true
     }
   ]
 }

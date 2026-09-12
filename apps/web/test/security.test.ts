@@ -127,7 +127,7 @@ describe('adversarial phase-one security regressions', () => {
       }),
       env,
     )
-    expect(denied.status).toBe(404)
+    expect(denied.status).toBe(200)
 
     // Web loaders are cookie-only, and even a valid browser-readable CSRF
     // token cannot be substituted for the HttpOnly session cookie.
@@ -298,7 +298,7 @@ describe('adversarial phase-one security regressions', () => {
     })
   })
 
-  it('does not distinguish an unreadable same-workspace document from a missing ID', async () => {
+  it('allows a workspace member to read the default team boundary', async () => {
     const owner = await seedPrincipal(env, { suffix: 'security_oracle_owner' })
     const outsider = await seedPrincipal(env, {
       suffix: 'security_oracle_outsider',
@@ -321,15 +321,18 @@ describe('adversarial phase-one security regressions', () => {
           env,
         )
       ).status,
-    ).toBe(404)
+).toBe(200)
     const missing = await api('/api/documents/000000000000', outsider.token)
     const hidden = await api(
       `/api/documents/${receipt.document.id}`,
       outsider.token,
     )
     expect(missing.status).toBe(404)
-    expect(hidden.status).toBe(missing.status)
-    expect(await hidden.json()).toEqual(await missing.json())
+    expect(hidden.status).toBe(200)
+    expect(await hidden.json()).toMatchObject({
+      ok: true,
+      document: { id: receipt.document.id, effectiveVisibility: 'team' },
+    })
   })
 })
 

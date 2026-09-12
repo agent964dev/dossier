@@ -288,6 +288,7 @@ export const deletionBatches = sqliteTable('deletion_batches', {
   createdAt: text('created_at').notNull(),
   restoredAt: text('restored_at'),
   deletedCount: integer('deleted_count').notNull(),
+  rootTitle: text('root_title'),
 })
 
 export const assets = sqliteTable(
