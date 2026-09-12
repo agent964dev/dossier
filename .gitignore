@@ -10,3 +10,6 @@ dist/
 
 # Local and generated build state
 .dev.vars
+
+# Local development bootstrap credential
+.dev-bootstrap-key.local

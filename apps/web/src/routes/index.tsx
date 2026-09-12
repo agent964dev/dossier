@@ -1,5 +1,6 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 import { ArrowRight, Terminal } from 'lucide-react'
+import { Atmosphere } from '../components/atmosphere'
 import { BrandMark } from '../components/brand-mark'
 import { CopyButton } from '../components/copy-button'
 import { HealthStatus } from '../components/health-status'
@@ -14,8 +15,14 @@ import {
   CardHeader,
   CardTitle,
 } from '../components/ui/card'
+import { peekSession } from '../server/account'
 
 export const Route = createFileRoute('/')({
+  // Signed in already? The landing page has nothing to say — go to the work.
+  loader: async () => {
+    const session = await peekSession()
+    if (session.signedIn) throw redirect({ to: '/dashboard' })
+  },
   component: HomePage,
 })
 
@@ -101,7 +108,7 @@ function HomePage() {
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
               <Button asChild size="lg" className="w-full sm:w-auto">
-                <a href="/auth/sign-in">
+                <a href="/sign-in">
                   Sign in
                   <ArrowRight aria-hidden />
                 </a>
@@ -218,23 +225,5 @@ function HomePage() {
         </div>
       </footer>
     </main>
-  )
-}
-
-/**
- * One cyan glow as the emotional center, one warm counter-glow, and a cyan
- * hairline along the top edge. Background only — nothing stacks on top of it,
- * so no glass tiers are mixed (DESIGN.md sections 1 and 4).
- */
-function Atmosphere() {
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute inset-0 -z-10 overflow-hidden"
-    >
-      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand-300/45 to-transparent" />
-      <div className="absolute -top-[26rem] left-1/2 h-[34rem] w-[46rem] -translate-x-1/2 rounded-full bg-brand-500/25 blur-[120px] sm:w-[64rem]" />
-      <div className="absolute -right-40 bottom-[-18rem] h-[26rem] w-[26rem] rounded-full bg-complement-400/[0.06] blur-[130px]" />
-    </div>
   )
 }

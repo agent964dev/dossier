@@ -10,33 +10,115 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as WorkspaceRouteImport } from './routes/workspace'
+import { Route as CliAuthRouteImport } from './routes/cli.auth'
+import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
+import { Route as DashboardTrashRouteImport } from './routes/dashboard/trash'
+import { Route as DashboardDocumentsIdRouteImport } from './routes/dashboard/documents.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SignInRoute = SignInRouteImport.update({
+  id: '/sign-in',
+  path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspaceRoute = WorkspaceRouteImport.update({
+  id: '/workspace',
+  path: '/workspace',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CliAuthRoute = CliAuthRouteImport.update({
+  id: '/cli/auth',
+  path: '/cli/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardIndexRoute = DashboardIndexRouteImport.update({
+  id: '/dashboard/',
+  path: '/dashboard/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardTrashRoute = DashboardTrashRouteImport.update({
+  id: '/dashboard/trash',
+  path: '/dashboard/trash',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardDocumentsIdRoute = DashboardDocumentsIdRouteImport.update({
+  id: '/dashboard/documents/$id',
+  path: '/dashboard/documents/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/sign-in': typeof SignInRoute
+  '/workspace': typeof WorkspaceRoute
+  '/cli/auth': typeof CliAuthRoute
+  '/dashboard/trash': typeof DashboardTrashRoute
+  '/dashboard/': typeof DashboardIndexRoute
+  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/sign-in': typeof SignInRoute
+  '/workspace': typeof WorkspaceRoute
+  '/cli/auth': typeof CliAuthRoute
+  '/dashboard/trash': typeof DashboardTrashRoute
+  '/dashboard': typeof DashboardIndexRoute
+  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/sign-in': typeof SignInRoute
+  '/workspace': typeof WorkspaceRoute
+  '/cli/auth': typeof CliAuthRoute
+  '/dashboard/trash': typeof DashboardTrashRoute
+  '/dashboard/': typeof DashboardIndexRoute
+  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/sign-in'
+    | '/workspace'
+    | '/cli/auth'
+    | '/dashboard/trash'
+    | '/dashboard/'
+    | '/dashboard/documents/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/sign-in'
+    | '/workspace'
+    | '/cli/auth'
+    | '/dashboard/trash'
+    | '/dashboard'
+    | '/dashboard/documents/$id'
+  id:
+    | '__root__'
+    | '/'
+    | '/sign-in'
+    | '/workspace'
+    | '/cli/auth'
+    | '/dashboard/trash'
+    | '/dashboard/'
+    | '/dashboard/documents/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  SignInRoute: typeof SignInRoute
+  WorkspaceRoute: typeof WorkspaceRoute
+  CliAuthRoute: typeof CliAuthRoute
+  DashboardTrashRoute: typeof DashboardTrashRoute
+  DashboardIndexRoute: typeof DashboardIndexRoute
+  DashboardDocumentsIdRoute: typeof DashboardDocumentsIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +130,59 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workspace': {
+      id: '/workspace'
+      path: '/workspace'
+      fullPath: '/workspace'
+      preLoaderRoute: typeof WorkspaceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cli/auth': {
+      id: '/cli/auth'
+      path: '/cli/auth'
+      fullPath: '/cli/auth'
+      preLoaderRoute: typeof CliAuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/': {
+      id: '/dashboard/'
+      path: '/dashboard'
+      fullPath: '/dashboard/'
+      preLoaderRoute: typeof DashboardIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/trash': {
+      id: '/dashboard/trash'
+      path: '/dashboard/trash'
+      fullPath: '/dashboard/trash'
+      preLoaderRoute: typeof DashboardTrashRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/documents/$id': {
+      id: '/dashboard/documents/$id'
+      path: '/dashboard/documents/$id'
+      fullPath: '/dashboard/documents/$id'
+      preLoaderRoute: typeof DashboardDocumentsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  SignInRoute: SignInRoute,
+  WorkspaceRoute: WorkspaceRoute,
+  CliAuthRoute: CliAuthRoute,
+  DashboardTrashRoute: DashboardTrashRoute,
+  DashboardIndexRoute: DashboardIndexRoute,
+  DashboardDocumentsIdRoute: DashboardDocumentsIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

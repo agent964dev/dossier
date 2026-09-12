@@ -5,17 +5,33 @@ export interface DossierHttpOptions {
   readonly apiKey?: string
   readonly timeoutMs?: number
   readonly fetchImpl?: typeof fetch
+  readonly accept?: string
 }
 
-function normalizeApiUrl(apiUrl: string): URL {
+function isLoopback(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname === '[::1]' ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  )
+}
+
+export function normalizeApiUrl(apiUrl: string): URL {
   let url: URL
   try {
     url = new URL(apiUrl)
   } catch {
     throw new CliError(`invalid API URL: ${apiUrl}`, ExitCode.Usage)
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new CliError(`API URL must use http or https: ${apiUrl}`, ExitCode.Usage)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    throw new CliError(
+      `API URL must use HTTPS except on loopback: ${apiUrl}`,
+      ExitCode.Usage,
+    )
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new CliError('API URL must not contain credentials', ExitCode.Usage)
   }
   return url
 }
@@ -47,7 +63,7 @@ export async function dossierFetch(
   if (options.apiKey && url.origin === api.origin) {
     headers.set('authorization', `Bearer ${options.apiKey}`)
   }
-  headers.set('accept', 'application/json')
+  if (!headers.has('accept')) headers.set('accept', options.accept ?? 'application/json')
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000)
@@ -57,8 +73,12 @@ export async function dossierFetch(
     const response = await (options.fetchImpl ?? fetch)(url, {
       ...init,
       headers,
+      redirect: 'manual',
       signal: controller.signal,
     })
+    if (response.status >= 300 && response.status < 400) {
+      throw new CliError('redirects are not allowed')
+    }
     if (!response.ok) {
       const message = await decodeError(response)
       throw new CliError(

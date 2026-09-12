@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   acquireStateLock,
   fileMode,
+  readDocuments,
   readJsonFile,
+  mutateDocuments,
   statePaths,
   writeJsonAtomic,
 } from './state.js'
@@ -59,4 +61,32 @@ describe('CLI state', () => {
       /corrupted JSON.*repair it or remove the file/,
     )
   })
+
+  it('stores mappings by origin, account, and absolute path', async () => {
+    const home = await temporaryHome()
+    const paths = statePaths({ DOSSIER_HOME: home })
+    const absolutePath = join(home, 'plan.html')
+    await mutateDocuments((documents) => {
+      documents['https://dossier.example'] = {
+        acct_test: {
+          [absolutePath]: {
+            documentId: '7k2m9x1qz3ab',
+            url: 'https://dossier.example/d/7k2m9x1qz3ab',
+            rawUrl: 'https://dossier.example/d/7k2m9x1qz3ab/raw',
+            updatedAt: '2026-09-12T00:00:00.000Z',
+          },
+        },
+      }
+    }, paths)
+
+    expect(await readDocuments(paths)).toMatchObject({
+      'https://dossier.example': {
+        acct_test: {
+          [absolutePath]: { documentId: '7k2m9x1qz3ab' },
+        },
+      },
+    })
+    expect(await fileMode(paths.documents)).toBe(0o600)
+  })
+
 })

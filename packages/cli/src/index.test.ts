@@ -47,4 +47,28 @@ describe('argument normalization', () => {
       '7k2m9x1qz3ab',
     ])
   })
+
+  it('allows delete and restore options after their document IDs', () => {
+    expect(
+      normalizeGlobalOptions(['node', 'dossier', 'delete', '7k2m9x1qz3ab', '--force']).args,
+    ).toEqual(['node', 'dossier', 'delete', '--force', '7k2m9x1qz3ab'])
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        'restore',
+        '7k2m9x1qz3ab',
+        '--batch',
+        'batch_1',
+      ]).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      'restore',
+      '--batch',
+      'batch_1',
+      '7k2m9x1qz3ab',
+    ])
+  })
+
 })

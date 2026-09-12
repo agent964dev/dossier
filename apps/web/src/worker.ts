@@ -1,20 +1,24 @@
 import tanstackServer from '@tanstack/react-start/server-entry'
-import { handleApiRequest } from './api/health'
+import { handleApiRequest } from './api'
+import { handleAuthRequest } from './api/auth'
+import { handleServingRequest } from './api/serving'
 
-const effectRoutePrefixes = ['/api', '/d', '/a', '/auth'] as const
-
-function isEffectRoute(pathname: string): boolean {
-  return effectRoutePrefixes.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
-  )
+function hasPrefix(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`)
 }
 
 export default {
   async fetch(request, env): Promise<Response> {
-    if (isEffectRoute(new URL(request.url).pathname)) {
+    const pathname = new URL(request.url).pathname
+    if (hasPrefix(pathname, '/api')) {
       return handleApiRequest(request, env)
     }
-
+    if (hasPrefix(pathname, '/d')) {
+      return handleServingRequest(request, env)
+    }
+    if (hasPrefix(pathname, '/auth')) {
+      return handleAuthRequest(request, env)
+    }
     return tanstackServer.fetch(request)
   },
 } satisfies ExportedHandler<Cloudflare.Env>

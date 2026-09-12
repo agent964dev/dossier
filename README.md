@@ -33,3 +33,21 @@ bun run --cwd apps/web dev
 ```
 
 See [`apps/web/README.md`](apps/web/README.md) for database and deployment commands.
+
+## Phase 1 surfaces
+
+The Worker entry keeps the runtime boundaries explicit:
+
+- `/api/*` — the merged Effect `DossierApi` (`/api/healthz` and `/api/policy/check` remain public; the other phase-one routes require Bearer authentication).
+- `/d/*` — byte-preserving document serving.
+- `/auth/*` — shoo sign-in, callback, and sign-out.
+- every other route — TanStack Start, including the dashboard, workspace, and CLI-key pages.
+
+Build and run the phase-one CLI directly with Node 22.12 or newer:
+
+```sh
+bun run --cwd packages/cli build
+node packages/cli/dist/index.js --api-url http://localhost:8787 health
+```
+
+The CLI supports `auth set`, `whoami`, `upload`, `list`, `fetch`, `delete`, `restore`, `disable`, and `enable`. See [`apps/web/README.md`](apps/web/README.md) for the development deployment, migration, secret, and bootstrap-seed procedure.

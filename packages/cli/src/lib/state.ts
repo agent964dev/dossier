@@ -19,10 +19,23 @@ export interface DossierConfig {
 
 export type Credentials = Record<string, string>
 
+export interface DocumentMapping {
+  readonly documentId: string
+  readonly url: string
+  readonly rawUrl: string
+  readonly updatedAt: string
+}
+
+export type Documents = Record<
+  string,
+  Record<string, Record<string, DocumentMapping>>
+>
+
 export interface StatePaths {
   readonly home: string
   readonly config: string
   readonly credentials: string
+  readonly documents: string
   readonly lock: string
 }
 
@@ -40,6 +53,7 @@ export function statePaths(env: NodeJS.ProcessEnv = process.env): StatePaths {
     home,
     config: join(home, 'config.json'),
     credentials: join(home, 'credentials.json'),
+    documents: join(home, 'documents.json'),
     lock: join(home, '.state.lock'),
   }
 }
@@ -126,10 +140,17 @@ export async function readJsonFile<A>(path: string, fallback: A): Promise<A> {
 async function writeJsonUnlocked(path: string, value: unknown, mode: number): Promise<void> {
   const directory = path.slice(0, path.lastIndexOf('/'))
   await ensureStateDirectory(directory)
-  const temporary = join(directory, `.${path.slice(path.lastIndexOf('/') + 1)}.${randomUUID()}.tmp`)
+  const temporary = join(
+    directory,
+    `.${path.slice(path.lastIndexOf('/') + 1)}.${randomUUID()}.tmp`,
+  )
   let handle
   try {
-    handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode)
+    handle = await open(
+      temporary,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      mode,
+    )
     await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
     await handle.sync()
     await handle.close()
@@ -185,6 +206,27 @@ export async function mutateCredentials<A>(
       const credentials = await readCredentials(paths)
       const result = await mutation(credentials)
       await writeJsonUnlocked(paths.credentials, credentials, 0o600)
+      return result
+    },
+    lockOptions,
+  )
+}
+
+export async function readDocuments(paths: StatePaths = statePaths()): Promise<Documents> {
+  return readJsonFile(paths.documents, {})
+}
+
+export async function mutateDocuments<A>(
+  mutation: (documents: Documents) => A | Promise<A>,
+  paths: StatePaths = statePaths(),
+  lockOptions?: LockOptions,
+): Promise<A> {
+  return withStateLock(
+    paths.home,
+    async () => {
+      const documents = await readDocuments(paths)
+      const result = await mutation(documents)
+      await writeJsonUnlocked(paths.documents, documents, 0o600)
       return result
     },
     lockOptions,

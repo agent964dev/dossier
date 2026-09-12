@@ -34,4 +34,36 @@ describe('dossierFetch', () => {
       }),
     )
   })
+
+  it('requires HTTPS except for loopback API origins', async () => {
+    await expect(
+      dossierFetch('/api/me', {
+        apiUrl: 'http://dossier.example',
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CliError>>({
+        message: 'API URL must use HTTPS except on loopback: http://dossier.example',
+      }),
+    )
+  })
+
+  it('rejects redirects instead of following them', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://foreign.example/document' },
+      }),
+    )
+    await expect(
+      dossierFetch('/d/7k2m9x1qz3ab/raw', {
+        apiUrl: 'https://dossier.example',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CliError>>({ message: 'redirects are not allowed' }),
+    )
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
 })

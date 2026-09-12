@@ -363,3 +363,18 @@ export const uploadEvents = sqliteTable(
     ),
   ],
 )
+
+/**
+ * Ephemeral rows used inside D1 batches. Inserting ok=0 raises a CHECK
+ * constraint so a failed publication or document guard rolls back the batch.
+ */
+export const publicationGuards = sqliteTable(
+  'publication_guards',
+  {
+    id: text('id').primaryKey(),
+    ok: integer('ok').notNull(),
+  },
+  (table) => [
+    check('publication_guards_ok_check', sql`${table.ok} = 1`),
+  ],
+)
