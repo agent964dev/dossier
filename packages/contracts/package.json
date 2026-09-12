@@ -1,0 +1,18 @@
+{
+  "name": "@dossier/contracts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dossier/policy": "workspace:*",
+    "@effect/platform": "0.97.2",
+    "effect": "3.22.2"
+  }
+}

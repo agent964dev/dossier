@@ -1,0 +1,25 @@
+{
+  "name": "@agent964/dossier",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dossier/contracts": "workspace:*",
+    "@dossier/policy": "workspace:*",
+    "@effect/cli": "0.77.1",
+    "@effect/platform": "0.97.2",
+    "@effect/platform-bun": "0.91.2",
+    "@effect/platform-node": "0.108.2",
+    "effect": "3.22.2"
+  },
+  "bin": {
+    "dossier": "dist/index.js"
+  }
+}

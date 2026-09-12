@@ -1,0 +1,3 @@
+PUBLIC_BASE_URL=http://localhost:8787
+SESSION_SECRET=replace-with-a-random-secret
+BOOTSTRAP_API_KEY=replace-with-a-bootstrap-api-key

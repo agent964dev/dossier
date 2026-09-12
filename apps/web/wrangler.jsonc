@@ -1,0 +1,82 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dossier",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "dossier.agent964.com", "custom_domain": true }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "https://dossier.agent964.com",
+    "SEED_WORKSPACE": "agent964:agent964.com",
+    "SEED_ADMIN_EMAIL": "malhashemi@agent964.com",
+    "STYLE_HOST_ALLOWLIST": "fonts.googleapis.com,fonts.gstatic.com",
+    "EMBED_HOST_ALLOWLIST": "",
+    "SCRIPT_HOST_ALLOWLIST": "",
+    "SHOO_BASE_URL": "https://shoo.dev",
+    "MAX_REQUEST_BYTES": "8388608",
+    "MAX_HTML_BYTES": "1048576",
+    "MAX_ASSET_BYTES": "5242880"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dossier-production",
+      "database_id": "11111111-1111-1111-1111-111111111111",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "OBJECTS", "bucket_name": "dossier-production" }
+  ],
+  "ratelimits": [
+    {
+      "name": "UPLOAD_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 30, "period": 60 }
+    }
+  ],
+  "env": {
+    "dev": {
+      "workers_dev": true,
+      "preview_urls": true,
+      "routes": [],
+      "vars": {
+        "PUBLIC_BASE_URL": "https://dossier-dev.tech964.workers.dev",
+        "SEED_WORKSPACE": "agent964:agent964.com",
+        "SEED_ADMIN_EMAIL": "malhashemi@agent964.com",
+        "STYLE_HOST_ALLOWLIST": "fonts.googleapis.com,fonts.gstatic.com",
+        "EMBED_HOST_ALLOWLIST": "",
+        "SCRIPT_HOST_ALLOWLIST": "",
+        "SHOO_BASE_URL": "https://shoo.dev",
+        "MAX_REQUEST_BYTES": "8388608",
+        "MAX_HTML_BYTES": "1048576",
+        "MAX_ASSET_BYTES": "5242880"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "dossier-development",
+          "database_id": "a3944e02-ce91-4e17-8fa1-b93534ba2158",
+          "migrations_dir": "drizzle"
+        }
+      ],
+      "r2_buckets": [
+        { "binding": "OBJECTS", "bucket_name": "dossier-development" }
+      ],
+      "ratelimits": [
+        {
+          "name": "UPLOAD_RATE_LIMITER",
+          "namespace_id": "1002",
+          "simple": { "limit": 30, "period": 60 }
+        }
+      ]
+    }
+  }
+}

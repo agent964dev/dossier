@@ -1,0 +1,21 @@
+{
+  "name": "dossier",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "bun --filter '*' test",
+    "typecheck": "bun --filter '*' typecheck",
+    "dev": "bun --filter '*' dev",
+    "deploy:dev": "bun --filter '*' deploy:dev"
+  },
+  "devDependencies": {
+    "@effect/vitest": "0.30.0",
+    "@types/node": "22.20.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}

@@ -7,3 +7,6 @@ dist/
 .output/
 .tanstack/
 *.tsbuildinfo
+
+# Local and generated build state
+.dev.vars
