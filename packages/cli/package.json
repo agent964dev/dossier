@@ -21,10 +21,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/agent964/dossier.git",
+    "url": "https://github.com/agent964dev/dossier.git",
     "directory": "packages/cli"
   },
-  "homepage": "https://github.com/agent964/dossier#readme",
+  "homepage": "https://github.com/agent964dev/dossier#readme",
   "license": "MIT",
   "scripts": {
     "build": "bun build src/index.ts --target=node --outfile dist/index.js",
