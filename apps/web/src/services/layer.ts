@@ -4,6 +4,7 @@ import { AccessLive } from './access'
 import { AllowlistLive } from './allowlist'
 import { AssetsLive } from './assets'
 import { DbLive } from './db'
+import { DiffLive } from './diff'
 import { DocumentsLive } from './documents'
 import { IdsLive } from './ids'
 import { ObjectsLive } from './objects'
@@ -28,6 +29,7 @@ export const CoreServicesLive = Layer.mergeAll(
   AssetsLive,
   PublishLive,
   DocumentsLive,
+  DiffLive,
   ServingLive,
   SharesLive,
   TreeLive,

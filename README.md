@@ -1,17 +1,39 @@
 # dossier
 
-Dossier is a Bun workspace for publishing versioned HTML documents to a workspace-owned tree on Cloudflare Workers.
+Dossier publishes versioned HTML documents into workspace-owned trees on Cloudflare Workers. It keeps every version, supports inherited access boundaries and shares, serves reusable CSS/font assets, and provides both a dark-themed web dashboard and the `@agent964/dossier` CLI.
 
 ## Workspace layout
 
-- `apps/web` — TanStack Start application and custom Worker entry, Effect HTTP API, Drizzle schema and D1 migrations, Cloudflare integration tests, and the agent964-styled web UI.
+- `apps/web` — TanStack Start application, custom Worker entry, Effect HTTP API, Drizzle/D1 migrations, R2 document storage, integration tests, and the web UI.
 - `packages/policy` — runtime-neutral HTML and CSS upload policy shared by the Worker and CLI.
 - `packages/contracts` — Effect schemas and the shared `HttpApi` contract.
-- `packages/cli` — the `@agent964/dossier` command-line client.
-- `docs` — the approved design plan, workflow notes, and source diagrams.
+- `packages/cli` — the public `@agent964/dossier` command-line client.
+- `packages/cli/skills/dossier` — packaged agent instructions for reading and publishing dossier documents.
+- `docs` — the approved design plan, workflow notes, handoff, and production runbook.
 - `upstream` — read-only Postplan reference source.
 
-## Development
+## Install the CLI
+
+The supported distribution is npm and requires Node 22.12 or newer (Bun also works):
+
+```sh
+npm install --global @agent964/dossier
+dossier auth login
+dossier whoami
+```
+
+After authentication, common commands include:
+
+```sh
+dossier upload report.html --kind report
+dossier list --tree
+dossier tree <document-id>
+dossier diff <document-id>
+dossier assets push theme.css
+dossier trash
+```
+
+## Develop
 
 Install the pinned workspace dependencies:
 
@@ -19,7 +41,7 @@ Install the pinned workspace dependencies:
 bun install
 ```
 
-Run the repository checks from the workspace root:
+Run repository checks:
 
 ```sh
 bun run typecheck
@@ -32,22 +54,26 @@ Start the web application and Worker locally:
 bun run --cwd apps/web dev
 ```
 
-See [`apps/web/README.md`](apps/web/README.md) for database and deployment commands.
-
-## Phase 1 surfaces
-
-The Worker entry keeps the runtime boundaries explicit:
-
-- `/api/*` — the merged Effect `DossierApi` (`/api/healthz` and `/api/policy/check` remain public; the other phase-one routes require Bearer authentication).
-- `/d/*` — byte-preserving document serving.
-- `/auth/*` — shoo sign-in, callback, and sign-out.
-- every other route — TanStack Start, including the dashboard, workspace, and CLI-key pages.
-
-Build and run the phase-one CLI directly with Node 22.12 or newer:
+Build and run the unpublished CLI from this checkout:
 
 ```sh
 bun run --cwd packages/cli build
 node packages/cli/dist/index.js --api-url http://localhost:8787 health
 ```
 
-The CLI supports `auth set`, `whoami`, `upload`, `list`, `fetch`, `delete`, `restore`, `disable`, and `enable`. See [`apps/web/README.md`](apps/web/README.md) for the development deployment, migration, secret, and bootstrap-seed procedure.
+## Runtime surfaces
+
+The Worker entry keeps the boundaries explicit:
+
+- `/api/*` — the Effect API. Health and policy checks are public; document, asset, workspace, key, and diff operations require a Bearer API key.
+- `POST /api/setup` — deployment-only bootstrap protected by `BOOTSTRAP_API_KEY`.
+- `/d/*` — byte-preserving document serving and tree hubs.
+- `/a/*` — versioned workspace CSS and WOFF2 assets.
+- `/auth/*` — Shoo sign-in, callback, and sign-out.
+- every other route — TanStack Start, including dashboard, trash, workspace, diff, and CLI-key pages.
+
+## Production
+
+Production runs at <https://dossier.agent964.com>. The top-level Wrangler environment is production; do not deploy it as part of ordinary development. The exact resource creation, secret, migration, deploy, bootstrap, owner handoff, rollback, and logging procedures are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+See [`apps/web/README.md`](apps/web/README.md) for local/development commands and Worker configuration details.

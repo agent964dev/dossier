@@ -36,12 +36,19 @@ export function normalizeApiUrl(apiUrl: string): URL {
   return url
 }
 
-async function decodeError(response: Response): Promise<string> {
+interface DecodedHttpError {
+  readonly message: string
+  readonly code?: string
+  readonly body?: Record<string, unknown>
+}
+
+async function decodeError(response: Response): Promise<DecodedHttpError> {
   const contentType = response.headers.get('content-type') ?? ''
   const text = await response.text()
   if (contentType.includes('json') || text.trimStart().startsWith('{')) {
     try {
       const body = JSON.parse(text) as Record<string, unknown>
+      const code = typeof body.code === 'string' ? body.code : undefined
       const message = ['message', 'error', 'code']
         .map((key) => body[key])
         .find((value): value is string =>
@@ -59,15 +66,22 @@ async function decodeError(response: Response): Promise<string> {
                 typeof error === 'string' && error.trim() !== '',
             )
           : []
-        return detailErrors.length > 0
-          ? `${message}\n${detailErrors.map((error) => `  - ${error}`).join('\n')}`
-          : message
+        return {
+          message:
+            detailErrors.length > 0
+              ? `${message}\n${detailErrors.map((error) => `  - ${error}`).join('\n')}`
+              : message,
+          ...(code === undefined ? {} : { code }),
+          body,
+        }
       }
     } catch {
       // Fall through to the raw response below.
     }
   }
-  return text.trim() || response.statusText || `HTTP ${response.status}`
+  return {
+    message: text.trim() || response.statusText || `HTTP ${response.status}`,
+  }
 }
 
 export async function dossierFetch(
@@ -98,11 +112,15 @@ export async function dossierFetch(
       throw new CliError('redirects are not allowed')
     }
     if (!response.ok) {
-      const message = await decodeError(response)
+      const decoded = await decodeError(response)
       throw new CliError(
-        `${response.status} ${response.statusText || 'request failed'}: ${message}`,
+        `${response.status} ${response.statusText || 'request failed'}: ${decoded.message}`,
         response.status === 401 ? ExitCode.Auth : ExitCode.Failure,
-        { status: response.status },
+        {
+          status: response.status,
+          ...(decoded.code === undefined ? {} : { code: decoded.code }),
+          ...(decoded.body === undefined ? {} : { body: decoded.body }),
+        },
       )
     }
     return response

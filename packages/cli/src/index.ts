@@ -7,8 +7,10 @@ import {
   AssetListResponse,
   AssetPushRequest,
   AssetPushResponse,
+  DiffResponse as DiffResponseSchema,
   DossierApi,
   isDocumentEditor,
+  type DiffResponse as DiffResponseType,
   type DocumentEditor,
   type DocumentListScope,
   type DocumentView,
@@ -36,11 +38,12 @@ import {
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, realpath, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { pathToFileURL } from 'node:url'
 import { CliError, ExitCode, exitCodeFor } from './lib/errors.js'
+import { formatUnifiedDiff } from './lib/diff.js'
 import { dossierFetch, dossierJson, normalizeApiUrl } from './lib/http.js'
 import { parseRef } from './lib/ref.js'
 import {
@@ -55,7 +58,7 @@ import {
   type StatePaths,
 } from './lib/state.js'
 
-const VERSION = '0.0.0'
+const VERSION = '0.1.0'
 const DEFAULT_API_URL = 'https://dossier.agent964.com'
 const FetchClientLive = Layer.mergeAll(
   FetchHttpClient.layer,
@@ -83,25 +86,30 @@ function apiOrigin(apiUrl: string): string {
 
 async function runtimeConfig(globals: GlobalOptions): Promise<RuntimeConfig> {
   const paths = statePaths()
-  const config = await readConfig(paths)
   const explicitApiUrl = Option.getOrUndefined(globals.apiUrl)
-  const apiUrl =
-    explicitApiUrl ??
-    process.env.DOSSIER_API_URL ??
-    config.apiUrl ??
-    DEFAULT_API_URL
-  const origin = apiOrigin(apiUrl)
-  const credentials = await readCredentials(paths)
-  const storedKey = credentials[origin]
-  if (storedKey !== undefined && typeof storedKey !== 'string') {
-    throw new CliError(
-      `cannot read ${paths.credentials}: credential for ${origin} must be a string; repair or remove the file`,
-    )
+  const environmentApiUrl = process.env.DOSSIER_API_URL?.trim() || undefined
+  const configuredApiUrl =
+    explicitApiUrl === undefined && environmentApiUrl === undefined
+      ? (await readConfig(paths)).apiUrl
+      : undefined
+  const origin = apiOrigin(
+    explicitApiUrl ?? environmentApiUrl ?? configuredApiUrl ?? DEFAULT_API_URL,
+  )
+  const environmentApiKey = process.env.DOSSIER_API_KEY?.trim() || undefined
+  let storedKey: string | undefined
+  if (environmentApiKey === undefined) {
+    const credentials = await readCredentials(paths)
+    storedKey = credentials[origin]
+    if (storedKey !== undefined && typeof storedKey !== 'string') {
+      throw new CliError(
+        `cannot read ${paths.credentials}: credential for ${origin} must be a string; repair or remove the file`,
+      )
+    }
   }
   return {
     apiUrl: origin,
     apiOrigin: origin,
-    apiKey: process.env.DOSSIER_API_KEY?.trim() || storedKey,
+    apiKey: environmentApiKey ?? storedKey,
     json: globals.json,
     quiet: globals.quiet,
     paths,
@@ -109,7 +117,11 @@ async function runtimeConfig(globals: GlobalOptions): Promise<RuntimeConfig> {
 }
 
 function printJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value)}\n`)
+  // JSON.stringify escapes C0; also escape DEL/C1 to neutralize terminal controls.
+  const json = JSON.stringify(value)?.replace(/[\u007f-\u009f]/g, (control) =>
+    `\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  )
+  process.stdout.write(`${json}\n`)
 }
 
 function printValue(
@@ -474,14 +486,7 @@ async function requireMe(
 }
 
 function parseDocumentId(value: string, runtime: RuntimeConfig): string {
-  const parsed = parseRef(value, runtime.apiUrl)
-  if (parsed.version !== undefined) {
-    throw new CliError(
-      'a document mutation cannot target a pinned version',
-      ExitCode.Usage,
-    )
-  }
-  return parsed.id
+  return parseRef(value, runtime.apiUrl).id
 }
 
 function git(args: readonly string[], cwd: string): string | null {
@@ -647,6 +652,213 @@ function printDocumentMutation(
   process.stdout.write(`${action}\nURL: ${document.url}\nID: ${document.id}\n`)
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function decodeDiffResponse(value: unknown): DiffResponseType {
+  try {
+    return Schema.decodeUnknownSync(DiffResponseSchema, {
+      onExcessProperty: 'error',
+    })(value)
+  } catch (error) {
+    throw new CliError(
+      'server returned an invalid diff response',
+      ExitCode.Failure,
+      error,
+    )
+  }
+}
+
+interface WorkspaceMember {
+  readonly accountId: string
+  readonly name: string
+  readonly email: string | null
+  readonly role: 'admin' | 'member'
+  readonly kind?: string
+  readonly disabled?: boolean
+}
+
+interface WorkspaceAllowlistEntry {
+  readonly id: string
+  readonly kind: 'email' | 'domain'
+  readonly value: string
+  readonly role: 'admin' | 'member'
+}
+
+interface WorkspaceResponse {
+  readonly members: readonly WorkspaceMember[]
+  readonly allowlist: readonly WorkspaceAllowlistEntry[]
+  readonly [key: string]: unknown
+}
+
+function decodeWorkspaceResponse(value: unknown): WorkspaceResponse {
+  const candidate = record(value)
+  if (!candidate || !Array.isArray(candidate.members) || !Array.isArray(candidate.allowlist)) {
+    throw new CliError('server returned an invalid workspace response')
+  }
+  for (const rawMember of candidate.members) {
+    const member = record(rawMember)
+    if (
+      typeof member?.accountId !== 'string' ||
+      typeof member.name !== 'string' ||
+      (member.email !== null && typeof member.email !== 'string') ||
+      (member.role !== 'admin' && member.role !== 'member')
+    ) {
+      throw new CliError('server returned an invalid workspace response')
+    }
+  }
+  for (const rawEntry of candidate.allowlist) {
+    const entry = record(rawEntry)
+    if (
+      typeof entry?.id !== 'string' ||
+      (entry.kind !== 'email' && entry.kind !== 'domain') ||
+      typeof entry.value !== 'string' ||
+      (entry.role !== 'admin' && entry.role !== 'member')
+    ) {
+      throw new CliError('server returned an invalid workspace response')
+    }
+  }
+  return candidate as unknown as WorkspaceResponse
+}
+
+function allowlistValue(raw: string): {
+  readonly kind: 'email' | 'domain'
+  readonly value: string
+} {
+  const normalized = raw.trim().toLowerCase()
+  const kind = normalized.startsWith('@') ? 'domain' : 'email'
+  const value = kind === 'domain' ? normalized.slice(1) : normalized
+  const domain = kind === 'domain' ? value : value.slice(value.lastIndexOf('@') + 1)
+  if (
+    normalized.length === 0 ||
+    normalized.length > 254 ||
+    /\s/.test(normalized) ||
+    (kind === 'email' &&
+      (normalized.indexOf('@') <= 0 ||
+        normalized.indexOf('@') !== normalized.lastIndexOf('@'))) ||
+    !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(
+      domain,
+    )
+  ) {
+    throw new CliError(
+      'expected one email address or @ followed by a domain',
+      ExitCode.Usage,
+    )
+  }
+  return { kind, value }
+}
+
+async function workspaceData(runtime: RuntimeConfig): Promise<WorkspaceResponse> {
+  return decodeWorkspaceResponse(
+    await dossierJson<unknown>('/api/workspace', {
+      apiUrl: runtime.apiUrl,
+      apiKey: runtime.apiKey,
+    }),
+  )
+}
+
+async function workspaceMutation(
+  runtime: RuntimeConfig,
+  path: string,
+  method: 'POST' | 'DELETE',
+  payload?: unknown,
+): Promise<Record<string, unknown>> {
+  const response = await dossierFetch(
+    path,
+    { apiUrl: runtime.apiUrl, apiKey: runtime.apiKey },
+    {
+      method,
+      ...(payload === undefined
+        ? {}
+        : {
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          }),
+    },
+  )
+  if (response.status === 204) return { ok: true }
+  let value: unknown
+  try {
+    value = await response.json()
+  } catch {
+    throw new CliError('server returned an invalid workspace response')
+  }
+  const decoded = record(value)
+  if (!decoded) throw new CliError('server returned an invalid workspace response')
+  return decoded
+}
+
+function printWorkspaceMutation(
+  result: Record<string, unknown>,
+  runtime: RuntimeConfig,
+): void {
+  if (runtime.json) printJson(result)
+  else if (!runtime.quiet) {
+    const message = result.message
+    printValue(typeof message === 'string' ? message : result, runtime)
+  }
+}
+
+function printWorkspace(
+  workspace: WorkspaceResponse,
+  runtime: RuntimeConfig,
+  membersOnly = false,
+): void {
+  if (runtime.json) {
+    printJson(membersOnly ? workspace.members : workspace)
+    return
+  }
+  if (runtime.quiet) return
+  process.stdout.write('Members:\n')
+  if (workspace.members.length === 0) process.stdout.write('  None\n')
+  for (const member of workspace.members) {
+    process.stdout.write(
+      `  ${member.name}${member.email ? ` <${member.email}>` : ''} · ${member.role}${member.disabled ? ' · disabled' : ''}\n`,
+    )
+  }
+  if (membersOnly) return
+  process.stdout.write('Allowlist:\n')
+  if (workspace.allowlist.length === 0) process.stdout.write('  None\n')
+  for (const entry of workspace.allowlist) {
+    const value = entry.kind === 'domain' ? `@${entry.value}` : entry.value
+    process.stdout.write(`  ${value} · ${entry.role}\n`)
+  }
+}
+
+function findWorkspaceMember(
+  workspace: WorkspaceResponse,
+  email: string,
+): WorkspaceMember {
+  const normalized = email.trim().toLowerCase()
+  const member = workspace.members.find(
+    (candidate) => candidate.email?.toLowerCase() === normalized,
+  )
+  if (!member) {
+    throw new CliError(`${normalized} is not a member of this workspace`)
+  }
+  return member
+}
+
+function tryOpenBrowser(url: string): boolean {
+  const configured = process.env.BROWSER?.trim()
+  const command: readonly [string, readonly string[]] = configured
+    ? [configured, [url]]
+    : process.platform === 'darwin'
+      ? ['open', [url]]
+      : process.platform === 'win32'
+        ? ['cmd', ['/c', 'start', '', url]]
+        : ['xdg-open', [url]]
+  try {
+    execFileSync(command[0], command[1], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 const globalOptions = {
   apiUrl: Options.text('api-url').pipe(
     Options.optional,
@@ -680,8 +892,10 @@ const authLogin = Command.make('login', {}, () =>
         ExitCode.Usage,
       )
     }
+    const authUrl = `${runtime.apiUrl}/cli/auth`
+    const opened = tryOpenBrowser(authUrl)
     process.stdout.write(
-      `Open this in your browser (any device):\n\n  ${runtime.apiUrl}/cli/auth\n\nSign in, generate a key, then paste it below.\n\n`,
+      `${opened ? 'Opened' : 'Open'} this in your browser (any device):\n\n  ${authUrl}\n\nSign in, generate a key, then paste it below.\n\n`,
     )
     const readline = createInterface({
       input: process.stdin,
@@ -1008,6 +1222,98 @@ const fetchCommand = Command.make(
     }),
 ).pipe(Command.withDescription('Fetch a document without changing its bytes'))
 
+const diffCommand = Command.make(
+  'diff',
+  {
+    from: Options.integer('from').pipe(
+      Options.optional,
+      Options.withDescription('Older version number (default: the version before --to)'),
+    ),
+    to: Options.integer('to').pipe(
+      Options.optional,
+      Options.withDescription('Newer version number (default: latest; a pinned id@n reference also sets it)'),
+    ),
+    text: Options.boolean('text').pipe(
+      Options.withDescription('Compare visible text instead of HTML source'),
+    ),
+    ref: Args.text({ name: 'id' }).pipe(
+      Args.withDescription('Document ID, id@n, or dossier URL'),
+    ),
+  },
+  ({ from, to, text, ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const parsed = parseRef(ref, runtime.apiUrl)
+      const fromVersion = Option.getOrUndefined(from)
+      const explicitToVersion = Option.getOrUndefined(to)
+      if (fromVersion !== undefined && fromVersion < 1) {
+        throw new CliError('--from must be a positive integer', ExitCode.Usage)
+      }
+      if (explicitToVersion !== undefined && explicitToVersion < 1) {
+        throw new CliError('--to must be a positive integer', ExitCode.Usage)
+      }
+      if (
+        parsed.version !== undefined &&
+        explicitToVersion !== undefined &&
+        parsed.version !== explicitToVersion
+      ) {
+        throw new CliError(
+          'reference version conflicts with --to',
+          ExitCode.Usage,
+        )
+      }
+      const toVersion = explicitToVersion ?? parsed.version
+      const query = new URLSearchParams()
+      if (fromVersion !== undefined) query.set('from', String(fromVersion))
+      if (toVersion !== undefined) query.set('to', String(toVersion))
+      if (text) query.set('mode', 'text')
+      const suffix = query.size === 0 ? '' : `?${query}`
+
+      let response: DiffResponseType
+      try {
+        response = decodeDiffResponse(
+          await dossierJson<unknown>(
+            `/api/documents/${parsed.id}/diff${suffix}`,
+            { apiUrl: runtime.apiUrl, apiKey: runtime.apiKey },
+          ),
+        )
+      } catch (error) {
+        if (errorStatus(error instanceof CliError ? error.details : error) === 413) {
+          throw new CliError(
+            `diff is too large; fetch both versions with dossier fetch ${parsed.id}@<version> -o <file> and compare them locally`,
+            ExitCode.Failure,
+            error,
+          )
+        }
+        throw error
+      }
+      if (response.documentId !== parsed.id) {
+        throw new CliError('server returned a diff for the wrong document')
+      }
+      if (runtime.json) {
+        printJson(response)
+      } else if (!runtime.quiet) {
+        const terminal = Boolean(process.stdout.isTTY)
+        process.stdout.write(
+          formatUnifiedDiff(
+            response,
+            terminal && !Object.hasOwn(process.env, 'NO_COLOR'),
+            terminal,
+          ),
+        )
+        if (response.hunks.length === 0) {
+          process.stderr.write(
+            `dossier: v${response.from.versionNumber} and v${response.to.versionNumber} are identical\n`,
+          )
+        }
+      }
+    }),
+).pipe(
+  Command.withDescription(
+    'Print a unified diff (defaults to the previous and latest versions)',
+  ),
+)
+
 const listCommand = Command.make(
   'list',
   {
@@ -1323,6 +1629,145 @@ const enableCommand = Command.make(
     }),
 ).pipe(Command.withDescription('Enable document serving'))
 
+const workspaceMembersCommand = Command.make('members', {}, () =>
+  withGlobals(async (globals) => {
+    const runtime = await runtimeConfig(globals)
+    printWorkspace(await workspaceData(runtime), runtime, true)
+  }),
+).pipe(Command.withDescription('List workspace members'))
+
+const workspaceAllowCommand = Command.make(
+  'allow',
+  {
+    role: Options.choice('role', ['admin', 'member']).pipe(Options.optional),
+    value: Args.text({ name: 'email-or-domain' }),
+  },
+  ({ role, value }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const parsed = allowlistValue(value)
+      const result = await workspaceMutation(
+        runtime,
+        '/api/workspace/allowlist',
+        'POST',
+        {
+          ...parsed,
+          role: Option.getOrUndefined(role) ?? 'member',
+        },
+      )
+      printWorkspaceMutation(result, runtime)
+    }),
+).pipe(Command.withDescription('Allow an email address or @domain to sign in'))
+
+const workspaceDisallowCommand = Command.make(
+  'disallow',
+  { value: Args.text({ name: 'email-or-domain' }) },
+  ({ value }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const parsed = allowlistValue(value)
+      const workspace = await workspaceData(runtime)
+      const entry = workspace.allowlist.find(
+        (candidate) =>
+          candidate.kind === parsed.kind && candidate.value === parsed.value,
+      )
+      if (!entry) {
+        throw new CliError(
+          `${parsed.kind === 'domain' ? '@' : ''}${parsed.value} is not in this workspace's allowlist`,
+        )
+      }
+      const result = await workspaceMutation(
+        runtime,
+        `/api/workspace/allowlist/${encodeURIComponent(entry.id)}`,
+        'DELETE',
+      )
+      printWorkspaceMutation(result, runtime)
+    }),
+).pipe(Command.withDescription('Remove an email address or @domain from the allowlist'))
+
+const workspacePromoteCommand = Command.make(
+  'promote',
+  { email: Args.text({ name: 'email' }) },
+  ({ email }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const member = findWorkspaceMember(await workspaceData(runtime), email)
+      const result = await workspaceMutation(
+        runtime,
+        `/api/workspace/members/${encodeURIComponent(member.accountId)}`,
+        'POST',
+        { role: 'admin' },
+      )
+      printWorkspaceMutation(result, runtime)
+    }),
+).pipe(Command.withDescription('Promote a workspace member to admin'))
+
+const workspaceRemoveCommand = Command.make(
+  'remove',
+  { email: Args.text({ name: 'email' }) },
+  ({ email }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const member = findWorkspaceMember(await workspaceData(runtime), email)
+      const result = await workspaceMutation(
+        runtime,
+        `/api/workspace/members/${encodeURIComponent(member.accountId)}`,
+        'DELETE',
+      )
+      printWorkspaceMutation(result, runtime)
+    }),
+).pipe(Command.withDescription('Remove a member from the workspace'))
+
+const workspaceCommand = Command.make('workspace', {}, () =>
+  withGlobals(async (globals) => {
+    const runtime = await runtimeConfig(globals)
+    printWorkspace(await workspaceData(runtime), runtime)
+  }),
+).pipe(
+  Command.withDescription('Manage workspace members and the sign-in allowlist'),
+  Command.withSubcommands([
+    workspaceMembersCommand,
+    workspaceAllowCommand,
+    workspaceDisallowCommand,
+    workspacePromoteCommand,
+    workspaceRemoveCommand,
+  ]),
+)
+
+const setupCommand = Command.make('setup', {}, () =>
+  withGlobals(async (globals) => {
+    const runtime = await runtimeConfig(globals)
+    const pipedKey =
+      runtime.apiKey || process.stdin.isTTY ? undefined : (await readStdin()).trim()
+    const bootstrapKey =
+      process.env.BOOTSTRAP_API_KEY?.trim() || runtime.apiKey || pipedKey
+    if (!bootstrapKey) {
+      throw new CliError(
+        'bootstrap key is required through BOOTSTRAP_API_KEY, DOSSIER_API_KEY, stored credentials, or stdin',
+        ExitCode.Auth,
+      )
+    }
+    const result = await dossierJson<Record<string, unknown>>(
+      '/api/setup',
+      { apiUrl: runtime.apiUrl, apiKey: bootstrapKey },
+      { method: 'POST' },
+    )
+    if (runtime.json) printJson(result)
+    else if (!runtime.quiet) {
+      const workspaceSlug = result.workspaceSlug
+      process.stdout.write(
+        typeof workspaceSlug === 'string'
+          ? `Seeded workspace ${workspaceSlug}.\n`
+          : 'Deployment setup complete.\n',
+      )
+    }
+  }),
+).pipe(
+  Command.withDescription(
+    'Call the protected deployment bootstrap endpoint (operators only)',
+  ),
+)
+
 const assetsPushCommand = Command.make(
   'push',
   {
@@ -1421,6 +1866,7 @@ const dossierCommand = rootCommand.pipe(
     whoamiCommand,
     uploadCommand,
     fetchCommand,
+    diffCommand,
     listCommand,
     treeCommand,
     moveCommand,
@@ -1431,7 +1877,9 @@ const dossierCommand = rootCommand.pipe(
     restoreCommand,
     disableCommand,
     enableCommand,
+    workspaceCommand,
     assetsCommand,
+    setupCommand,
   ]),
 )
 
@@ -1454,48 +1902,129 @@ interface NormalizedArguments {
   readonly health: boolean
 }
 
-function optionsBeforeArguments(command: readonly string[]): string[] {
-  const [name, ...argumentsAndOptions] = command
-  const nestedCommand =
-    name === 'assets' && argumentsAndOptions[0]
-      ? `${name} ${argumentsAndOptions[0]}`
-      : undefined
-  const commandName = nestedCommand ?? name ?? ''
-  const commandPrefix = nestedCommand
-    ? [name!, argumentsAndOptions[0]!]
-    : [name!]
-  const commandArguments = nestedCommand
-    ? argumentsAndOptions.slice(1)
-    : argumentsAndOptions
-  const valuedByCommand: Record<string, ReadonlySet<string>> = {
-    upload: new Set([
-      '--parent',
-      '--kind',
-      '--visibility',
-      '--share',
-      '--description',
-      '--doc',
-    ]),
-    fetch: new Set(['--version', '--output', '-o']),
-    list: new Set(['--parent']),
-    move: new Set(['--parent']),
-    share: new Set(['--add', '--remove']),
-    restore: new Set(['--batch']),
-    'assets push': new Set(['--slug']),
+const nestedCommands: Readonly<Record<string, ReadonlySet<string>>> = {
+  auth: new Set(['login', 'set', 'logout']),
+  assets: new Set(['push', 'list', 'delete']),
+  workspace: new Set(['members', 'allow', 'disallow', 'promote', 'remove']),
+}
+
+const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
+  upload: new Set([
+    '--parent',
+    '--kind',
+    '--visibility',
+    '--share',
+    '--description',
+    '--doc',
+  ]),
+  fetch: new Set(['--version', '--output', '-o']),
+  diff: new Set(['--from', '--to']),
+  list: new Set(['--parent']),
+  move: new Set(['--parent']),
+  share: new Set(['--add', '--remove']),
+  restore: new Set(['--batch']),
+  'assets push': new Set(['--slug']),
+  'workspace allow': new Set(['--role']),
+}
+
+const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
+  upload: new Set(['--new']),
+  diff: new Set(['--text']),
+  list: new Set(['--all', '--tree', '--trash']),
+  delete: new Set(['--force']),
+}
+
+function isGlobalBoolean(argument: string): boolean {
+  return argument === '--json' || argument === '--quiet' || argument === '-q'
+}
+
+function detectCommand(rest: readonly string[]): string {
+  let root: string | undefined
+  for (let index = 0; index < rest.length; index += 1) {
+    const argument = rest[index]!
+    if (argument === '--') break
+    if (argument === '--api-url') {
+      index += 1
+      continue
+    }
+    if (argument.startsWith('--api-url=') || isGlobalBoolean(argument)) {
+      continue
+    }
+    if (argument.startsWith('-')) continue
+    if (!root) {
+      root = argument
+      if (!nestedCommands[root]) return root
+      continue
+    }
+    if (nestedCommands[root]?.has(argument)) return `${root} ${argument}`
+    return root
   }
-  const booleanByCommand: Record<string, ReadonlySet<string>> = {
-    upload: new Set(['--new']),
-    list: new Set(['--all', '--tree', '--trash']),
-    delete: new Set(['--force']),
+  return root ?? ''
+}
+
+function extractGlobals(
+  rest: readonly string[],
+  commandName: string,
+): { readonly globals: string[]; readonly command: string[]; readonly json: boolean } {
+  const globals: string[] = []
+  const command: string[] = []
+  const valued = valuedOptions[commandName]
+  let json = false
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const argument = rest[index]!
+    if (argument === '--') {
+      command.push(...rest.slice(index))
+      break
+    }
+    const equalsName = argument.includes('=')
+      ? argument.slice(0, argument.indexOf('='))
+      : argument
+    if (valued?.has(equalsName)) {
+      command.push(argument)
+      if (!argument.includes('=') && index + 1 < rest.length) {
+        command.push(rest[++index]!)
+      }
+      continue
+    }
+    if (argument === '--api-url') {
+      globals.push(argument)
+      if (index + 1 < rest.length) globals.push(rest[++index]!)
+      continue
+    }
+    if (argument.startsWith('--api-url=')) {
+      globals.push(argument)
+      continue
+    }
+    if (isGlobalBoolean(argument)) {
+      globals.push(argument)
+      if (argument === '--json') json = true
+      continue
+    }
+    command.push(argument)
   }
-  const valued = valuedByCommand[commandName]
-  const boolean = booleanByCommand[commandName]
+  return { globals, command, json }
+}
+
+function optionsBeforeArguments(
+  command: readonly string[],
+  commandName: string,
+): string[] {
+  const prefixLength = commandName.includes(' ') ? 2 : commandName ? 1 : 0
+  const commandPrefix = command.slice(0, prefixLength)
+  const commandArguments = command.slice(prefixLength)
+  const valued = valuedOptions[commandName]
+  const boolean = booleanOptions[commandName]
   if (!valued && !boolean) return [...command]
 
   const options: string[] = []
   const arguments_: string[] = []
   for (let index = 0; index < commandArguments.length; index += 1) {
     const argument = commandArguments[index]!
+    if (argument === '--') {
+      arguments_.push(...commandArguments.slice(index))
+      break
+    }
     const equalsName = argument.includes('=')
       ? argument.slice(0, argument.indexOf('='))
       : argument
@@ -1518,37 +2047,12 @@ export function normalizeGlobalOptions(
 ): NormalizedArguments {
   const prefix = argv.slice(0, 2)
   const rest = argv.slice(2)
-  const globals: string[] = []
-  const command: string[] = []
-  let json = false
-
-  for (let index = 0; index < rest.length; index += 1) {
-    const argument = rest[index]!
-    if (argument === '--api-url') {
-      globals.push(argument)
-      if (index + 1 < rest.length) globals.push(rest[++index]!)
-      continue
-    }
-    if (argument.startsWith('--api-url=')) {
-      globals.push(argument)
-      continue
-    }
-    if (argument === '--json') {
-      globals.push(argument)
-      json = true
-      continue
-    }
-    if (argument === '--quiet' || argument === '-q') {
-      globals.push(argument)
-      continue
-    }
-    command.push(argument)
-  }
-
-  const orderedCommand = optionsBeforeArguments(command)
+  const commandName = detectCommand(rest)
+  const extracted = extractGlobals(rest, commandName)
+  const orderedCommand = optionsBeforeArguments(extracted.command, commandName)
   return {
-    args: [...prefix, ...globals, ...orderedCommand],
-    json,
+    args: [...prefix, ...extracted.globals, ...orderedCommand],
+    json: extracted.json,
     health: orderedCommand[0] === 'health',
   }
 }
@@ -1610,7 +2114,15 @@ export async function runCli(
 }
 
 const entry = process.argv[1]
-if (entry && import.meta.url === pathToFileURL(entry).href) {
+let entryUrl: string | undefined
+if (entry) {
+  try {
+    entryUrl = pathToFileURL(await realpath(entry)).href
+  } catch {
+    entryUrl = pathToFileURL(resolve(entry)).href
+  }
+}
+if (entryUrl === import.meta.url) {
   runCli().then(
     (code) => {
       process.exitCode = code

@@ -4,6 +4,7 @@ import {
   DocumentPatch,
   DossierApi,
   ShareDelta,
+  type DiffMode,
   ShareReplacement,
   isDocumentEditor,
   type DocumentEditor,
@@ -22,6 +23,8 @@ import {
   Assets,
   CoreServicesLive,
   Db,
+  Diff,
+  DiffTooLarge,
   Documents,
   DossierError,
   Ids,
@@ -133,6 +136,49 @@ function parseForce(
   return Effect.succeed(true)
 }
 
+function parseDiffVersion(
+  value: string | undefined,
+  name: 'from' | 'to',
+): Effect.Effect<number | undefined, DossierError> {
+  if (value === undefined) return Effect.succeed(undefined)
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    return Effect.fail(
+      new DossierError({
+        code: 'policy_rejected',
+        message: `${name} must be a positive integer version number.`,
+      }),
+    )
+  }
+  return Effect.succeed(parsed)
+}
+
+function parseDiffMode(
+  value: string | undefined,
+): Effect.Effect<DiffMode, DossierError> {
+  if (value === undefined || value === 'html') return Effect.succeed('html')
+  if (value === 'text') return Effect.succeed('text')
+  return Effect.fail(
+    new DossierError({
+      code: 'policy_rejected',
+      message: 'mode must be html or text.',
+    }),
+  )
+}
+
+function diffTooLargeResponse(
+  error: DiffTooLarge,
+): HttpServerResponse.HttpServerResponse {
+  return HttpServerResponse.unsafeJson(
+    {
+      ok: false,
+      code: 'diff_too_large',
+      message: error.message,
+    },
+    { status: 413, headers: { 'cache-control': 'no-store' } },
+  )
+}
+
 const UploadsLive = HttpApiBuilder.group(DossierApi, 'uploads', (handlers) =>
   handlers.handleRaw('publish', ({ request }) =>
     withApiErrors(
@@ -218,6 +264,35 @@ const DocumentsLive = HttpApiBuilder.group(
             const documents = yield* Documents
             const result = yield* documents.get(path.id, state.principal)
             return jsonServerResponse({ ok: true, ...result })
+          }),
+        ),
+      )
+      .handleRaw('diff', ({ path, urlParams }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const state = yield* ApiRequest
+            const diffs = yield* Diff
+            const from = yield* parseDiffVersion(urlParams.from, 'from')
+            const to = yield* parseDiffVersion(urlParams.to, 'to')
+            const mode = yield* parseDiffMode(urlParams.mode)
+            const result = yield* diffs
+              .compare(
+                path.id,
+                {
+                  ...(from === undefined ? {} : { from }),
+                  ...(to === undefined ? {} : { to }),
+                  mode,
+                },
+                state.principal,
+              )
+              .pipe(Effect.either)
+            if (result._tag === 'Left') {
+              if (result.left instanceof DiffTooLarge) {
+                return diffTooLargeResponse(result.left)
+              }
+              return yield* Effect.fail(result.left)
+            }
+            return jsonServerResponse(result.right)
           }),
         ),
       )

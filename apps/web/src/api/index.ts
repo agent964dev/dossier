@@ -1,4 +1,5 @@
 import { handleSystemRequest } from './health'
+import { handleSetupRequest } from './setup'
 import { handleProtectedApiRequest } from './surfaces'
 
 export async function handleApiRequest(
@@ -8,6 +9,9 @@ export async function handleApiRequest(
   const pathname = new URL(request.url).pathname
   if (pathname === '/api/healthz' || pathname === '/api/policy/check') {
     return handleSystemRequest(request, env)
+  }
+  if (pathname === '/api/setup') {
+    return handleSetupRequest(request, env)
   }
   return handleProtectedApiRequest(request, env)
 }

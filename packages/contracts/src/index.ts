@@ -103,6 +103,46 @@ export const Version = Schema.Struct({
 })
 export type Version = typeof Version.Type
 
+export const DiffMode = Schema.Literal('html', 'text')
+export type DiffMode = typeof DiffMode.Type
+
+export const DiffVersion = Schema.Struct({
+  versionNumber: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  createdAt: Schema.String,
+  fileSize: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+})
+export type DiffVersion = typeof DiffVersion.Type
+
+export const DiffLine = Schema.Struct({
+  op: Schema.Literal(' ', '+', '-'),
+  text: Schema.String,
+  noNewline: Schema.optional(Schema.Boolean),
+})
+export type DiffLine = typeof DiffLine.Type
+
+export const DiffHunk = Schema.Struct({
+  oldStart: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  oldLines: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  newStart: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  newLines: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  lines: Schema.Array(DiffLine),
+})
+export type DiffHunk = typeof DiffHunk.Type
+
+export const DiffResponse = Schema.Struct({
+  ok: Schema.Literal(true),
+  documentId: DocumentId,
+  from: DiffVersion,
+  to: DiffVersion,
+  mode: DiffMode,
+  hunks: Schema.Array(DiffHunk),
+  stats: Schema.Struct({
+    added: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+    removed: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  }),
+})
+export type DiffResponse = typeof DiffResponse.Type
+
 export const UploadMetadata = Schema.Struct({
   userAgent: OptionalNullableString,
   cliVersion: OptionalNullableString,
@@ -363,6 +403,8 @@ export const IdempotencyConflictError = errorSchema('idempotency_conflict')
 export const BodyTooLargeError = errorSchema('body_too_large')
 export const PolicyRejectedError = errorSchema('policy_rejected')
 export const RateLimitedError = errorSchema('rate_limited')
+export const DiffTooLargeError = errorSchema('diff_too_large')
+export type DiffTooLargeError = typeof DiffTooLargeError.Type
 
 export const ApiError = Schema.Union(
   UnauthenticatedError,
@@ -447,6 +489,19 @@ export const DocumentsApiGroup = HttpApiGroup.make('documents')
     HttpApiEndpoint.get('tree', '/api/documents/:id/tree')
       .setPath(DocumentPath)
       .addSuccess(TreeResponse),
+  )
+  .add(
+    HttpApiEndpoint.get('diff', '/api/documents/:id/diff')
+      .setPath(DocumentPath)
+      .setUrlParams(
+        Schema.Struct({
+          from: OptionalString,
+          to: OptionalString,
+          mode: OptionalString,
+        }),
+      )
+      .addSuccess(DiffResponse)
+      .addError(DiffTooLargeError, { status: 413 }),
   )
   .add(
     HttpApiEndpoint.patch('patch', '/api/documents/:id')

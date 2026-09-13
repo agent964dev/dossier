@@ -23,11 +23,13 @@
         "@tanstack/react-start": "1.168.52",
         "class-variance-authority": "0.7.1",
         "clsx": "2.1.1",
+        "diff": "9.0.0",
         "drizzle-orm": "0.45.2",
         "effect": "3.22.2",
         "jose": "6.2.12",
         "lucide-react": "1.45.0",
         "nanoid": "6.0.1",
+        "parse5": "8.0.1",
         "react": "19.3.0",
         "react-dom": "19.3.0",
         "tailwind-merge": "3.6.0",
@@ -48,18 +50,21 @@
     },
     "packages/cli": {
       "name": "@agent964/dossier",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "bin": {
         "dossier": "dist/index.js",
       },
       "dependencies": {
-        "@dossier/contracts": "workspace:*",
-        "@dossier/policy": "workspace:*",
         "@effect/cli": "0.77.1",
         "@effect/platform": "0.97.2",
         "@effect/platform-bun": "0.91.2",
         "@effect/platform-node": "0.108.2",
+        "diff": "9.0.0",
         "effect": "3.22.2",
+      },
+      "devDependencies": {
+        "@dossier/contracts": "workspace:*",
+        "@dossier/policy": "workspace:*",
       },
     },
     "packages/contracts": {
@@ -573,7 +578,7 @@
 
     "detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
 
-    "diff": ["diff@8.0.4", "", {}, "sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw=="],
+    "diff": ["diff@9.0.0", "", {}, "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw=="],
 
     "drizzle-kit": ["drizzle-kit@0.31.10", "", { "dependencies": { "@drizzle-team/brocli": "^0.10.2", "@esbuild-kit/esm-loader": "^2.5.5", "esbuild": "^0.25.4", "tsx": "^4.21.0" }, "bin": { "drizzle-kit": "bin.cjs" } }, "sha512-7OZcmQUrdGI+DUNNsKBn1aW8qSoKuTH7d0mYgSP8bAzdFzKoovxEFnoGQp2dVs82EOJeYycqRtciopszwUf8bw=="],
 
@@ -848,6 +853,8 @@
     "@tanstack/router-generator/zod": ["zod@4.6.2", "", {}, "sha512-lh5RCAGFa1Cm2hjtNwLQhSs/AsqdWnTQaBER9fEwN/88pSh7KOtJavtBx/0VlkN/uFd61SwYmljLMDAsHlvzBQ=="],
 
     "@tanstack/router-plugin/zod": ["zod@4.6.2", "", {}, "sha512-lh5RCAGFa1Cm2hjtNwLQhSs/AsqdWnTQaBER9fEwN/88pSh7KOtJavtBx/0VlkN/uFd61SwYmljLMDAsHlvzBQ=="],
+
+    "@tanstack/router-utils/diff": ["diff@8.0.4", "", {}, "sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw=="],
 
     "@tanstack/start-plugin-core/zod": ["zod@4.6.2", "", {}, "sha512-lh5RCAGFa1Cm2hjtNwLQhSs/AsqdWnTQaBER9fEwN/88pSh7KOtJavtBx/0VlkN/uFd61SwYmljLMDAsHlvzBQ=="],
 

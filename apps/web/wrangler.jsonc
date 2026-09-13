@@ -12,6 +12,9 @@
   "observability": {
     "enabled": true
   },
+  "assets": {
+    "binding": "ASSETS"
+  },
   "vars": {
     "PUBLIC_BASE_URL": "https://dossier.agent964.com",
     "SEED_WORKSPACE": "agent964:agent964.com",
@@ -28,7 +31,7 @@
     {
       "binding": "DB",
       "database_name": "dossier-production",
-      "database_id": "11111111-1111-1111-1111-111111111111",
+      "database_id": "72766ce3-44da-4bdd-a025-90a6ebe1e3e0",
       "migrations_dir": "drizzle"
     }
   ],

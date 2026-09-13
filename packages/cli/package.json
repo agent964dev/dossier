@@ -1,25 +1,7 @@
 {
   "name": "@agent964/dossier",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
-  "scripts": {
-    "build": "bun build src/index.ts --target=node --outfile dist/index.js",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@dossier/contracts": "workspace:*",
-    "@dossier/policy": "workspace:*",
-    "@effect/cli": "0.77.1",
-    "@effect/platform": "0.97.2",
-    "@effect/platform-bun": "0.91.2",
-    "@effect/platform-node": "0.108.2",
-    "effect": "3.22.2"
-  },
   "bin": {
     "dossier": "dist/index.js"
   },
@@ -27,7 +9,39 @@
     "dist",
     "skills"
   ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./skills/dossier/SKILL.md": "./skills/dossier/SKILL.md"
+  },
   "engines": {
     "node": ">=22.12"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agent964/dossier.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/agent964/dossier#readme",
+  "license": "MIT",
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --outfile dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "release": "bun run build && npm publish"
+  },
+  "dependencies": {
+    "@effect/cli": "0.77.1",
+    "@effect/platform": "0.97.2",
+    "@effect/platform-bun": "0.91.2",
+    "@effect/platform-node": "0.108.2",
+    "diff": "9.0.0",
+    "effect": "3.22.2"
+  },
+  "devDependencies": {
+    "@dossier/contracts": "workspace:*",
+    "@dossier/policy": "workspace:*"
   }
 }

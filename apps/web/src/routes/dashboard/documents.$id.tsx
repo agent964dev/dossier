@@ -6,6 +6,7 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
+  GitCompare,
   Home,
   RotateCcw,
 } from 'lucide-react'
@@ -382,7 +383,7 @@ function DocumentDetailPage() {
 
           {versions.length === 0 ? (
             <p className="rounded-xl border border-dashed border-border bg-card/40 px-4 py-8 text-center text-sm text-neutral-500">
-              Version history is visible to the document’s author.
+              Version history is available to the document’s editors.
             </p>
           ) : (
             <ul className="grid gap-2">
@@ -428,6 +429,44 @@ function DocumentDetailPage() {
                     ) : null}
 
                     <span className="ml-auto flex items-center gap-1">
+                      {/*
+                        Phase 4: every version row opens the diff page already
+                        pointed at the comparison its reader wants — the current
+                        version for an older row, the previous one for the
+                        current row.
+                      */}
+                      {versions.length > 1 ? (
+                        <Button asChild variant="ghost" size="sm">
+                          <Link
+                            to="/dashboard/documents/$id/diff"
+                            params={{ id: document.id }}
+                            search={
+                              index === 0
+                                ? {
+                                    from: versions[1].versionNumber,
+                                    to: version.versionNumber,
+                                  }
+                                : {
+                                    from: version.versionNumber,
+                                    to: versions[0].versionNumber,
+                                  }
+                            }
+                            title={
+                              index === 0
+                                ? 'Compare with the previous version'
+                                : 'Compare with the current version'
+                            }
+                            aria-label={
+                              index === 0
+                                ? `Compare v${version.versionNumber} with the previous version`
+                                : `Compare v${version.versionNumber} with the current version`
+                            }
+                          >
+                            <GitCompare aria-hidden />
+                            Compare
+                          </Link>
+                        </Button>
+                      ) : null}
                       <Button asChild variant="ghost" size="sm">
                         <a href={version.url} target="_blank" rel="noreferrer">
                           Open

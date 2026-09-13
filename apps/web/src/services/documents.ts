@@ -7,6 +7,7 @@ import type {
   DocumentView,
   Version,
 } from '@dossier/contracts'
+import { isDocumentEditor } from '@dossier/contracts'
 import { Context, Effect, Layer } from 'effect'
 
 import {
@@ -383,7 +384,7 @@ export const DocumentsLive = Layer.effect(
       Effect.gen(function* () {
         const document = yield* loadView(documentId, principal)
         const versions =
-          document.authorAccountId === principal.accountId
+          isDocumentEditor(document)
             ? yield* Effect.tryPromise({
                 try: () => loadVersions(db.raw, documentId, env.PUBLIC_BASE_URL),
                 catch: (cause) =>

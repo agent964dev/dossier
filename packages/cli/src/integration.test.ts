@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -48,6 +48,38 @@ let retryFailureSeen = false
 let redirectWasFollowed = false
 let uploadRequests = 0
 let assetRequests = 0
+let lastDiffQuery = ''
+const workspaceMembers = [
+  {
+    accountId: 'acct_test',
+    name: 'Test User',
+    email: 'test@example.com',
+    role: 'admin' as const,
+    kind: 'user',
+    disabled: false,
+  },
+  {
+    accountId: 'acct_member',
+    name: 'Member User',
+    email: 'member@example.com',
+    role: 'member' as const,
+    kind: 'user',
+    disabled: false,
+  },
+]
+const workspaceAllowlist: Array<{
+  id: string
+  kind: 'email' | 'domain'
+  value: string
+  role: 'admin' | 'member'
+}> = [
+  {
+    id: 'allow_domain',
+    kind: 'domain',
+    value: 'example.com',
+    role: 'member',
+  },
+]
 
 async function bodyJson(
   request: IncomingMessage,
@@ -197,6 +229,25 @@ beforeAll(async () => {
       redirectWasFollowed = true
       response.setHeader('content-type', 'application/json')
       response.end(JSON.stringify({ ok: true }))
+      return
+    }
+
+    if (url.pathname === '/api/setup' && request.method === 'POST') {
+      response.setHeader('content-type', 'application/json')
+      if (request.headers.authorization !== 'Bearer ds_bootstrap') {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      response.end(
+        JSON.stringify({
+          ok: true,
+          workspaceId: 'workspace_test',
+          workspaceSlug: 'test',
+          bootstrapAccountId: 'acct_bootstrap',
+          bootstrapApiKeyId: 'key_bootstrap',
+        }),
+      )
       return
     }
 
@@ -431,6 +482,167 @@ beforeAll(async () => {
         }),
       )
       return
+    }
+
+    const diffApi = /^\/api\/documents\/([a-z0-9]{12})\/diff$/.exec(
+      url.pathname,
+    )
+    if (diffApi && request.method === 'GET') {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const id = diffApi[1]!
+      if (id === 'largediff001') {
+        response.statusCode = 413
+        response.end(
+          JSON.stringify({
+            ok: false,
+            code: 'diff_too_large',
+            message: 'Diff exceeds the response limit.',
+          }),
+        )
+        return
+      }
+      const stored = documents.get(id)
+      if (!stored) {
+        response.statusCode = 404
+        response.end(JSON.stringify({ ok: false, code: 'not_found' }))
+        return
+      }
+      lastDiffQuery = url.search
+      const from = Number(
+        url.searchParams.get('from') ?? Math.max(1, stored.version - 1),
+      )
+      const to = Number(url.searchParams.get('to') ?? stored.version)
+      response.end(
+        JSON.stringify({
+          ok: true,
+          documentId: id,
+          from: {
+            versionNumber: from,
+            createdAt: '2026-09-12T00:00:00.000Z',
+            fileSize: 24,
+          },
+          to: {
+            versionNumber: to,
+            createdAt: '2026-09-12T00:01:00.000Z',
+            fileSize: 23,
+          },
+          mode: url.searchParams.get('mode') === 'text' ? 'text' : 'html',
+          hunks: from === to ? [] : [
+            {
+              oldStart: 1,
+              oldLines: 2,
+              newStart: 1,
+              newLines: 2,
+              lines: [
+                { op: ' ', text: '<main>' },
+                { op: '-', text: '<p>Before</p>' },
+                { op: '+', text: '<p>After</p>' },
+              ],
+            },
+          ],
+          stats: from === to ? { added: 0, removed: 0 } : { added: 1, removed: 1 },
+        }),
+      )
+      return
+    }
+
+    if (url.pathname === '/api/workspace') {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      if (request.method === 'GET') {
+        response.end(
+          JSON.stringify({
+            ok: true,
+            members: workspaceMembers,
+            allowlist: workspaceAllowlist,
+          }),
+        )
+        return
+      }
+    }
+
+    if (url.pathname === '/api/workspace/allowlist' && request.method === 'POST') {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const payload = await bodyJson(request)
+      workspaceAllowlist.push({
+        id: `allow_${workspaceAllowlist.length + 1}`,
+        kind: payload.kind === 'domain' ? 'domain' : 'email',
+        value: String(payload.value),
+        role: payload.role === 'admin' ? 'admin' : 'member',
+      })
+      response.end(
+        JSON.stringify({ ok: true, message: `${String(payload.value)} allowed.` }),
+      )
+      return
+    }
+
+    const workspaceAllowlistDelete =
+      /^\/api\/workspace\/allowlist\/([^/]+)$/.exec(url.pathname)
+    if (workspaceAllowlistDelete && request.method === 'DELETE') {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const index = workspaceAllowlist.findIndex(
+        (entry) => entry.id === decodeURIComponent(workspaceAllowlistDelete[1]!),
+      )
+      if (index < 0) {
+        response.statusCode = 404
+        response.end(JSON.stringify({ ok: false, code: 'not_found' }))
+        return
+      }
+      workspaceAllowlist.splice(index, 1)
+      response.end(JSON.stringify({ ok: true, message: 'Entry removed.' }))
+      return
+    }
+
+    const workspaceMember = /^\/api\/workspace\/members\/([^/]+)$/.exec(
+      url.pathname,
+    )
+    if (workspaceMember) {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const accountId = decodeURIComponent(workspaceMember[1]!)
+      const index = workspaceMembers.findIndex(
+        (member) => member.accountId === accountId,
+      )
+      if (index < 0) {
+        response.statusCode = 404
+        response.end(JSON.stringify({ ok: false, code: 'not_found' }))
+        return
+      }
+      if (request.method === 'POST') {
+        const payload = await bodyJson(request)
+        workspaceMembers[index]!.role =
+          payload.role === 'admin' ? 'admin' : 'member'
+        response.end(JSON.stringify({ ok: true, message: 'Role updated.' }))
+        return
+      }
+      if (request.method === 'DELETE') {
+        workspaceMembers.splice(index, 1)
+        response.end(JSON.stringify({ ok: true, message: 'Member removed.' }))
+        return
+      }
     }
 
     const documentApi =
@@ -742,10 +954,50 @@ describe('built CLI', () => {
     })
   })
 
+  it('runs when invoked through an npm-style bin symlink', async () => {
+    const home = await temporaryHome()
+    const executable = join(home, 'dossier')
+    await symlink(artifact, executable)
+    const result = await exec(executable, ['health', '--api-url', apiUrl, '--json'], {
+      env: { ...process.env, DOSSIER_HOME: home },
+    })
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      service: 'dossier',
+      version: '0.0.0',
+    })
+  })
+
+  it('calls the protected setup endpoint with a piped bootstrap key', async () => {
+    const result = await cli(
+      'node',
+      ['setup', '--api-url', apiUrl, '--json'],
+      { input: 'ds_bootstrap\n' },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      workspaceId: 'workspace_test',
+      workspaceSlug: 'test',
+      bootstrapAccountId: 'acct_bootstrap',
+      bootstrapApiKeyId: 'key_bootstrap',
+    })
+  })
+
   it('keeps health hidden from root help', async () => {
     const help = await cli('node', ['--help'])
     expect(help.exitCode).toBe(0)
     expect(help.stdout).not.toMatch(/- health/)
+  })
+
+  it('describes diff arguments and options in built-in help', async () => {
+    const help = await cli('node', ['diff', '--help'])
+    expect(help.exitCode).toBe(0)
+    expect(help.stdout).toContain('Document ID, id@n, or dossier URL')
+    expect(help.stdout).toContain('Older version number')
+    expect(help.stdout).toContain('Newer version number')
+    expect(help.stdout).toContain('Compare visible text instead of HTML source')
   })
 
   it('runs static upload validation before requiring credentials', async () => {
@@ -828,6 +1080,61 @@ describe('built CLI', () => {
       workspace: { id: 'ws_test', slug: 'test', kind: 'team', role: 'admin' },
       email: 'test@example.com',
     })
+  })
+
+  it('honors API URL precedence flag over env over config', async () => {
+    const home = await temporaryHome()
+    await writeFile(
+      join(home, 'config.json'),
+      `${JSON.stringify({ apiUrl })}\n`,
+      'utf8',
+    )
+    const configWins = await cli('node', ['health', '--json'], { home })
+    expect(configWins.exitCode).toBe(0)
+
+    await writeFile(join(home, 'config.json'), '{broken', 'utf8')
+    const envWins = await cli('node', ['health', '--json'], {
+      home,
+      env: { DOSSIER_API_URL: apiUrl },
+    })
+    expect(envWins.exitCode).toBe(0)
+
+    const flagWins = await cli(
+      'node',
+      ['--api-url', apiUrl, 'health', '--json'],
+      {
+        home,
+        env: { DOSSIER_API_URL: 'https://env.invalid' },
+      },
+    )
+    expect(flagWins.exitCode).toBe(0)
+  })
+
+  it('uses an environment key without reading lower-precedence credentials', async () => {
+    const home = await temporaryHome()
+    await writeFile(join(home, 'credentials.json'), '{broken', 'utf8')
+    const result = await cli(
+      'node',
+      ['whoami', '--api-url', apiUrl, '--json'],
+      { home, env: { DOSSIER_API_KEY: 'ds_integration' } },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(JSON.parse(result.stdout)).toMatchObject({ accountId: 'acct_test' })
+  })
+
+  it('accepts global flags around nested subcommands', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const before = await cli('node', ['--json', 'workspace', 'members'], {
+      home,
+    })
+    const after = await cli('node', ['workspace', 'members', '--json'], {
+      home,
+    })
+    expect(before.exitCode).toBe(0)
+    expect(after.exitCode).toBe(0)
+    expect(JSON.parse(before.stdout)).toEqual(JSON.parse(after.stdout))
   })
 
   it('pushes CSS using the basename slug and prints its URLs', async () => {
@@ -1035,6 +1342,95 @@ describe('built CLI', () => {
     expect(retryKeys[0]).toBe(retryKeys[1])
   })
 
+  it('prints a standard unified diff and exits zero when versions differ', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'diffdoc00001',
+      storedDocument('Diff Document.html', { version: 2 }),
+    )
+    const result = await cli(
+      'node',
+      ['diff', 'diffdoc00001', '--from', '1', '--to', '2'],
+      { home },
+    )
+    expect(result).toEqual({
+      stdout:
+        '--- a/diffdoc00001@1\n' +
+        '+++ b/diffdoc00001@2\n' +
+        '@@ -1,2 +1,2 @@\n' +
+        ' <main>\n' +
+        '-<p>Before</p>\n' +
+        '+<p>After</p>\n',
+      stderr: '',
+      exitCode: 0,
+    })
+    expect(result.stdout).not.toContain(`${String.fromCharCode(27)}[`)
+  })
+
+  it('explains an identical comparison while keeping patch headers', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'diffsame0001',
+      storedDocument('Identical Diff.html', { version: 2 }),
+    )
+    const result = await cli(
+      'node',
+      ['diff', 'diffsame0001', '--from', '2', '--to', '2'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(
+      '--- a/diffsame0001@2\n+++ b/diffsame0001@2\n',
+    )
+    expect(result.stderr).toBe('dossier: v2 and v2 are identical\n')
+  })
+
+  it('supports pinned diff URLs, text mode, and raw JSON output', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'diffjson0001',
+      storedDocument('Diff JSON.html', { version: 3 }),
+    )
+    const result = await cli(
+      'node',
+      [
+        '--json',
+        'diff',
+        `${apiUrl}/d/diffjson0001/v/3`,
+        '--from',
+        '1',
+        '--text',
+      ],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      documentId: 'diffjson0001',
+      from: { versionNumber: 1 },
+      to: { versionNumber: 3 },
+      mode: 'text',
+      stats: { added: 1, removed: 1 },
+    })
+    expect(lastDiffQuery).toContain('from=1')
+    expect(lastDiffQuery).toContain('to=3')
+    expect(lastDiffQuery).toContain('mode=text')
+  })
+
+  it('prints fetch guidance for an oversized diff', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const result = await cli('node', ['diff', 'largediff001'], { home })
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('dossier: diff is too large')
+    expect(result.stderr).toContain('dossier fetch largediff001@<version>')
+  })
+
   it('fetches a BOM fixture with exact byte equality', async () => {
     const home = await temporaryHome()
     await authenticate(home)
@@ -1182,7 +1578,13 @@ describe('built CLI', () => {
     documents.set('movedoc00001', storedDocument('Move Document.html'))
     const moved = await cli(
       'node',
-      ['move', 'movedoc00001', '--parent', 'movepar00001', '--json'],
+      [
+        'move',
+        'movedoc00001@1',
+        '--parent',
+        `${apiUrl}/d/movepar00001/v/1`,
+        '--json',
+      ],
       { home },
     )
     expect(moved.exitCode).toBe(0)
@@ -1243,6 +1645,71 @@ describe('built CLI', () => {
       effective: ['one@example.com', 'two@example.com'],
       accessSource: 'own',
     })
+  })
+
+  it('lists members and manages the workspace allowlist', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+
+    const listed = await cli('node', ['workspace', '--json'], { home })
+    expect(listed.exitCode).toBe(0)
+    expect(JSON.parse(listed.stdout)).toMatchObject({
+      members: expect.arrayContaining([
+        expect.objectContaining({ email: 'test@example.com' }),
+      ]),
+      allowlist: expect.arrayContaining([
+        expect.objectContaining({ value: 'example.com' }),
+      ]),
+    })
+
+    const allowed = await cli(
+      'node',
+      ['workspace', 'allow', '@outside.example', '--role', 'admin', '--json'],
+      { home },
+    )
+    expect(allowed.exitCode).toBe(0)
+    expect(workspaceAllowlist).toContainEqual(
+      expect.objectContaining({
+        kind: 'domain',
+        value: 'outside.example',
+        role: 'admin',
+      }),
+    )
+
+    const disallowed = await cli(
+      'node',
+      ['workspace', 'disallow', '@outside.example', '--json'],
+      { home },
+    )
+    expect(disallowed.exitCode).toBe(0)
+    expect(
+      workspaceAllowlist.some((entry) => entry.value === 'outside.example'),
+    ).toBe(false)
+  })
+
+  it('promotes and removes workspace members by email', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const promoted = await cli(
+      'node',
+      ['workspace', 'promote', 'member@example.com', '--json'],
+      { home },
+    )
+    expect(promoted.exitCode).toBe(0)
+    expect(
+      workspaceMembers.find((member) => member.email === 'member@example.com')
+        ?.role,
+    ).toBe('admin')
+
+    const removed = await cli(
+      'node',
+      ['workspace', 'remove', 'member@example.com', '--json'],
+      { home },
+    )
+    expect(removed.exitCode).toBe(0)
+    expect(
+      workspaceMembers.some((member) => member.email === 'member@example.com'),
+    ).toBe(false)
   })
 
   it('shows trash batch roots with root titles and authors', async () => {
@@ -1358,6 +1825,13 @@ describe('built CLI', () => {
     expect(result.exitCode).toBe(1)
     expect(result.stderr).toContain('redirects are not allowed')
     expect(redirectWasFollowed).toBe(false)
+  })
+
+  it('uses exit code 2 and the dossier prefix for command usage errors', async () => {
+    const result = await cli('node', ['diff', 'not-an-id'])
+    expect(result.exitCode).toBe(2)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toMatch(/^dossier: /)
   })
 
   it('rejects a foreign-origin document reference with exit code 2', async () => {

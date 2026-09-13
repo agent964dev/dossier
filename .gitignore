@@ -13,3 +13,6 @@ dist/
 
 # Local development bootstrap credential
 .dev-bootstrap-key.local
+
+# Local production bootstrap credential
+.prod-bootstrap-key.local

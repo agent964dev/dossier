@@ -97,4 +97,26 @@ describe('dossierFetch', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
+  it('preserves structured error codes for command-specific recovery', async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json(
+        { ok: false, code: 'diff_too_large', message: 'Diff exceeds limit.' },
+        { status: 413, statusText: 'Payload Too Large' },
+      ),
+    )
+    await expect(
+      dossierFetch('/api/documents/7k2m9x1qz3ab/diff', {
+        apiUrl: 'https://dossier.example',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CliError>>({
+        details: expect.objectContaining({
+          status: 413,
+          code: 'diff_too_large',
+        }),
+      }),
+    )
+  })
+
 })

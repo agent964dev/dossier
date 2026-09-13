@@ -16,6 +16,7 @@ import { Route as CliAuthRouteImport } from './routes/cli.auth'
 import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
 import { Route as DashboardTrashRouteImport } from './routes/dashboard/trash'
 import { Route as DashboardDocumentsIdRouteImport } from './routes/dashboard/documents.$id'
+import { Route as DashboardDocumentsIdDiffRouteImport } from './routes/dashboard/documents.$id_.diff'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -52,6 +53,12 @@ const DashboardDocumentsIdRoute = DashboardDocumentsIdRouteImport.update({
   path: '/dashboard/documents/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DashboardDocumentsIdDiffRoute =
+  DashboardDocumentsIdDiffRouteImport.update({
+    id: '/dashboard/documents/$id_/diff',
+    path: '/dashboard/documents/$id/diff',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -61,6 +68,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/trash': typeof DashboardTrashRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
+  '/dashboard/documents/$id/diff': typeof DashboardDocumentsIdDiffRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -70,6 +78,7 @@ export interface FileRoutesByTo {
   '/dashboard/trash': typeof DashboardTrashRoute
   '/dashboard': typeof DashboardIndexRoute
   '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
+  '/dashboard/documents/$id/diff': typeof DashboardDocumentsIdDiffRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -80,6 +89,7 @@ export interface FileRoutesById {
   '/dashboard/trash': typeof DashboardTrashRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
+  '/dashboard/documents/$id_/diff': typeof DashboardDocumentsIdDiffRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -91,6 +101,7 @@ export interface FileRouteTypes {
     | '/dashboard/trash'
     | '/dashboard/'
     | '/dashboard/documents/$id'
+    | '/dashboard/documents/$id/diff'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -100,6 +111,7 @@ export interface FileRouteTypes {
     | '/dashboard/trash'
     | '/dashboard'
     | '/dashboard/documents/$id'
+    | '/dashboard/documents/$id/diff'
   id:
     | '__root__'
     | '/'
@@ -109,6 +121,7 @@ export interface FileRouteTypes {
     | '/dashboard/trash'
     | '/dashboard/'
     | '/dashboard/documents/$id'
+    | '/dashboard/documents/$id_/diff'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -119,6 +132,7 @@ export interface RootRouteChildren {
   DashboardTrashRoute: typeof DashboardTrashRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
   DashboardDocumentsIdRoute: typeof DashboardDocumentsIdRoute
+  DashboardDocumentsIdDiffRoute: typeof DashboardDocumentsIdDiffRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -172,6 +186,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardDocumentsIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/dashboard/documents/$id_/diff': {
+      id: '/dashboard/documents/$id_/diff'
+      path: '/dashboard/documents/$id/diff'
+      fullPath: '/dashboard/documents/$id/diff'
+      preLoaderRoute: typeof DashboardDocumentsIdDiffRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -183,6 +204,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardTrashRoute: DashboardTrashRoute,
   DashboardIndexRoute: DashboardIndexRoute,
   DashboardDocumentsIdRoute: DashboardDocumentsIdRoute,
+  DashboardDocumentsIdDiffRoute: DashboardDocumentsIdDiffRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

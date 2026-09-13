@@ -12,6 +12,18 @@
 - `apps/web/src/services/assets.ts` + `apps/web/src/api/assets.ts`: POST/GET/DELETE `/api/assets`, `/a/:file` with MIME/CORS/CORP/nosniff and latest-vs-pinned cache headers; global slug reservation; `packages/policy/test/fixtures` (38 adversarial/accepted CSS+HTML fixtures); CLI `assets push|list|delete` with static CSS pre-check; `apps/web/browser/` Playwright render and embed harnesses with results JSON (Chromium 147, WebKit 26.4, both passed). 228 tests.
 - Open owner decision recorded in PLAN section 15: script-driven top-level navigation from a sandboxed document.
 
+## Phase 4 — committed on main (session 3, 2026-09-13)
+- Version diff: `GET /api/documents/:id/diff` (`apps/web/src/services/diff.ts`, editor-only and live-only, html and text modes via parse5, `diff_too_large` caps, `maxEditLength` CPU bound), dashboard `/dashboard/documents/$id/diff` (side/unified/auto, text toggle, hunk navigator), CLI `dossier diff` (unified output, colour on TTY only, terminal-control escaping).
+- CLI polish: global flags anywhere, precedence flag > env > config, exit codes, `auth login`, real help text, `docs/CLI.md`, final `skills/dossier/SKILL.md`; package.json is publishable (0.1.0, public, bin, files; workspace packages are devDependencies because `bun build` inlines them). Verified: `npm pack` + clean `npm install` + running the bin symlink works.
+- Ops: `POST /api/setup` (constant-time bootstrap-key check), `apps/web/scripts/setup.sh`, `docs/RUNBOOK.md` (A operator, B owner, C day-2).
+
+## Production (created 2026-09-13 by the orchestrator)
+- Worker `dossier` at https://dossier.agent964.com (custom domain, `workers_dev: false`), account Agent964.
+- D1 `dossier-production` id `72766ce3-44da-4bdd-a025-90a6ebe1e3e0` (EEUR), migrations 0000-0002 applied. R2 bucket `dossier-production`. Rate limiter namespace 1001.
+- Secrets `SESSION_SECRET` and `BOOTSTRAP_API_KEY` set. The bootstrap key value is in `.prod-bootstrap-key.local` at the repo root (gitignored, mode 0600). Seed ran twice via the setup script; idempotent.
+- Smoke (CLI against production with the bootstrap key): whoami, upload x2, fetch byte-equal, diff, `/d/:id` sandbox CSP + no-store, hub 200, dashboard diff route 307 to sign-in, delete --force. Same against env.dev.
+- Not done, owner-only (PLAN 14 / RUNBOOK B): npm login + `bun run release`, first browser sign-in, mint owner key, import the playground, retire postplan drafts.
+
 ## Historical note: partial phase 2 core at start of session 2 (now merged)
 `git status` shows ~23 changed files. What landed and passes:
 - `apps/web/src/services/access.ts` — recursive-CTE access predicate (public/team/private/invites, node-only availability); `serving.ts`, `documents.ts` already call it
@@ -27,7 +39,7 @@ Not started in phase 2: API route handlers for tree/patch/shares/move (`apps/web
 
 ## Environment
 - Dev deploy: https://dossier-dev.tech964.workers.dev (env.dev; D1 `dossier-development`, R2 `dossier-development`); bootstrap key in `.dev-bootstrap-key.local` (gitignored, mode 0600); secrets already set.
-- Production resources and the top-level env are NOT created/deployed; that is phase 4.
+- Production is live; see the Production section above.
 - Workflow shape and model seats: `docs/WORKFLOW.md`. Owner decisions: `docs/PLAN.md` section 1.
 
 ## Lessons from session 1 (bake into prompts)

@@ -41,7 +41,7 @@ Generate a migration after changing `src/db/schema.ts`:
 bun run --cwd apps/web db:generate
 ```
 
-Apply migrations to the local dev database:
+Apply migrations to the local development database:
 
 ```sh
 cd apps/web
@@ -71,68 +71,57 @@ CLOUDFLARE_ENV=dev bunx vite build
 bunx wrangler deploy --env dev
 ```
 
-Do not deploy the top-level Wrangler environment unless a production deployment is explicitly authorised.
-
-## Request routing
-
-`src/worker.ts` routes `/api/*` to the merged Effect API, `/d/*` to document serving, `/auth/*` to the web authentication handler, and all remaining requests to TanStack Start. Phase-one API and serving responses use `Cache-Control: no-store`.
+Do not deploy the top-level Wrangler environment unless the production runbook has explicitly assigned that step.
 
 ## Bootstrap a fresh development deployment
 
-Run this only against `env.dev`. First apply migrations and inspect the development Worker's secret names:
+The setup endpoint seeds the configured workspace, admin/domain allowlist, bootstrap service account, and bootstrap API key. It is insert-only and safe to rerun.
+
+Set the two development secrets, deploy the endpoint, then run the setup wrapper:
 
 ```sh
 cd apps/web
-bunx wrangler d1 migrations apply dossier-development --remote --env dev
-bunx wrangler secret list --env dev
-```
-
-If either secret is absent, create it. The bootstrap key is kept at the repository root in a gitignored, mode-0600 file so the CLI acceptance flow can use the same value:
-
-```sh
-openssl rand -base64 32 | bunx wrangler secret put SESSION_SECRET --env dev
-openssl rand -base64 32 > ../../.dev-bootstrap-key.local
+openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put SESSION_SECRET --env dev
+openssl rand -base64 48 | tr -d '\n' > ../../.dev-bootstrap-key.local
 chmod 600 ../../.dev-bootstrap-key.local
 cat ../../.dev-bootstrap-key.local | bunx wrangler secret put BOOTSTRAP_API_KEY --env dev
+CLOUDFLARE_ENV=dev bunx vite build
+bunx wrangler deploy --env dev
+scripts/setup.sh --env dev --key-file ../../.dev-bootstrap-key.local
 ```
 
-Seed the configured workspace, admin allowlist, domain allowlist, bootstrap service account, and hashed bootstrap API key with remote D1 SQL. This is insert-only and safe to rerun to finish an interrupted fresh seed; do not use it to rotate an existing bootstrap key.
+Expected setup JSON includes:
+
+```json
+{"ok":true,"workspaceId":"workspace_agent964","workspaceSlug":"agent964","bootstrapAccountId":"acct_bootstrap","bootstrapApiKeyId":"key_bootstrap"}
+```
+
+The development origin is <https://dossier-dev.tech964.workers.dev>.
+
+## Request routing
+
+`src/worker.ts` routes `/api/*` to the merged Effect API, `/a/*` to workspace asset serving, `/d/*` to document/tree serving, `/auth/*` to authentication, and all remaining requests to TanStack Start. `POST /api/setup` is handled before normal API-key lookup and uses a constant-time comparison against the `BOOTSTRAP_API_KEY` Worker secret.
+
+All API and serving responses use `Cache-Control: no-store` except immutable/pinned asset responses. Static Vite output uses the Wrangler `ASSETS` binding. That binding is inherited by `env.dev`; the Cloudflare Vite plugin injects the concrete client build directory into `dist/server/wrangler.json` during each build.
+
+## CLI
+
+Install the production CLI from npm:
 
 ```sh
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-BOOTSTRAP_HASH="$(tr -d '\r\n' < ../../.dev-bootstrap-key.local | shasum -a 256 | awk '{print $1}')"
-SQL="$(cat <<SQL
-INSERT INTO accounts (id,name,kind,deployment_admin,disabled_at,created_at,updated_at)
-VALUES ('acct_bootstrap','Bootstrap service','service',1,NULL,'$NOW','$NOW')
-ON CONFLICT(id) DO NOTHING;
-INSERT INTO workspaces (id,slug,kind,email_domain,name,created_at,updated_at)
-VALUES ('workspace_agent964','agent964','team','agent964.com','agent964','$NOW','$NOW')
-ON CONFLICT(id) DO NOTHING;
-INSERT INTO allowlist (id,kind,value,workspace_id,role,created_by,created_at,last_used_at)
-VALUES ('allow_agent964_admin','email','malhashemi@agent964.com','workspace_agent964','admin','acct_bootstrap','$NOW',NULL)
-ON CONFLICT(value) DO NOTHING;
-INSERT INTO allowlist (id,kind,value,workspace_id,role,created_by,created_at,last_used_at)
-VALUES ('allow_agent964_domain','domain','agent964.com','workspace_agent964','member','acct_bootstrap','$NOW',NULL)
-ON CONFLICT(value) DO NOTHING;
-INSERT INTO api_keys (id,account_id,workspace_id,name,key_hash,created_at,last_used_at,revoked_at)
-VALUES ('key_bootstrap','acct_bootstrap','workspace_agent964','Bootstrap','$BOOTSTRAP_HASH','$NOW',NULL,NULL)
-ON CONFLICT(id) DO NOTHING;
-SQL
-)"
-bunx wrangler d1 execute dossier-development --remote --env dev --command "$SQL"
+npm install --global @agent964/dossier
+dossier auth login
 ```
 
-Deploy only the development environment:
+For development acceptance against the remote dev Worker, run from the repository root:
 
 ```sh
-bun run deploy:dev
+bun run --cwd packages/cli build
+cat .dev-bootstrap-key.local | \
+  node packages/cli/dist/index.js --api-url https://dossier-dev.tech964.workers.dev auth set
+node packages/cli/dist/index.js --api-url https://dossier-dev.tech964.workers.dev whoami
 ```
 
-The current development origin is `https://dossier-dev.tech964.workers.dev`. A quick authenticated check after building the CLI is:
+## Production
 
-```sh
-bun run --cwd ../../packages/cli build
-cat ../../.dev-bootstrap-key.local | \
-  node ../../packages/cli/dist/index.js --api-url https://dossier-dev.tech964.workers.dev auth set
-node ../../packages/cli/dist/index.js --api-url https://dossier-dev.tech964.workers.dev whoami
-```
+The top-level Wrangler environment targets <https://dossier.agent964.com> with `workers_dev: false`, a custom-domain route, observability, production D1/R2 bindings, and Vite static assets. Follow [`../../docs/RUNBOOK.md`](../../docs/RUNBOOK.md) exactly for resource creation, the real D1 ID, secrets, migrations, deployment, setup, owner-only actions, and day-2 operations.
