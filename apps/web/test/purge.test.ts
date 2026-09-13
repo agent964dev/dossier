@@ -759,7 +759,7 @@ describe('Purge', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     try {
       const controller = createScheduledController({
-        cron: '17 3 * * *',
+        cron: '17 3 * * 0',
         scheduledTime: new Date(),
       })
       const context = createExecutionContext()
