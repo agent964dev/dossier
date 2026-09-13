@@ -75,7 +75,9 @@ describe('formatUnifiedDiff', () => {
       writeFileSync(oldFile, before)
       writeFileSync(newFile, after)
       // Zero context exposes empty ranges for insertion/deletion hunks.
-      const native = spawnSync('diff', ['-u', '-U', '0', oldFile, newFile], {
+      // Pass only -U 0: GNU diff keeps the larger of `-u` (3) and `-U 0`,
+      // BSD diff keeps the last one, so `-u -U 0` differs by platform.
+      const native = spawnSync('diff', ['-U', '0', oldFile, newFile], {
         encoding: 'utf8',
       })
       expect(native.error).toBeUndefined()
