@@ -25,6 +25,9 @@ export interface PrincipalService {
   readonly resolve: (
     request: Request,
   ) => Effect.Effect<PrincipalIdentity, DossierError | PersistenceError>
+  readonly resolveReadOnly: (
+    request: Request,
+  ) => Effect.Effect<PrincipalIdentity, DossierError | PersistenceError>
   readonly resolveSession: (
     request: Request,
   ) => Effect.Effect<PrincipalIdentity, DossierError | PersistenceError>
@@ -97,7 +100,7 @@ export const PrincipalLive = Layer.effect(
       verifiedEmails: emails,
     })
 
-    const resolveBearer = (token: string) =>
+    const resolveBearer = (token: string, stampUse: boolean) =>
       Effect.gen(function* () {
         if (token.length === 0) {
           return yield* Effect.fail(
@@ -133,21 +136,23 @@ export const PrincipalLive = Layer.effect(
           )
         }
 
-        const now = new Date()
-        const cutoff = new Date(now.getTime() - 60_000).toISOString()
-        yield* Effect.tryPromise({
-          try: () =>
-            db.raw
-              .prepare(
-                `UPDATE api_keys
-                    SET last_used_at = ?
-                  WHERE id = ?
-                    AND (last_used_at IS NULL OR last_used_at < ?)`,
-              )
-              .bind(now.toISOString(), row.api_key_id, cutoff)
-              .run(),
-          catch: (cause) => persistence('stamp API key use', cause),
-        })
+        if (stampUse) {
+          const now = new Date()
+          const cutoff = new Date(now.getTime() - 60_000).toISOString()
+          yield* Effect.tryPromise({
+            try: () =>
+              db.raw
+                .prepare(
+                  `UPDATE api_keys
+                      SET last_used_at = ?
+                    WHERE id = ?
+                      AND (last_used_at IS NULL OR last_used_at < ?)`,
+                )
+                .bind(now.toISOString(), row.api_key_id, cutoff)
+                .run(),
+            catch: (cause) => persistence('stamp API key use', cause),
+          })
+        }
         return fromRow(row, yield* verifiedEmails(row.account_id))
       })
 
@@ -187,14 +192,20 @@ export const PrincipalLive = Layer.effect(
         return fromRow(row, yield* verifiedEmails(row.account_id))
       })
 
-    const resolve: PrincipalService['resolve'] = (request) => {
+    const resolveWithBearerStamp = (request: Request, stampUse: boolean) => {
       const authorization = request.headers.get('authorization')
       if (authorization !== null && /^Bearer(?:\s|$)/i.test(authorization)) {
         const match = /^Bearer\s+(.+)$/i.exec(authorization)
-        return resolveBearer(match?.[1]?.trim() ?? '')
+        return resolveBearer(match?.[1]?.trim() ?? '', stampUse)
       }
       return resolveCookie(request)
     }
+
+    const resolve: PrincipalService['resolve'] = (request) =>
+      resolveWithBearerStamp(request, true)
+
+    const resolveReadOnly: PrincipalService['resolveReadOnly'] = (request) =>
+      resolveWithBearerStamp(request, false)
 
     const requirePublisher: PrincipalService['requirePublisher'] = (
       principal,
@@ -234,6 +245,11 @@ export const PrincipalLive = Layer.effect(
         }
       })
 
-    return { resolve, resolveSession: resolveCookie, requirePublisher }
+    return {
+      resolve,
+      resolveReadOnly,
+      resolveSession: resolveCookie,
+      requirePublisher,
+    }
   }),
 )

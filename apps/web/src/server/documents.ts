@@ -3,6 +3,7 @@ import {
   type AuthorSummary,
   type DocumentEditor,
   type DocumentView,
+  type PurgeStatus,
   type SharesResponse,
   type Version,
   type Visibility,
@@ -17,6 +18,7 @@ import {
   PersistenceError,
   Shares,
   Tree,
+  WorkerEnv,
   type PrincipalIdentity,
 } from '../services'
 import { verifyCsrf } from './csrf'
@@ -73,6 +75,8 @@ export interface TrashBatch {
   readonly deletedBy: string | null
   readonly deletedByAccountId: string | null
   readonly deletedAt: string | null
+  readonly purgeStatus: PurgeStatus
+  readonly purgesAt: string | null
   /** Every document the batch took, including other people's. */
   readonly deletedCount: number
   readonly authors: readonly AuthorSummary[]
@@ -97,6 +101,7 @@ export interface TrashData {
   readonly viewer: Viewer
   readonly batches: readonly TrashBatch[]
   readonly swept: readonly SweptDocument[]
+  readonly retentionDays: number
 }
 
 /** A place a document may be filed under, flattened for a picker. */
@@ -436,6 +441,12 @@ export const loadTrash = createServerFn({ method: 'GET' }).handler(async () => {
   return runWeb(
     Effect.gen(function* () {
       const { viewer, principal } = yield* resolveWeb(request)
+      const env = yield* WorkerEnv
+      const configuredRetention = Number(env.PURGE_RETENTION_DAYS)
+      const retentionDays =
+        Number.isSafeInteger(configuredRetention) && configuredRetention > 0
+          ? configuredRetention
+          : 30
       const documents = yield* Documents
       // `scope=trash` answers with one document per batch: its root, carrying
       // the authors the batch swept up.
@@ -485,6 +496,8 @@ export const loadTrash = createServerFn({ method: 'GET' }).handler(async () => {
                 ? null
                 : (deleters.get(document.deletionBatchId) ?? null),
             deletedAt: document.deletedAt,
+            purgeStatus: document.purgeStatus ?? 'pending',
+            purgesAt: document.purgesAt ?? null,
             deletedCount:
               authors.reduce((total, author) => total + author.count, 0) || 1,
             authors,
@@ -499,7 +512,7 @@ export const loadTrash = createServerFn({ method: 'GET' }).handler(async () => {
           .filter((id): id is string => id !== null),
       )
 
-      return { viewer, batches, swept } satisfies TrashData
+      return { viewer, batches, swept, retentionDays } satisfies TrashData
     }),
   )
 })

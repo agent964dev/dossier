@@ -10,6 +10,7 @@ import { IdsLive } from './ids'
 import { ObjectsLive } from './objects'
 import { PrincipalLive } from './principal'
 import { PublishLive } from './publish'
+import { PurgeLive } from './purge'
 import { ServingLive } from './serving'
 import { SharesLive } from './shares'
 import { TreeLive } from './tree'
@@ -29,6 +30,7 @@ const SignInLive = Layer.mergeAll(AllowlistLive, ShooLive).pipe(
 export const CoreServicesLive = Layer.mergeAll(
   AssetsLive,
   PublishLive,
+  PurgeLive,
   DocumentsLive,
   DiffLive,
   ServingLive,

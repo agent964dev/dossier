@@ -3,7 +3,11 @@ import { ArrowLeft, RotateCcw, Users } from 'lucide-react'
 
 import { AppShell } from '../../components/app-shell'
 import { EmptyState } from '../../components/empty-state'
-import { absoluteDateTime, relativeTime } from '../../components/format'
+import {
+  absoluteDate,
+  absoluteDateTime,
+  relativeTime,
+} from '../../components/format'
 import { PageHeader, SectionLabel } from '../../components/page-header'
 import { StatusMessage } from '../../components/status-message'
 import { Badge } from '../../components/ui/badge'
@@ -22,14 +26,23 @@ export const Route = createFileRoute('/dashboard/trash')({
 })
 
 function TrashPage() {
-  const { viewer, batches, swept } = Route.useLoaderData()
+  const {
+    viewer,
+    batches: loadedBatches,
+    swept,
+    retentionDays,
+  } = Route.useLoaderData()
+  // A purged batch has no documents left to restore, so it leaves the list.
+  const batches = loadedBatches.filter(
+    (batch) => batch.purgeStatus !== 'purged',
+  )
 
   return (
     <AppShell viewer={viewer} subtitle="Trash">
       <PageHeader
         kicker="Archived"
         title="Trash"
-        description="Archiving takes a document and everything filed under it as one batch, whoever wrote those documents. The bytes stay, the links stop resolving, and restoring brings the whole batch back at once."
+        description="Archiving takes a document and everything filed under it as one batch, whoever wrote those documents. The bytes stay while the batch is restorable, the links stop resolving, and restoring brings the whole batch back at once."
         actions={
           <Button asChild variant="outline" size="sm">
             <Link to="/dashboard">
@@ -43,7 +56,7 @@ function TrashPage() {
       {batches.length === 0 && swept.length === 0 ? (
         <EmptyState
           title="Nothing archived"
-          body="Documents you archive land here until you restore them. Nothing is ever purged in this version."
+          body={`Documents you archive land here until you restore them. Archived documents are permanently removed ${retentionDays} days after archiving.`}
         />
       ) : null}
 
@@ -165,12 +178,27 @@ function TrashBatchCard({
                 </span>
               </>
             ) : null}
-            {others > 0
+            {batch.purgeStatus === 'pending' && others > 0
               ? `. Restoring brings back ${
                   others === 1 ? 'the document' : `all ${others} documents`
                 } filed under it too.`
               : '.'}
           </p>
+
+          {batch.purgeStatus === 'claimed' ? (
+            <p className="mt-1.5 text-sm leading-ui text-neutral-500">
+              Permanent removal has started. This batch can no longer be
+              restored.
+            </p>
+          ) : batch.purgesAt ? (
+            <p className="mt-1.5 text-sm leading-ui text-neutral-500">
+              Permanently removed on{' '}
+              <span title={absoluteDateTime(batch.purgesAt)}>
+                {absoluteDate(batch.purgesAt)}
+              </span>
+              .
+            </p>
+          ) : null}
 
           {batch.authors.length > 0 ? (
             <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
@@ -195,19 +223,21 @@ function TrashBatchCard({
           ) : null}
         </div>
 
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={restore}
-          disabled={
-            pending !== null || batch.batchId === null || !viewer.publisher
-          }
-          className="shrink-0"
-        >
-          <RotateCcw aria-hidden />
-          {pending === 'restore' ? 'Restoring…' : 'Restore'}
-        </Button>
+        {batch.purgeStatus === 'pending' ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={restore}
+            disabled={
+              pending !== null || batch.batchId === null || !viewer.publisher
+            }
+            className="shrink-0"
+          >
+            <RotateCcw aria-hidden />
+            {pending === 'restore' ? 'Restoring…' : 'Restore'}
+          </Button>
+        ) : null}
       </div>
 
       {failure ? (

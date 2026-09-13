@@ -246,6 +246,29 @@ cat .prod-bootstrap-key.local | \
   dossier --api-url https://dossier.agent964.com setup --json
 ```
 
+## Deployment administration
+
+`dossier admin purge` is for deployment operators, not routine use. It calls the deployed Worker's protected `POST /api/admin/purge`, which reports the archived deletion batches past the retention window. Supply the bootstrap secret the way `dossier setup` does: `BOOTSTRAP_API_KEY`, `DOSSIER_API_KEY`, credentials stored for the configured origin, or stdin.
+
+```sh
+dossier admin purge
+dossier admin purge --retention-days 45
+dossier admin purge --execute
+dossier admin purge --json
+```
+
+Without `--execute` the command is a dry run and the server writes nothing. `--retention-days` overrides the server's window for one run. Human output is one row per batch followed by totals; `--json` prints the server's report as one JSON value.
+
+```text
+Dry run: archived batches older than 2026-08-15T03:17:00.000Z
+  BATCH           ROOT         DOCS  VERSIONS    SIZE
+  b_9f3c1a2b4d5e  Q3 planning     4        11  2.1 MB
+Totals: 1 batch, 4 documents, 11 versions, 2.1 MB
+Nothing was removed. Re-run with --execute to remove them permanently.
+```
+
+Archived documents are permanently removed 30 days after archiving. A removal deletes the R2 objects first, then the document and version rows, and keeps the deletion batch row as an audit record; a purged batch can never be restored. The scheduled purge is enabled per deployment, which for production is a runbook step (`docs/RUNBOOK.md` section E).
+
 ## Diagnostics
 
 `dossier health` is a hidden compatibility command that calls `/api/healthz`; it is useful for deployment smoke checks.

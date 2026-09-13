@@ -24,6 +24,9 @@ export type DocumentId = typeof DocumentId.Type
 export const Visibility = Schema.Literal('public', 'team', 'private')
 export type Visibility = typeof Visibility.Type
 
+export const PurgeStatus = Schema.Literal('pending', 'claimed', 'purged')
+export type PurgeStatus = typeof PurgeStatus.Type
+
 export const AccessSource = Schema.Literal('own', 'inherited', 'default')
 export type AccessSource = typeof AccessSource.Type
 
@@ -72,6 +75,8 @@ export const DocumentEditor = Schema.Struct({
   disabledAt: Schema.NullOr(Schema.String),
   /** Present on scope=trash batch roots. */
   authors: Schema.optional(Schema.Array(AuthorSummary)),
+  purgeStatus: Schema.optional(PurgeStatus),
+  purgesAt: Schema.optional(Schema.String),
 })
 export type DocumentEditor = typeof DocumentEditor.Type
 
@@ -443,6 +448,7 @@ export const HasChildrenError = Schema.Struct({
   }),
 })
 export const ConflictError = errorSchema('conflict')
+export const BatchPurgedError = errorSchema('batch_purged')
 export const IdempotencyConflictError = errorSchema('idempotency_conflict')
 export const BodyTooLargeError = errorSchema('body_too_large')
 export const PolicyRejectedError = errorSchema('policy_rejected')
@@ -457,12 +463,46 @@ export const ApiError = Schema.Union(
   PublisherRequiredError,
   HasChildrenError,
   ConflictError,
+  BatchPurgedError,
   IdempotencyConflictError,
   BodyTooLargeError,
   PolicyRejectedError,
   RateLimitedError,
 )
 export type ApiError = typeof ApiError.Type
+
+export const AdminPurgeRequest = Schema.Struct({
+  dryRun: Schema.optional(Schema.Boolean),
+  retentionDays: Schema.optional(
+    Schema.Number.pipe(Schema.int(), Schema.positive()),
+  ),
+})
+export type AdminPurgeRequest = typeof AdminPurgeRequest.Type
+
+export const PurgeBatchReport = Schema.Struct({
+  id: Schema.String,
+  rootTitle: Schema.NullOr(Schema.String),
+  documents: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  versions: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  bytes: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+})
+export type PurgeBatchReport = typeof PurgeBatchReport.Type
+
+export const PurgeTotals = Schema.Struct({
+  batches: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  documents: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  versions: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  bytes: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+})
+export type PurgeTotals = typeof PurgeTotals.Type
+
+export const PurgeReport = Schema.Struct({
+  cutoff: Schema.String,
+  batches: Schema.Array(PurgeBatchReport),
+  totals: PurgeTotals,
+  dryRun: Schema.Boolean,
+})
+export type PurgeReport = typeof PurgeReport.Type
 
 export const HealthzResponse = Schema.Struct({
   ok: Schema.Literal(true),
@@ -485,6 +525,13 @@ export const SystemApiGroup = HttpApiGroup.make('system')
       .setPayload(PolicyCheckPayload)
       .addSuccess(PolicyResult),
   )
+
+export const AdminApiGroup = HttpApiGroup.make('admin').add(
+  HttpApiEndpoint.post('purge', '/api/admin/purge')
+    .setPayload(AdminPurgeRequest)
+    .addSuccess(PurgeReport)
+    .addError(UnauthenticatedError, { status: 401 }),
+)
 
 export const UploadsApiGroup = HttpApiGroup.make('uploads').add(
   HttpApiEndpoint.post('publish', '/api/uploads')
@@ -664,6 +711,7 @@ export const DossierApi = SystemApi.add(UploadsApiGroup)
   .addError(PublisherRequiredError, { status: 403 })
   .addError(HasChildrenError, { status: 409 })
   .addError(ConflictError, { status: 409 })
+  .addError(BatchPurgedError, { status: 409 })
   .addError(IdempotencyConflictError, { status: 409 })
   .addError(BodyTooLargeError, { status: 413 })
   .addError(PolicyRejectedError, { status: 422 })

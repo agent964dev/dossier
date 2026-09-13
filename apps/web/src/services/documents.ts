@@ -550,7 +550,7 @@ export const DocumentsLive = Layer.effect(
               db.raw
                 .prepare(
                   `SELECT b.id AS batch_id, b.root_document_id AS id,
-                          b.created_at AS updated_at
+                          b.created_at AS updated_at, b.purge_status
                      FROM deletion_batches b
                      JOIN documents root ON root.id = b.root_document_id
                 LEFT JOIN memberships self
@@ -573,7 +573,12 @@ export const DocumentsLive = Layer.effect(
                   cursor?.[1] ?? null,
                   limit + 1,
                 )
-                .all<{ batch_id: string; id: string; updated_at: string }>(),
+                .all<{
+                  batch_id: string
+                  id: string
+                  updated_at: string
+                  purge_status: 'pending' | 'claimed' | 'purged'
+                }>(),
             catch: (cause) =>
               new PersistenceError({ operation: 'list trash batches', cause }),
           })
@@ -599,10 +604,20 @@ export const DocumentsLive = Layer.effect(
                   cause,
                 }),
             })
+            const configuredRetention = Number(env.PURGE_RETENTION_DAYS)
+            const retentionDays =
+              Number.isSafeInteger(configuredRetention) &&
+              configuredRetention > 0
+                ? configuredRetention
+                : 30
             documents.push({
               ...document,
               deletionRootTitle: document.deletionRootTitle ?? document.title,
               authors: authorSummaries(authorRows.results),
+              purgeStatus: row.purge_status,
+              purgesAt: new Date(
+                Date.parse(row.updated_at) + retentionDays * 86_400_000,
+              ).toISOString(),
             })
           }
           const last = pageRows.at(-1)
@@ -855,10 +870,11 @@ export const DocumentsLive = Layer.effect(
           try: () =>
             db.raw
               .prepare(
-                `SELECT b.root_document_id, b.restored_at, d.parent_id,
-                        d.workspace_id, parent.deleted_at AS parent_deleted_at
+                `SELECT b.root_document_id, b.restored_at, b.purge_status,
+                        d.parent_id, d.workspace_id,
+                        parent.deleted_at AS parent_deleted_at
                    FROM deletion_batches b
-                   JOIN documents d ON d.id = b.root_document_id
+              LEFT JOIN documents d ON d.id = b.root_document_id
               LEFT JOIN documents parent ON parent.id = d.parent_id
                   WHERE b.id = ?`,
               )
@@ -866,18 +882,28 @@ export const DocumentsLive = Layer.effect(
               .first<{
                 root_document_id: string
                 restored_at: string | null
+                purge_status: 'pending' | 'claimed' | 'purged'
                 parent_id: string | null
-                workspace_id: string
+                workspace_id: string | null
                 parent_deleted_at: string | null
               }>(),
           catch: (cause) =>
             new PersistenceError({ operation: 'load deletion batch', cause }),
         })
-        if (
-          !batch ||
-          batch.root_document_id !== documentId ||
-          batch.workspace_id !== principal.workspaceId
-        ) {
+        if (!batch || batch.root_document_id !== documentId) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Deletion batch not found.'),
+          )
+        }
+        if (batch.purge_status !== 'pending') {
+          return yield* Effect.fail(
+            apiError(
+              'batch_purged',
+              'The deletion batch is being or has been permanently purged.',
+            ),
+          )
+        }
+        if (batch.workspace_id !== principal.workspaceId) {
           return yield* Effect.fail(
             apiError('not_found', 'Deletion batch not found.'),
           )
@@ -890,7 +916,7 @@ export const DocumentsLive = Layer.effect(
         }
         const now = new Date().toISOString()
         const guardId = ids.internalId()
-        yield* db
+        const restoreResult = yield* db
           .batch([
             db.raw
               .prepare(
@@ -905,6 +931,7 @@ export const DocumentsLive = Layer.effect(
                    ON editor.workspace_id = d.workspace_id AND editor.account_id = a.id
                  LEFT JOIN documents parent ON parent.id = d.parent_id
                  WHERE b.id = ? AND b.root_document_id = ? AND b.restored_at IS NULL
+                   AND b.purge_status = 'pending'
                    AND d.workspace_id = ?
                    AND (d.parent_id IS NULL OR parent.deleted_at IS NULL)
                    AND (a.kind = 'service' OR publisher.account_id IS NOT NULL)
@@ -922,19 +949,52 @@ export const DocumentsLive = Layer.effect(
               .prepare(
                 `UPDATE documents
                   SET deleted_at = NULL, deletion_batch_id = NULL, updated_at = ?
-                WHERE deletion_batch_id = ?`,
+                WHERE deletion_batch_id = ?
+                  AND EXISTS (
+                    SELECT 1 FROM deletion_batches
+                     WHERE id = ? AND restored_at IS NULL
+                       AND purge_status = 'pending'
+                  )`,
               )
-              .bind(now, batchId),
+              .bind(now, batchId, batchId),
             db.raw
               .prepare(
-                `UPDATE deletion_batches SET restored_at = ? WHERE id = ?`,
+                `UPDATE deletion_batches
+                    SET restored_at = ?
+                  WHERE id = ? AND restored_at IS NULL
+                    AND purge_status = 'pending'`,
               )
               .bind(now, batchId),
             db.raw
               .prepare(`DELETE FROM publication_guards WHERE id = ?`)
               .bind(guardId),
           ])
-          .pipe(Effect.mapError(guardFailure))
+          .pipe(Effect.either)
+        if (restoreResult._tag === 'Left') {
+          const status = yield* Effect.tryPromise({
+            try: () =>
+              db.raw
+                .prepare(
+                  'SELECT purge_status FROM deletion_batches WHERE id = ?',
+                )
+                .bind(batchId)
+                .first<{ purge_status: 'pending' | 'claimed' | 'purged' }>(),
+            catch: (cause) =>
+              new PersistenceError({
+                operation: 'reload deletion batch after restore conflict',
+                cause,
+              }),
+          }).pipe(Effect.orElseSucceed(() => null))
+          if (status && status.purge_status !== 'pending') {
+            return yield* Effect.fail(
+              apiError(
+                'batch_purged',
+                'The deletion batch is being or has been permanently purged.',
+              ),
+            )
+          }
+          return yield* Effect.fail(guardFailure(restoreResult.left))
+        }
         return yield* loadEditor(documentId, principal)
       })
 

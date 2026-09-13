@@ -1,6 +1,6 @@
 ---
 name: dossier
-description: Read Dossier document references, inspect their version history and tree context, and publish safe versioned HTML with the dossier CLI. Use when a user provides a Dossier ID or URL, or asks to publish a plan, proposal, brief, report, playground, or similar HTML artifact to Dossier.
+description: Read and manage Dossier documents, inspect their version history and tree context, and publish safe versioned HTML with the dossier CLI. Use when a user provides a Dossier ID or URL, or asks to publish a plan, proposal, brief, report, playground, or similar HTML artifact to Dossier.
 ---
 
 # Dossier
@@ -29,6 +29,24 @@ dossier list --tree [--all] [--parent <id>]
 `diff` defaults to the previous and latest versions. Use `--text` when HTML markup makes the patch noisy. Tree results intentionally omit unreadable ancestors and siblings.
 
 If a Dossier command is missing, run `dossier update --check` before adapting.
+
+## Archive and retention
+
+```sh
+dossier delete <id> [--force]
+dossier trash
+dossier restore <id> [--batch <batch-id>]
+```
+
+`delete` archives a document and its subtree as one batch; use `--force` only when the reported descendant impact is intended. `trash` lists restorable batches. Archived documents are permanently removed after the deployment's retention window, normally 30 days. Restore before removal begins; claimed or purged batches cannot be restored.
+
+Deployment operators can inspect eligible batches without changing data:
+
+```sh
+dossier admin purge --json
+```
+
+The admin command is a dry run unless `--execute` is present. Run `--execute` only when the user explicitly asks for permanent removal. It requires the deployment bootstrap credential; never print or persist that credential in command output.
 
 ## Document rules
 

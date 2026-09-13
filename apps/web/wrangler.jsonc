@@ -25,6 +25,7 @@
     "MAX_REQUEST_BYTES": "8388608",
     "MAX_HTML_BYTES": "1048576",
     "MAX_ASSET_BYTES": "5242880",
+    "PURGE_RETENTION_DAYS": "30",
   },
   "d1_databases": [
     {
@@ -45,6 +46,7 @@
   "env": {
     "dev": {
       "workers_dev": true,
+      "triggers": { "crons": ["17 3 * * *"] },
       "preview_urls": true,
       "routes": [],
       "vars": {
@@ -59,6 +61,7 @@
         "MAX_REQUEST_BYTES": "8388608",
         "MAX_HTML_BYTES": "1048576",
         "MAX_ASSET_BYTES": "5242880",
+        "PURGE_RETENTION_DAYS": "30",
       },
       "d1_databases": [
         {

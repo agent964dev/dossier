@@ -10,7 +10,7 @@ import { handleServingRequest } from '../src/api/serving'
 import { readBoundedBody } from '../src/api/request'
 import { issueCsrfToken, verifyCsrf } from '../src/server/csrf'
 import { loadWorkspace } from '../src/server/workspace'
-import { documentAction } from '../src/server/documents'
+import { documentAction, loadTrash } from '../src/server/documents'
 import { loadCliAuth, mintApiKey } from '../src/server/keys'
 import type { CoreServices } from '../src/server/runtime'
 import {
@@ -332,6 +332,53 @@ describe('adversarial phase-one security regressions', () => {
     expect(await hidden.json()).toMatchObject({
       ok: true,
       document: { id: receipt.document.id, effectiveVisibility: 'team' },
+    })
+  })
+})
+
+describe('dashboard trash data', () => {
+  it('maps purge metadata and retention into the loader contract', async () => {
+    const owner = await seedPrincipal(env, { suffix: 'trash_purge_metadata' })
+    const receipt = await publish(owner.token)
+    const deleted = await api(
+      `/api/documents/${receipt.document.id}`,
+      owner.token,
+      undefined,
+      'DELETE',
+    )
+    expect(deleted.status).toBe(200)
+    const { batchId } = (await deleted.json()) as { batchId: string }
+    const batch = await env.DB.prepare(
+      'SELECT created_at, purge_status FROM deletion_batches WHERE id = ?',
+    )
+      .bind(batchId)
+      .first<{ created_at: string; purge_status: string }>()
+    expect(batch).not.toBeNull()
+
+    const cookie = (
+      await Effect.runPromise(
+        session.createSessionCookie({
+          accountId: owner.accountId,
+          workspaceId: owner.workspaceId,
+        }),
+      )
+    ).split(';')[0]
+    webContext.request = new Request(`${ORIGIN}/dashboard/trash`, {
+      headers: { cookie },
+    })
+
+    expect(await loadTrash()).toMatchObject({
+      retentionDays: 30,
+      batches: [
+        {
+          batchId,
+          rootDocumentId: receipt.document.id,
+          purgeStatus: 'pending',
+          purgesAt: new Date(
+            Date.parse(batch!.created_at) + 30 * 86_400_000,
+          ).toISOString(),
+        },
+      ],
     })
   })
 })
