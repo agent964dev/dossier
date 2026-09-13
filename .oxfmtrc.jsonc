@@ -1,0 +1,21 @@
+{
+  "semi": false,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "tabWidth": 2,
+  "useTabs": false,
+  "printWidth": 80,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    ".output",
+    "drizzle",
+    "apps/web/worker-configuration.d.ts",
+    "**/routeTree.gen.ts",
+    "upstream/**",
+    "apps/web/browser/fixtures/render.css",
+    "packages/policy/test/fixtures/**",
+    "docs/**/*.html",
+  ],
+}

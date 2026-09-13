@@ -16,3 +16,6 @@ dist/
 
 # Local production bootstrap credential
 .prod-bootstrap-key.local
+
+# Generated CLI package artifact
+packages/cli/LICENSE
