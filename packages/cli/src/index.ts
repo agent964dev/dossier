@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import packageJson from '../package.json' with { type: 'json' }
 import { Args, Command, Options, ValidationError } from '@effect/cli'
 import {
   AssetDeleteResponse,
@@ -39,6 +40,7 @@ import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { readFile, realpath, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, extname, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { pathToFileURL } from 'node:url'
@@ -46,6 +48,7 @@ import { CliError, ExitCode, exitCodeFor } from './lib/errors.js'
 import { formatUnifiedDiff } from './lib/diff.js'
 import { dossierFetch, dossierJson, normalizeApiUrl } from './lib/http.js'
 import { parseRef } from './lib/ref.js'
+import { compareSemver, runUpdate } from './lib/update.js'
 import {
   mutateCredentials,
   mutateDocuments,
@@ -58,7 +61,7 @@ import {
   type StatePaths,
 } from './lib/state.js'
 
-const VERSION = '0.1.0'
+export const VERSION = packageJson.version
 const DEFAULT_API_URL = 'https://dossier.agent964.com'
 const FetchClientLive = Layer.mergeAll(
   FetchHttpClient.layer,
@@ -118,8 +121,9 @@ async function runtimeConfig(globals: GlobalOptions): Promise<RuntimeConfig> {
 
 function printJson(value: unknown): void {
   // JSON.stringify escapes C0; also escape DEL/C1 to neutralize terminal controls.
-  const json = JSON.stringify(value)?.replace(/[\u007f-\u009f]/g, (control) =>
-    `\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  const json = JSON.stringify(value)?.replace(
+    /[\u007f-\u009f]/g,
+    (control) => `\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`,
   )
   process.stdout.write(`${json}\n`)
 }
@@ -613,10 +617,7 @@ function documentForest(
   )
 }
 
-function printTreeNodes(
-  nodes: readonly DocumentTreeNode[],
-  depth = 0,
-): void {
+function printTreeNodes(nodes: readonly DocumentTreeNode[], depth = 0): void {
   for (const node of nodes) {
     const indent = '  '.repeat(depth)
     process.stdout.write(
@@ -696,7 +697,11 @@ interface WorkspaceResponse {
 
 function decodeWorkspaceResponse(value: unknown): WorkspaceResponse {
   const candidate = record(value)
-  if (!candidate || !Array.isArray(candidate.members) || !Array.isArray(candidate.allowlist)) {
+  if (
+    !candidate ||
+    !Array.isArray(candidate.members) ||
+    !Array.isArray(candidate.allowlist)
+  ) {
     throw new CliError('server returned an invalid workspace response')
   }
   for (const rawMember of candidate.members) {
@@ -731,7 +736,8 @@ function allowlistValue(raw: string): {
   const normalized = raw.trim().toLowerCase()
   const kind = normalized.startsWith('@') ? 'domain' : 'email'
   const value = kind === 'domain' ? normalized.slice(1) : normalized
-  const domain = kind === 'domain' ? value : value.slice(value.lastIndexOf('@') + 1)
+  const domain =
+    kind === 'domain' ? value : value.slice(value.lastIndexOf('@') + 1)
   if (
     normalized.length === 0 ||
     normalized.length > 254 ||
@@ -751,7 +757,9 @@ function allowlistValue(raw: string): {
   return { kind, value }
 }
 
-async function workspaceData(runtime: RuntimeConfig): Promise<WorkspaceResponse> {
+async function workspaceData(
+  runtime: RuntimeConfig,
+): Promise<WorkspaceResponse> {
   return decodeWorkspaceResponse(
     await dossierJson<unknown>('/api/workspace', {
       apiUrl: runtime.apiUrl,
@@ -787,7 +795,8 @@ async function workspaceMutation(
     throw new CliError('server returned an invalid workspace response')
   }
   const decoded = record(value)
-  if (!decoded) throw new CliError('server returned an invalid workspace response')
+  if (!decoded)
+    throw new CliError('server returned an invalid workspace response')
   return decoded
 }
 
@@ -1227,11 +1236,15 @@ const diffCommand = Command.make(
   {
     from: Options.integer('from').pipe(
       Options.optional,
-      Options.withDescription('Older version number (default: the version before --to)'),
+      Options.withDescription(
+        'Older version number (default: the version before --to)',
+      ),
     ),
     to: Options.integer('to').pipe(
       Options.optional,
-      Options.withDescription('Newer version number (default: latest; a pinned id@n reference also sets it)'),
+      Options.withDescription(
+        'Newer version number (default: latest; a pinned id@n reference also sets it)',
+      ),
     ),
     text: Options.boolean('text').pipe(
       Options.withDescription('Compare visible text instead of HTML source'),
@@ -1278,7 +1291,9 @@ const diffCommand = Command.make(
           ),
         )
       } catch (error) {
-        if (errorStatus(error instanceof CliError ? error.details : error) === 413) {
+        if (
+          errorStatus(error instanceof CliError ? error.details : error) === 413
+        ) {
           throw new CliError(
             `diff is too large; fetch both versions with dossier fetch ${parsed.id}@<version> -o <file> and compare them locally`,
             ExitCode.Failure,
@@ -1366,7 +1381,9 @@ const listCommand = Command.make(
       }
       if (runtime.quiet) return
       if (documents.length === 0) {
-        process.stdout.write(trash ? 'Trash is empty.\n' : 'No documents yet.\n')
+        process.stdout.write(
+          trash ? 'Trash is empty.\n' : 'No documents yet.\n',
+        )
         return
       }
       for (const document of documents) {
@@ -1413,7 +1430,9 @@ const treeCommand = Command.make(
             `  - ${document.title} (${document.id}) · ${document.authorName}\n`,
           )
     }),
-).pipe(Command.withDescription('Show a document breadcrumb, siblings, and children'))
+).pipe(
+  Command.withDescription('Show a document breadcrumb, siblings, and children'),
+)
 
 const moveCommand = Command.make(
   'move',
@@ -1531,8 +1550,8 @@ const trashCommand = Command.make('trash', {}, () =>
     }
     for (const [batchId, batch] of batches) {
       const rootTitle =
-        batch.find((document) => document.deletionRootTitle)?.deletionRootTitle ??
-        batch[0]!.title
+        batch.find((document) => document.deletionRootTitle)
+          ?.deletionRootTitle ?? batch[0]!.title
       const root =
         batch.find((document) => document.title === rootTitle) ?? batch[0]!
       const authors = [...new Set(batch.map((document) => document.authorName))]
@@ -1588,7 +1607,7 @@ const restoreCommand = Command.make(
           client.documents.get({ path: { id } }),
         )
         batchId = isDocumentEditor(detail.document)
-          ? detail.document.deletionBatchId ?? undefined
+          ? (detail.document.deletionBatchId ?? undefined)
           : undefined
       }
       if (!batchId) {
@@ -1683,7 +1702,11 @@ const workspaceDisallowCommand = Command.make(
       )
       printWorkspaceMutation(result, runtime)
     }),
-).pipe(Command.withDescription('Remove an email address or @domain from the allowlist'))
+).pipe(
+  Command.withDescription(
+    'Remove an email address or @domain from the allowlist',
+  ),
+)
 
 const workspacePromoteCommand = Command.make(
   'promote',
@@ -1738,7 +1761,9 @@ const setupCommand = Command.make('setup', {}, () =>
   withGlobals(async (globals) => {
     const runtime = await runtimeConfig(globals)
     const pipedKey =
-      runtime.apiKey || process.stdin.isTTY ? undefined : (await readStdin()).trim()
+      runtime.apiKey || process.stdin.isTTY
+        ? undefined
+        : (await readStdin()).trim()
     const bootstrapKey =
       process.env.BOOTSTRAP_API_KEY?.trim() || runtime.apiKey || pipedKey
     if (!bootstrapKey) {
@@ -1766,6 +1791,73 @@ const setupCommand = Command.make('setup', {}, () =>
   Command.withDescription(
     'Call the protected deployment bootstrap endpoint (operators only)',
   ),
+)
+
+const updateCommand = Command.make(
+  'update',
+  {
+    check: Options.boolean('check').pipe(
+      Options.withDescription('Check for an update without installing it'),
+    ),
+  },
+  ({ check }) =>
+    withGlobals(async (globals) => {
+      const entry = process.argv[1]
+      if (!entry) throw new CliError('cannot determine the dossier executable')
+      const argv1Path = resolve(entry)
+      let argv1RealPath: string
+      try {
+        argv1RealPath = await realpath(argv1Path)
+      } catch {
+        argv1RealPath = argv1Path
+      }
+      const bunInstall = process.env.BUN_INSTALL?.trim()
+      const bunHome = bunInstall || resolve(homedir(), '.bun')
+      const result = await runUpdate({
+        argv1RealPath,
+        argv1Path,
+        platform: process.platform,
+        home: homedir(),
+        bunGlobalDir: resolve(bunHome, 'install', 'global'),
+        currentVersion: VERSION,
+        check,
+        json: globals.json,
+        registryUrl:
+          process.env.DOSSIER_UPDATE_REGISTRY_URL?.trim() ||
+          'https://registry.npmjs.org',
+        fetch: globalThis.fetch,
+        execFile: execFileSync,
+        onStatus: globals.json
+          ? undefined
+          : (message) => process.stdout.write(`${message}\n`),
+      })
+
+      if (globals.json) {
+        printJson(result)
+        return
+      }
+      if (result.updated || globals.quiet) return
+      if (result.updateAvailable) {
+        process.stdout.write(
+          `Update available: ${result.currentVersion} → ` +
+            `${result.latestVersion} (${result.installMethod}). ` +
+            'Run `dossier update` to install.\n',
+        )
+      } else if (
+        compareSemver(result.currentVersion, result.latestVersion) > 0
+      ) {
+        process.stdout.write(
+          `dossier ${result.currentVersion} is ahead of npm ` +
+            `(latest ${result.latestVersion}).\n`,
+        )
+      } else {
+        process.stdout.write(
+          `dossier ${result.currentVersion} is up to date.\n`,
+        )
+      }
+    }),
+).pipe(
+  Command.withDescription('Update the dossier CLI to the latest npm release'),
 )
 
 const assetsPushCommand = Command.make(
@@ -1801,7 +1893,9 @@ const assetsPushCommand = Command.make(
         )
       }
     }),
-).pipe(Command.withDescription('Validate and upload a shared CSS or WOFF2 asset'))
+).pipe(
+  Command.withDescription('Validate and upload a shared CSS or WOFF2 asset'),
+)
 
 const assetsListCommand = Command.make('list', {}, () =>
   withGlobals(async (globals) => {
@@ -1880,6 +1974,7 @@ const dossierCommand = rootCommand.pipe(
     workspaceCommand,
     assetsCommand,
     setupCommand,
+    updateCommand,
   ]),
 )
 
@@ -1932,6 +2027,7 @@ const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
   diff: new Set(['--text']),
   list: new Set(['--all', '--tree', '--trash']),
   delete: new Set(['--force']),
+  update: new Set(['--check']),
 }
 
 function isGlobalBoolean(argument: string): boolean {
@@ -1965,7 +2061,11 @@ function detectCommand(rest: readonly string[]): string {
 function extractGlobals(
   rest: readonly string[],
   commandName: string,
-): { readonly globals: string[]; readonly command: string[]; readonly json: boolean } {
+): {
+  readonly globals: string[]
+  readonly command: string[]
+  readonly json: boolean
+} {
   const globals: string[] = []
   const command: string[] = []
   const valued = valuedOptions[commandName]

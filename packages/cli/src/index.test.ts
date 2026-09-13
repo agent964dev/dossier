@@ -68,14 +68,7 @@ describe('argument normalization', () => {
         '-o',
         'plan.html',
       ]).args,
-    ).toEqual([
-      'node',
-      'dossier',
-      'fetch',
-      '-o',
-      'plan.html',
-      '7k2m9x1qz3ab',
-    ])
+    ).toEqual(['node', 'dossier', 'fetch', '-o', 'plan.html', '7k2m9x1qz3ab'])
     expect(
       normalizeGlobalOptions([
         'node',
@@ -160,6 +153,13 @@ describe('argument normalization', () => {
     ])
   })
 
+  it('keeps update check while moving JSON to global options', () => {
+    expect(
+      normalizeGlobalOptions(['node', 'dossier', 'update', '--check', '--json'])
+        .args,
+    ).toEqual(['node', 'dossier', '--json', 'update', '--check'])
+  })
+
   it('allows delete and restore options after their document IDs', () => {
     expect(
       normalizeGlobalOptions([
@@ -190,7 +190,6 @@ describe('argument normalization', () => {
   })
 })
 
-
 describe('JSON output', () => {
   it('escapes DEL and all C1 controls without changing decoded document text', async () => {
     const controls = Array.from({ length: 0x9f - 0x7f + 1 }, (_, index) =>
@@ -200,13 +199,26 @@ describe('JSON output', () => {
     const response = {
       ok: true,
       documentId: '7k2m9x1qz3ab',
-      from: { versionNumber: 1, createdAt: '2026-09-12T00:00:00Z', fileSize: 0 },
-      to: { versionNumber: 2, createdAt: '2026-09-12T00:01:00Z', fileSize: 100 },
+      from: {
+        versionNumber: 1,
+        createdAt: '2026-09-12T00:00:00Z',
+        fileSize: 0,
+      },
+      to: {
+        versionNumber: 2,
+        createdAt: '2026-09-12T00:01:00Z',
+        fileSize: 100,
+      },
       mode: 'html',
-      hunks: [{
-        oldStart: 1, oldLines: 0, newStart: 1, newLines: 1,
-        lines: [{ op: '+', text }],
-      }],
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 0,
+          newStart: 1,
+          newLines: 1,
+          lines: [{ op: '+', text }],
+        },
+      ],
       stats: { added: 1, removed: 0 },
     }
     const fetchMock = vi.fn().mockResolvedValue(Response.json(response))
@@ -214,15 +226,28 @@ describe('JSON output', () => {
     vi.stubEnv('DOSSIER_API_KEY', 'test-key')
     const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
     try {
-      expect(await runCli([
-        'node', 'dossier', '--api-url', 'https://dossier.example', '--json',
-        'diff', response.documentId, '--from', '1', '--to', '2',
-      ])).toBe(0)
+      expect(
+        await runCli([
+          'node',
+          'dossier',
+          '--api-url',
+          'https://dossier.example',
+          '--json',
+          'diff',
+          response.documentId,
+          '--from',
+          '1',
+          '--to',
+          '2',
+        ]),
+      ).toBe(0)
       expect(fetchMock).toHaveBeenCalledOnce()
       const output = write.mock.calls.map(([chunk]) => String(chunk)).join('')
       expect(output).not.toMatch(/[\u007f-\u009f]/)
       for (const control of controls) {
-        expect(output).toContain(`\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`)
+        expect(output).toContain(
+          `\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`,
+        )
       }
       expect(output).not.toContain('\u001b')
       expect(output).not.toContain('\u0007')

@@ -28,6 +28,8 @@ dossier list --tree [--all] [--parent <id>]
 
 `diff` defaults to the previous and latest versions. Use `--text` when HTML markup makes the patch noisy. Tree results intentionally omit unreadable ancestors and siblings.
 
+If a Dossier command is missing, run `dossier update --check` before adapting.
+
 ## Document rules
 
 Create one complete static HTML document. Dossier preserves accepted bytes exactly.
