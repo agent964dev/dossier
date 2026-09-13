@@ -3,7 +3,12 @@ import { Context, Effect, Layer } from 'effect'
 import { Access } from './access'
 import { Db } from './db'
 import { WorkerEnv } from './env'
-import { DossierError, errorResponse, PersistenceError, StorageError } from './errors'
+import {
+  DossierError,
+  errorResponse,
+  PersistenceError,
+  StorageError,
+} from './errors'
 import { Objects } from './objects'
 import { Principal } from './principal'
 
@@ -27,7 +32,8 @@ function hosts(value: string, protocol = 'https:'): string[] {
     .filter(Boolean)
     .map((entry) => {
       try {
-        return new URL(entry.includes('://') ? entry : `${protocol}//${entry}`).origin
+        return new URL(entry.includes('://') ? entry : `${protocol}//${entry}`)
+          .origin
       } catch {
         return entry
       }
@@ -108,23 +114,33 @@ export const ServingLive = Layer.effect(
 
     const serve: ServingService['serve'] = (request) =>
       Effect.gen(function* () {
-        if (request.method !== 'GET' && request.method !== 'HEAD') return notFound(env)
+        if (request.method !== 'GET' && request.method !== 'HEAD')
+          return notFound(env)
         const target = parseServingPath(new URL(request.url).pathname)
         if (!target) return notFound(env)
 
         const authorization = request.headers.get('authorization')
         const bearerSupplied =
           authorization !== null && /^Bearer(?:\s|$)/i.test(authorization)
-        const principalResult = yield* principals.resolve(request).pipe(Effect.either)
+        const principalResult = yield* principals
+          .resolve(request)
+          .pipe(Effect.either)
         if (principalResult._tag === 'Left' && bearerSupplied) {
           const error = principalResult.left
-          if (error instanceof DossierError && error.code === 'unauthenticated') {
+          if (
+            error instanceof DossierError &&
+            error.code === 'unauthenticated'
+          ) {
             return errorResponse(error)
           }
           return notFound(env)
         }
-        const principal = principalResult._tag === 'Right' ? principalResult.right : null
-        const canRead = yield* access.canReadContent(target.documentId, principal)
+        const principal =
+          principalResult._tag === 'Right' ? principalResult.right : null
+        const canRead = yield* access.canReadContent(
+          target.documentId,
+          principal,
+        )
         if (!canRead) return notFound(env)
 
         const row = yield* Effect.tryPromise({
@@ -152,13 +168,17 @@ export const ServingLive = Layer.effect(
               .first<ServingRow>()
           },
           catch: (cause) =>
-            new PersistenceError({ operation: 'load served document version', cause }),
+            new PersistenceError({
+              operation: 'load served document version',
+              cause,
+            }),
         })
         if (!row) return notFound(env)
 
-        const object = request.method === 'HEAD'
-          ? yield* objects.head(row.object_key)
-          : yield* objects.get(row.object_key)
+        const object =
+          request.method === 'HEAD'
+            ? yield* objects.head(row.object_key)
+            : yield* objects.get(row.object_key)
         if (!object) return notFound(env)
 
         const responseHeaders = securityHeaders(env)

@@ -2,7 +2,12 @@ import { env as workerEnv } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import { Principal, Publish, Serving, type PrincipalIdentity } from '../src/services'
+import {
+  Principal,
+  Publish,
+  Serving,
+  type PrincipalIdentity,
+} from '../src/services'
 import bomFixture from './fixtures/bom.html?raw'
 import { makeCoreLayer, seedPrincipal, testEnv } from './core-helpers'
 
@@ -15,7 +20,10 @@ function run<A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> {
   )
 }
 
-async function setup(): Promise<{ principal: PrincipalIdentity; token: string }> {
+async function setup(): Promise<{
+  principal: PrincipalIdentity
+  token: string
+}> {
   const seeded = await seedPrincipal(env, { suffix: 'serving_bytes' })
   const principal = await run(
     Effect.gen(function* () {

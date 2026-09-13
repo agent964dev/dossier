@@ -73,7 +73,11 @@ export function AppShell({
 
             <div className="flex shrink-0 items-center gap-2">
               <span className="flex items-center gap-2 rounded-lg border border-border bg-neutral-900/50 py-1 pr-2.5 pl-1">
-                <Avatar name={viewer.accountName} src={viewer.pictureUrl} className="size-6" />
+                <Avatar
+                  name={viewer.accountName}
+                  src={viewer.pictureUrl}
+                  className="size-6"
+                />
                 <span className="hidden min-w-0 flex-col leading-none lg:flex">
                   <span className="max-w-[11rem] truncate text-xs font-medium text-neutral-200">
                     {viewer.accountName}
@@ -139,14 +143,22 @@ export function AppShell({
             <span className="text-neutral-700"> / </span>
             {viewer.workspaceKind} workspace
           </p>
-          <p className="text-micro-lg text-neutral-500">Cloudflare Workers · D1 · R2</p>
+          <p className="text-micro-lg text-neutral-500">
+            Cloudflare Workers · D1 · R2
+          </p>
         </div>
       </footer>
     </div>
   )
 }
 
-function NavLink({ item, stacked = false }: { item: NavItem; stacked?: boolean }) {
+function NavLink({
+  item,
+  stacked = false,
+}: {
+  item: NavItem
+  stacked?: boolean
+}) {
   const { Icon } = item
   return (
     <Link

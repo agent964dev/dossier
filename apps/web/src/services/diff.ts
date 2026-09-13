@@ -1,8 +1,4 @@
-import type {
-  DiffMode,
-  DiffResponse,
-  DiffVersion,
-} from '@dossier/contracts'
+import type { DiffMode, DiffResponse, DiffVersion } from '@dossier/contracts'
 import { Context, Data, Effect, Layer } from 'effect'
 import { structuredPatch } from 'diff'
 import { parse, type DefaultTreeAdapterTypes } from 'parse5'
@@ -98,7 +94,10 @@ export interface DiffService {
   >
 }
 
-export class Diff extends Context.Tag('@dossier/web/Diff')<Diff, DiffService>() {}
+export class Diff extends Context.Tag('@dossier/web/Diff')<
+  Diff,
+  DiffService
+>() {}
 
 function positiveInteger(value: string, name: string): number {
   const parsed = Number(value)
@@ -116,7 +115,9 @@ function isElement(node: HtmlNode): node is HtmlElement {
   return 'tagName' in node
 }
 
-function nodeChildren(node: HtmlNode): readonly DefaultTreeAdapterTypes.ChildNode[] {
+function nodeChildren(
+  node: HtmlNode,
+): readonly DefaultTreeAdapterTypes.ChildNode[] {
   return 'childNodes' in node ? node.childNodes : []
 }
 
@@ -208,7 +209,10 @@ export const DiffLive = Layer.effect(
         return yield* Effect.tryPromise({
           try: () => object.text(),
           catch: (cause) =>
-            new StorageError({ operation: 'read document version for diff', cause }),
+            new StorageError({
+              operation: 'read document version for diff',
+              cause,
+            }),
         })
       })
 
@@ -216,7 +220,9 @@ export const DiffLive = Layer.effect(
       Effect.gen(function* () {
         const decision = yield* access.requireEditor(documentId, principal)
         if (!decision.canRead) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
 
         const mode = options.mode ?? 'html'
@@ -232,7 +238,10 @@ export const DiffLive = Layer.effect(
               .bind(documentId)
               .all<VersionRow>(),
           catch: (cause) =>
-            new PersistenceError({ operation: 'load versions for diff', cause }),
+            new PersistenceError({
+              operation: 'load versions for diff',
+              cause,
+            }),
         })
         const latest = rows.results[0]?.version_number
         if (latest === undefined) {
@@ -254,7 +263,10 @@ export const DiffLive = Layer.effect(
           )
         }
 
-        const maxHtmlBytes = positiveInteger(env.MAX_HTML_BYTES, 'MAX_HTML_BYTES')
+        const maxHtmlBytes = positiveInteger(
+          env.MAX_HTML_BYTES,
+          'MAX_HTML_BYTES',
+        )
         if (
           fromRow.file_size > maxHtmlBytes ||
           toRow.file_size > maxHtmlBytes
@@ -267,15 +279,12 @@ export const DiffLive = Layer.effect(
         }
 
         const fromSource = yield* readVersion(fromRow)
-        const toSource = fromNumber === toNumber
-          ? fromSource
-          : yield* readVersion(toRow)
-        const fromText = mode === 'text'
-          ? visibleText(fromSource)
-          : normalizeHtml(fromSource)
-        const toText = mode === 'text'
-          ? visibleText(toSource)
-          : normalizeHtml(toSource)
+        const toSource =
+          fromNumber === toNumber ? fromSource : yield* readVersion(toRow)
+        const fromText =
+          mode === 'text' ? visibleText(fromSource) : normalizeHtml(fromSource)
+        const toText =
+          mode === 'text' ? visibleText(toSource) : normalizeHtml(toSource)
         const totalLines = lineCount(fromText) + lineCount(toText)
         if (totalLines > MAX_DIFF_LINES) {
           return yield* Effect.fail(
@@ -304,7 +313,8 @@ export const DiffLive = Layer.effect(
         if (!patch) {
           return yield* Effect.fail(
             new DiffTooLarge({
-              message: 'These versions are too different to compare within the server limit.',
+              message:
+                'These versions are too different to compare within the server limit.',
             }),
           )
         }

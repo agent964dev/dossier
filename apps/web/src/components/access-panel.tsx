@@ -1,5 +1,9 @@
 import { useState } from 'react'
-import type { DocumentEditor, SharesResponse, Visibility } from '@dossier/contracts'
+import type {
+  DocumentEditor,
+  SharesResponse,
+  Visibility,
+} from '@dossier/contracts'
 import { Mail, Plus, X } from 'lucide-react'
 
 import { VisibilityTag } from './document-list'
@@ -89,7 +93,8 @@ export function AccessPanel({
   }`
 
   function needsConfirmation(level: Level): boolean {
-    if (level === current || document.effectiveVisibility === 'public') return false
+    if (level === current || document.effectiveVisibility === 'public')
+      return false
     if (level === 'inherit') return true
     return ACCESS_RANK[level] > ACCESS_RANK[document.effectiveVisibility]
   }
@@ -283,7 +288,8 @@ export function AccessPanel({
                 variant="warn"
                 onClick={() => setLevel(confirmation)}
               >
-                Confirm {LEVELS.find((level) => level.value === confirmation)?.label}
+                Confirm{' '}
+                {LEVELS.find((level) => level.value === confirmation)?.label}
               </Button>
               <Button
                 type="button"
@@ -320,7 +326,10 @@ export function AccessPanel({
                 key={email}
                 className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-950/50 py-1.5 pr-1 pl-2.5"
               >
-                <Mail aria-hidden className="size-3.5 shrink-0 text-neutral-500" />
+                <Mail
+                  aria-hidden
+                  className="size-3.5 shrink-0 text-neutral-500"
+                />
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-200">
                   {email}
                 </span>
@@ -370,7 +379,9 @@ export function AccessPanel({
                 Invites do not narrow {document.effectiveVisibility} access now,
                 but they remain configured if you later choose Private.
               </p>
-              <div className="mt-3 border-t border-border/70 pt-3">{inviteForm}</div>
+              <div className="mt-3 border-t border-border/70 pt-3">
+                {inviteForm}
+              </div>
             </details>
           )
         ) : null}

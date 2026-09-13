@@ -10,7 +10,11 @@ import { peekSession } from '../server/account'
 /** Same rule as the server: only same-site relative paths survive. */
 function safeNext(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0) return '/dashboard'
-  if (!value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {
+  if (
+    !value.startsWith('/') ||
+    value.startsWith('//') ||
+    value.includes('\\')
+  ) {
     return '/dashboard'
   }
   return value
@@ -78,8 +82,14 @@ function SignInPage() {
 
         <ul className="mt-8 grid gap-3 border-t border-border pt-6">
           {FACTS.map((fact) => (
-            <li key={fact} className="flex gap-2.5 text-sm leading-body text-neutral-500">
-              <span aria-hidden className="mt-[9px] size-1 shrink-0 rounded-full bg-brand-300/70" />
+            <li
+              key={fact}
+              className="flex gap-2.5 text-sm leading-body text-neutral-500"
+            >
+              <span
+                aria-hidden
+                className="mt-[9px] size-1 shrink-0 rounded-full bg-brand-300/70"
+              />
               {fact}
             </li>
           ))}

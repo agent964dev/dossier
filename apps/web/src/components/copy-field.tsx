@@ -30,7 +30,10 @@ export function CopyField({
       )}
     >
       {prefix ? (
-        <span aria-hidden className="font-mono text-xs text-neutral-600 select-none">
+        <span
+          aria-hidden
+          className="font-mono text-xs text-neutral-600 select-none"
+        >
           {prefix}
         </span>
       ) : null}
@@ -41,7 +44,9 @@ export function CopyField({
           rel="noreferrer"
           className={cn(
             'min-w-0 flex-1 truncate py-1.5 font-mono text-xs underline-offset-4 hover:underline',
-            muted ? 'text-neutral-500' : 'text-neutral-200 hover:text-brand-100',
+            muted
+              ? 'text-neutral-500'
+              : 'text-neutral-200 hover:text-brand-100',
           )}
           title={value}
         >

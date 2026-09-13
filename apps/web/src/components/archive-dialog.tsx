@@ -82,7 +82,9 @@ export function ArchiveDialog({
       <Modal
         open={open}
         onClose={() => setOpen(false)}
-        title={cascade ? 'This archives more than one document' : 'Archive document'}
+        title={
+          cascade ? 'This archives more than one document' : 'Archive document'
+        }
         description={
           cascade ? undefined : (
             <>
@@ -145,8 +147,8 @@ export function ArchiveDialog({
                 {cascade.count}
               </span>{' '}
               {cascade.count === 1 ? 'document' : 'documents'} filed under “
-              {document.title}”{' '}
-              {cascade.count === 1 ? 'goes' : 'go'} to the trash with it
+              {document.title}” {cascade.count === 1 ? 'goes' : 'go'} to the
+              trash with it
               {others.length > 0
                 ? `, including work by ${others.length} other ${
                     others.length === 1 ? 'person' : 'people'

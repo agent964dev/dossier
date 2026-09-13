@@ -23,7 +23,10 @@ const HTML_OPTIONS: HtmlPolicyOptions = {
 }
 
 function fixture(path: string): string {
-  return readFileSync(new URL(`../test/fixtures/${path}`, import.meta.url), 'utf8')
+  return readFileSync(
+    new URL(`../test/fixtures/${path}`, import.meta.url),
+    'utf8',
+  )
 }
 
 interface CssFixture {
@@ -55,8 +58,14 @@ const REJECTED_CSS_FIXTURES: CssFixture[] = [
     error: 'Blocked unsafe CSS URL.',
   },
   { name: 'hex-escaped url() name', path: 'css/rejected/escaped-url-hex.css' },
-  { name: 'simple-escaped url() name', path: 'css/rejected/escaped-url-simple.css' },
-  { name: 'URL in a custom property', path: 'css/rejected/custom-property-url.css' },
+  {
+    name: 'simple-escaped url() name',
+    path: 'css/rejected/escaped-url-simple.css',
+  },
+  {
+    name: 'URL in a custom property',
+    path: 'css/rejected/custom-property-url.css',
+  },
   {
     name: 'browser-normalized backslash URL in a custom property',
     path: 'css/rejected/custom-property-backslash-url.css',
@@ -78,8 +87,14 @@ const REJECTED_CSS_FIXTURES: CssFixture[] = [
     path: 'css/rejected/image-set-foreign-string.css',
     error: 'CSS image-set() destination is not allowed.',
   },
-  { name: 'whitespace-obscured url()', path: 'css/rejected/url-whitespace.css' },
-  { name: 'entity-spelled URL destination', path: 'css/rejected/url-entity.css' },
+  {
+    name: 'whitespace-obscured url()',
+    path: 'css/rejected/url-whitespace.css',
+  },
+  {
+    name: 'entity-spelled URL destination',
+    path: 'css/rejected/url-entity.css',
+  },
   {
     name: 'comment-split url() name',
     path: 'css/rejected/url-comment.css',
@@ -112,28 +127,40 @@ const REJECTED_CSS_FIXTURES: CssFixture[] = [
 const ACCEPTED_CSS_FIXTURES: CssFixture[] = [
   { name: 'OKLCH theme variables', path: 'css/accepted/theme-oklch.css' },
   { name: 'workspace asset @import', path: 'css/accepted/asset-import.css' },
-  { name: 'workspace WOFF2 @font-face', path: 'css/accepted/asset-font-face.css' },
+  {
+    name: 'workspace WOFF2 @font-face',
+    path: 'css/accepted/asset-font-face.css',
+  },
   {
     name: 'allowlisted Google Fonts import',
     path: 'css/accepted/google-fonts.css',
     options: { styleHostAllowlist: ['fonts.googleapis.com'] },
   },
-  { name: 'nested media, supports, and layer rules', path: 'css/accepted/nested-at-rules.css' },
+  {
+    name: 'nested media, supports, and layer rules',
+    path: 'css/accepted/nested-at-rules.css',
+  },
   { name: 'CSS nesting', path: 'css/accepted/nesting.css' },
-  { name: 'plain custom-property values', path: 'css/accepted/custom-properties.css' },
+  {
+    name: 'plain custom-property values',
+    path: 'css/accepted/custom-properties.css',
+  },
 ]
 
 describe('adversarial CSS fixtures', () => {
-  it.each(REJECTED_CSS_FIXTURES)('rejects $name', ({ path, options, error }) => {
-    const result = validateCss(fixture(path), { ...CSS_OPTIONS, ...options })
+  it.each(REJECTED_CSS_FIXTURES)(
+    'rejects $name',
+    ({ path, options, error }) => {
+      const result = validateCss(fixture(path), { ...CSS_OPTIONS, ...options })
 
-    expect(result.ok, `${path}: ${result.errors.join('; ')}`).toBe(false)
-    if (error) {
-      expect(result.errors.some((candidate) => candidate.includes(error))).toBe(
-        true,
-      )
-    }
-  })
+      expect(result.ok, `${path}: ${result.errors.join('; ')}`).toBe(false)
+      if (error) {
+        expect(
+          result.errors.some((candidate) => candidate.includes(error)),
+        ).toBe(true)
+      }
+    },
+  )
 
   it.each(ACCEPTED_CSS_FIXTURES)('accepts $name', ({ path, options }) => {
     const result = validateCss(fixture(path), { ...CSS_OPTIONS, ...options })
@@ -234,24 +261,34 @@ const ACCEPTED_HTML_FIXTURES: HtmlFixture[] = [
 ]
 
 describe('adversarial HTML fixtures', () => {
-  it.each(REJECTED_HTML_FIXTURES)('rejects $name', ({ path, options, error }) => {
-    const result = validateHtml(fixture(path), { ...HTML_OPTIONS, ...options })
+  it.each(REJECTED_HTML_FIXTURES)(
+    'rejects $name',
+    ({ path, options, error }) => {
+      const result = validateHtml(fixture(path), {
+        ...HTML_OPTIONS,
+        ...options,
+      })
 
-    expect(result.ok, `${path}: ${result.errors.join('; ')}`).toBe(false)
-    if (error) {
-      expect(result.errors.some((candidate) => candidate.includes(error))).toBe(
-        true,
-      )
-    }
-  })
+      expect(result.ok, `${path}: ${result.errors.join('; ')}`).toBe(false)
+      if (error) {
+        expect(
+          result.errors.some((candidate) => candidate.includes(error)),
+        ).toBe(true)
+      }
+    },
+  )
 
   it.each(ACCEPTED_HTML_FIXTURES)(
     'accepts $name',
     ({ path, options, stylesheetRefs, embedHosts }) => {
-      const result = validateHtml(fixture(path), { ...HTML_OPTIONS, ...options })
+      const result = validateHtml(fixture(path), {
+        ...HTML_OPTIONS,
+        ...options,
+      })
 
       expect(result.ok, `${path}: ${result.errors.join('; ')}`).toBe(true)
-      if (stylesheetRefs) expect(result.stats.stylesheetRefs).toEqual(stylesheetRefs)
+      if (stylesheetRefs)
+        expect(result.stats.stylesheetRefs).toEqual(stylesheetRefs)
       if (embedHosts) expect(result.stats.embedHosts).toEqual(embedHosts)
     },
   )

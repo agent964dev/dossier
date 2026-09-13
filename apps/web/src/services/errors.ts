@@ -56,7 +56,11 @@ export function apiError(
   message: string,
   details?: unknown,
 ): DossierError {
-  return new DossierError({ code, message, ...(details === undefined ? {} : { details }) })
+  return new DossierError({
+    code,
+    message,
+    ...(details === undefined ? {} : { details }),
+  })
 }
 
 export function errorResponse(error: DossierError): Response {

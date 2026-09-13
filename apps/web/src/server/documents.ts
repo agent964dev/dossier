@@ -157,12 +157,12 @@ function countTrash(workspaceId: string, accountId: string) {
           )
           .bind(accountId, workspaceId, accountId)
           .first<{ total: number }>(),
-      catch: (cause) => new PersistenceError({ operation: 'count trash', cause }),
+      catch: (cause) =>
+        new PersistenceError({ operation: 'count trash', cause }),
     })
     return row?.total ?? 0
   })
 }
-
 
 interface SweptRow {
   readonly id: string
@@ -212,17 +212,15 @@ function loadSwept(
       catch: (cause) =>
         new PersistenceError({ operation: 'load swept documents', cause }),
     })
-    return rows.results.map(
-      (row): SweptDocument => ({
-        id: row.id,
-        title: row.title,
-        kind: row.kind,
-        rootTitle: row.root_title ?? 'an archived document',
-        deletedBy: row.deleted_by,
-        deletedByAccountId: row.deleted_by_account_id,
-        deletedAt: row.created_at,
-      }),
-    )
+    return rows.results.map((row): SweptDocument => ({
+      id: row.id,
+      title: row.title,
+      kind: row.kind,
+      rootTitle: row.root_title ?? 'an archived document',
+      deletedBy: row.deleted_by,
+      deletedByAccountId: row.deleted_by_account_id,
+      deletedAt: row.created_at,
+    }))
   })
 }
 
@@ -245,7 +243,6 @@ function isBatchRoot(batchId: string, documentId: string) {
     return row?.ok === 1
   })
 }
-
 
 function loadArchivePreview(documentId: string) {
   return Effect.gen(function* () {
@@ -412,7 +409,10 @@ export const loadDashboard = createServerFn({ method: 'GET' })
         const shared = readable.documents
           .filter((document) => !inWorkspace.has(document.id))
           .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-        const trashCount = yield* countTrash(viewer.workspaceId, viewer.accountId)
+        const trashCount = yield* countTrash(
+          viewer.workspaceId,
+          viewer.accountId,
+        )
 
         return {
           viewer,
@@ -439,18 +439,21 @@ export const loadTrash = createServerFn({ method: 'GET' }).handler(async () => {
       const documents = yield* Documents
       // `scope=trash` answers with one document per batch: its root, carrying
       // the authors the batch swept up.
-      const page = yield* documents.list({ scope: 'trash', limit: PAGE }, principal)
+      const page = yield* documents.list(
+        { scope: 'trash', limit: PAGE },
+        principal,
+      )
 
       const batchIds = page.documents
         .filter(isDocumentEditor)
         .map((document) => document.deletionBatchId)
         .filter((id): id is string => id !== null)
       const db = yield* Db
-      const deleters = batchIds.length === 0
-        ? new Map<string, string>()
-        : new Map(
-            (
-              yield* Effect.tryPromise({
+      const deleters =
+        batchIds.length === 0
+          ? new Map<string, string>()
+          : new Map(
+              (yield* Effect.tryPromise({
                 try: () =>
                   db.raw
                     .prepare(
@@ -460,29 +463,33 @@ export const loadTrash = createServerFn({ method: 'GET' }).handler(async () => {
                     .bind(JSON.stringify(batchIds))
                     .all<{ id: string; account_id: string }>(),
                 catch: (cause) =>
-                  new PersistenceError({ operation: 'load trash deleters', cause }),
-              })
-            ).results.map((row) => [row.id, row.account_id] as const),
-          )
+                  new PersistenceError({
+                    operation: 'load trash deleters',
+                    cause,
+                  }),
+              })).results.map((row) => [row.id, row.account_id] as const),
+            )
 
-      const batches = page.documents.filter(isDocumentEditor).map((document) => {
-        const authors = document.authors ?? []
-        return {
-          batchId: document.deletionBatchId,
-          rootDocumentId: document.id,
-          rootTitle: document.deletionRootTitle ?? document.title,
-          rootKind: document.kind,
-          deletedBy: document.deletedBy,
-          deletedByAccountId:
-            document.deletionBatchId === null
-              ? null
-              : (deleters.get(document.deletionBatchId) ?? null),
-          deletedAt: document.deletedAt,
-          deletedCount:
-            authors.reduce((total, author) => total + author.count, 0) || 1,
-          authors,
-        } satisfies TrashBatch
-      })
+      const batches = page.documents
+        .filter(isDocumentEditor)
+        .map((document) => {
+          const authors = document.authors ?? []
+          return {
+            batchId: document.deletionBatchId,
+            rootDocumentId: document.id,
+            rootTitle: document.deletionRootTitle ?? document.title,
+            rootKind: document.kind,
+            deletedBy: document.deletedBy,
+            deletedByAccountId:
+              document.deletionBatchId === null
+                ? null
+                : (deleters.get(document.deletionBatchId) ?? null),
+            deletedAt: document.deletedAt,
+            deletedCount:
+              authors.reduce((total, author) => total + author.count, 0) || 1,
+            authors,
+          } satisfies TrashBatch
+        })
 
       const swept = yield* loadSwept(
         viewer.workspaceId,
@@ -548,7 +555,10 @@ export const loadDocument = createServerFn({ method: 'GET' })
                 current: node.document.id === document.parentId,
               })
             }
-            walk(node.children, depth + 1, [...ancestorTitles, node.document.title])
+            walk(node.children, depth + 1, [
+              ...ancestorTitles,
+              node.document.title,
+            ])
           }
         }
         walk(forest, 0, [])

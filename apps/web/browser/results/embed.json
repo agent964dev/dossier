@@ -25,9 +25,7 @@
           "navigation": {
             "status": 200,
             "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
-            "frameSources": [
-              "http://localhost:8787"
-            ],
+            "frameSources": ["http://localhost:8787"],
             "frameCount": 2
           },
           "console": [],
@@ -88,9 +86,7 @@
           "navigation": {
             "status": 200,
             "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
-            "frameSources": [
-              "http://localhost:8787"
-            ],
+            "frameSources": ["http://localhost:8787"],
             "frameCount": 2
           },
           "console": [],
@@ -160,10 +156,7 @@
           "navigation": {
             "status": 200,
             "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
-            "frameSources": [
-              "http://localhost:8787",
-              "https://example.com"
-            ],
+            "frameSources": ["http://localhost:8787", "https://example.com"],
             "frameCount": 3,
             "frameNavigations": [
               {
@@ -228,10 +221,7 @@
           "navigation": {
             "status": 200,
             "contentSecurityPolicy": "default-src 'none'; script-src 'unsafe-inline'; script-src-attr 'none'; style-src 'unsafe-inline' http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; font-src http://localhost:8787 https://fonts.googleapis.com https://fonts.gstatic.com; img-src https: data:; connect-src 'none'; worker-src 'none'; frame-src http://localhost:8787 https://example.com; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
-            "frameSources": [
-              "http://localhost:8787",
-              "https://example.com"
-            ],
+            "frameSources": ["http://localhost:8787", "https://example.com"],
             "frameCount": 3,
             "frameNavigations": [
               {

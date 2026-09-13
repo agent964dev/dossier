@@ -70,7 +70,9 @@ export const AllowlistLive = Layer.effect(
         const at = email.lastIndexOf('@')
         if (!identity.emailVerified || at <= 0 || at === email.length - 1) {
           return yield* Effect.fail(
-            new SignInRefused({ message: 'A verified email address is required.' }),
+            new SignInRefused({
+              message: 'A verified email address is required.',
+            }),
           )
         }
         const domain = email.slice(at + 1)
@@ -103,7 +105,8 @@ export const AllowlistLive = Layer.effect(
         if (!entry) {
           return yield* Effect.fail(
             new SignInRefused({
-              message: 'This dossier is invite-only; ask an admin to allow your email.',
+              message:
+                'This dossier is invite-only; ask an admin to allow your email.',
             }),
           )
         }
@@ -119,7 +122,11 @@ export const AllowlistLive = Layer.effect(
                   LIMIT 1`,
               )
               .bind(identity.provider, identity.subject)
-              .first<{ identity_id: string; account_id: string; disabled_at: string | null }>(),
+              .first<{
+                identity_id: string
+                account_id: string
+                disabled_at: string | null
+              }>(),
           catch: (cause) => persistence('load sign-in identity', cause),
         })
         if (existing?.disabled_at) {
@@ -277,7 +284,9 @@ export const AllowlistLive = Layer.effect(
           workspaceId,
           workspaceSlug: slug,
           bootstrapAccountId: 'acct_bootstrap' as const,
-          bootstrapApiKeyId: bootstrapKeyHash ? ('key_bootstrap' as const) : null,
+          bootstrapApiKeyId: bootstrapKeyHash
+            ? ('key_bootstrap' as const)
+            : null,
         }
       })
 

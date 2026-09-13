@@ -91,7 +91,6 @@ The first caller-managed invocation writes `status: "partial"`; the second
 merges its case into the existing file and writes `status: "passed"` when both
 cases pass. Do not run both caller-managed cases concurrently.
 
-
 ## Known WebKit credential behavior
 
 `/d/:id` and `/d/:id/v/:n` serve the document bytes top-level, directly under
@@ -129,9 +128,9 @@ happens when a document's own inline script sets `location =
 "https://example.com/..."`: whether the top-level page stayed on the document
 URL, any frame navigations, and any request made to the external origin.
 Whether the platform should block a document from navigating the reader's
-top-level page this way is an open owner decision — see PLAN.md section 2's
-verified-facts note on Chromium's top-level self-navigation behavior under the
-section-9 sandbox CSP. This harness does not fail the run on the outcome
+top-level page this way is an open owner decision. See the upload policy and
+serving CSP in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md). This
+harness does not fail the run on the outcome
 either way.
 
 ### `results/embed.json`

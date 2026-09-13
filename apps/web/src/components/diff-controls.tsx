@@ -79,6 +79,7 @@ export function DiffControls({
   // Rendered on the server, so the form works before (and without) hydration;
   // once React is live the selects navigate on change and the button retires.
   const [enhanced, setEnhanced] = useState(false)
+  // oxlint-disable-next-line react/set-state-in-effect -- Hydration enhancement.
   useEffect(() => setEnhanced(true), [])
 
   /**
@@ -91,16 +92,18 @@ export function DiffControls({
     view?: 'side' | 'unified' | undefined
     mode?: 'text' | undefined
   }): DiffSearch => {
-    const view = 'view' in overrides
-      ? overrides.view
-      : layout === 'auto'
-        ? undefined
-        : layout
-    const compare = 'mode' in overrides
-      ? overrides.mode
-      : mode === 'text'
-        ? ('text' as const)
-        : undefined
+    const view =
+      'view' in overrides
+        ? overrides.view
+        : layout === 'auto'
+          ? undefined
+          : layout
+    const compare =
+      'mode' in overrides
+        ? overrides.mode
+        : mode === 'text'
+          ? ('text' as const)
+          : undefined
     return {
       from: overrides.from ?? from.versionNumber,
       to: overrides.to ?? to.versionNumber,
@@ -129,7 +132,9 @@ export function DiffControls({
         {layout === 'auto' ? null : (
           <input type="hidden" name="view" value={layout} />
         )}
-        {mode === 'text' ? <input type="hidden" name="mode" value="text" /> : null}
+        {mode === 'text' ? (
+          <input type="hidden" name="mode" value="text" />
+        ) : null}
 
         <VersionPicker
           id="diff-from"
@@ -256,7 +261,10 @@ function VersionPicker({
 }) {
   return (
     <div className="min-w-0 flex-1">
-      <label htmlFor={id} className="text-micro-lg flex items-baseline gap-1.5 pb-1.5">
+      <label
+        htmlFor={id}
+        className="text-micro-lg flex items-baseline gap-1.5 pb-1.5"
+      >
         <span className="text-neutral-400">{label}</span>
         <span className="text-neutral-500">{hint}</span>
       </label>
@@ -285,7 +293,9 @@ function Segmented({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-micro-lg hidden text-neutral-500 sm:inline">{label}</span>
+      <span className="text-micro-lg hidden text-neutral-500 sm:inline">
+        {label}
+      </span>
       <div
         role="group"
         aria-label={label}

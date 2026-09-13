@@ -39,10 +39,7 @@ async function apiRequest(
   )
 }
 
-async function publicRequest(
-  path: string,
-  method = 'GET',
-): Promise<Response> {
+async function publicRequest(path: string, method = 'GET'): Promise<Response> {
   return worker.fetch(
     new Request(`https://dossier.test${path}`, { method }) as Parameters<
       typeof worker.fetch
@@ -76,7 +73,12 @@ describe('assets', () => {
     const firstCss = ':root { color: #ff0000; }\n'
     const secondCss = ':root { color: #0000ff; }\n'
 
-    const first = await push(principal.token, 'versioned-theme', 'css', firstCss)
+    const first = await push(
+      principal.token,
+      'versioned-theme',
+      'css',
+      firstCss,
+    )
     expect(first.status).toBe(200)
     expect(await first.json()).toEqual({
       slug: 'versioned-theme',
@@ -168,7 +170,9 @@ describe('assets', () => {
   it('soft-deletes latest and listing while retaining pinned versions', async () => {
     const principal = await seedPrincipal(env, { suffix: 'assets_delete' })
     const css = '.retained { display: block }\n'
-    expect((await push(principal.token, 'delete-me', 'css', css)).status).toBe(200)
+    expect((await push(principal.token, 'delete-me', 'css', css)).status).toBe(
+      200,
+    )
 
     const deleted = await apiRequest('/api/assets/delete-me', principal.token, {
       method: 'DELETE',
@@ -195,9 +199,9 @@ describe('assets', () => {
   it('serves WOFF2 with CORS and supports HEAD', async () => {
     const principal = await seedPrincipal(env, { suffix: 'assets_woff2' })
     const font = Uint8Array.of(0x77, 0x4f, 0x46, 0x32, 0, 1, 2, 3, 4)
-    expect((await push(principal.token, 'test-font', 'woff2', font)).status).toBe(
-      200,
-    )
+    expect(
+      (await push(principal.token, 'test-font', 'woff2', font)).status,
+    ).toBe(200)
 
     const latest = await publicRequest('/a/test-font.woff2')
     expect(latest.status).toBe(200)

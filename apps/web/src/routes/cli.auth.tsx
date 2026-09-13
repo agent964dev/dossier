@@ -42,7 +42,9 @@ function CliAuthPage() {
   const { viewer, keys } = Route.useLoaderData()
   const router = useRouter()
   const [name, setName] = useState('')
-  const [minted, setMinted] = useState<{ token: string; name: string } | null>(null)
+  const [minted, setMinted] = useState<{ token: string; name: string } | null>(
+    null,
+  )
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<string | null>(null)
 
@@ -65,7 +67,9 @@ function CliAuthPage() {
   async function revoke(id: string) {
     setPending(id)
     setError(null)
-    const result = await revokeApiKey({ data: { id, csrfToken: viewer.csrfToken } })
+    const result = await revokeApiKey({
+      data: { id, csrfToken: viewer.csrfToken },
+    })
     setPending(null)
     if (isSurfaceFailure(result)) {
       setError(result.message)
@@ -101,8 +105,8 @@ function CliAuthPage() {
           <p className="mt-2 max-w-xl text-sm leading-body text-neutral-400">
             You are signed in, but you are not a member of{' '}
             <span className="text-neutral-200">{viewer.workspaceSlug}</span>, so
-            you cannot publish here. Ask a workspace admin to add your address to
-            the allowlist and sign in again.
+            you cannot publish here. Ask a workspace admin to add your address
+            to the allowlist and sign in again.
           </p>
         </div>
       ) : (
@@ -122,7 +126,11 @@ function CliAuthPage() {
                     onChange={(event) => setName(event.target.value)}
                   />
                 </div>
-                <Button type="button" onClick={mint} disabled={pending !== null}>
+                <Button
+                  type="button"
+                  onClick={mint}
+                  disabled={pending !== null}
+                >
                   <Sparkles aria-hidden />
                   {pending === 'mint' ? 'Generating…' : 'Generate key'}
                 </Button>
@@ -145,7 +153,9 @@ function CliAuthPage() {
                     <KeyRound aria-hidden />
                     Shown once
                   </Badge>
-                  <span className="text-micro-lg text-neutral-400">{minted.name}</span>
+                  <span className="text-micro-lg text-neutral-400">
+                    {minted.name}
+                  </span>
                 </div>
                 <p className="mt-3 text-sm leading-body text-neutral-300">
                   Copy this now. dossier stores only its SHA-256 hash, so it
@@ -167,11 +177,14 @@ function CliAuthPage() {
               </div>
             ) : null}
 
-            <SectionLabel className="mt-8" aside={
-              <span data-numeric className="text-micro-lg text-neutral-500">
-                {active.length} active
-              </span>
-            }>
+            <SectionLabel
+              className="mt-8"
+              aside={
+                <span data-numeric className="text-micro-lg text-neutral-500">
+                  {active.length} active
+                </span>
+              }
+            >
               Keys
             </SectionLabel>
 
@@ -231,11 +244,16 @@ function CliAuthPage() {
             <ol className="grid gap-4">
               {STEPS.map((step) => (
                 <li key={step.n} className="flex gap-3">
-                  <span data-numeric className="text-micro-lg mt-[5px] text-neutral-600">
+                  <span
+                    data-numeric
+                    className="text-micro-lg mt-[5px] text-neutral-600"
+                  >
                     {step.n}
                   </span>
                   <div className="min-w-0">
-                    <p className="text-sm font-medium text-neutral-200">{step.title}</p>
+                    <p className="text-sm font-medium text-neutral-200">
+                      {step.title}
+                    </p>
                     <p className="mt-1 text-sm leading-body text-neutral-500">
                       {step.body}
                     </p>

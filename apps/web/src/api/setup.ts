@@ -11,7 +11,11 @@ import {
 
 const encoder = new TextEncoder()
 
-function jsonResponse(body: unknown, status: number, headers?: HeadersInit): Response {
+function jsonResponse(
+  body: unknown,
+  status: number,
+  headers?: HeadersInit,
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
@@ -34,7 +38,10 @@ async function sha256(value: string): Promise<Uint8Array> {
   return new Uint8Array(digest)
 }
 
-async function constantTimeEqual(left: string, right: string): Promise<boolean> {
+async function constantTimeEqual(
+  left: string,
+  right: string,
+): Promise<boolean> {
   const [leftHash, rightHash] = await Promise.all([sha256(left), sha256(right)])
   let difference = 0
   for (let index = 0; index < leftHash.length; index += 1) {
@@ -80,7 +87,11 @@ export async function handleSetupRequest(
 
   if (request.method !== 'POST') {
     return jsonResponse(
-      { ok: false, code: 'method_not_allowed', message: 'Use POST /api/setup.' },
+      {
+        ok: false,
+        code: 'method_not_allowed',
+        message: 'Use POST /api/setup.',
+      },
       405,
       { allow: 'POST' },
     )

@@ -47,32 +47,33 @@ function listKeys(accountId: string, workspaceId: string) {
           )
           .bind(accountId, workspaceId)
           .all<KeyRecord>(),
-      catch: (cause) => new PersistenceError({ operation: 'list API keys', cause }),
+      catch: (cause) =>
+        new PersistenceError({ operation: 'list API keys', cause }),
     })
-    return result.results.map(
-      (row): ApiKeyRow => ({
-        id: row.id,
-        name: row.name,
-        createdAt: row.created_at,
-        lastUsedAt: row.last_used_at,
-        revokedAt: row.revoked_at,
-      }),
-    )
+    return result.results.map((row): ApiKeyRow => ({
+      id: row.id,
+      name: row.name,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      revokedAt: row.revoked_at,
+    }))
   })
 }
 
-export const loadCliAuth = createServerFn({ method: 'GET' }).handler(async () => {
-  const request = getRequest()
-  return runSurface(
-    Effect.gen(function* () {
-      const { viewer } = yield* resolveWeb(request)
-      const keys = viewer.publisher
-        ? yield* listKeys(viewer.accountId, viewer.workspaceId)
-        : []
-      return { viewer, keys } satisfies CliAuthData
-    }),
-  )
-})
+export const loadCliAuth = createServerFn({ method: 'GET' }).handler(
+  async () => {
+    const request = getRequest()
+    return runSurface(
+      Effect.gen(function* () {
+        const { viewer } = yield* resolveWeb(request)
+        const keys = viewer.publisher
+          ? yield* listKeys(viewer.accountId, viewer.workspaceId)
+          : []
+        return { viewer, keys } satisfies CliAuthData
+      }),
+    )
+  },
+)
 
 export type MintKeyResult =
   | {
@@ -145,7 +146,8 @@ export const mintApiKey = createServerFn({ method: 'POST' })
                 createdAt,
               )
               .run(),
-          catch: (cause) => new PersistenceError({ operation: 'mint API key', cause }),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'mint API key', cause }),
         })
 
         return {
@@ -207,7 +209,10 @@ export const revokeApiKey = createServerFn({ method: 'POST' })
         })
         if ((result.meta.changes ?? 0) === 0) {
           return yield* Effect.fail(
-            apiError('not_found', 'That key is already revoked or does not exist.'),
+            apiError(
+              'not_found',
+              'That key is already revoked or does not exist.',
+            ),
           )
         }
         return { ok: true as const, id: data.id }

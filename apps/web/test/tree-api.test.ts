@@ -97,7 +97,8 @@ async function actor(
 ): Promise<Seeded> {
   const seeded = await seedPrincipal(env, {
     suffix,
-    email: options.email && options.verified !== false ? options.email : undefined,
+    email:
+      options.email && options.verified !== false ? options.email : undefined,
   })
   if (options.email && options.verified === false) {
     await env.DB.prepare(
@@ -201,15 +202,39 @@ describe('phase two HTTP tree and access', () => {
       for (const target of [roots[visibility], inherited[visibility]]) {
         const id = target.document.id as string
         await expectApiStatus(id, owner.token, 200)
-        await expectApiStatus(id, member.token, visibility === 'private' ? 404 : 200)
+        await expectApiStatus(
+          id,
+          member.token,
+          visibility === 'private' ? 404 : 200,
+        )
         await expectApiStatus(id, invited.token, 200)
-        await expectApiStatus(id, unverified.token, visibility === 'public' ? 200 : 404)
-        await expectApiStatus(id, stranger.token, visibility === 'public' ? 200 : 404)
+        await expectApiStatus(
+          id,
+          unverified.token,
+          visibility === 'public' ? 200 : 404,
+        )
+        await expectApiStatus(
+          id,
+          stranger.token,
+          visibility === 'public' ? 200 : 404,
+        )
         await expectServingStatus(id, 200, owner.token)
-        await expectServingStatus(id, visibility === 'private' ? 404 : 200, member.token)
+        await expectServingStatus(
+          id,
+          visibility === 'private' ? 404 : 200,
+          member.token,
+        )
         await expectServingStatus(id, 200, invited.token)
-        await expectServingStatus(id, visibility === 'public' ? 200 : 404, unverified.token)
-        await expectServingStatus(id, visibility === 'public' ? 200 : 404, stranger.token)
+        await expectServingStatus(
+          id,
+          visibility === 'public' ? 200 : 404,
+          unverified.token,
+        )
+        await expectServingStatus(
+          id,
+          visibility === 'public' ? 200 : 404,
+          stranger.token,
+        )
         await expectServingStatus(id, visibility === 'public' ? 200 : 404)
       }
     }
@@ -222,13 +247,19 @@ describe('phase two HTTP tree and access', () => {
     const privateParent = await upload(owner.token, 'HTTP hidden boundary', {
       visibility: 'private',
     })
-    const publicChild = await upload(owner.token, 'HTTP visible boundary child', {
-      parentId: privateParent.document.id,
-      visibility: 'public',
-    })
+    const publicChild = await upload(
+      owner.token,
+      'HTTP visible boundary child',
+      {
+        parentId: privateParent.document.id,
+        visibility: 'public',
+      },
+    )
     await expectApiStatus(publicChild.document.id, stranger.token, 200)
     const childDetail = await body(
-      await api(`/api/documents/${publicChild.document.id}`, { token: stranger.token }),
+      await api(`/api/documents/${publicChild.document.id}`, {
+        token: stranger.token,
+      }),
     )
     expect(childDetail.document.parentId).toBeNull()
 
@@ -268,10 +299,14 @@ describe('phase two HTTP tree and access', () => {
     const hidden = await upload(owner.token, 'HTTP never reveal ancestor', {
       visibility: 'private',
     })
-    const hiddenSibling = await upload(owner.token, 'HTTP never reveal sibling', {
-      parentId: hidden.document.id,
-      visibility: 'private',
-    })
+    const hiddenSibling = await upload(
+      owner.token,
+      'HTTP never reveal sibling',
+      {
+        parentId: hidden.document.id,
+        visibility: 'private',
+      },
+    )
     const child = await upload(owner.token, 'HTTP visible virtual root', {
       parentId: hidden.document.id,
       visibility: 'public',
@@ -283,10 +318,9 @@ describe('phase two HTTP tree and access', () => {
       visibility: 'public',
     })
 
-    const mineResponse = await api(
-      '/api/documents?scope=mine&tree=1&limit=1',
-      { token: owner.token },
-    )
+    const mineResponse = await api('/api/documents?scope=mine&tree=1&limit=1', {
+      token: owner.token,
+    })
     expect(mineResponse.status).toBe(200)
     const mine = await body(mineResponse)
     expect(mine.nextCursor).toBeNull()
@@ -300,8 +334,9 @@ describe('phase two HTTP tree and access', () => {
       ]),
     )
     expect(
-      mine.documents.find((document: JsonObject) => document.id === child.document.id)
-        .parentId,
+      mine.documents.find(
+        (document: JsonObject) => document.id === child.document.id,
+      ).parentId,
     ).toBe(hidden.document.id)
 
     const listResponse = await api(
@@ -371,7 +406,9 @@ describe('phase two HTTP tree and access', () => {
     expect(hiddenParent.status).toBe(404)
     expect(await body(hiddenParent)).toMatchObject({ code: 'not_found' })
 
-    const invalidTree = await api('/api/documents?tree=0', { token: owner.token })
+    const invalidTree = await api('/api/documents?tree=0', {
+      token: owner.token,
+    })
     expect(invalidTree.status).toBe(422)
     expect(await body(invalidTree)).toMatchObject({ code: 'policy_rejected' })
   })
@@ -387,7 +424,12 @@ describe('phase two HTTP tree and access', () => {
       documentId: id,
     })
 
-    for (const path of [`/d/${id}`, `/d/${id}/raw`, `/d/${id}/v/1`, `/d/${id}/v/1/raw`]) {
+    for (const path of [
+      `/d/${id}`,
+      `/d/${id}/raw`,
+      `/d/${id}/v/1`,
+      `/d/${id}/v/1/raw`,
+    ]) {
       expect((await serving(path)).status).toBe(200)
       expect((await serving(path, { token: stranger.token })).status).toBe(200)
     }
@@ -398,7 +440,12 @@ describe('phase two HTTP tree and access', () => {
       body: { visibility: 'private' },
     })
     expect(privatePatch.status).toBe(200)
-    for (const path of [`/d/${id}`, `/d/${id}/raw`, `/d/${id}/v/1`, `/d/${id}/v/1/raw`]) {
+    for (const path of [
+      `/d/${id}`,
+      `/d/${id}/raw`,
+      `/d/${id}/v/1`,
+      `/d/${id}/v/1/raw`,
+    ]) {
       expect((await serving(path)).status).toBe(404)
       expect((await serving(path, { token: stranger.token })).status).toBe(404)
       expect((await serving(path, { token: owner.token })).status).toBe(200)
@@ -421,15 +468,29 @@ describe('phase two HTTP tree and access', () => {
         })
       ).status,
     ).toBe(200)
-    expect((await serving(`/d/${id}/v/1`, { token: owner.token })).status).toBe(404)
+    expect((await serving(`/d/${id}/v/1`, { token: owner.token })).status).toBe(
+      404,
+    )
 
     expect(
-      (await api(`/api/documents/${id}/enable`, { token: owner.token, method: 'POST' })).status,
+      (
+        await api(`/api/documents/${id}/enable`, {
+          token: owner.token,
+          method: 'POST',
+        })
+      ).status,
     ).toBe(200)
     expect(
-      (await api(`/api/documents/${id}`, { token: owner.token, method: 'DELETE' })).status,
+      (
+        await api(`/api/documents/${id}`, {
+          token: owner.token,
+          method: 'DELETE',
+        })
+      ).status,
     ).toBe(200)
-    expect((await serving(`/d/${id}/v/1`, { token: owner.token })).status).toBe(404)
+    expect((await serving(`/d/${id}/v/1`, { token: owner.token })).status).toBe(
+      404,
+    )
   })
 
   it('enforces depth, cycle, root, cross-owner, and admin move/delete rules over HTTP', async () => {
@@ -447,7 +508,9 @@ describe('phase two HTTP tree and access', () => {
       role: 'member',
     })
 
-    const chain = [await upload(owner.token, 'HTTP depth zero', { visibility: 'team' })]
+    const chain = [
+      await upload(owner.token, 'HTTP depth zero', { visibility: 'team' }),
+    ]
     for (let depth = 1; depth <= 16; depth += 1) {
       chain.push(
         await upload(owner.token, `HTTP depth ${depth}`, {
@@ -491,7 +554,9 @@ describe('phase two HTTP tree and access', () => {
       body: { parentId: chain[0].document.id },
     })
     expect(crossOwner.status).toBe(200)
-    expect((await body(crossOwner)).document.parentId).toBe(chain[0].document.id)
+    expect((await body(crossOwner)).document.parentId).toBe(
+      chain[0].document.id,
+    )
     const rooted = await api(`/api/documents/${movable.document.id}`, {
       token: member.token,
       method: 'PATCH',
@@ -500,10 +565,16 @@ describe('phase two HTTP tree and access', () => {
     expect(rooted.status).toBe(200)
     expect((await body(rooted)).document.parentId).toBeNull()
 
-    const foreignOwner = await seedPrincipal(env, { suffix: 'http_moves_foreign' })
-    const foreignRoot = await upload(foreignOwner.token, 'HTTP foreign public root', {
-      visibility: 'public',
+    const foreignOwner = await seedPrincipal(env, {
+      suffix: 'http_moves_foreign',
     })
+    const foreignRoot = await upload(
+      foreignOwner.token,
+      'HTTP foreign public root',
+      {
+        visibility: 'public',
+      },
+    )
     const crossWorkspace = await api(`/api/documents/${movable.document.id}`, {
       token: member.token,
       method: 'PATCH',
@@ -519,20 +590,23 @@ describe('phase two HTTP tree and access', () => {
       visibility: 'team',
     })
     for (const operation of [
-      () => api(`/api/documents/${memberDocument.document.id}`, {
-        token: peer.token,
-        method: 'PATCH',
-        body: { description: 'forbidden edit' },
-      }),
-      () => api(`/api/documents/${memberDocument.document.id}`, {
-        token: peer.token,
-        method: 'PATCH',
-        body: { parentId: destination.document.id },
-      }),
-      () => api(`/api/documents/${memberDocument.document.id}`, {
-        token: peer.token,
-        method: 'DELETE',
-      }),
+      () =>
+        api(`/api/documents/${memberDocument.document.id}`, {
+          token: peer.token,
+          method: 'PATCH',
+          body: { description: 'forbidden edit' },
+        }),
+      () =>
+        api(`/api/documents/${memberDocument.document.id}`, {
+          token: peer.token,
+          method: 'PATCH',
+          body: { parentId: destination.document.id },
+        }),
+      () =>
+        api(`/api/documents/${memberDocument.document.id}`, {
+          token: peer.token,
+          method: 'DELETE',
+        }),
     ]) {
       const denied = await operation()
       expect(denied.status).toBe(403)
@@ -602,10 +676,12 @@ describe('phase two HTTP tree and access', () => {
     expect(forced.status).toBe(200)
     const deletion = await body(forced)
     expect(deletion.deleted).toBe(2)
-    expect(deletion.authors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ accountId: owner.accountId, count: 1 }),
-      expect.objectContaining({ accountId: member.accountId, count: 1 }),
-    ]))
+    expect(deletion.authors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ accountId: owner.accountId, count: 1 }),
+        expect.objectContaining({ accountId: member.accountId, count: 1 }),
+      ]),
+    )
 
     const ownerTrash = await body(
       await api('/api/documents?scope=trash', { token: owner.token }),
@@ -618,20 +694,26 @@ describe('phase two HTTP tree and access', () => {
       deletionBatchId: deletion.batchId,
       deletionRootTitle: 'HTTP archive ticket',
     })
-    expect(batchRoot.authors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ accountId: owner.accountId, count: 1 }),
-      expect.objectContaining({ accountId: member.accountId, count: 1 }),
-    ]))
-    expect(ownerTrash.documents.some(
-      (document: JsonObject) => document.id === research.document.id,
-    )).toBe(false)
+    expect(batchRoot.authors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ accountId: owner.accountId, count: 1 }),
+        expect.objectContaining({ accountId: member.accountId, count: 1 }),
+      ]),
+    )
+    expect(
+      ownerTrash.documents.some(
+        (document: JsonObject) => document.id === research.document.id,
+      ),
+    ).toBe(false)
 
     const memberTrash = await body(
       await api('/api/documents?scope=trash', { token: member.token }),
     )
-    expect(memberTrash.documents.some(
-      (document: JsonObject) => document.id === research.document.id,
-    )).toBe(false)
+    expect(
+      memberTrash.documents.some(
+        (document: JsonObject) => document.id === research.document.id,
+      ),
+    ).toBe(false)
 
     const parentDelete = await body(
       await api(`/api/documents/${parent.document.id}`, {
@@ -662,8 +744,13 @@ describe('phase two HTTP tree and access', () => {
         })
       ).status,
     ).toBe(200)
-    expect((await api(`/api/documents/${research.document.id}`, { token: member.token })).status)
-      .toBe(200)
+    expect(
+      (
+        await api(`/api/documents/${research.document.id}`, {
+          token: member.token,
+        })
+      ).status,
+    ).toBe(200)
 
     const oldDetail = await body(
       await api(`/api/documents/${old.document.id}`, { token: owner.token }),
@@ -736,23 +823,27 @@ describe('phase two HTTP tree and access', () => {
       visibility: 'public',
     })
     for (const request of [
-      () => api(`/api/documents/${readable.document.id}`, {
-        token: member.token,
-        method: 'PATCH',
-        body: { description: 'no' },
-      }),
-      () => api(`/api/documents/${readable.document.id}/shares`, {
-        token: member.token,
-      }),
-      () => api(`/api/documents/${readable.document.id}/shares`, {
-        token: member.token,
-        body: { add: ['no@http-shares.test'] },
-      }),
-      () => api(`/api/documents/${readable.document.id}/shares`, {
-        token: member.token,
-        method: 'PUT',
-        body: { emails: [], ifRevision: readable.document.revision },
-      }),
+      () =>
+        api(`/api/documents/${readable.document.id}`, {
+          token: member.token,
+          method: 'PATCH',
+          body: { description: 'no' },
+        }),
+      () =>
+        api(`/api/documents/${readable.document.id}/shares`, {
+          token: member.token,
+        }),
+      () =>
+        api(`/api/documents/${readable.document.id}/shares`, {
+          token: member.token,
+          body: { add: ['no@http-shares.test'] },
+        }),
+      () =>
+        api(`/api/documents/${readable.document.id}/shares`, {
+          token: member.token,
+          method: 'PUT',
+          body: { emails: [], ifRevision: readable.document.revision },
+        }),
     ]) {
       const denied = await request()
       expect(denied.status).toBe(403)
@@ -767,40 +858,53 @@ describe('phase two HTTP tree and access', () => {
     ).toBe(200)
 
     for (const request of [
-      () => api(`/api/documents/${readable.document.id}`, {
-        token: external.token,
-        method: 'PATCH',
-        body: { description: 'external write' },
-      }),
-      () => api(`/api/documents/${readable.document.id}/shares`, {
-        token: external.token,
-        body: { add: ['external@http-shares.test'] },
-      }),
+      () =>
+        api(`/api/documents/${readable.document.id}`, {
+          token: external.token,
+          method: 'PATCH',
+          body: { description: 'external write' },
+        }),
+      () =>
+        api(`/api/documents/${readable.document.id}/shares`, {
+          token: external.token,
+          body: { add: ['external@http-shares.test'] },
+        }),
     ]) {
       const nonPublisher = await request()
       expect(nonPublisher.status).toBe(403)
-      expect(await body(nonPublisher)).toMatchObject({ code: 'publisher_required' })
+      expect(await body(nonPublisher)).toMatchObject({
+        code: 'publisher_required',
+      })
     }
 
-    const staleShares = await api(`/api/documents/${child.document.id}/shares`, {
-      token: owner.token,
-      method: 'PUT',
-      body: { emails: [], ifRevision: child.document.revision },
-    })
+    const staleShares = await api(
+      `/api/documents/${child.document.id}/shares`,
+      {
+        token: owner.token,
+        method: 'PUT',
+        body: { emails: [], ifRevision: child.document.revision },
+      },
+    )
     expect(staleShares.status).toBe(409)
     expect(await body(staleShares)).toMatchObject({ code: 'conflict' })
 
-    const invalidShare = await api(`/api/documents/${child.document.id}/shares`, {
-      token: owner.token,
-      body: { add: ['not-an-email'] },
-    })
+    const invalidShare = await api(
+      `/api/documents/${child.document.id}/shares`,
+      {
+        token: owner.token,
+        body: { add: ['not-an-email'] },
+      },
+    )
     expect(invalidShare.status).toBe(422)
     expect(await body(invalidShare)).toMatchObject({ code: 'policy_rejected' })
 
     const stalePatch = await api(`/api/documents/${readable.document.id}`, {
       token: owner.token,
       method: 'PATCH',
-      body: { description: 'stale', ifRevision: readable.document.revision + 1 },
+      body: {
+        description: 'stale',
+        ifRevision: readable.document.revision + 1,
+      },
     })
     expect(stalePatch.status).toBe(409)
     expect(await body(stalePatch)).toMatchObject({ code: 'conflict' })
@@ -808,21 +912,24 @@ describe('phase two HTTP tree and access', () => {
     const missingId = 'zzzzzzzzzzzz'
     for (const request of [
       () => api(`/api/documents/${missingId}/tree`, { token: owner.token }),
-      () => api(`/api/documents/${missingId}`, {
-        token: owner.token,
-        method: 'PATCH',
-        body: { description: 'missing' },
-      }),
+      () =>
+        api(`/api/documents/${missingId}`, {
+          token: owner.token,
+          method: 'PATCH',
+          body: { description: 'missing' },
+        }),
       () => api(`/api/documents/${missingId}/shares`, { token: owner.token }),
-      () => api(`/api/documents/${missingId}/shares`, {
-        token: owner.token,
-        body: { add: ['missing@http-shares.test'] },
-      }),
-      () => api(`/api/documents/${missingId}/shares`, {
-        token: owner.token,
-        method: 'PUT',
-        body: { emails: [], ifRevision: 0 },
-      }),
+      () =>
+        api(`/api/documents/${missingId}/shares`, {
+          token: owner.token,
+          body: { add: ['missing@http-shares.test'] },
+        }),
+      () =>
+        api(`/api/documents/${missingId}/shares`, {
+          token: owner.token,
+          method: 'PUT',
+          body: { emails: [], ifRevision: 0 },
+        }),
     ]) {
       const missing = await request()
       expect(missing.status).toBe(404)
@@ -831,16 +938,19 @@ describe('phase two HTTP tree and access', () => {
 
     for (const request of [
       () => api(`/api/documents/${readable.document.id}/tree`),
-      () => api(`/api/documents/${readable.document.id}`, {
-        method: 'PATCH',
-        body: { description: 'anonymous' },
-      }),
+      () =>
+        api(`/api/documents/${readable.document.id}`, {
+          method: 'PATCH',
+          body: { description: 'anonymous' },
+        }),
       () => api(`/api/documents/${readable.document.id}/shares`),
     ]) {
       const unauthenticated = await request()
       expect(unauthenticated.status).toBe(401)
       expect(unauthenticated.headers.get('www-authenticate')).toBe('Bearer')
-      expect(await body(unauthenticated)).toMatchObject({ code: 'unauthenticated' })
+      expect(await body(unauthenticated)).toMatchObject({
+        code: 'unauthenticated',
+      })
     }
 
     const malformed = await api(`/api/documents/${readable.document.id}`, {
@@ -859,14 +969,18 @@ describe('phase two HTTP tree and access', () => {
       visibility: 'private',
     })
     const sessions = makeSession(TEST_SECRET, true)
-    const ownerCookie = await Effect.runPromise(sessions.createSessionCookie({
-      accountId: owner.accountId,
-      workspaceId: owner.workspaceId,
-    }))
-    const strangerCookie = await Effect.runPromise(sessions.createSessionCookie({
-      accountId: stranger.accountId,
-      workspaceId: stranger.workspaceId,
-    }))
+    const ownerCookie = await Effect.runPromise(
+      sessions.createSessionCookie({
+        accountId: owner.accountId,
+        workspaceId: owner.workspaceId,
+      }),
+    )
+    const strangerCookie = await Effect.runPromise(
+      sessions.createSessionCookie({
+        accountId: stranger.accountId,
+        workspaceId: stranger.workspaceId,
+      }),
+    )
     const ownerPair = ownerCookie.split(';', 1)[0]
     const strangerPair = strangerCookie.split(';', 1)[0]
 

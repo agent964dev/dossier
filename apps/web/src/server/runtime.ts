@@ -54,7 +54,10 @@ export async function workerEnv(): Promise<Cloudflare.Env> {
 }
 
 export function coreLayer(env: Cloudflare.Env) {
-  const environment = Layer.succeed(WorkerEnv, workerEnvWithOptionalRateLimiter(env))
+  const environment = Layer.succeed(
+    WorkerEnv,
+    workerEnvWithOptionalRateLimiter(env),
+  )
   return CoreServicesLive.pipe(Layer.provideMerge(environment))
 }
 

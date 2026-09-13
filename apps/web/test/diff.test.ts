@@ -58,12 +58,9 @@ async function upload(
 }
 
 function documentHtml(line: string, newline = '\n'): string {
-  return [
-    '<!doctype html>',
-    '<title>Version diff</title>',
-    line,
-    '',
-  ].join(newline)
+  return ['<!doctype html>', '<title>Version diff</title>', line, ''].join(
+    newline,
+  )
 }
 
 describe('version diff API', () => {
@@ -170,16 +167,12 @@ describe('version diff API', () => {
   it('returns editor_required only when the document is readable', async () => {
     const owner = await seedPrincipal(env, { suffix: 'diff_owner' })
     const outsider = await seedPrincipal(env, { suffix: 'diff_outsider' })
-    const readable = await upload(
-      owner.token,
-      documentHtml('<p>public</p>'),
-      { visibility: 'public' },
-    )
-    const hidden = await upload(
-      owner.token,
-      documentHtml('<p>private</p>'),
-      { visibility: 'private' },
-    )
+    const readable = await upload(owner.token, documentHtml('<p>public</p>'), {
+      visibility: 'public',
+    })
+    const hidden = await upload(owner.token, documentHtml('<p>private</p>'), {
+      visibility: 'private',
+    })
 
     const forbidden = await api(
       `/api/documents/${readable.document.id}/diff?from=1&to=1`,
@@ -310,12 +303,16 @@ describe('version diff API', () => {
       stats: { added: 1, removed: 1 },
     })
     const lines = result.hunks.flatMap((hunk: JsonObject) => hunk.lines)
-    expect(lines).toEqual(expect.arrayContaining([
-      { op: ' ', text: 'Hello world' },
-      { op: '-', text: 'Before text' },
-      { op: '+', text: 'After text' },
-    ]))
-    expect(JSON.stringify(lines)).not.toMatch(/oldScript|newScript|template|color/)
+    expect(lines).toEqual(
+      expect.arrayContaining([
+        { op: ' ', text: 'Hello world' },
+        { op: '-', text: 'Before text' },
+        { op: '+', text: 'After text' },
+      ]),
+    )
+    expect(JSON.stringify(lines)).not.toMatch(
+      /oldScript|newScript|template|color/,
+    )
   })
 
   it('preserves missing EOF-newline metadata on changed lines', async () => {
@@ -336,9 +333,11 @@ describe('version diff API', () => {
     )
     expect(response.status).toBe(200)
     const result = await body(response)
-    expect(result.hunks[0].lines).toEqual(expect.arrayContaining([
-      { op: '+', text: '<p>after</p>', noNewline: true },
-    ]))
+    expect(result.hunks[0].lines).toEqual(
+      expect.arrayContaining([
+        { op: '+', text: '<p>after</p>', noNewline: true },
+      ]),
+    )
   })
 
   it('lets workspace admins load and compare another author’s versions', async () => {
@@ -352,8 +351,10 @@ describe('version diff API', () => {
         `INSERT INTO memberships (workspace_id, account_id, role, created_at)
          VALUES (?, ?, 'admin', ?)`,
       ).bind(owner.workspaceId, admin.accountId, '2026-09-12T00:00:00.000Z'),
-      env.DB.prepare('UPDATE api_keys SET workspace_id = ? WHERE id = ?')
-        .bind(owner.workspaceId, admin.keyId),
+      env.DB.prepare('UPDATE api_keys SET workspace_id = ? WHERE id = ?').bind(
+        owner.workspaceId,
+        admin.keyId,
+      ),
     ])
     const first = await upload(owner.token, documentHtml('<p>admin old</p>'))
     await upload(owner.token, documentHtml('<p>admin new</p>'), {
@@ -378,8 +379,14 @@ describe('version diff API', () => {
 
   it('aborts highly divergent inputs before diff computation becomes unbounded', async () => {
     const owner = await seedPrincipal(env, { suffix: 'diff_edit_cap' })
-    const oldLines = Array.from({ length: 551 }, (_, index) => `<p>old ${index}</p>`).join('\n')
-    const newLines = Array.from({ length: 551 }, (_, index) => `<p>new ${index}</p>`).join('\n')
+    const oldLines = Array.from(
+      { length: 551 },
+      (_, index) => `<p>old ${index}</p>`,
+    ).join('\n')
+    const newLines = Array.from(
+      { length: 551 },
+      (_, index) => `<p>new ${index}</p>`,
+    ).join('\n')
     const first = await upload(
       owner.token,
       `<!doctype html>\n<title>Edit cap</title>\n${oldLines}`,

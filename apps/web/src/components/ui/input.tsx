@@ -7,7 +7,11 @@ import { cn } from '@/lib/utils'
  * `neutral-800/80` surface, low-alpha border at rest, cyan ring on focus.
  * `text-base` on mobile is mandatory to stop iOS zooming the page on focus.
  */
-function Input({ className, type = 'text', ...props }: React.ComponentProps<'input'>) {
+function Input({
+  className,
+  type = 'text',
+  ...props
+}: React.ComponentProps<'input'>) {
   return (
     <input
       type={type}

@@ -176,14 +176,27 @@ export const PublishLive = Layer.effect(
         const decision = (yield* access.resolve([documentId], principal))[0]
         const row = yield* Effect.tryPromise({
           try: () => loadDocumentRow(db.raw, documentId),
-          catch: (cause) => new PersistenceError({ operation: 'load publication receipt', cause }),
+          catch: (cause) =>
+            new PersistenceError({
+              operation: 'load publication receipt',
+              cause,
+            }),
         })
         if (!decision?.editor || !row) {
-          return yield* Effect.fail(apiError('not_found', 'Published document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Published document not found.'),
+          )
         }
-        const parentReadable = row.parent_id !== null &&
-          (yield* access.resolve([row.parent_id], principal))[0]?.canRead === true
-        return toDocumentEditor(row, decision, parentReadable, env.PUBLIC_BASE_URL)
+        const parentReadable =
+          row.parent_id !== null &&
+          (yield* access.resolve([row.parent_id], principal))[0]?.canRead ===
+            true
+        return toDocumentEditor(
+          row,
+          decision,
+          parentReadable,
+          env.PUBLIC_BASE_URL,
+        )
       })
 
     const response = (
@@ -312,15 +325,29 @@ export const PublishLive = Layer.effect(
             target.deleted_at !== null ||
             target.disabled_at !== null
           ) {
-            return yield* Effect.fail(apiError('not_found', 'Document not found.'))
-          }
-          if (hasOwn(payload, 'parentId') && (payload.parentId ?? null) !== target.parent_id) {
             return yield* Effect.fail(
-              apiError('conflict', 'Use the move operation to change a document parent.'),
+              apiError('not_found', 'Document not found.'),
             )
           }
-        } else if (payload.parentId !== undefined && payload.parentId !== null) {
-          const parentDecision = (yield* access.resolve([payload.parentId], principal))[0]
+          if (
+            hasOwn(payload, 'parentId') &&
+            (payload.parentId ?? null) !== target.parent_id
+          ) {
+            return yield* Effect.fail(
+              apiError(
+                'conflict',
+                'Use the move operation to change a document parent.',
+              ),
+            )
+          }
+        } else if (
+          payload.parentId !== undefined &&
+          payload.parentId !== null
+        ) {
+          const parentDecision = (yield* access.resolve(
+            [payload.parentId],
+            principal,
+          ))[0]
           const parent = yield* Effect.tryPromise({
             try: () =>
               db.raw
@@ -336,7 +363,10 @@ export const PublishLive = Layer.effect(
                   disabled_at: string | null
                 }>(),
             catch: (cause) =>
-              new PersistenceError({ operation: 'load publication parent', cause }),
+              new PersistenceError({
+                operation: 'load publication parent',
+                cause,
+              }),
           })
           if (
             !parent ||
@@ -351,7 +381,10 @@ export const PublishLive = Layer.effect(
           }
           if (parent.depth >= 16) {
             return yield* Effect.fail(
-              apiError('policy_rejected', 'A child cannot be created below depth 16.'),
+              apiError(
+                'policy_rejected',
+                'A child cannot be created below depth 16.',
+              ),
             )
           }
         }
@@ -420,7 +453,8 @@ export const PublishLive = Layer.effect(
           policy.title?.trim() || filenameTitle(payload.filename) || 'Untitled'
         const metadata = payload.metadata
         const sharesPresent = hasOwn(payload, 'shares')
-        const clearingVisibility = hasOwn(payload, 'visibility') && payload.visibility === null
+        const clearingVisibility =
+          hasOwn(payload, 'visibility') && payload.visibility === null
         const writeShares = sharesPresent && !clearingVisibility
         const clearShares = sharesPresent || clearingVisibility
         const sharesJson = JSON.stringify(
@@ -462,7 +496,10 @@ export const PublishLive = Layer.effect(
                 principal.workspaceId,
               ),
           )
-        } else if (payload.parentId !== undefined && payload.parentId !== null) {
+        } else if (
+          payload.parentId !== undefined &&
+          payload.parentId !== null
+        ) {
           const [accountId, emails] = accessBindValues(principal)
           statements.push(
             db.raw
@@ -486,7 +523,13 @@ export const PublishLive = Layer.effect(
                     )
                  ) THEN 1 ELSE 0 END)`,
               )
-              .bind(accountId, emails, payload.parentId, guardId, principal.workspaceId),
+              .bind(
+                accountId,
+                emails,
+                payload.parentId,
+                guardId,
+                principal.workspaceId,
+              ),
             db.raw
               .prepare(
                 `INSERT INTO documents
@@ -787,7 +830,10 @@ export const PublishLive = Layer.effect(
               .bind(JSON.stringify(document), versionId)
               .run(),
           catch: (cause) =>
-            new PersistenceError({ operation: 'persist publication receipt', cause }),
+            new PersistenceError({
+              operation: 'persist publication receipt',
+              cause,
+            }),
         })
         return response(row, document, policy.warnings)
       })

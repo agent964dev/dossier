@@ -7,8 +7,12 @@ const { spawn } = require('node:child_process')
 const BROWSER_DIR = __dirname
 const APP_DIR = path.resolve(BROWSER_DIR, '..')
 const REPO_DIR = path.resolve(APP_DIR, '../..')
-const BASE_URL = (process.env.DOSSIER_BASE_URL || 'http://localhost:8787').replace(/\/$/, '')
-const PLAYWRIGHT_PATH = process.env.DOSSIER_PLAYWRIGHT_PATH || '/opt/homebrew/lib/node_modules/playwright'
+const BASE_URL = (
+  process.env.DOSSIER_BASE_URL || 'http://localhost:8787'
+).replace(/\/$/, '')
+const PLAYWRIGHT_PATH =
+  process.env.DOSSIER_PLAYWRIGHT_PATH ||
+  '/opt/homebrew/lib/node_modules/playwright'
 const VITE_CONFIG = path.join(BROWSER_DIR, 'vite.browser.config.mjs')
 
 function requireApiKey() {
@@ -33,7 +37,10 @@ function readFixture(name, replacements = {}) {
     value = value.split(`{{${key}}}`).join(String(replacement))
   }
   const unresolved = value.match(/{{[A-Z0-9_]+}}/g)
-  if (unresolved) throw new Error(`Unresolved fixture tokens in ${name}: ${unresolved.join(', ')}`)
+  if (unresolved)
+    throw new Error(
+      `Unresolved fixture tokens in ${name}: ${unresolved.join(', ')}`,
+    )
   return value
 }
 
@@ -54,8 +61,11 @@ async function apiJson(pathname, apiKey, body) {
     parsed = text
   }
   if (!response.ok) {
-    const renderedBody = typeof parsed === 'string' ? parsed : JSON.stringify(parsed)
-    throw new Error(`POST ${pathname} failed with HTTP ${response.status}: ${renderedBody}`)
+    const renderedBody =
+      typeof parsed === 'string' ? parsed : JSON.stringify(parsed)
+    throw new Error(
+      `POST ${pathname} failed with HTTP ${response.status}: ${renderedBody}`,
+    )
   }
   return parsed
 }
@@ -75,7 +85,10 @@ async function uploadPublicDocument(apiKey, html, filename) {
     visibility: 'public',
   })
   const id = receipt?.document?.id
-  assert(typeof id === 'string', `POST /api/uploads returned no document.id: ${JSON.stringify(receipt)}`)
+  assert(
+    typeof id === 'string',
+    `POST /api/uploads returned no document.id: ${JSON.stringify(receipt)}`,
+  )
   return receipt
 }
 
@@ -104,7 +117,9 @@ async function healthResponds(timeoutMs = 700) {
 
 async function startServer({ embedHostAllowlist = '' } = {}) {
   if (await healthResponds()) {
-    throw new Error(`${BASE_URL} already has a responding server; omit --manage-server to use it.`)
+    throw new Error(
+      `${BASE_URL} already has a responding server; omit --manage-server to use it.`,
+    )
   }
 
   const output = []
@@ -131,7 +146,9 @@ async function startServer({ embedHostAllowlist = '' } = {}) {
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
-      throw new Error(`Dev server exited with code ${child.exitCode}.\n${output.join('')}`)
+      throw new Error(
+        `Dev server exited with code ${child.exitCode}.\n${output.join('')}`,
+      )
     }
     if (await healthResponds(1000)) {
       return { child, output, embedHostAllowlist }
@@ -140,7 +157,9 @@ async function startServer({ embedHostAllowlist = '' } = {}) {
   }
 
   await stopServer({ child, output })
-  throw new Error(`Timed out waiting for ${BASE_URL}/api/healthz.\n${output.join('')}`)
+  throw new Error(
+    `Timed out waiting for ${BASE_URL}/api/healthz.\n${output.join('')}`,
+  )
 }
 
 async function stopServer(server) {
@@ -178,7 +197,9 @@ function browserLaunchOptions(engine) {
     process.env.DOSSIER_WEBKIT_EXECUTABLE,
     '/tmp/dossier-research/csp/webkit-2272/pw_run.sh',
   ].filter(Boolean)
-  const executablePath = candidates.find((candidate) => fs.existsSync(candidate))
+  const executablePath = candidates.find((candidate) =>
+    fs.existsSync(candidate),
+  )
   return executablePath ? { ...options, executablePath } : options
 }
 
@@ -186,13 +207,17 @@ function loadPlaywright() {
   try {
     return require(PLAYWRIGHT_PATH)
   } catch (error) {
-    throw new Error(`Could not load Playwright from ${PLAYWRIGHT_PATH}: ${error}`)
+    throw new Error(
+      `Could not load Playwright from ${PLAYWRIGHT_PATH}: ${error}`,
+    )
   }
 }
 
 function cspConsoleMessages(messages) {
   return messages.filter((entry) =>
-    /content security policy|refused to (?:load|frame|connect|execute)|violat(?:e|ion)/i.test(entry.text),
+    /content security policy|refused to (?:load|frame|connect|execute)|violat(?:e|ion)/i.test(
+      entry.text,
+    ),
   )
 }
 

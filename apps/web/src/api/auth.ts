@@ -37,6 +37,7 @@ export function safeNextPath(
     !value.startsWith('/') ||
     value.startsWith('//') ||
     value.includes('\\') ||
+    // oxlint-disable-next-line eslint/no-control-regex -- Intentional filter.
     /[\u0000-\u001f\u007f]/.test(value)
   ) {
     return '/dashboard'
