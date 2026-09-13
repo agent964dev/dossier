@@ -133,6 +133,54 @@ describe('argument normalization', () => {
     ])
   })
 
+  it('normalizes options for the nested admin purge command', () => {
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        'admin',
+        'purge',
+        '--execute',
+        '--retention-days',
+        '45',
+        '--api-url',
+        'https://dossier.example',
+        '--json',
+      ]).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      '--api-url',
+      'https://dossier.example',
+      '--json',
+      'admin',
+      'purge',
+      '--execute',
+      '--retention-days',
+      '45',
+    ])
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        '--json',
+        'admin',
+        'purge',
+        '--retention-days=14',
+      ]).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      '--json',
+      'admin',
+      'purge',
+      '--retention-days=14',
+    ])
+    expect(
+      normalizeGlobalOptions(['node', 'dossier', 'admin', 'purge']).args,
+    ).toEqual(['node', 'dossier', 'admin', 'purge'])
+  })
+
   it('does not steal a command option value that looks global', () => {
     expect(
       normalizeGlobalOptions([

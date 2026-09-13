@@ -11,12 +11,14 @@ import {
   DiffResponse as DiffResponseSchema,
   DossierApi,
   isDocumentEditor,
+  PurgeReport as PurgeReportSchema,
   type DiffResponse as DiffResponseType,
   type DocumentEditor,
   type DocumentListScope,
   type DocumentView,
   type HealthzResponse,
   type Me,
+  type PurgeReport,
   type UploadRequest,
   type UploadResponse,
 } from '@dossier/contracts'
@@ -1793,6 +1795,148 @@ const setupCommand = Command.make('setup', {}, () =>
   ),
 )
 
+/**
+ * Excess properties are ignored on purpose: an older CLI must still print the
+ * report of a `--execute` run that already removed the batches.
+ */
+function decodePurgeReport(value: unknown): PurgeReport {
+  try {
+    return Schema.decodeUnknownSync(PurgeReportSchema)(value)
+  } catch (error) {
+    throw new CliError(
+      'server returned an invalid purge report',
+      ExitCode.Failure,
+      error,
+    )
+  }
+}
+
+function purgeSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Server text shares a line with padded columns, so controls are dropped. */
+function purgeCell(value: string): string {
+  const plain = value.replaceAll(/\p{Cc}/gu, ' ').trim()
+  if (plain === '') return '-'
+  return plain.length > 48 ? `${plain.slice(0, 47)}…` : plain
+}
+
+function printPurgeReport(report: PurgeReport, runtime: RuntimeConfig): void {
+  if (runtime.json) {
+    printJson(report)
+    return
+  }
+  if (runtime.quiet) return
+  const { batches, totals } = report
+  if (batches.length === 0) {
+    process.stdout.write(
+      `No batch is past the retention window (cutoff ${purgeCell(report.cutoff)}).\n`,
+    )
+    return
+  }
+  process.stdout.write(
+    `${report.dryRun ? 'Dry run' : 'Purged'}: archived batches older than ` +
+      `${purgeCell(report.cutoff)}\n`,
+  )
+  const header = ['BATCH', 'ROOT', 'DOCS', 'VERSIONS', 'SIZE']
+  const rows = batches.map((batch) => [
+    purgeCell(batch.id),
+    purgeCell(batch.rootTitle ?? ''),
+    String(batch.documents),
+    String(batch.versions),
+    purgeSize(batch.bytes),
+  ])
+  const widths = header.map((cell, column) =>
+    Math.max(cell.length, ...rows.map((row) => row[column]!.length)),
+  )
+  for (const row of [header, ...rows]) {
+    const line = row
+      .map((cell, column) =>
+        column < 2
+          ? cell.padEnd(widths[column]!)
+          : cell.padStart(widths[column]!),
+      )
+      .join('  ')
+    process.stdout.write(`  ${line.trimEnd()}\n`)
+  }
+  process.stdout.write(
+    `Totals: ${totals.batches} batch${totals.batches === 1 ? '' : 'es'}, ` +
+      `${totals.documents} document${totals.documents === 1 ? '' : 's'}, ` +
+      `${totals.versions} version${totals.versions === 1 ? '' : 's'}, ` +
+      `${purgeSize(totals.bytes)}\n`,
+  )
+  if (report.dryRun) {
+    process.stdout.write(
+      'Nothing was removed. Re-run with --execute to remove them permanently.\n',
+    )
+  }
+}
+
+/**
+ * Same key sources as `dossier setup`: this endpoint is operator-only. Stdin is
+ * read only when no other source answers, so a non-interactive shell with
+ * `BOOTSTRAP_API_KEY` set never blocks on it.
+ */
+async function operatorKey(runtime: RuntimeConfig): Promise<string> {
+  const configured = process.env.BOOTSTRAP_API_KEY?.trim() || runtime.apiKey
+  if (configured) return configured
+  const piped = process.stdin.isTTY ? '' : (await readStdin()).trim()
+  if (piped) return piped
+  throw new CliError(
+    'bootstrap key is required through BOOTSTRAP_API_KEY, DOSSIER_API_KEY, stored credentials, or stdin',
+    ExitCode.Auth,
+  )
+}
+
+const adminPurgeCommand = Command.make(
+  'purge',
+  {
+    execute: Options.boolean('execute').pipe(
+      Options.withDescription(
+        'Permanently remove the reported batches instead of reporting them',
+      ),
+    ),
+    retentionDays: Options.integer('retention-days').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Override the retention window, in days after archiving',
+      ),
+    ),
+  },
+  ({ execute, retentionDays }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      const apiKey = await operatorKey(runtime)
+      const days = Option.getOrUndefined(retentionDays)
+      const report = await dossierJson<unknown>(
+        '/api/admin/purge',
+        { apiUrl: runtime.apiUrl, apiKey },
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            dryRun: !execute,
+            ...(days === undefined ? {} : { retentionDays: days }),
+          }),
+        },
+      )
+      printPurgeReport(decodePurgeReport(report), runtime)
+    }),
+).pipe(
+  Command.withDescription(
+    'Report archived batches past the retention window, or remove them with --execute',
+  ),
+)
+
+const adminCommand = Command.make('admin').pipe(
+  Command.withDescription('Deployment administration (operators only)'),
+  Command.withSubcommands([adminPurgeCommand]),
+)
+
 const updateCommand = Command.make(
   'update',
   {
@@ -1974,6 +2118,7 @@ const dossierCommand = rootCommand.pipe(
     workspaceCommand,
     assetsCommand,
     setupCommand,
+    adminCommand,
     updateCommand,
   ]),
 )
@@ -2001,6 +2146,7 @@ const nestedCommands: Readonly<Record<string, ReadonlySet<string>>> = {
   auth: new Set(['login', 'set', 'logout']),
   assets: new Set(['push', 'list', 'delete']),
   workspace: new Set(['members', 'allow', 'disallow', 'promote', 'remove']),
+  admin: new Set(['purge']),
 }
 
 const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2020,6 +2166,7 @@ const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
   restore: new Set(['--batch']),
   'assets push': new Set(['--slug']),
   'workspace allow': new Set(['--role']),
+  'admin purge': new Set(['--retention-days']),
 }
 
 const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2028,6 +2175,7 @@ const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
   list: new Set(['--all', '--tree', '--trash']),
   delete: new Set(['--force']),
   update: new Set(['--check']),
+  'admin purge': new Set(['--execute']),
 }
 
 function isGlobalBoolean(argument: string): boolean {

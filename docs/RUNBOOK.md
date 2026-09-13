@@ -290,6 +290,102 @@ bunx wrangler secret put SEED_ADMIN_EMAIL --env dev
 
 Worker secrets override variables of the same name.
 
-## E. Enable the retention purge
+## E. Enable the retention purge in production
 
-Shipped in change set 2; steps will be added there.
+Archived documents are permanently removed 30 days after archiving; the window
+is the `PURGE_RETENTION_DAYS` var in `apps/web/wrangler.jsonc`. The cron trigger
+that runs the purge is configured for the development environment only, so
+production removes nothing on a schedule until these steps are complete. Step 2
+deploys the purge-capable Worker without a production cron and verifies that the
+operator CLI includes `admin purge`. Step 3 is read-only; step 5 is the first
+permanent removal and step 6 turns the schedule on.
+
+1. **Confirm migration 0003 on the production database.**
+
+   `apps/web/scripts/setup.sh` applies remote migrations before it calls
+   `POST /api/setup`, so a production setup run (steps A8 and C1) has already
+   applied it. Confirm, or apply it on its own, with the same command the script
+   uses:
+
+   ```sh
+   cd /path/to/dossier/apps/web
+   bunx wrangler d1 migrations apply dossier-production --remote
+   ```
+
+   Expected: `0003_skinny_pet_avengers.sql` is listed as applied, or Wrangler
+   reports there is nothing to apply. Paste back: migration names and statuses.
+
+2. **Deploy the purge-capable Worker and operator CLI without enabling the production cron.**
+
+   Use the purge-capable repository revision. Before deploying, confirm that
+   `triggers` remains inside `env.dev` only; do not add a top-level trigger yet.
+
+   ```sh
+   cd /path/to/dossier/apps/web
+   bunx vite build
+   bunx wrangler deploy
+   cd ../..
+   npm install --global @agent964/dossier@<purge-cli-version>
+   dossier --version
+   dossier admin purge --help
+   ```
+
+   Expected: Wrangler reports the new production Worker version without a cron
+   schedule, and CLI help identifies `purge` as the protected deployment purge
+   command with `--execute` and `--retention-days`. Paste back: the Worker
+   version ID, confirmation that no production schedule is present, the CLI
+   version, and the help synopsis.
+
+3. **Dry run the purge.**
+
+   ```sh
+   cd /path/to/dossier
+   BOOTSTRAP_API_KEY=$(tr -d '\r\n' < .prod-bootstrap-key.local) \
+     env -u DOSSIER_API_KEY -u DOSSIER_API_URL \
+     dossier admin purge --api-url https://dossier.agent964.com
+   ```
+
+   The command is a dry run unless `--execute` is passed; the server writes
+   nothing. Add `--retention-days <n>` to preview a different window, and
+   `--json` for the raw report. Expected: a cutoff timestamp with one row per
+   batch past the retention window, or `No batch is past the retention window`.
+   Paste back: the cutoff line, the table, and the totals line.
+
+4. **Review the report.**
+
+   Read every root title in the report. A purged batch cannot be restored: the
+   R2 objects and the document and version rows are gone, and only the deletion
+   batch row survives as an audit record. If a batch should live, restore it from
+   the trash page first, then repeat step 3.
+
+5. **Execute the purge once.**
+
+   ```sh
+   cd /path/to/dossier
+   BOOTSTRAP_API_KEY=$(tr -d '\r\n' < .prod-bootstrap-key.local) \
+     env -u DOSSIER_API_KEY -u DOSSIER_API_URL \
+     dossier admin purge --execute --api-url https://dossier.agent964.com
+   ```
+
+   Expected: the reviewed batches reported under `Purged:`, and a repeat of step
+   3 reporting no batches. Paste back: the totals line from both runs.
+
+6. **Turn on the production cron.**
+
+   Add the trigger to the top level of `apps/web/wrangler.jsonc`, beside
+   `"routes"`. The `env.dev` block keeps its own schedule:
+
+   ```jsonc
+   "triggers": { "crons": ["17 3 * * *"] },
+   ```
+
+   ```sh
+   cd /path/to/dossier/apps/web
+   bunx vite build
+   bunx wrangler deploy
+   ```
+
+   Expected: Wrangler reports the schedule `17 3 * * *` for the deployed
+   version. Paste back: the deployed version ID and the schedule line. To stop
+   the scheduled purge, remove the `triggers` block and deploy again; the admin
+   endpoint keeps working either way.

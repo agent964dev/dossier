@@ -3,6 +3,7 @@ import { Layer as Layers } from 'effect'
 import {
   AccessLive,
   AllowlistLive,
+  AssetsLive,
   Db,
   type DbService,
   DocumentsLive,
@@ -13,6 +14,7 @@ import {
   type ObjectsService,
   PrincipalLive,
   PublishLive,
+  PurgeLive,
   ServingLive,
   SharesLive,
   TreeLive,
@@ -33,10 +35,12 @@ export function testEnv(base: Cloudflare.Env): Cloudflare.Env {
     MAX_REQUEST_BYTES: '8388608',
     MAX_HTML_BYTES: '1048576',
     MAX_ASSET_BYTES: '5242880',
+    PURGE_RETENTION_DAYS: '30',
     SEED_WORKSPACE: 'test:test.example',
     SEED_ADMIN_EMAIL: 'admin@test.example',
     SESSION_SECRET: TEST_SECRET,
     BOOTSTRAP_API_KEY: undefined,
+    UPLOAD_RATE_LIMITER: { limit: async () => ({ success: true }) },
   } as unknown as Cloudflare.Env
 }
 
@@ -58,7 +62,9 @@ export function makeCoreLayer(
   const principal = PrincipalLive.pipe(Layers.provide(foundation))
   const access = AccessLive.pipe(Layers.provide(foundation))
   const auth = Layers.mergeAll(foundation, principal, access)
+  const assets = AssetsLive.pipe(Layers.provide(auth))
   const publish = PublishLive.pipe(Layers.provide(auth))
+  const purge = PurgeLive.pipe(Layers.provide(auth))
   const documents = DocumentsLive.pipe(Layers.provide(auth))
   const serving = ServingLive.pipe(Layers.provide(auth))
   const shares = SharesLive.pipe(Layers.provide(auth))
@@ -66,7 +72,9 @@ export function makeCoreLayer(
   const allowlist = AllowlistLive.pipe(Layers.provide(foundation))
   return Layers.mergeAll(
     auth,
+    assets,
     publish,
+    purge,
     documents,
     serving,
     shares,

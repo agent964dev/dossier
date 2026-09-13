@@ -274,19 +274,36 @@ export const documentShares = sqliteTable(
   ],
 )
 
-export const deletionBatches = sqliteTable('deletion_batches', {
-  id: text('id').primaryKey(),
-  rootDocumentId: text('root_document_id')
-    .notNull()
-    .references((): AnySQLiteColumn => documents.id),
-  accountId: text('account_id')
-    .notNull()
-    .references(() => accounts.id),
-  createdAt: text('created_at').notNull(),
-  restoredAt: text('restored_at'),
-  deletedCount: integer('deleted_count').notNull(),
-  rootTitle: text('root_title'),
-})
+export const deletionBatches = sqliteTable(
+  'deletion_batches',
+  {
+    id: text('id').primaryKey(),
+    // Kept as an audit identifier after the document row is purged.
+    rootDocumentId: text('root_document_id').notNull(),
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id),
+    createdAt: text('created_at').notNull(),
+    restoredAt: text('restored_at'),
+    deletedCount: integer('deleted_count').notNull(),
+    rootTitle: text('root_title'),
+    purgeStatus: text('purge_status').notNull().default('pending'),
+    purgeLeaseUntil: text('purge_lease_until'),
+    purgeProgress: text('purge_progress'),
+    purgedAt: text('purged_at'),
+    purgedBytes: integer('purged_bytes'),
+  },
+  (table) => [
+    index('deletion_batches_purge_status_created_at_idx').on(
+      table.purgeStatus,
+      table.createdAt,
+    ),
+    check(
+      'deletion_batches_purge_status_check',
+      sql`${table.purgeStatus} IN ('pending', 'claimed', 'purged')`,
+    ),
+  ],
+)
 
 export const assets = sqliteTable(
   'assets',

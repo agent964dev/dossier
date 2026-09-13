@@ -126,7 +126,16 @@ create distinct batches. Partial restore is not supported.
 
 Disable and enable affect one node only. A disabled node serves 404 to everyone
 but remains visible to its editors in management views. R2 objects are retained
-while documents are restorable. A retention purge is planned for version 0.2.
+while documents are restorable.
+
+A batch stays restorable for 30 days after it was archived; after that a daily
+scheduled purge removes it permanently, one batch at a time under a short lease.
+The purge deletes R2 objects first, in chunks, checkpointing as it goes, then
+deletes the version and document rows, so a crash leaves objects gone and rows
+intact and the next run finishes the job. The deletion batch row is kept as an
+audit record of who archived what and when it was purged, and restore refuses a
+batch once the purge has claimed it. Operators can report or run the same work
+with `dossier admin purge`, which is a dry run unless `--execute` is passed.
 
 ## Upload policy and serving CSP
 

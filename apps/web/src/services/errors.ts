@@ -10,6 +10,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   publisher_required: 403,
   has_children: 409,
   conflict: 409,
+  batch_purged: 409,
   idempotency_conflict: 409,
   body_too_large: 413,
   policy_rejected: 422,
