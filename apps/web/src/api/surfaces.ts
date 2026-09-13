@@ -1,8 +1,10 @@
 import {
+  AllowlistCreate,
   ApiKeyCreate,
   AssetUploadRequest,
   DocumentPatch,
   DossierApi,
+  MemberRoleUpdate,
   ShareDelta,
   type DiffMode,
   ShareReplacement,
@@ -35,6 +37,8 @@ import {
   Tree,
   type PrincipalIdentity,
   WorkerEnv,
+  Workspace,
+  parseAllowlistValue,
 } from '../services'
 import { SystemLive } from './health'
 import {
@@ -561,6 +565,82 @@ const KeysLive = HttpApiBuilder.group(DossierApi, 'keys', (handlers) =>
     ),
 )
 
+const WorkspaceLive = HttpApiBuilder.group(DossierApi, 'workspace', (handlers) =>
+  handlers
+    .handleRaw('get', () =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const workspace = yield* Workspace
+          return jsonServerResponse(yield* workspace.get(principal))
+        }),
+      ),
+    )
+    .handleRaw('addAllowlistEntry', ({ request }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const workspace = yield* Workspace
+          const payload = yield* decodeJsonBody(request, AllowlistCreate)
+          // The CLI sends bare domains with an explicit kind. Reconstruct the
+          // browser syntax for shared validation; mismatches are HTTP 422.
+          const parsed = parseAllowlistValue(
+            payload.kind === 'domain' ? `@${payload.value.trim()}` : payload.value,
+          )
+          if (parsed === null || parsed.kind !== payload.kind) {
+            return yield* Effect.fail(
+              new DossierError({
+                code: 'policy_rejected',
+                message:
+                  'Enter one email address, or a domain matching the supplied kind.',
+              }),
+            )
+          }
+          return jsonServerResponse(
+            yield* workspace.addAllowlistEntry(principal, {
+              ...parsed,
+              role: payload.role,
+            }),
+          )
+        }),
+      ),
+    )
+    .handleRaw('removeAllowlistEntry', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const workspace = yield* Workspace
+          return jsonServerResponse(
+            yield* workspace.removeAllowlistEntry(principal, path.id),
+          )
+        }),
+      ),
+    )
+    .handleRaw('setMemberRole', ({ path, request }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const workspace = yield* Workspace
+          const payload = yield* decodeJsonBody(request, MemberRoleUpdate)
+          return jsonServerResponse(
+            yield* workspace.setMemberRole(principal, path.accountId, payload.role),
+          )
+        }),
+      ),
+    )
+    .handleRaw('removeMember', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const workspace = yield* Workspace
+          return jsonServerResponse(
+            yield* workspace.removeMember(principal, path.accountId),
+          )
+        }),
+      ),
+    ),
+)
+
 const MeLive = HttpApiBuilder.group(DossierApi, 'me', (handlers) =>
   handlers.handleRaw('get', () =>
     Effect.gen(function* () {
@@ -665,6 +745,7 @@ const GroupsLive = Layer.mergeAll(
   AssetsLive,
   DocumentsLive,
   KeysLive,
+  WorkspaceLive,
   MeLive,
   LegacyLive,
 )

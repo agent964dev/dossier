@@ -17,6 +17,7 @@ import {
   SessionError,
   Shoo,
   WorkerEnv,
+  Workspace,
 } from '../services'
 import { workerEnvWithOptionalRateLimiter } from '../api/request'
 import { CsrfRejected } from './csrf'
@@ -39,6 +40,7 @@ export type CoreServices =
   | Publish
   | Documents
   | Serving
+  | Workspace
 
 /**
  * The Cloudflare bindings, loaded lazily. The import is dynamic on purpose:

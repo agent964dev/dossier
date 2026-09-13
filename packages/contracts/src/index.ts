@@ -286,6 +286,54 @@ export const ApiKeyListResponse = Schema.Struct({
 })
 export type ApiKeyListResponse = typeof ApiKeyListResponse.Type
 
+export const WorkspaceMember = Schema.Struct({
+  accountId: Schema.String,
+  name: Schema.String,
+  email: Schema.NullOr(Schema.String),
+  pictureUrl: Schema.NullOr(Schema.String),
+  role: WorkspaceRole,
+  joinedAt: Schema.String,
+  lastLoginAt: Schema.NullOr(Schema.String),
+  disabled: Schema.Boolean,
+  deploymentAdmin: Schema.Boolean,
+  kind: Schema.Literal('user', 'service'),
+})
+export type WorkspaceMember = typeof WorkspaceMember.Type
+
+export const WorkspaceAllowlistEntry = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.Literal('email', 'domain'),
+  value: Schema.String,
+  role: WorkspaceRole,
+  createdAt: Schema.String,
+  createdByName: Schema.NullOr(Schema.String),
+  lastUsedAt: Schema.NullOr(Schema.String),
+})
+export type WorkspaceAllowlistEntry = typeof WorkspaceAllowlistEntry.Type
+
+export const WorkspaceResponse = Schema.Struct({
+  ok: Schema.Literal(true),
+  members: Schema.Array(WorkspaceMember),
+  allowlist: Schema.Array(WorkspaceAllowlistEntry),
+})
+export type WorkspaceResponse = typeof WorkspaceResponse.Type
+
+export const WorkspaceMutationResponse = Schema.Struct({
+  ok: Schema.Literal(true),
+  message: Schema.String,
+})
+export type WorkspaceMutationResponse = typeof WorkspaceMutationResponse.Type
+
+export const AllowlistCreate = Schema.Struct({
+  kind: Schema.Literal('email', 'domain'),
+  value: Schema.String,
+  role: WorkspaceRole,
+})
+export type AllowlistCreate = typeof AllowlistCreate.Type
+
+export const MemberRoleUpdate = Schema.Struct({ role: WorkspaceRole })
+export type MemberRoleUpdate = typeof MemberRoleUpdate.Type
+
 export const DocumentGetResponse = Schema.Struct({
   ok: Schema.Literal(true),
   document: DocumentView,
@@ -563,6 +611,32 @@ export const KeysApiGroup = HttpApiGroup.make('keys')
       .addSuccess(Schema.Struct({ ok: Schema.Literal(true) })),
   )
 
+export const WorkspaceApiGroup = HttpApiGroup.make('workspace')
+  .add(
+    HttpApiEndpoint.get('get', '/api/workspace').addSuccess(WorkspaceResponse),
+  )
+  .add(
+    HttpApiEndpoint.post('setMemberRole', '/api/workspace/members/:accountId')
+      .setPath(Schema.Struct({ accountId: Schema.String }))
+      .setPayload(MemberRoleUpdate)
+      .addSuccess(WorkspaceMutationResponse),
+  )
+  .add(
+    HttpApiEndpoint.del('removeMember', '/api/workspace/members/:accountId')
+      .setPath(Schema.Struct({ accountId: Schema.String }))
+      .addSuccess(WorkspaceMutationResponse),
+  )
+  .add(
+    HttpApiEndpoint.post('addAllowlistEntry', '/api/workspace/allowlist')
+      .setPayload(AllowlistCreate)
+      .addSuccess(WorkspaceMutationResponse),
+  )
+  .add(
+    HttpApiEndpoint.del('removeAllowlistEntry', '/api/workspace/allowlist/:id')
+      .setPath(Schema.Struct({ id: Schema.String }))
+      .addSuccess(WorkspaceMutationResponse),
+  )
+
 export const MeApiGroup = HttpApiGroup.make('me').add(
   HttpApiEndpoint.get('get', '/api/me').addSuccess(Me),
 )
@@ -578,6 +652,7 @@ export const DossierApi = SystemApi
   .add(AssetsApiGroup)
   .add(DocumentsApiGroup)
   .add(KeysApiGroup)
+  .add(WorkspaceApiGroup)
   .add(MeApiGroup)
   .add(LegacyApiGroup)
   .addError(UnauthenticatedError, { status: 401 })

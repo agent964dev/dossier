@@ -22,6 +22,8 @@
 - D1 `dossier-production` id `72766ce3-44da-4bdd-a025-90a6ebe1e3e0` (EEUR), migrations 0000-0002 applied. R2 bucket `dossier-production`. Rate limiter namespace 1001.
 - Secrets `SESSION_SECRET` and `BOOTSTRAP_API_KEY` set. The bootstrap key value is in `.prod-bootstrap-key.local` at the repo root (gitignored, mode 0600). Seed ran twice via the setup script; idempotent.
 - Smoke (CLI against production with the bootstrap key): whoami, upload x2, fetch byte-equal, diff, `/d/:id` sandbox CSP + no-store, hub 200, dashboard diff route 307 to sign-in, delete --force. Same against env.dev.
+- 2026-09-13 fix: `/api/workspace*` routes were missing from the Effect API (the browser used server functions only), so every `dossier workspace` command returned 404. Added `apps/web/src/services/workspace.ts` (shared by API and browser), `WorkspaceApiGroup` in contracts, handlers in surfaces.ts, `test/workspace-api.test.ts` (37 tests). Worker redeployed to production (`b5e9890c`) and dev; CLI unchanged, no npm release needed.
+- Owner steps done by the owner on 2026-09-13: repo public at github.com/agent964dev/dossier, npm `@agent964/dossier@0.1.0` published, first sign-in, key minted, playground imported as `eth3ej0cdy36`.
 - Not done, owner-only (PLAN 14 / RUNBOOK B): npm login + `bun run release`, first browser sign-in, mint owner key, import the playground, retire postplan drafts.
 
 ## Historical note: partial phase 2 core at start of session 2 (now merged)

@@ -15,6 +15,7 @@ import { SharesLive } from './shares'
 import { TreeLive } from './tree'
 import { SessionLive } from './session'
 import { ShooLive } from './shoo'
+import { WorkspaceLive } from './workspace'
 
 const FoundationLive = Layer.mergeAll(DbLive, ObjectsLive, IdsLive, SessionLive)
 const AuthenticationLive = Layer.mergeAll(PrincipalLive, AccessLive).pipe(
@@ -33,4 +34,5 @@ export const CoreServicesLive = Layer.mergeAll(
   ServingLive,
   SharesLive,
   TreeLive,
+  WorkspaceLive,
 ).pipe(Layer.provideMerge(SignInLive))
