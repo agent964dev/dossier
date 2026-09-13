@@ -1,1 +1,23 @@
-{"theme": "base", "themeVariables": {"background": "#08161E", "primaryColor": "#13232C", "primaryTextColor": "#FCFCFC", "primaryBorderColor": "#3EEBFF", "secondaryColor": "#0E1E27", "tertiaryColor": "#13232C", "lineColor": "#6C848B", "textColor": "#FCFCFC", "fontFamily": "ui-sans-serif, system-ui, sans-serif", "fontSize": "14px", "nodeBorder": "#3EEBFF", "clusterBkg": "#0B1A22", "clusterBorder": "#2A4550", "edgeLabelBackground": "#08161E", "attributeBackgroundColorOdd": "#0E1E27", "attributeBackgroundColorEven": "#13232C"}, "flowchart": {"htmlLabels": false, "curve": "basis", "useMaxWidth": true}, "er": {"fontSize": 13, "useMaxWidth": true}}
+{
+  "theme": "base",
+  "themeVariables": {
+    "background": "#08161E",
+    "primaryColor": "#13232C",
+    "primaryTextColor": "#FCFCFC",
+    "primaryBorderColor": "#3EEBFF",
+    "secondaryColor": "#0E1E27",
+    "tertiaryColor": "#13232C",
+    "lineColor": "#6C848B",
+    "textColor": "#FCFCFC",
+    "fontFamily": "ui-sans-serif, system-ui, sans-serif",
+    "fontSize": "14px",
+    "nodeBorder": "#3EEBFF",
+    "clusterBkg": "#0B1A22",
+    "clusterBorder": "#2A4550",
+    "edgeLabelBackground": "#08161E",
+    "attributeBackgroundColorOdd": "#0E1E27",
+    "attributeBackgroundColorEven": "#13232C"
+  },
+  "flowchart": { "htmlLabels": false, "curve": "basis", "useMaxWidth": true },
+  "er": { "fontSize": 13, "useMaxWidth": true }
+}

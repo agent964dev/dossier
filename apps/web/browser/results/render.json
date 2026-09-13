@@ -3,7 +3,7 @@
   "startedAt": "2026-09-12T15:01:35.801Z",
   "baseUrl": "http://localhost:8787",
   "managedServer": true,
-  "fontSource": "/Users/malhashemi/dev/dossier/packages/cli/test/fixtures/test-font.woff2",
+  "fontSource": "packages/cli/test/fixtures/test-font.woff2",
   "browsers": [
     {
       "engine": "chromium",

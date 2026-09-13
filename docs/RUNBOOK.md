@@ -6,7 +6,7 @@ This runbook is ordered for a human operator or a computer-use agent. Run shell 
 
 The phase-4 integrator normally completes this section before handing the deployment to the owner. Preserve the evidence requested by each step, but redact tokens and secret values.
 
-1. **[x] Already done on `2026-09-13` — Confirm Cloudflare access.**
+1. **Confirm Cloudflare access.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -15,7 +15,7 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: Wrangler prints the intended Cloudflare account and an authenticated user. Paste back: account name/ID and the command exit status; no credentials.
 
-2. **[x] Already done on `2026-09-13` — Create the production D1 database.**
+2. **Create the production D1 database.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -24,9 +24,7 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: `Successfully created DB 'dossier-production'` and a `database_id`. Paste that UUID over the clearly marked placeholder in `apps/web/wrangler.jsonc`, then paste back the UUID and the resulting `d1_databases` block.
 
-   Done: `database_id` is `72766ce3-44da-4bdd-a025-90a6ebe1e3e0` (region EEUR), already in `wrangler.jsonc`.
-
-3. **[x] Already done on `2026-09-13` — Create the production R2 bucket.**
+3. **Create the production R2 bucket.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -35,9 +33,7 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: Wrangler confirms that `dossier-production` was created. Paste back: the confirmation line.
 
-   Done: bucket `dossier-production` created 2026-09-13T08:53Z.
-
-4. **[x] Already done on `2026-09-13` — Confirm the upload rate limiter.**
+4. **Confirm the upload rate limiter.**
 
    Rate-limit bindings are declarative; there is no separate Wrangler create command. The production binding is provisioned when the Worker is deployed.
 
@@ -48,11 +44,12 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: `UPLOAD_RATE_LIMITER`, namespace `1001`, limit `30`, period `60`. Paste back: that block. Do not copy the development namespace `1002` into production.
 
-5. **[x] Already done on `2026-09-13` — Create and set production secrets.**
+5. **Create and set production secrets.**
 
    ```sh
    cd /path/to/dossier/apps/web
    openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put SESSION_SECRET
+   bunx wrangler secret put SEED_ADMIN_EMAIL
    openssl rand -base64 48 | tr -d '\n' > ../../.prod-bootstrap-key.local
    chmod 600 ../../.prod-bootstrap-key.local
    cat ../../.prod-bootstrap-key.local | bunx wrangler secret put BOOTSTRAP_API_KEY
@@ -60,9 +57,15 @@ The phase-4 integrator normally completes this section before handing the deploy
    bunx wrangler secret list
    ```
 
-   On Linux, replace the `stat` command with `stat -c '%a %n' ../../.prod-bootstrap-key.local`. Expected: file mode `600`; the secret list names `SESSION_SECRET` and `BOOTSTRAP_API_KEY` without revealing values. Paste back: the mode line and secret names only.
+   When Wrangler prompts for `SEED_ADMIN_EMAIL`, enter the owner's verified
+   production email. The value in `wrangler.jsonc` is only a placeholder. On
+   Linux, replace the `stat` command with
+   `stat -c '%a %n' ../../.prod-bootstrap-key.local`. Expected: file mode
+   `600`; the secret list names `SESSION_SECRET`, `SEED_ADMIN_EMAIL`, and
+   `BOOTSTRAP_API_KEY` without revealing values. Paste back: the mode line and
+   secret names only.
 
-6. **[x] Already done on `2026-09-13` — Apply production migrations.**
+6. **Apply production migrations.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -71,7 +74,7 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: every pending migration is marked applied, or Wrangler reports that there is nothing to apply. Paste back: migration names and statuses.
 
-7. **[x] Already done on `2026-09-13` — Build and deploy production.**
+7. **Build and deploy production.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -81,9 +84,7 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: the Vite build succeeds; Wrangler uploads Worker and static assets, reports the `dossier.agent964.com` custom domain, and exits zero. Paste back: deployed version ID, domain, and exit status.
 
-   Done: first deploy `d6ca0b1c-c7d2-4239-95e1-f6d110a49c75`; final phase-4 deploy `256cba25-6889-4c85-9f5a-766e449f355c`, custom domain `dossier.agent964.com`, health 200.
-
-8. **[x] Already done on `2026-09-13` — Run the protected setup endpoint.**
+8. **Run the protected setup endpoint.**
 
    The script reapplies migrations intentionally, then calls `POST /api/setup` without exposing the key in the curl process arguments.
 
@@ -97,12 +98,18 @@ The phase-4 integrator normally completes this section before handing the deploy
    Expected JSON:
 
    ```json
-   {"ok":true,"workspaceId":"workspace_agent964","workspaceSlug":"agent964","bootstrapAccountId":"acct_bootstrap","bootstrapApiKeyId":"key_bootstrap"}
+   {
+     "ok": true,
+     "workspaceId": "workspace_agent964",
+     "workspaceSlug": "agent964",
+     "bootstrapAccountId": "acct_bootstrap",
+     "bootstrapApiKeyId": "key_bootstrap"
+   }
    ```
 
    A rerun must return the same summary without creating duplicates. Paste back: the JSON summary, never the key.
 
-9. **[x] Already done on `2026-09-13` — Verify health.**
+9. **Verify health.**
 
    ```sh
    curl --fail-with-body --silent --show-error \
@@ -112,7 +119,7 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Expected: HTTP 200 and JSON containing `{"ok":true,"service":"dossier"}`. Paste back: status and JSON.
 
-10. **[x] Already done on `2026-09-13` — Verify an authenticated tree page, then archive the probe.**
+10. **Verify an authenticated tree page, then archive the probe.**
 
     ```sh
     cd /path/to/dossier
@@ -152,14 +159,22 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
 1. **Publish the CLI package.**
 
+   Bump the exact version in `packages/cli/package.json` in the release pull
+   request, then merge it to `main`. From an up-to-date `main` checkout, tag
+   and push the matching release:
+
    ```sh
-   cd /path/to/dossier/packages/cli
-   npm login
-   bun run release
+   git tag cli-vX.Y.Z
+   git push origin cli-vX.Y.Z
    npm view @agent964/dossier version
    ```
 
-   `npm login` opens npm's browser confirmation. Expected: `bun run release` completes and `npm view` prints the released version. Paste back: the package version and release URL; never npm credentials or one-time codes.
+   CI publishes through npm trusted publishing. Complete the one-time setup on
+   npmjs.com under **Trusted publisher → GitHub Actions** with repository
+   `agent964dev/dossier`, workflow `release-cli.yml`, and direct publishing
+   allowed. Expected: the release workflow succeeds and `npm view` prints
+   `X.Y.Z`. Paste back: the package version and workflow URL; never npm
+   credentials or one-time codes.
 
 2. **Install that exact release.**
 
@@ -172,7 +187,7 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
 3. **Complete the first production sign-in.**
 
-   Open <https://dossier.agent964.com>, choose **Sign in**, then **Continue with shoo**. Sign in as `malhashemi@agent964.com`. Shoo opens at `shoo.dev`; its one-time consent screen identifies `https://dossier.agent964.com` and asks to share the verified email plus basic profile (name and picture). Approve it once.
+   Open <https://dossier.agent964.com>, choose **Sign in**, then **Continue with shoo**. Sign in as `<owner email>`. Shoo opens at `shoo.dev`; its one-time consent screen identifies `https://dossier.agent964.com` and asks to share the verified email plus basic profile (name and picture). Approve it once.
 
    Expected: the browser returns to the dossier dashboard and shows workspace `agent964` with role `admin`. Paste back: the final URL and that workspace/role text, not cookies or identity tokens.
 
@@ -187,16 +202,7 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    The command reads the key currently copied to the macOS clipboard without putting it in shell history. On Linux, use the clipboard tool available on that machine (for example, `xclip -selection clipboard -o | env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com auth set`). Expected: `auth set` confirms storage and `whoami` prints the owner's account, workspace `agent964`, and role `admin`. Paste back: the `whoami` output with account ID/key ID redacted if sharing outside the team. Never paste the token.
 
-5. **Import the existing playground.**
-
-   ```sh
-   test -f ~/model-routing-research-playground.html
-   env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com upload ~/model-routing-research-playground.html --kind playground
-   ```
-
-   Expected: `Created`, a permanent production `URL`, `Raw`, `Hub`, a 12-character `ID`, and `Version: 1`. Open the printed URL and confirm the playground renders and responds. Paste back: URL, Hub URL, ID, version, and render result.
-
-6. **Allow outside email addresses when needed.**
+5. **Allow outside email addresses when needed.**
 
    The `agent964.com` domain is already seeded. For a person outside it:
 
@@ -206,12 +212,6 @@ Only the owner performs these steps, in this order. Every CLI command below pins
    ```
 
    Expected: the allowlist includes `name@example.com` as `member`. Paste back: that allowlist line. The person still needs to sign in once before appearing as a member.
-
-7. **Retire the Postplan drafts after production is confirmed.**
-
-   Open <https://postplan.dev>, verify the dossier import first, then optionally delete drafts `39af2hybmt7p` and `v90efjnmq5va`.
-
-   Expected: both legacy draft URLs are removed only after the dossier URL is known-good. Paste back: each retired ID and the retained dossier URL. This step is intentionally optional and irreversible on Postplan.
 
 ## C. Day-2 operations
 
@@ -277,3 +277,19 @@ Only the owner performs these steps, in this order. Every CLI command below pins
    ```
 
    Expected: live request and exception events from the production Worker. Reproduce one request, capture only relevant lines, then stop with `Ctrl-C`. Paste back: timestamp, request path, status, and exception text with secrets, cookies, emails, and Bearer headers redacted.
+
+## D. Development seed admin email
+
+Production `SEED_ADMIN_EMAIL` is configured before deployment in step A5.
+Set the development value separately when preparing the development Worker:
+
+```sh
+cd /path/to/dossier/apps/web
+bunx wrangler secret put SEED_ADMIN_EMAIL --env dev
+```
+
+Worker secrets override variables of the same name.
+
+## E. Enable the retention purge
+
+Shipped in change set 2; steps will be added there.
