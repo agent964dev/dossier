@@ -317,17 +317,24 @@ schedule is deployed.
 
 2. **Confirm the deployed Worker and the operator CLI support the purge.**
 
+   The Worker reports the git commit it was built from as `version` in its
+   health response, so the check is a direct comparison with the repository.
+
    ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler deployments list | head -n 5
+   cd /path/to/dossier
+   git fetch origin && git rev-parse --short origin/main
+   curl --fail-with-body --silent https://dossier.agent964.com/api/healthz
+   printf '\n'
    dossier --version
    dossier admin purge --help
    ```
 
-   Expected: the active production deployment is at or after the 0.2.0 release,
-   `dossier --version` prints 0.2.0 or newer, and the help synopsis lists
-   `--execute` and `--retention-days`. Paste back: the deployment version ID,
-   the CLI version, and the help synopsis.
+   Expected: the health `version` equals the short commit printed by
+   `git rev-parse`, or a later commit that you know is deployed; that commit
+   is at or after the 0.2.0 merge (`2af0932`). `dossier --version` prints
+   0.2.0 or newer, and the help synopsis lists `--execute` and
+   `--retention-days`. Paste back: the two commits, the CLI version, and the
+   help synopsis.
 
 3. **Dry run.**
 
@@ -377,6 +384,15 @@ schedule is deployed.
    ```
 
    Expected: Wrangler reports the schedule `17 3 * * SUN` for the deployed
-   version. Paste back: the deployed version ID and the schedule line. To pause
-   the schedule, remove the top-level `triggers` block and deploy; the admin
-   command keeps working either way.
+   version. Paste back: the deployed version ID and the schedule line.
+
+   To pause the schedule, set the top-level trigger to an explicit empty list
+   and deploy; leaving `triggers` out of the file does not clear a schedule
+   that is already deployed:
+
+   ```jsonc
+   "triggers": { "crons": [] },
+   ```
+
+   Restore the cron expression and deploy to resume. The admin command keeps
+   working either way.

@@ -267,7 +267,7 @@ Totals: 1 batch, 4 documents, 11 versions, 2.1 MB
 Nothing was removed. Re-run with --execute to remove them permanently.
 ```
 
-Archived documents become eligible for permanent removal 30 days after archiving. This command is how they are removed: run it, read the report, and run it again with `--execute`. A removal deletes the R2 objects first, then the document and version rows, and keeps the deletion batch row as an audit record; a purged batch can never be restored. The deployment also runs the same purge once a week from a cron trigger (`docs/RUNBOOK.md` section E).
+Archived documents become eligible for permanent removal after the deployment's retention window (30 days by default, `PURGE_RETENTION_DAYS`); `--retention-days` previews or applies a different window for one run. This command is how they are removed: run it, read the report, and run it again with `--execute`. A removal deletes the R2 objects first, then the document and version rows, and keeps the deletion batch row as an audit record; a purged batch can never be restored. The deployment also runs the same purge once a week from a cron trigger (`docs/RUNBOOK.md` section E).
 
 ## Diagnostics
 

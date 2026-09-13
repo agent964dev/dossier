@@ -128,8 +128,9 @@ Disable and enable affect one node only. A disabled node serves 404 to everyone
 but remains visible to its editors in management views. R2 objects are retained
 while documents are restorable.
 
-A batch stays restorable for 30 days after it was archived; after that it is
-eligible for permanent removal. Removal is an operator action, `dossier admin
+A batch stays restorable for the configured retention window (30 days by
+default, `PURGE_RETENTION_DAYS`); after that it is eligible for permanent
+removal. Removal is an operator action, `dossier admin
 purge --execute`, which is a dry run without the flag. Each deployment also
 runs the same purge once a week (Sunday 03:17 UTC) from a cron trigger. Either
 path removes one batch at a time under a short lease.
