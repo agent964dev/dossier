@@ -1,0 +1,13 @@
+title = "Dossier gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow fixtures and a historical storage-key false positive"
+paths = [
+  '''^docs/plan-playground\.html$''',
+  '''^apps/web/test/.*$''',
+  '''^packages/cli/src/[^/]*\.test\.ts$''',
+  '''^packages/cli/test/.*$''',
+]

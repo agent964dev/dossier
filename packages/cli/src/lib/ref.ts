@@ -2,7 +2,9 @@ import { CliError, ExitCode } from './errors.js'
 
 const DOCUMENT_ID = '[a-z0-9]{12}'
 const SHORT_REF = new RegExp(`^(${DOCUMENT_ID})(?:@([1-9]\\d*))?$`)
-const URL_PATH = new RegExp(`^/d/(${DOCUMENT_ID})(?:/v/([1-9]\\d*))?(?:/(raw|tree))?/?$`)
+const URL_PATH = new RegExp(
+  `^/d/(${DOCUMENT_ID})(?:/v/([1-9]\\d*))?(?:/(raw|tree))?/?$`,
+)
 
 export interface DocumentRef {
   readonly id: string
@@ -43,7 +45,12 @@ export function parseRef(ref: string, apiUrl: string): DocumentRef {
       `document URL origin ${url.origin} does not match configured dossier origin ${configured.origin}`,
     )
   }
-  if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+  if (
+    url.username !== '' ||
+    url.password !== '' ||
+    url.search !== '' ||
+    url.hash !== ''
+  ) {
     return usage(`not a canonical dossier document URL: ${ref}`)
   }
 

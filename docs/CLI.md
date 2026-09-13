@@ -13,16 +13,16 @@ dossier --help
 
 The Dossier origin and output flags work before or after a subcommand, including nested subcommands.
 
-| Flag | Meaning |
-|---|---|
-| `--api-url <url>` | Use this Dossier origin. HTTPS is required except for loopback development URLs. |
-| `--json` | Print exactly one JSON value on stdout. Errors still print as `dossier: <message>` on stderr. |
-| `-q`, `--quiet` | Suppress normal output. `upload` and `assets push` print only the resulting URL. |
-| `-h`, `--help` | Show help for the selected command. |
-| `--version` | Show the CLI version. |
-| `--completions sh|bash|fish|zsh` | Generate a shell completion script. |
-| `--log-level all|trace|debug|info|warning|error|fatal|none` | Set Effect CLI logging verbosity. |
-| `--wizard` | Start Effect CLI's interactive command wizard. |
+| Flag              | Meaning                                                                                       |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `--api-url <url>` | Use this Dossier origin. HTTPS is required except for loopback development URLs.              |
+| `--json`          | Print exactly one JSON value on stdout. Errors still print as `dossier: <message>` on stderr. |
+| `-q`, `--quiet`   | Suppress normal output. `upload` and `assets push` print only the resulting URL.              |
+| `-h`, `--help`    | Show help for the selected command.                                                           |
+| `--version`       | Show the version derived from the installed package.json.                                     |
+| `--completions sh | bash                                                                                          | fish  | zsh` | Generate a shell completion script. |
+| `--log-level all  | trace                                                                                         | debug | info | warning                             | error | fatal | none` | Set Effect CLI logging verbosity. |
+| `--wizard`        | Start Effect CLI's interactive command wizard.                                                |
 
 Examples:
 
@@ -179,6 +179,33 @@ dossier enable <id>
 
 `delete` never prompts. A subtree requires `--force`; without it, the error reports descendant and author impact. `trash` groups archived documents by deletion batch. `restore` discovers the document's batch when `--batch` is omitted. `disable` and `enable` affect serving for one node.
 
+## Maintenance
+
+### `dossier update [--check]`
+
+Checks the npm registry and updates a globally installed CLI with the package
+manager that installed it. Supported global installs are npm, Bun, pnpm, and
+Yarn classic. The command never downgrades a locally newer version.
+
+```sh
+dossier update --check
+dossier update
+dossier update --json
+dossier update -q
+```
+
+`--check` reports availability without installing and exits `0` whether or not
+an update exists. `--json` emits one result object on stdout and routes
+installer output to stderr. Quiet mode prints nothing unless an update runs or
+an error occurs. Automatic updates are refused for npx, bunx, source checkouts,
+unknown installations, and Windows; the error gives a manual command where
+applicable.
+Permission errors show the exact command to rerun with elevated rights and never
+invoke `sudo` automatically.
+
+`DOSSIER_UPDATE_REGISTRY_URL` overrides the npm registry origin. It exists only
+for automated testing; normal usage should leave it unset.
+
 ## Shared assets
 
 ### `dossier assets push <file> [--slug <slug>]`
@@ -225,12 +252,12 @@ cat .prod-bootstrap-key.local | \
 
 ## Exit codes and error output
 
-| Code | Meaning |
-|---:|---|
-| `0` | Success. A diff with changes is still success. |
-| `1` | Operational failure, policy rejection, server error, conflict, or not found. |
-| `2` | Invalid command usage, option, reference, or configured URL. |
-| `4` | Authentication is missing or rejected. |
+| Code | Meaning                                                                      |
+| ---: | ---------------------------------------------------------------------------- |
+|  `0` | Success. A diff with changes is still success.                               |
+|  `1` | Operational failure, policy rejection, server error, conflict, or not found. |
+|  `2` | Invalid command usage, option, reference, or configured URL.                 |
+|  `4` | Authentication is missing or rejected.                                       |
 
 Errors are written to stderr as:
 

@@ -19,7 +19,9 @@ export type AllowlistRow = WorkspaceAllowlistEntry
 type WorkspaceEffect<A> = Effect.Effect<A, DossierError | PersistenceError>
 
 export interface WorkspaceService {
-  readonly get: (principal: PrincipalIdentity) => WorkspaceEffect<WorkspaceResponse>
+  readonly get: (
+    principal: PrincipalIdentity,
+  ) => WorkspaceEffect<WorkspaceResponse>
   readonly addAllowlistEntry: (
     principal: PrincipalIdentity,
     entry: AllowlistCreate,
@@ -125,22 +127,23 @@ export const WorkspaceLive = Layer.effect(
                 last_login_at: string | null
               }>(),
           catch: (cause) =>
-            new PersistenceError({ operation: 'list workspace members', cause }),
+            new PersistenceError({
+              operation: 'list workspace members',
+              cause,
+            }),
         })
-        return result.results.map(
-          (row): MemberRow => ({
-            accountId: row.id,
-            name: row.name,
-            email: row.email,
-            pictureUrl: row.picture_url,
-            role: row.role,
-            joinedAt: row.joined_at,
-            lastLoginAt: row.last_login_at,
-            disabled: row.disabled_at !== null,
-            deploymentAdmin: row.deployment_admin === 1,
-            kind: row.kind,
-          }),
-        )
+        return result.results.map((row): MemberRow => ({
+          accountId: row.id,
+          name: row.name,
+          email: row.email,
+          pictureUrl: row.picture_url,
+          role: row.role,
+          joinedAt: row.joined_at,
+          lastLoginAt: row.last_login_at,
+          disabled: row.disabled_at !== null,
+          deploymentAdmin: row.deployment_admin === 1,
+          kind: row.kind,
+        }))
       })
     }
 
@@ -168,19 +171,20 @@ export const WorkspaceLive = Layer.effect(
                 created_by_name: string | null
               }>(),
           catch: (cause) =>
-            new PersistenceError({ operation: 'list allowlist entries', cause }),
+            new PersistenceError({
+              operation: 'list allowlist entries',
+              cause,
+            }),
         })
-        return result.results.map(
-          (row): AllowlistRow => ({
-            id: row.id,
-            kind: row.kind,
-            value: row.value,
-            role: row.role,
-            createdAt: row.created_at,
-            createdByName: row.created_by_name,
-            lastUsedAt: row.last_used_at,
-          }),
-        )
+        return result.results.map((row): AllowlistRow => ({
+          id: row.id,
+          kind: row.kind,
+          value: row.value,
+          role: row.role,
+          createdAt: row.created_at,
+          createdByName: row.created_by_name,
+          lastUsedAt: row.last_used_at,
+        }))
       })
     }
 
@@ -196,7 +200,10 @@ export const WorkspaceLive = Layer.effect(
               .bind(workspaceId)
               .first<{ total: number }>(),
           catch: (cause) =>
-            new PersistenceError({ operation: 'count workspace admins', cause }),
+            new PersistenceError({
+              operation: 'count workspace admins',
+              cause,
+            }),
         })
         return row?.total ?? 0
       })
@@ -281,10 +288,12 @@ export const WorkspaceLive = Layer.effect(
               ? `Anyone with a verified @${parsed.value} address can now sign in as ${data.role}.`
               : `${parsed.value} can now sign in as ${data.role}.`,
         }
-
       })
 
-    const removeAllowlistEntry: WorkspaceService['removeAllowlistEntry'] = (principal, id) =>
+    const removeAllowlistEntry: WorkspaceService['removeAllowlistEntry'] = (
+      principal,
+      id,
+    ) =>
       Effect.gen(function* () {
         yield* requireAdmin(principal)
 
@@ -313,7 +322,6 @@ export const WorkspaceLive = Layer.effect(
           ok: true as const,
           message: 'Entry removed. Existing members keep their access.',
         }
-
       })
 
     const setMemberRole: WorkspaceService['setMemberRole'] = (
@@ -376,10 +384,12 @@ export const WorkspaceLive = Layer.effect(
           ok: true as const,
           message: `${current.name} is now ${role}.`,
         }
-
       })
 
-    const removeMember: WorkspaceService['removeMember'] = (principal, accountId) =>
+    const removeMember: WorkspaceService['removeMember'] = (
+      principal,
+      accountId,
+    ) =>
       Effect.gen(function* () {
         yield* requireAdmin(principal)
 
@@ -439,7 +449,6 @@ export const WorkspaceLive = Layer.effect(
           ok: true as const,
           message: `${current.name} can no longer publish here. Their documents are untouched.`,
         }
-
       })
 
     return {

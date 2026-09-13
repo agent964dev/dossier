@@ -8,7 +8,12 @@ import { Context, Data, Effect, Layer } from 'effect'
 
 import { Db } from './db'
 import { WorkerEnv } from './env'
-import { apiError, type DossierError, PersistenceError, StorageError } from './errors'
+import {
+  apiError,
+  type DossierError,
+  PersistenceError,
+  StorageError,
+} from './errors'
 import { Ids } from './ids'
 import { Objects } from './objects'
 import { Principal, type PrincipalIdentity } from './principal'
@@ -126,10 +131,7 @@ function isDefiniteRollbackFailure(error: PersistenceError): boolean {
   )
 }
 
-function assetPushDto(
-  row: AssetVersionRow,
-  origin: string,
-): AssetPushResponse {
+function assetPushDto(row: AssetVersionRow, origin: string): AssetPushResponse {
   return {
     slug: row.slug,
     ext: row.ext,
@@ -247,7 +249,10 @@ export const AssetsLive = Layer.effect(
         const decoded = decodeBase64(payload.contentBase64, maxAssetBytes)
         if (decoded._tag === 'Invalid') {
           return yield* Effect.fail(
-            apiError('policy_rejected', 'Asset contentBase64 is not valid base64.'),
+            apiError(
+              'policy_rejected',
+              'Asset contentBase64 is not valid base64.',
+            ),
           )
         }
         if (decoded._tag === 'TooLarge') {
@@ -269,7 +274,10 @@ export const AssetsLive = Layer.effect(
               apiError(
                 'policy_rejected',
                 'CSS asset must contain valid UTF-8.',
-                { errors: ['CSS asset must contain valid UTF-8.'], warnings: [] },
+                {
+                  errors: ['CSS asset must contain valid UTF-8.'],
+                  warnings: [],
+                },
               ),
             )
           }
@@ -292,7 +300,9 @@ export const AssetsLive = Layer.effect(
               'policy_rejected',
               'WOFF2 asset does not start with the wOF2 magic bytes.',
               {
-                errors: ['WOFF2 asset does not start with the wOF2 magic bytes.'],
+                errors: [
+                  'WOFF2 asset does not start with the wOF2 magic bytes.',
+                ],
                 warnings: [],
               },
             ),
@@ -506,7 +516,9 @@ export const AssetsLive = Layer.effect(
               return yield* Effect.fail(
                 new PersistenceError({
                   operation: 'load asset publication result',
-                  cause: new Error('Committed asset version row was not found.'),
+                  cause: new Error(
+                    'Committed asset version row was not found.',
+                  ),
                 }),
               )
             }
@@ -628,7 +640,10 @@ export const AssetsLive = Layer.effect(
               .first<ServedAssetRow>()
           },
           catch: (cause) =>
-            new PersistenceError({ operation: 'load served asset version', cause }),
+            new PersistenceError({
+              operation: 'load served asset version',
+              cause,
+            }),
         })
         if (!row) return assetNotFound()
 

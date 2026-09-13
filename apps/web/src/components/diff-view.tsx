@@ -1,5 +1,10 @@
 import { cn } from '@/lib/utils'
-import type { DiffHunk, DiffLayout, DiffLine, DiffVersionRef } from '../server/diff'
+import type {
+  DiffHunk,
+  DiffLayout,
+  DiffLine,
+  DiffVersionRef,
+} from '../server/diff'
 
 /**
  * The diff surface (PLAN section 1, "Versions").
@@ -48,7 +53,11 @@ function Num({
   className?: string
 }) {
   return (
-    <span aria-hidden data-numeric className={cn(NUMBER, TONE[op].number, className)}>
+    <span
+      aria-hidden
+      data-numeric
+      className={cn(NUMBER, TONE[op].number, className)}
+    >
       {value ?? ''}
     </span>
   )

@@ -202,7 +202,9 @@ const UploadsLive = HttpApiBuilder.group(DossierApi, 'uploads', (handlers) =>
   ),
 )
 
-function slugTakenResponse(slug: string): HttpServerResponse.HttpServerResponse {
+function slugTakenResponse(
+  slug: string,
+): HttpServerResponse.HttpServerResponse {
   return HttpServerResponse.unsafeJson(
     {
       ok: false,
@@ -221,7 +223,9 @@ const AssetsLive = HttpApiBuilder.group(DossierApi, 'assets', (handlers) =>
           const state = yield* ApiRequest
           const assets = yield* Assets
           const payload = yield* decodeJsonBody(request, AssetUploadRequest)
-          const result = yield* assets.push(payload, state.principal).pipe(Effect.either)
+          const result = yield* assets
+            .push(payload, state.principal)
+            .pipe(Effect.either)
           if (result._tag === 'Left') {
             if (result.left instanceof AssetSlugTaken) {
               return slugTakenResponse(result.left.slug)
@@ -319,7 +323,10 @@ const DocumentsLive = HttpApiBuilder.group(
                   : { cursor: urlParams.cursor }),
                 ...(urlParams.parent === undefined
                   ? {}
-                  : { parent: urlParams.parent === 'root' ? null : urlParams.parent }),
+                  : {
+                      parent:
+                        urlParams.parent === 'root' ? null : urlParams.parent,
+                    }),
               },
               state.principal,
             )
@@ -342,7 +349,11 @@ const DocumentsLive = HttpApiBuilder.group(
             const state = yield* ApiRequest
             const tree = yield* Tree
             const payload = yield* decodeJsonBody(request, DocumentPatch)
-            const document = yield* tree.patch(path.id, payload, state.principal)
+            const document = yield* tree.patch(
+              path.id,
+              payload,
+              state.principal,
+            )
             return jsonServerResponse({ ok: true, document })
           }),
         ),
@@ -352,7 +363,9 @@ const DocumentsLive = HttpApiBuilder.group(
           Effect.gen(function* () {
             const state = yield* ApiRequest
             const shares = yield* Shares
-            return jsonServerResponse(yield* shares.get(path.id, state.principal))
+            return jsonServerResponse(
+              yield* shares.get(path.id, state.principal),
+            )
           }),
         ),
       )
@@ -362,7 +375,9 @@ const DocumentsLive = HttpApiBuilder.group(
             const state = yield* ApiRequest
             const shares = yield* Shares
             const payload = yield* decodeJsonBody(request, ShareDelta)
-            return jsonServerResponse(yield* shares.delta(path.id, payload, state.principal))
+            return jsonServerResponse(
+              yield* shares.delta(path.id, payload, state.principal),
+            )
           }),
         ),
       )
@@ -372,7 +387,9 @@ const DocumentsLive = HttpApiBuilder.group(
             const state = yield* ApiRequest
             const shares = yield* Shares
             const payload = yield* decodeJsonBody(request, ShareReplacement)
-            return jsonServerResponse(yield* shares.replace(path.id, payload, state.principal))
+            return jsonServerResponse(
+              yield* shares.replace(path.id, payload, state.principal),
+            )
           }),
         ),
       )
@@ -565,80 +582,89 @@ const KeysLive = HttpApiBuilder.group(DossierApi, 'keys', (handlers) =>
     ),
 )
 
-const WorkspaceLive = HttpApiBuilder.group(DossierApi, 'workspace', (handlers) =>
-  handlers
-    .handleRaw('get', () =>
-      withApiErrors(
-        Effect.gen(function* () {
-          const { principal } = yield* ApiRequest
-          const workspace = yield* Workspace
-          return jsonServerResponse(yield* workspace.get(principal))
-        }),
-      ),
-    )
-    .handleRaw('addAllowlistEntry', ({ request }) =>
-      withApiErrors(
-        Effect.gen(function* () {
-          const { principal } = yield* ApiRequest
-          const workspace = yield* Workspace
-          const payload = yield* decodeJsonBody(request, AllowlistCreate)
-          // The CLI sends bare domains with an explicit kind. Reconstruct the
-          // browser syntax for shared validation; mismatches are HTTP 422.
-          const parsed = parseAllowlistValue(
-            payload.kind === 'domain' ? `@${payload.value.trim()}` : payload.value,
-          )
-          if (parsed === null || parsed.kind !== payload.kind) {
-            return yield* Effect.fail(
-              new DossierError({
-                code: 'policy_rejected',
-                message:
-                  'Enter one email address, or a domain matching the supplied kind.',
+const WorkspaceLive = HttpApiBuilder.group(
+  DossierApi,
+  'workspace',
+  (handlers) =>
+    handlers
+      .handleRaw('get', () =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const { principal } = yield* ApiRequest
+            const workspace = yield* Workspace
+            return jsonServerResponse(yield* workspace.get(principal))
+          }),
+        ),
+      )
+      .handleRaw('addAllowlistEntry', ({ request }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const { principal } = yield* ApiRequest
+            const workspace = yield* Workspace
+            const payload = yield* decodeJsonBody(request, AllowlistCreate)
+            // The CLI sends bare domains with an explicit kind. Reconstruct the
+            // browser syntax for shared validation; mismatches are HTTP 422.
+            const parsed = parseAllowlistValue(
+              payload.kind === 'domain'
+                ? `@${payload.value.trim()}`
+                : payload.value,
+            )
+            if (parsed === null || parsed.kind !== payload.kind) {
+              return yield* Effect.fail(
+                new DossierError({
+                  code: 'policy_rejected',
+                  message:
+                    'Enter one email address, or a domain matching the supplied kind.',
+                }),
+              )
+            }
+            return jsonServerResponse(
+              yield* workspace.addAllowlistEntry(principal, {
+                ...parsed,
+                role: payload.role,
               }),
             )
-          }
-          return jsonServerResponse(
-            yield* workspace.addAllowlistEntry(principal, {
-              ...parsed,
-              role: payload.role,
-            }),
-          )
-        }),
+          }),
+        ),
+      )
+      .handleRaw('removeAllowlistEntry', ({ path }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const { principal } = yield* ApiRequest
+            const workspace = yield* Workspace
+            return jsonServerResponse(
+              yield* workspace.removeAllowlistEntry(principal, path.id),
+            )
+          }),
+        ),
+      )
+      .handleRaw('setMemberRole', ({ path, request }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const { principal } = yield* ApiRequest
+            const workspace = yield* Workspace
+            const payload = yield* decodeJsonBody(request, MemberRoleUpdate)
+            return jsonServerResponse(
+              yield* workspace.setMemberRole(
+                principal,
+                path.accountId,
+                payload.role,
+              ),
+            )
+          }),
+        ),
+      )
+      .handleRaw('removeMember', ({ path }) =>
+        withApiErrors(
+          Effect.gen(function* () {
+            const { principal } = yield* ApiRequest
+            const workspace = yield* Workspace
+            return jsonServerResponse(
+              yield* workspace.removeMember(principal, path.accountId),
+            )
+          }),
+        ),
       ),
-    )
-    .handleRaw('removeAllowlistEntry', ({ path }) =>
-      withApiErrors(
-        Effect.gen(function* () {
-          const { principal } = yield* ApiRequest
-          const workspace = yield* Workspace
-          return jsonServerResponse(
-            yield* workspace.removeAllowlistEntry(principal, path.id),
-          )
-        }),
-      ),
-    )
-    .handleRaw('setMemberRole', ({ path, request }) =>
-      withApiErrors(
-        Effect.gen(function* () {
-          const { principal } = yield* ApiRequest
-          const workspace = yield* Workspace
-          const payload = yield* decodeJsonBody(request, MemberRoleUpdate)
-          return jsonServerResponse(
-            yield* workspace.setMemberRole(principal, path.accountId, payload.role),
-          )
-        }),
-      ),
-    )
-    .handleRaw('removeMember', ({ path }) =>
-      withApiErrors(
-        Effect.gen(function* () {
-          const { principal } = yield* ApiRequest
-          const workspace = yield* Workspace
-          return jsonServerResponse(
-            yield* workspace.removeMember(principal, path.accountId),
-          )
-        }),
-      ),
-    ),
 )
 
 const MeLive = HttpApiBuilder.group(DossierApi, 'me', (handlers) =>

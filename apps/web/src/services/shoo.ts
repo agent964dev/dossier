@@ -37,7 +37,10 @@ export interface ShooService {
   ) => Effect.Effect<ShooClaims, ShooError>
 }
 
-export class Shoo extends Context.Tag('@dossier/web/Shoo')<Shoo, ShooService>() {}
+export class Shoo extends Context.Tag('@dossier/web/Shoo')<
+  Shoo,
+  ShooService
+>() {}
 
 const issuers = new Map<string, Promise<string>>()
 const jwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>()
@@ -62,7 +65,8 @@ export const ShooLive = Layer.effect(
         signal: AbortSignal.timeout(10_000),
       })
         .then(async (response) => {
-          if (!response.ok) throw new Error(`Shoo discovery failed: ${response.status}`)
+          if (!response.ok)
+            throw new Error(`Shoo discovery failed: ${response.status}`)
           const body = (await response.json()) as { issuer?: unknown }
           if (typeof body.issuer !== 'string') {
             throw new Error('Shoo discovery document has no issuer.')
@@ -154,7 +158,10 @@ export const ShooLive = Layer.effect(
             return payload as ShooClaims
           },
           catch: (cause) =>
-            new ShooError({ message: 'Shoo id_token verification failed.', cause }),
+            new ShooError({
+              message: 'Shoo id_token verification failed.',
+              cause,
+            }),
         }),
     }
   }),

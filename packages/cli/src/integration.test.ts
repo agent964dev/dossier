@@ -1,8 +1,17 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
@@ -151,7 +160,9 @@ function storedDocument(
   overrides: Partial<StoredDocument> = {},
 ): StoredDocument {
   return {
-    html: Buffer.from(`<!doctype html><title>${basename(filename, '.html')}</title>`),
+    html: Buffer.from(
+      `<!doctype html><title>${basename(filename, '.html')}</title>`,
+    ),
     version: 1,
     revision: 1,
     filename,
@@ -217,6 +228,12 @@ beforeAll(async () => {
 
   server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/@agent964%2Fdossier/latest') {
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ version: '0.3.0' }))
+      return
+    }
+
     if (url.pathname === '/api/healthz') {
       response.setHeader('content-type', 'application/json')
       response.end(
@@ -301,7 +318,8 @@ beforeAll(async () => {
             JSON.stringify({
               ok: false,
               code: 'slug_taken',
-              message: 'slug_taken: asset slug is reserved by another workspace',
+              message:
+                'slug_taken: asset slug is reserved by another workspace',
             }),
           )
           return
@@ -459,7 +477,8 @@ beforeAll(async () => {
         authorAccountId: previous?.authorAccountId ?? 'acct_test',
         authorName: previous?.authorName ?? 'Test User',
         shares:
-          Array.isArray(payload.shares) && payload.shares.every((email) => typeof email === 'string')
+          Array.isArray(payload.shares) &&
+          payload.shares.every((email) => typeof email === 'string')
             ? payload.shares
             : (previous?.shares ?? []),
         deletionBatchId: previous?.deletionBatchId ?? null,
@@ -532,20 +551,24 @@ beforeAll(async () => {
             fileSize: 23,
           },
           mode: url.searchParams.get('mode') === 'text' ? 'text' : 'html',
-          hunks: from === to ? [] : [
-            {
-              oldStart: 1,
-              oldLines: 2,
-              newStart: 1,
-              newLines: 2,
-              lines: [
-                { op: ' ', text: '<main>' },
-                { op: '-', text: '<p>Before</p>' },
-                { op: '+', text: '<p>After</p>' },
-              ],
-            },
-          ],
-          stats: from === to ? { added: 0, removed: 0 } : { added: 1, removed: 1 },
+          hunks:
+            from === to
+              ? []
+              : [
+                  {
+                    oldStart: 1,
+                    oldLines: 2,
+                    newStart: 1,
+                    newLines: 2,
+                    lines: [
+                      { op: ' ', text: '<main>' },
+                      { op: '-', text: '<p>Before</p>' },
+                      { op: '+', text: '<p>After</p>' },
+                    ],
+                  },
+                ],
+          stats:
+            from === to ? { added: 0, removed: 0 } : { added: 1, removed: 1 },
         }),
       )
       return
@@ -570,7 +593,10 @@ beforeAll(async () => {
       }
     }
 
-    if (url.pathname === '/api/workspace/allowlist' && request.method === 'POST') {
+    if (
+      url.pathname === '/api/workspace/allowlist' &&
+      request.method === 'POST'
+    ) {
       response.setHeader('content-type', 'application/json')
       if (!authenticated(request)) {
         response.statusCode = 401
@@ -585,7 +611,10 @@ beforeAll(async () => {
         role: payload.role === 'admin' ? 'admin' : 'member',
       })
       response.end(
-        JSON.stringify({ ok: true, message: `${String(payload.value)} allowed.` }),
+        JSON.stringify({
+          ok: true,
+          message: `${String(payload.value)} allowed.`,
+        }),
       )
       return
     }
@@ -600,7 +629,8 @@ beforeAll(async () => {
         return
       }
       const index = workspaceAllowlist.findIndex(
-        (entry) => entry.id === decodeURIComponent(workspaceAllowlistDelete[1]!),
+        (entry) =>
+          entry.id === decodeURIComponent(workspaceAllowlistDelete[1]!),
       )
       if (index < 0) {
         response.statusCode = 404
@@ -700,7 +730,8 @@ beforeAll(async () => {
             children: [...documents]
               .filter(
                 ([, candidate]) =>
-                  candidate.parentId === id && candidate.deletionBatchId === null,
+                  candidate.parentId === id &&
+                  candidate.deletionBatchId === null,
               )
               .map(([candidateId, candidate]) =>
                 readerDto(candidateId, candidate),
@@ -958,9 +989,13 @@ describe('built CLI', () => {
     const home = await temporaryHome()
     const executable = join(home, 'dossier')
     await symlink(artifact, executable)
-    const result = await exec(executable, ['health', '--api-url', apiUrl, '--json'], {
-      env: { ...process.env, DOSSIER_HOME: home },
-    })
+    const result = await exec(
+      executable,
+      ['health', '--api-url', apiUrl, '--json'],
+      {
+        env: { ...process.env, DOSSIER_HOME: home },
+      },
+    )
     expect(JSON.parse(result.stdout)).toEqual({
       ok: true,
       service: 'dossier',
@@ -968,12 +1003,82 @@ describe('built CLI', () => {
     })
   })
 
-  it('calls the protected setup endpoint with a piped bootstrap key', async () => {
-    const result = await cli(
-      'node',
-      ['setup', '--api-url', apiUrl, '--json'],
-      { input: 'ds_bootstrap\n' },
+  it('updates an npm-style install through the configured registry', async () => {
+    const home = await temporaryHome()
+    const npmRoot = join(home, 'npm-root')
+    const packageRoot = join(npmRoot, '@agent964', 'dossier')
+    const fakeArtifact = join(packageRoot, 'dist', 'index.js')
+    const manifest = join(packageRoot, 'package.json')
+    const binDirectory = join(home, 'bin')
+    const npmStub = join(binDirectory, 'npm')
+    const record = join(home, 'npm-argv.txt')
+    const updateManifest = join(home, 'update-manifest.cjs')
+    await mkdir(join(packageRoot, 'dist'), { recursive: true })
+    await mkdir(binDirectory, { recursive: true })
+    await copyFile(artifact, fakeArtifact)
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        name: '@agent964/dossier',
+        version: '0.2.0',
+        type: 'module',
+      }),
+      'utf8',
     )
+    await writeFile(
+      updateManifest,
+      `const fs = require('fs')
+const path = process.env.DOSSIER_TEST_PACKAGE_JSON
+const manifest = JSON.parse(fs.readFileSync(path, 'utf8'))
+manifest.version = '0.3.0'
+fs.writeFileSync(path, JSON.stringify(manifest))
+`,
+      'utf8',
+    )
+    await writeFile(
+      npmStub,
+      `#!/bin/sh
+printf '%s\n' "$*" >> "$DOSSIER_UPDATE_RECORD"
+if [ "$1" = "root" ] && [ "$2" = "-g" ]; then
+  printf '%s\n' "$DOSSIER_TEST_NPM_ROOT"
+  exit 0
+fi
+node "$DOSSIER_TEST_UPDATE_MANIFEST"
+`,
+      'utf8',
+    )
+    await chmod(npmStub, 0o755)
+
+    const result = await exec('node', [fakeArtifact, 'update', '--json'], {
+      env: {
+        ...process.env,
+        PATH: `${binDirectory}${delimiter}${process.env.PATH ?? ''}`,
+        DOSSIER_UPDATE_REGISTRY_URL: apiUrl,
+        DOSSIER_UPDATE_RECORD: record,
+        DOSSIER_TEST_NPM_ROOT: npmRoot,
+        DOSSIER_TEST_PACKAGE_JSON: manifest,
+        DOSSIER_TEST_UPDATE_MANIFEST: updateManifest,
+      },
+    })
+    expect(result.stderr).toBe('')
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      currentVersion: '0.2.0',
+      latestVersion: '0.3.0',
+      installMethod: 'npm',
+      updateAvailable: true,
+      checked: false,
+      updated: true,
+    })
+    expect((await readFile(record, 'utf8')).trim().split('\n')).toContain(
+      'install -g @agent964/dossier@0.3.0',
+    )
+  })
+
+  it('calls the protected setup endpoint with a piped bootstrap key', async () => {
+    const result = await cli('node', ['setup', '--api-url', apiUrl, '--json'], {
+      input: 'ds_bootstrap\n',
+    })
     expect(result.exitCode).toBe(0)
     expect(result.stderr).toBe('')
     expect(JSON.parse(result.stdout)).toEqual({
@@ -1048,7 +1153,6 @@ describe('built CLI', () => {
     expect(result.stderr).not.toContain('not authenticated')
     expect(assetRequests).toBe(before)
   })
-
 
   it('explains invalid slugs derived from filenames', async () => {
     const home = await temporaryHome()
@@ -1148,7 +1252,9 @@ describe('built CLI', () => {
     expect(result.stdout).toContain('Version: 1')
     expect(result.stdout).toContain(`${apiUrl}/a/shared-theme.css`)
     expect(result.stdout).toContain(`${apiUrl}/a/shared-theme@1.css`)
-    expect(assets.get('shared-theme')?.bytes).toEqual(await readFile(cssFixture))
+    expect(assets.get('shared-theme')?.bytes).toEqual(
+      await readFile(cssFixture),
+    )
   })
 
   it('pushes WOFF2 bytes with an explicit slug', async () => {
@@ -1216,7 +1322,9 @@ describe('built CLI', () => {
     await authenticate(home)
     const result = await cli('node', ['assets', 'list'], { home })
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('shared-theme.css\n  v1 · updated 2026-09-12')
+    expect(result.stdout).toContain(
+      'shared-theme.css\n  v1 · updated 2026-09-12',
+    )
     expect(result.stdout).toContain(`  pinned ${apiUrl}/a/shared-theme@1.css`)
   })
 
@@ -1381,9 +1489,7 @@ describe('built CLI', () => {
       { home },
     )
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toBe(
-      '--- a/diffsame0001@2\n+++ b/diffsame0001@2\n',
-    )
+    expect(result.stdout).toBe('--- a/diffsame0001@2\n+++ b/diffsame0001@2\n')
     expect(result.stderr).toBe('dossier: v2 and v2 are identical\n')
   })
 
@@ -1465,16 +1571,30 @@ describe('built CLI', () => {
     const firstParentFile = join(home, 'first-parent.html')
     const secondParentFile = join(home, 'second-parent.html')
     const childFile = join(home, 'parented-child.html')
-    await writeFile(firstParentFile, '<!doctype html><title>First</title>', 'utf8')
-    await writeFile(secondParentFile, '<!doctype html><title>Second</title>', 'utf8')
+    await writeFile(
+      firstParentFile,
+      '<!doctype html><title>First</title>',
+      'utf8',
+    )
+    await writeFile(
+      secondParentFile,
+      '<!doctype html><title>Second</title>',
+      'utf8',
+    )
     await writeFile(childFile, '<!doctype html><title>Child</title>', 'utf8')
     const firstParent = JSON.parse(
-      (await cli('node', ['upload', firstParentFile, '--new', '--json'], { home }))
-        .stdout,
+      (
+        await cli('node', ['upload', firstParentFile, '--new', '--json'], {
+          home,
+        })
+      ).stdout,
     )
     const secondParent = JSON.parse(
-      (await cli('node', ['upload', secondParentFile, '--new', '--json'], { home }))
-        .stdout,
+      (
+        await cli('node', ['upload', secondParentFile, '--new', '--json'], {
+          home,
+        })
+      ).stdout,
     )
     const created = await cli(
       'node',

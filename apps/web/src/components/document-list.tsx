@@ -25,7 +25,10 @@ export function VisibilityTag({
   const { label, Icon } = VISIBILITY[visibility]
   return (
     <span
-      className={cn('text-micro-lg inline-flex items-center gap-1.5 text-neutral-400', className)}
+      className={cn(
+        'text-micro-lg inline-flex items-center gap-1.5 text-neutral-400',
+        className,
+      )}
       title={inherited ? `${label}, inherited from an ancestor` : label}
     >
       <Icon aria-hidden className="size-3 opacity-70" />
@@ -117,7 +120,10 @@ export function DocumentRow({
             inherited={document.accessSource === 'inherited'}
           />
         </span>
-        <span data-numeric className="text-micro-lg hidden text-neutral-300 lg:block">
+        <span
+          data-numeric
+          className="text-micro-lg hidden text-neutral-300 lg:block"
+        >
           v{document.latestVersionNumber}
         </span>
         <span
@@ -128,7 +134,9 @@ export function DocumentRow({
         </span>
         <span className="hidden min-w-0 items-center gap-2 lg:flex">
           <Avatar name={document.authorName} className="size-5 text-[0.5rem]" />
-          <span className="truncate text-xs text-neutral-400">{document.authorName}</span>
+          <span className="truncate text-xs text-neutral-400">
+            {document.authorName}
+          </span>
         </span>
         <ChevronRight
           aria-hidden

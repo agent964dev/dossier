@@ -7,11 +7,7 @@ import {
 import { PolicyResult } from '@dossier/policy'
 import { Schema } from 'effect'
 
-export {
-  CssPolicyResult,
-  PolicyResult,
-  PolicyStats,
-} from '@dossier/policy'
+export { CssPolicyResult, PolicyResult, PolicyStats } from '@dossier/policy'
 export type {
   CssPolicyResultType,
   PolicyResultType,
@@ -22,9 +18,7 @@ const OptionalString = Schema.optional(Schema.String)
 const OptionalNullableString = Schema.optional(Schema.NullOr(Schema.String))
 const Revision = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 
-export const DocumentId = Schema.String.pipe(
-  Schema.pattern(/^[a-z0-9]{12}$/),
-)
+export const DocumentId = Schema.String.pipe(Schema.pattern(/^[a-z0-9]{12}$/))
 export type DocumentId = typeof DocumentId.Type
 
 export const Visibility = Schema.Literal('public', 'team', 'private')
@@ -84,7 +78,9 @@ export type DocumentEditor = typeof DocumentEditor.Type
 export const DocumentView = Schema.Union(DocumentEditor, DocumentReader)
 export type DocumentView = typeof DocumentView.Type
 
-export function isDocumentEditor(document: DocumentView): document is DocumentEditor {
+export function isDocumentEditor(
+  document: DocumentView,
+): document is DocumentEditor {
   return 'revision' in document
 }
 
@@ -475,11 +471,15 @@ export const HealthzResponse = Schema.Struct({
 })
 export type HealthzResponse = typeof HealthzResponse.Type
 
-export const PolicyCheckPayload = HttpApiSchema.Text({ contentType: 'text/html' })
+export const PolicyCheckPayload = HttpApiSchema.Text({
+  contentType: 'text/html',
+})
 export type PolicyCheckPayload = typeof PolicyCheckPayload.Type
 
 export const SystemApiGroup = HttpApiGroup.make('system')
-  .add(HttpApiEndpoint.get('healthz', '/api/healthz').addSuccess(HealthzResponse))
+  .add(
+    HttpApiEndpoint.get('healthz', '/api/healthz').addSuccess(HealthzResponse),
+  )
   .add(
     HttpApiEndpoint.post('policyCheck', '/api/policy/check')
       .setPayload(PolicyCheckPayload)
@@ -501,9 +501,7 @@ export const AssetsApiGroup = HttpApiGroup.make('assets')
       .addSuccess(AssetPushResponse)
       .addError(AssetSlugTakenError, { status: 409 }),
   )
-  .add(
-    HttpApiEndpoint.get('list', '/api/assets').addSuccess(AssetListResponse),
-  )
+  .add(HttpApiEndpoint.get('list', '/api/assets').addSuccess(AssetListResponse))
   .add(
     HttpApiEndpoint.del('delete', '/api/assets/:slug')
       .setPath(AssetPath)
@@ -525,7 +523,9 @@ export const DocumentsApiGroup = HttpApiGroup.make('documents')
       .setUrlParams(
         Schema.Struct({
           scope: Schema.optional(DocumentListScope),
-          parent: Schema.optional(Schema.Union(DocumentId, Schema.Literal('root'))),
+          parent: Schema.optional(
+            Schema.Union(DocumentId, Schema.Literal('root')),
+          ),
           tree: OptionalString,
           limit: OptionalString,
           cursor: OptionalString,
@@ -604,7 +604,9 @@ export const KeysApiGroup = HttpApiGroup.make('keys')
       .setPayload(ApiKeyCreate)
       .addSuccess(ApiKeyCreateResponse),
   )
-  .add(HttpApiEndpoint.get('list', '/api/api-keys').addSuccess(ApiKeyListResponse))
+  .add(
+    HttpApiEndpoint.get('list', '/api/api-keys').addSuccess(ApiKeyListResponse),
+  )
   .add(
     HttpApiEndpoint.post('revoke', '/api/api-keys/:id')
       .setPath(Schema.Struct({ id: Schema.String }))
@@ -642,13 +644,14 @@ export const MeApiGroup = HttpApiGroup.make('me').add(
 )
 
 export const LegacyApiGroup = HttpApiGroup.make('legacy').add(
-  HttpApiEndpoint.get('drafts', '/api/drafts').addSuccess(LegacyDraftListResponse),
+  HttpApiEndpoint.get('drafts', '/api/drafts').addSuccess(
+    LegacyDraftListResponse,
+  ),
 )
 
 export const SystemApi = HttpApi.make('dossier').add(SystemApiGroup)
 
-export const DossierApi = SystemApi
-  .add(UploadsApiGroup)
+export const DossierApi = SystemApi.add(UploadsApiGroup)
   .add(AssetsApiGroup)
   .add(DocumentsApiGroup)
   .add(KeysApiGroup)

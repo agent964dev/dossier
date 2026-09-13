@@ -24,7 +24,10 @@ export function normalizeApiUrl(apiUrl: string): URL {
   } catch {
     throw new CliError(`invalid API URL: ${apiUrl}`, ExitCode.Usage)
   }
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+  if (
+    url.protocol !== 'https:' &&
+    !(url.protocol === 'http:' && isLoopback(url.hostname))
+  ) {
     throw new CliError(
       `API URL must use HTTPS except on loopback: ${apiUrl}`,
       ExitCode.Usage,
@@ -51,8 +54,8 @@ async function decodeError(response: Response): Promise<DecodedHttpError> {
       const code = typeof body.code === 'string' ? body.code : undefined
       const message = ['message', 'error', 'code']
         .map((key) => body[key])
-        .find((value): value is string =>
-          typeof value === 'string' && value !== '',
+        .find(
+          (value): value is string => typeof value === 'string' && value !== '',
         )
       if (message) {
         const details = body.details
@@ -95,10 +98,14 @@ export async function dossierFetch(
   if (options.apiKey && url.origin === api.origin) {
     headers.set('authorization', `Bearer ${options.apiKey}`)
   }
-  if (!headers.has('accept')) headers.set('accept', options.accept ?? 'application/json')
+  if (!headers.has('accept'))
+    headers.set('accept', options.accept ?? 'application/json')
 
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000)
+  const timeout = setTimeout(
+    () => controller.abort(),
+    options.timeoutMs ?? 30_000,
+  )
   const onAbort = () => controller.abort()
   init.signal?.addEventListener('abort', onAbort, { once: true })
   try {
@@ -127,7 +134,9 @@ export async function dossierFetch(
   } catch (error) {
     if (error instanceof CliError) throw error
     if (controller.signal.aborted) {
-      throw new CliError(`request timed out after ${options.timeoutMs ?? 30_000} ms`)
+      throw new CliError(
+        `request timed out after ${options.timeoutMs ?? 30_000} ms`,
+      )
     }
     throw new CliError(
       `request failed: ${error instanceof Error ? error.message : String(error)}`,

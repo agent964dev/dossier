@@ -32,12 +32,16 @@ describe('worker policy route', () => {
     const allowed = await check(
       '<!doctype html><html><head><title>styles</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2"></head><body></body></html>',
     )
-    expect((await allowed.json()) as { ok: boolean }).toMatchObject({ ok: true })
+    expect((await allowed.json()) as { ok: boolean }).toMatchObject({
+      ok: true,
+    })
 
     const blocked = await check(
       '<!doctype html><html><head><title>styles</title><link rel="stylesheet" href="https://blocked.example/theme.css"></head><body></body></html>',
     )
-    expect((await blocked.json()) as { ok: boolean }).toMatchObject({ ok: false })
+    expect((await blocked.json()) as { ok: boolean }).toMatchObject({
+      ok: false,
+    })
   })
 })
 
@@ -52,7 +56,8 @@ const LIMITED_POLICY_ENV = {
 
 describe('worker policy request limits', () => {
   it('rejects an oversized declared body before policy decoding', async () => {
-    const body = '<title>This request body is deliberately larger than sixty-four bytes.</title>'
+    const body =
+      '<title>This request body is deliberately larger than sixty-four bytes.</title>'
     const response = await worker.fetch(
       new Request('https://dossier.test/api/policy/check', {
         method: 'POST',
@@ -74,11 +79,9 @@ describe('worker policy request limits', () => {
   })
 
   it('rejects a chunked body when accumulated bytes exceed the limit', async () => {
-    const chunks = [
-      '<!doctype html><title>',
-      'a'.repeat(48),
-      '</title>',
-    ].map((chunk) => new TextEncoder().encode(chunk))
+    const chunks = ['<!doctype html><title>', 'a'.repeat(48), '</title>'].map(
+      (chunk) => new TextEncoder().encode(chunk),
+    )
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         for (const chunk of chunks) controller.enqueue(chunk)

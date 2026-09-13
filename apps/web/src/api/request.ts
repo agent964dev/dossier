@@ -111,7 +111,9 @@ function errorHeaders(error: DossierError): Record<string, string> {
   return headers
 }
 
-export function apiErrorServerResponse(error: unknown): HttpServerResponse.HttpServerResponse {
+export function apiErrorServerResponse(
+  error: unknown,
+): HttpServerResponse.HttpServerResponse {
   if (error instanceof DossierError) {
     return HttpServerResponse.unsafeJson(
       {

@@ -154,9 +154,7 @@ export const documents = sqliteTable(
     createdBy: text('created_by')
       .notNull()
       .references(() => accounts.id),
-    parentId: text('parent_id').references(
-      (): AnySQLiteColumn => documents.id,
-    ),
+    parentId: text('parent_id').references((): AnySQLiteColumn => documents.id),
     path: text('path').notNull(),
     depth: integer('depth').notNull(),
     kind: text('kind'),
@@ -180,10 +178,7 @@ export const documents = sqliteTable(
       'documents_id_check',
       sql`length(${table.id}) = 12 AND ${table.id} NOT GLOB '*[^a-z0-9]*'`,
     ),
-    check(
-      'documents_depth_check',
-      sql`${table.depth} BETWEEN 0 AND 16`,
-    ),
+    check('documents_depth_check', sql`${table.depth} BETWEEN 0 AND 16`),
     check(
       'documents_kind_check',
       sql`${table.kind} IS NULL OR (length(${table.kind}) BETWEEN 1 AND 32 AND ${table.kind} NOT GLOB '*[^a-z0-9-]*')`,
@@ -222,7 +217,9 @@ export const documentVersions = sqliteTable(
     createdByAccountId: text('created_by_account_id')
       .notNull()
       .references(() => accounts.id),
-    createdByApiKeyId: text('created_by_api_key_id').references(() => apiKeys.id),
+    createdByApiKeyId: text('created_by_api_key_id').references(
+      () => apiKeys.id,
+    ),
     userAgent: text('user_agent'),
     cliVersion: text('cli_version'),
     gitBranch: text('git_branch'),
@@ -332,7 +329,9 @@ export const assetVersions = sqliteTable(
     contentHash: text('content_hash').notNull(),
     fileSize: integer('file_size').notNull(),
     createdAt: text('created_at').notNull(),
-    createdByApiKeyId: text('created_by_api_key_id').references(() => apiKeys.id),
+    createdByApiKeyId: text('created_by_api_key_id').references(
+      () => apiKeys.id,
+    ),
   },
   (table) => [
     uniqueIndex('asset_versions_object_key_unique').on(table.objectKey),
@@ -375,7 +374,5 @@ export const publicationGuards = sqliteTable(
     id: text('id').primaryKey(),
     ok: integer('ok').notNull(),
   },
-  (table) => [
-    check('publication_guards_ok_check', sql`${table.ok} = 1`),
-  ],
+  (table) => [check('publication_guards_ok_check', sql`${table.ok} = 1`)],
 )

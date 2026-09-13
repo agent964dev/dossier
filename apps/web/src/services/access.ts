@@ -204,7 +204,9 @@ export const AccessLive = Layer.effect(
       Effect.gen(function* () {
         const row = yield* one(documentId, principal)
         if (!row?.canRead) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         return row
       })
@@ -216,7 +218,9 @@ export const AccessLive = Layer.effect(
       Effect.gen(function* () {
         const row = yield* one(documentId, principal)
         if (!row) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         if (row.editor) return row
         if (row.canRead) {

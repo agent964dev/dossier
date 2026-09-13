@@ -1,13 +1,14 @@
 {
   "name": "@agent964/dossier",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "bin": {
     "dossier": "dist/index.js"
   },
   "files": [
     "dist",
-    "skills"
+    "skills",
+    "LICENSE"
   ],
   "exports": {
     ".": "./dist/index.js",
@@ -27,6 +28,7 @@
   "homepage": "https://github.com/agent964dev/dossier#readme",
   "license": "MIT",
   "scripts": {
+    "prebuild": "cp ../../LICENSE LICENSE",
     "build": "bun build src/index.ts --target=node --outfile dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

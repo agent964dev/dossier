@@ -14,7 +14,10 @@ function run<A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> {
   )
 }
 
-async function sessionCookie(accountId: string, workspaceId: string): Promise<string> {
+async function sessionCookie(
+  accountId: string,
+  workspaceId: string,
+): Promise<string> {
   const setCookie = await run(
     Effect.gen(function* () {
       const session = yield* Session
@@ -47,7 +50,9 @@ describe('Principal resolution', () => {
       role: 'member',
       verifiedEmails: ['VALID@Test.Example'],
     })
-    const row = await env.DB.prepare('SELECT last_used_at FROM api_keys WHERE id = ?')
+    const row = await env.DB.prepare(
+      'SELECT last_used_at FROM api_keys WHERE id = ?',
+    )
       .bind(seeded.keyId)
       .first<{ last_used_at: string | null }>()
     expect(row?.last_used_at).not.toBeNull()
@@ -133,7 +138,9 @@ describe('Principal resolution', () => {
   })
 
   it('authenticates a removed member but rejects publisher status', async () => {
-    const seeded = await seedPrincipal(env, { suffix: 'principal_removed_member' })
+    const seeded = await seedPrincipal(env, {
+      suffix: 'principal_removed_member',
+    })
     await env.DB.prepare(
       'DELETE FROM memberships WHERE workspace_id = ? AND account_id = ?',
     )
@@ -147,7 +154,9 @@ describe('Principal resolution', () => {
             headers: { authorization: `Bearer ${seeded.token}` },
           }),
         )
-        const publisher = yield* service.requirePublisher(principal).pipe(Effect.either)
+        const publisher = yield* service
+          .requirePublisher(principal)
+          .pipe(Effect.either)
         return { principal, publisher }
       }),
     )
@@ -157,5 +166,4 @@ describe('Principal resolution', () => {
       left: { code: 'publisher_required' },
     })
   })
-
 })

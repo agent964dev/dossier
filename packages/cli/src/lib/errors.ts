@@ -11,7 +11,11 @@ export class CliError extends Error {
   readonly exitCode: ExitCode
   readonly details?: unknown
 
-  constructor(message: string, exitCode: ExitCode = ExitCode.Failure, details?: unknown) {
+  constructor(
+    message: string,
+    exitCode: ExitCode = ExitCode.Failure,
+    details?: unknown,
+  ) {
     super(message)
     this.name = 'CliError'
     this.exitCode = exitCode

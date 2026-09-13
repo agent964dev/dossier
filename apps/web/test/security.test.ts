@@ -321,7 +321,7 @@ describe('adversarial phase-one security regressions', () => {
           env,
         )
       ).status,
-).toBe(200)
+    ).toBe(200)
     const missing = await api('/api/documents/000000000000', outsider.token)
     const hidden = await api(
       `/api/documents/${receipt.document.id}`,

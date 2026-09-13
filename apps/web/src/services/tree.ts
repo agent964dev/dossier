@@ -40,7 +40,10 @@ export function normalizeDocumentKind(
 
 function guarded(error: PersistenceError): DossierError | PersistenceError {
   return String(error.cause).includes('publication_guards_ok_check')
-    ? apiError('conflict', 'The document changed while the operation was running.')
+    ? apiError(
+        'conflict',
+        'The document changed while the operation was running.',
+      )
     : error
 }
 
@@ -56,7 +59,10 @@ export interface TreeService {
   ) => Effect.Effect<DocumentEditor, DossierError | PersistenceError>
 }
 
-export class Tree extends Context.Tag('@dossier/web/Tree')<Tree, TreeService>() {}
+export class Tree extends Context.Tag('@dossier/web/Tree')<
+  Tree,
+  TreeService
+>() {}
 
 export const TreeLive = Layer.effect(
   Tree,
@@ -70,7 +76,8 @@ export const TreeLive = Layer.effect(
     const row = (documentId: string) =>
       Effect.tryPromise({
         try: () => loadDocumentRow(db.raw, documentId),
-        catch: (cause) => new PersistenceError({ operation: 'load tree document', cause }),
+        catch: (cause) =>
+          new PersistenceError({ operation: 'load tree document', cause }),
       })
 
     const reader = (
@@ -81,12 +88,15 @@ export const TreeLive = Layer.effect(
       Effect.gen(function* () {
         const decision = (yield* access.resolve([documentRow.id], principal))[0]
         if (!decision?.canRead) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
-        const parentReadable = knownParentReadable ?? (
-          documentRow.parent_id !== null &&
-          (yield* access.resolve([documentRow.parent_id], principal))[0]?.canRead === true
-        )
+        const parentReadable =
+          knownParentReadable ??
+          (documentRow.parent_id !== null &&
+            (yield* access.resolve([documentRow.parent_id], principal))[0]
+              ?.canRead === true)
         return toDocumentReader(
           documentRow,
           decision,
@@ -103,10 +113,14 @@ export const TreeLive = Layer.effect(
         const decision = yield* access.requireEditor(documentId, principal)
         const documentRow = yield* row(documentId)
         if (!documentRow) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
-        const parentReadable = documentRow.parent_id !== null &&
-          (yield* access.resolve([documentRow.parent_id], principal))[0]?.canRead === true
+        const parentReadable =
+          documentRow.parent_id !== null &&
+          (yield* access.resolve([documentRow.parent_id], principal))[0]
+            ?.canRead === true
         return toDocumentEditor(
           documentRow,
           decision,
@@ -119,7 +133,10 @@ export const TreeLive = Layer.effect(
       Effect.gen(function* () {
         yield* access.requireReadable(documentId, principal)
         const target = yield* row(documentId)
-        if (!target) return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+        if (!target)
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
 
         const chain = yield* Effect.tryPromise({
           try: () =>
@@ -140,12 +157,14 @@ export const TreeLive = Layer.effect(
               )
               .bind(documentId)
               .all<{ id: string; parent_id: string | null; hops: number }>(),
-          catch: (cause) => new PersistenceError({ operation: 'load breadcrumb chain', cause }),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'load breadcrumb chain', cause }),
         })
         const chainDecisions = new Map(
-          (yield* access.resolve(chain.results.map((item) => item.id), principal)).map(
-            (item) => [item.documentId, item],
-          ),
+          (yield* access.resolve(
+            chain.results.map((item) => item.id),
+            principal,
+          )).map((item) => [item.documentId, item]),
         )
         const visibleAncestors: typeof chain.results = []
         for (const item of chain.results) {
@@ -156,13 +175,17 @@ export const TreeLive = Layer.effect(
         for (const item of [...visibleAncestors].reverse()) {
           const ancestor = yield* row(item.id)
           if (ancestor) {
-            const parentVisible = ancestor.parent_id !== null &&
-              visibleAncestors.some((candidate) => candidate.id === ancestor.parent_id)
+            const parentVisible =
+              ancestor.parent_id !== null &&
+              visibleAncestors.some(
+                (candidate) => candidate.id === ancestor.parent_id,
+              )
             breadcrumb.push(yield* reader(ancestor, principal, parentVisible))
           }
         }
 
-        const immediateParentReadable = target.parent_id !== null &&
+        const immediateParentReadable =
+          target.parent_id !== null &&
           chainDecisions.get(target.parent_id)?.canRead === true
         const siblingRows = immediateParentReadable
           ? yield* Effect.tryPromise({
@@ -175,7 +198,11 @@ export const TreeLive = Layer.effect(
                   )
                   .bind(target.parent_id, documentId)
                   .all<{ id: string }>(),
-              catch: (cause) => new PersistenceError({ operation: 'load tree siblings', cause }),
+              catch: (cause) =>
+                new PersistenceError({
+                  operation: 'load tree siblings',
+                  cause,
+                }),
             })
           : { results: [] as { id: string }[] }
         const childRows = yield* Effect.tryPromise({
@@ -188,14 +215,18 @@ export const TreeLive = Layer.effect(
               )
               .bind(documentId)
               .all<{ id: string }>(),
-          catch: (cause) => new PersistenceError({ operation: 'load tree children', cause }),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'load tree children', cause }),
         })
         const relatedIds = [
           ...siblingRows.results.map((item) => item.id),
           ...childRows.results.map((item) => item.id),
         ]
         const relatedDecisions = new Map(
-          (yield* access.resolve(relatedIds, principal)).map((item) => [item.documentId, item]),
+          (yield* access.resolve(relatedIds, principal)).map((item) => [
+            item.documentId,
+            item,
+          ]),
         )
         const siblings: DocumentReader[] = []
         for (const item of siblingRows.results) {
@@ -222,7 +253,9 @@ export const TreeLive = Layer.effect(
       Effect.gen(function* () {
         const decision = (yield* access.resolve([documentId], principal))[0]
         if (!decision || (!decision.editor && !decision.canRead)) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         yield* principals.requirePublisher(principal, decision.workspaceId)
         if (!decision.editor) {
@@ -247,20 +280,37 @@ export const TreeLive = Layer.effect(
                 revision: number
                 deleted_at: string | null
               }>(),
-          catch: (cause) => new PersistenceError({ operation: 'load move source', cause }),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'load move source', cause }),
         })
-        if (!source || source.deleted_at !== null || source.workspace_id !== principal.workspaceId) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+        if (
+          !source ||
+          source.deleted_at !== null ||
+          source.workspace_id !== principal.workspaceId
+        ) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
-        if (patch.ifRevision !== undefined && patch.ifRevision !== source.revision) {
-          return yield* Effect.fail(apiError('conflict', 'Document revision does not match.'))
+        if (
+          patch.ifRevision !== undefined &&
+          patch.ifRevision !== source.revision
+        ) {
+          return yield* Effect.fail(
+            apiError('conflict', 'Document revision does not match.'),
+          )
         }
         const kind = yield* normalizeDocumentKind(patch.kind)
         const moving = hasOwn(patch, 'parentId')
-        const destinationId = moving ? (patch.parentId ?? null) : source.parent_id
+        const destinationId = moving
+          ? (patch.parentId ?? null)
+          : source.parent_id
 
         if (moving && destinationId !== null) {
-          const destinationAccess = yield* access.resolve([destinationId], principal)
+          const destinationAccess = yield* access.resolve(
+            [destinationId],
+            principal,
+          )
           const destination = yield* Effect.tryPromise({
             try: () =>
               db.raw
@@ -277,7 +327,11 @@ export const TreeLive = Layer.effect(
                   deleted_at: string | null
                   disabled_at: string | null
                 }>(),
-            catch: (cause) => new PersistenceError({ operation: 'load move destination', cause }),
+            catch: (cause) =>
+              new PersistenceError({
+                operation: 'load move destination',
+                cause,
+              }),
           })
           if (
             !destination ||
@@ -286,7 +340,9 @@ export const TreeLive = Layer.effect(
             destination.disabled_at !== null ||
             destinationAccess[0]?.canRead !== true
           ) {
-            return yield* Effect.fail(apiError('not_found', 'Parent document not found.'))
+            return yield* Effect.fail(
+              apiError('not_found', 'Parent document not found.'),
+            )
           }
           const lower = `${source.path}${source.id}/`
           const upper = `${source.path}${source.id}0`
@@ -294,7 +350,12 @@ export const TreeLive = Layer.effect(
             destination.id === source.id ||
             (destination.path >= lower && destination.path < upper)
           ) {
-            return yield* Effect.fail(apiError('policy_rejected', 'A document cannot be moved beneath itself.'))
+            return yield* Effect.fail(
+              apiError(
+                'policy_rejected',
+                'A document cannot be moved beneath itself.',
+              ),
+            )
           }
           const maximum = yield* Effect.tryPromise({
             try: () =>
@@ -306,11 +367,24 @@ export const TreeLive = Layer.effect(
                 )
                 .bind(documentId, lower, upper)
                 .first<{ maximum: number }>(),
-            catch: (cause) => new PersistenceError({ operation: 'measure move subtree', cause }),
+            catch: (cause) =>
+              new PersistenceError({
+                operation: 'measure move subtree',
+                cause,
+              }),
           })
-          const resultingMaximum = destination.depth + 1 - source.depth + (maximum?.maximum ?? source.depth)
+          const resultingMaximum =
+            destination.depth +
+            1 -
+            source.depth +
+            (maximum?.maximum ?? source.depth)
           if (resultingMaximum > 16) {
-            return yield* Effect.fail(apiError('policy_rejected', 'The moved subtree would exceed depth 16.'))
+            return yield* Effect.fail(
+              apiError(
+                'policy_rejected',
+                'The moved subtree would exceed depth 16.',
+              ),
+            )
           }
         }
 
@@ -493,21 +567,25 @@ export const TreeLive = Layer.effect(
                 documentId,
               )
 
-        yield* db.batch([
-          guard,
-          update,
-          db.raw
-            .prepare(
-              `DELETE FROM document_shares
+        yield* db
+          .batch([
+            guard,
+            update,
+            db.raw
+              .prepare(
+                `DELETE FROM document_shares
                 WHERE document_id = ? AND ? = 1 AND ? IS NULL`,
-            )
-            .bind(
-              documentId,
-              hasOwn(patch, 'visibility') ? 1 : 0,
-              patch.visibility ?? null,
-            ),
-          db.raw.prepare(`DELETE FROM publication_guards WHERE id = ?`).bind(guardId),
-        ]).pipe(Effect.mapError(guarded))
+              )
+              .bind(
+                documentId,
+                hasOwn(patch, 'visibility') ? 1 : 0,
+                patch.visibility ?? null,
+              ),
+            db.raw
+              .prepare(`DELETE FROM publication_guards WHERE id = ?`)
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(guarded))
         return yield* editor(documentId, principal)
       })
 

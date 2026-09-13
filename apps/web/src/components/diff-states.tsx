@@ -43,7 +43,9 @@ function Frame({
           <h2 className="font-clash text-lg font-semibold tracking-[-0.02em] text-neutral-100">
             {title}
           </h2>
-          <div className="mt-2 text-sm leading-body text-neutral-400">{children}</div>
+          <div className="mt-2 text-sm leading-body text-neutral-400">
+            {children}
+          </div>
         </div>
       </div>
     </section>
@@ -98,7 +100,11 @@ export function DiffTooLarge({
   message: string
 }) {
   return (
-    <Frame tone="warn" Icon={TriangleAlert} title="This diff is too large to render">
+    <Frame
+      tone="warn"
+      Icon={TriangleAlert}
+      title="This diff is too large to render"
+    >
       <p>{message}</p>
       <p className="mt-2">
         Pick two closer versions, or read the two files directly — the raw links
@@ -121,10 +127,13 @@ export function DiffUnavailable({
   message: string
 }) {
   return (
-    <Frame tone="error" Icon={TriangleAlert} title="The diff could not be computed">
+    <Frame
+      tone="error"
+      Icon={TriangleAlert}
+      title="The diff could not be computed"
+    >
       <p>
-        {message}{' '}
-        <span className="text-micro-lg text-neutral-500">{code}</span>
+        {message} <span className="text-micro-lg text-neutral-500">{code}</span>
       </p>
       <VersionLinks from={from} to={to} className="mt-4" />
     </Frame>

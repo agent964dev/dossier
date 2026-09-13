@@ -6,7 +6,9 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 const appRoot = fileURLToPath(new URL('../', import.meta.url))
-const wranglerConfig = fileURLToPath(new URL('../wrangler.jsonc', import.meta.url))
+const wranglerConfig = fileURLToPath(
+  new URL('../wrangler.jsonc', import.meta.url),
+)
 const embedHostAllowlist = process.env.DOSSIER_BROWSER_EMBED_HOST_ALLOWLIST
 
 export default defineConfig({

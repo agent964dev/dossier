@@ -137,7 +137,11 @@ export async function readJsonFile<A>(path: string, fallback: A): Promise<A> {
   }
 }
 
-async function writeJsonUnlocked(path: string, value: unknown, mode: number): Promise<void> {
+async function writeJsonUnlocked(
+  path: string,
+  value: unknown,
+  mode: number,
+): Promise<void> {
   const directory = path.slice(0, path.lastIndexOf('/'))
   await ensureStateDirectory(directory)
   const temporary = join(
@@ -170,10 +174,16 @@ export async function writeJsonAtomic(
   lockOptions?: LockOptions,
 ): Promise<void> {
   const directory = path.slice(0, path.lastIndexOf('/'))
-  await withStateLock(directory, () => writeJsonUnlocked(path, value, mode), lockOptions)
+  await withStateLock(
+    directory,
+    () => writeJsonUnlocked(path, value, mode),
+    lockOptions,
+  )
 }
 
-export async function readConfig(paths: StatePaths = statePaths()): Promise<DossierConfig> {
+export async function readConfig(
+  paths: StatePaths = statePaths(),
+): Promise<DossierConfig> {
   return readJsonFile(paths.config, {})
 }
 
@@ -184,7 +194,9 @@ export async function writeConfig(
   await writeJsonAtomic(paths.config, config)
 }
 
-export async function readCredentials(paths: StatePaths = statePaths()): Promise<Credentials> {
+export async function readCredentials(
+  paths: StatePaths = statePaths(),
+): Promise<Credentials> {
   return readJsonFile(paths.credentials, {})
 }
 
@@ -212,7 +224,9 @@ export async function mutateCredentials<A>(
   )
 }
 
-export async function readDocuments(paths: StatePaths = statePaths()): Promise<Documents> {
+export async function readDocuments(
+  paths: StatePaths = statePaths(),
+): Promise<Documents> {
   return readJsonFile(paths.documents, {})
 }
 

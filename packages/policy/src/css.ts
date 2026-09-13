@@ -30,11 +30,19 @@ export interface StaticCssPolicyOptions {
 const STATIC_PUBLIC_ORIGIN = 'https://dossier.invalid'
 
 type CssContext = 'stylesheet' | 'declarationList'
-type DestinationKind = 'url' | 'import' | 'image-set' | 'custom-property' | 'font'
+type DestinationKind =
+  | 'url'
+  | 'import'
+  | 'image-set'
+  | 'custom-property'
+  | 'font'
 
 const UNSAFE_CSS_PROTOCOLS = ['javascript:', 'vbscript:', 'file:'] as const
 
-export function validateCss(css: string, options: CssPolicyOptions): CssPolicyResult {
+export function validateCss(
+  css: string,
+  options: CssPolicyOptions,
+): CssPolicyResult {
   return validateCssInContext(css, options, 'stylesheet', true)
 }
 
@@ -122,7 +130,10 @@ function validateCssInContext(
 
       if (node.type === 'Function') {
         const functionName = decodeIdentifier(node.name).toLowerCase()
-        if (functionName === 'image-set' || functionName === '-webkit-image-set') {
+        if (
+          functionName === 'image-set' ||
+          functionName === '-webkit-image-set'
+        ) {
           imageSetDepth += 1
         }
         if (functionName === 'expression') {
@@ -136,7 +147,10 @@ function validateCssInContext(
           const value =
             firstChild?.type === 'String'
               ? firstChild.value
-              : Array.from(node.children as Iterable<CssTree.CssNode>, (child) => generate(child)).join('')
+              : Array.from(
+                  node.children as Iterable<CssTree.CssNode>,
+                  (child) => generate(child),
+                ).join('')
           checkDestination(
             value,
             destinationKindForContext(this.atrule, this.declaration),
@@ -176,11 +190,23 @@ function validateCssInContext(
           : null
 
         if (atruleName === 'import') {
-          checkDestination(node.value, 'import', options, errors, enforceHostAllowlist)
+          checkDestination(
+            node.value,
+            'import',
+            options,
+            errors,
+            enforceHostAllowlist,
+          )
         } else if (imageSetDepth > 0) {
           // Strings nested below var() and other functions still become image
           // candidates when they are inside image-set().
-          checkDestination(node.value, 'image-set', options, errors, enforceHostAllowlist)
+          checkDestination(
+            node.value,
+            'image-set',
+            options,
+            errors,
+            enforceHostAllowlist,
+          )
         } else if (functionName === 'url') {
           checkDestination(
             node.value,
@@ -189,7 +215,10 @@ function validateCssInContext(
             errors,
             enforceHostAllowlist,
           )
-        } else if (declarationName?.startsWith('--') && looksLikeDestination(node.value)) {
+        } else if (
+          declarationName?.startsWith('--') &&
+          looksLikeDestination(node.value)
+        ) {
           checkDestination(
             node.value,
             'custom-property',
@@ -203,7 +232,10 @@ function validateCssInContext(
 
       if (node.type === 'Raw') {
         const normalizedRaw = normalizeRawCss(node.value)
-        if (normalizedRaw.includes('url(') || normalizedRaw.includes('import')) {
+        if (
+          normalizedRaw.includes('url(') ||
+          normalizedRaw.includes('import')
+        ) {
           errors.add('CSS contains an unparsed URL or @import.')
         }
         if (normalizedRaw.includes('expression(')) {
@@ -217,7 +249,10 @@ function validateCssInContext(
           ? decodeIdentifier(this.declaration.property)
           : null
         const decodedRaw = decodeIdentifier(node.value)
-        if (declarationName?.startsWith('--') && looksLikeDestination(decodedRaw)) {
+        if (
+          declarationName?.startsWith('--') &&
+          looksLikeDestination(decodedRaw)
+        ) {
           checkDestination(
             decodedRaw,
             'custom-property',
@@ -231,7 +266,10 @@ function validateCssInContext(
     leave(node: CssTree.CssNode) {
       if (node.type !== 'Function') return
       const functionName = decodeIdentifier(node.name).toLowerCase()
-      if (functionName === 'image-set' || functionName === '-webkit-image-set') {
+      if (
+        functionName === 'image-set' ||
+        functionName === '-webkit-image-set'
+      ) {
         imageSetDepth -= 1
       }
     },
@@ -252,7 +290,9 @@ function checkDestination(
   enforceHostAllowlist: boolean,
 ): void {
   const normalized = normalizeUrlForProtocol(value)
-  if (UNSAFE_CSS_PROTOCOLS.some((protocol) => normalized.startsWith(protocol))) {
+  if (
+    UNSAFE_CSS_PROTOCOLS.some((protocol) => normalized.startsWith(protocol))
+  ) {
     errors.add('Blocked unsafe CSS URL.')
     return
   }
@@ -327,7 +367,6 @@ function isAllowedDestination(
   )
 }
 
-
 function destinationKindForContext(
   atrule: CssTree.Atrule | null,
   declaration: CssTree.Declaration | null,
@@ -336,7 +375,9 @@ function destinationKindForContext(
   const declarationName = declaration
     ? decodeIdentifier(declaration.property).toLowerCase()
     : null
-  return atruleName === 'font-face' && declarationName === 'src' ? 'font' : 'url'
+  return atruleName === 'font-face' && declarationName === 'src'
+    ? 'font'
+    : 'url'
 }
 
 function looksLikeDestination(value: string): boolean {
@@ -406,7 +447,8 @@ function maskCssStringsAndComments(value: string): string {
 
 function renderDestination(value: string): string {
   const trimmed = value.trim()
-  const abbreviated = trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed
+  const abbreviated =
+    trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed
   return JSON.stringify(abbreviated)
 }
 
@@ -419,7 +461,11 @@ function normalizeUrlForProtocol(value: string): string {
   let normalized = ''
   for (const character of value) {
     const codePoint = character.codePointAt(0) ?? 0
-    if (codePoint <= 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f) || /\s/u.test(character)) {
+    if (
+      codePoint <= 0x20 ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      /\s/u.test(character)
+    ) {
       continue
     }
     normalized += character

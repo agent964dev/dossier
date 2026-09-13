@@ -28,7 +28,9 @@ export function EmptyState({
       <p className="font-clash text-lg font-semibold tracking-[-0.02em] text-neutral-200">
         {title}
       </p>
-      <p className="mx-auto mt-2 max-w-md text-sm leading-body text-neutral-500">{body}</p>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-body text-neutral-500">
+        {body}
+      </p>
       {command ? (
         <pre className="mx-auto mt-5 w-fit max-w-full overflow-x-auto rounded-lg border border-border bg-neutral-950/70 px-3.5 py-2.5 text-left font-mono text-xs text-neutral-300">
           <code>
@@ -39,7 +41,9 @@ export function EmptyState({
           </code>
         </pre>
       ) : null}
-      {children ? <div className="mt-5 flex justify-center">{children}</div> : null}
+      {children ? (
+        <div className="mt-5 flex justify-center">{children}</div>
+      ) : null}
     </div>
   )
 }

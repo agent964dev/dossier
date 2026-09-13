@@ -44,10 +44,17 @@ async function waitFor(probe, description, timeoutMs = 20_000) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError}` : ''}`)
+  throw new Error(
+    `Timed out waiting for ${description}${lastError ? `: ${lastError}` : ''}`,
+  )
 }
 
-async function runSameOriginBrowser(engine, browserType, documentId, innerDocumentId) {
+async function runSameOriginBrowser(
+  engine,
+  browserType,
+  documentId,
+  innerDocumentId,
+) {
   const record = { engine, status: 'failed' }
   let browser
   let context
@@ -91,34 +98,57 @@ async function runSameOriginBrowser(engine, browserType, documentId, innerDocume
       waitUntil: 'load',
       timeout: 45_000,
     })
-    assert(response, `${engine}: outer document navigation returned no response.`)
-    assert(response.status() === 200, `${engine}: outer document returned HTTP ${response.status()}.`)
+    assert(
+      response,
+      `${engine}: outer document navigation returned no response.`,
+    )
+    assert(
+      response.status() === 200,
+      `${engine}: outer document returned HTTP ${response.status()}.`,
+    )
     const csp = response.headers()['content-security-policy'] || ''
     const sources = frameSources(csp)
     const baseOrigin = new URL(BASE_URL).origin
-    const externalSources = sources.filter((source) => /^https?:/.test(source) && source !== baseOrigin)
-    assert(sources.includes(baseOrigin), `${engine}: frame-src does not include ${baseOrigin}: ${csp}`)
-    assert(externalSources.length === 0, `${engine}: empty allowlist exposed external frame sources: ${externalSources.join(', ')}`)
+    const externalSources = sources.filter(
+      (source) => /^https?:/.test(source) && source !== baseOrigin,
+    )
+    assert(
+      sources.includes(baseOrigin),
+      `${engine}: frame-src does not include ${baseOrigin}: ${csp}`,
+    )
+    assert(
+      externalSources.length === 0,
+      `${engine}: empty allowlist exposed external frame sources: ${externalSources.join(', ')}`,
+    )
 
     const innerFrame = await waitFor(
-      () => page.frames().find((frame) => {
-        try {
-          return new URL(frame.url()).pathname === `/d/${innerDocumentId}`
-        } catch {
-          return false
-        }
-      }),
+      () =>
+        page.frames().find((frame) => {
+          try {
+            return new URL(frame.url()).pathname === `/d/${innerDocumentId}`
+          } catch {
+            return false
+          }
+        }),
       `${engine} nested Dossier document frame`,
     )
-    await innerFrame.waitForFunction(() => globalThis.__dossierInnerProbe?.scriptRan === true)
-    const innerProbe = await innerFrame.evaluate(() => globalThis.__dossierInnerProbe)
+    await innerFrame.waitForFunction(
+      () => globalThis.__dossierInnerProbe?.scriptRan === true,
+    )
+    const innerProbe = await innerFrame.evaluate(
+      () => globalThis.__dossierInnerProbe,
+    )
     const resolvedInnerRequests = await Promise.all(innerRequests)
     const innerCookieHeaders = resolvedInnerRequests
       .map((request) => request.headers.cookie)
       .filter((value) => value !== undefined)
     const consoleViolations = cspConsoleMessages(consoleMessages)
-    const probeCookieReadable = innerProbe.cookieResult?.value?.includes('dossier_sandbox_probe=') === true
-    const sessionCookieSent = innerCookieHeaders.some((header) => header.includes('dossier_session='))
+    const probeCookieReadable =
+      innerProbe.cookieResult?.value?.includes('dossier_sandbox_probe=') ===
+      true
+    const sessionCookieSent = innerCookieHeaders.some((header) =>
+      header.includes('dossier_session='),
+    )
 
     record.navigation = {
       status: response.status(),
@@ -133,7 +163,8 @@ async function runSameOriginBrowser(engine, browserType, documentId, innerDocume
       requests: resolvedInnerRequests,
     }
     record.findings = {
-      nestedFramesInheritSandbox: innerProbe.origin === 'null' && innerProbe.parentReadable === false,
+      nestedFramesInheritSandbox:
+        innerProbe.origin === 'null' && innerProbe.parentReadable === false,
       innerSameOriginFrameCanReadCookies: probeCookieReadable,
       sessionCookieSentOnInnerNavigation: sessionCookieSent,
     }
@@ -150,7 +181,10 @@ async function runSameOriginBrowser(engine, browserType, documentId, innerDocume
     const failures = Object.entries(record.assertions)
       .filter(([, passed]) => !passed)
       .map(([name]) => name)
-    assert(failures.length === 0, `${engine}: failed same-origin assertions: ${failures.join(', ')}`)
+    assert(
+      failures.length === 0,
+      `${engine}: failed same-origin assertions: ${failures.join(', ')}`,
+    )
     record.status = 'passed'
   } catch (error) {
     record.error = String(error?.stack || error)
@@ -183,22 +217,34 @@ async function runAllowlistedBrowser(engine, browserType, documentId) {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
     })
-    assert(response, `${engine}: allowlisted document navigation returned no response.`)
-    assert(response.status() === 200, `${engine}: allowlisted document returned HTTP ${response.status()}.`)
+    assert(
+      response,
+      `${engine}: allowlisted document navigation returned no response.`,
+    )
+    assert(
+      response.status() === 200,
+      `${engine}: allowlisted document returned HTTP ${response.status()}.`,
+    )
     const csp = response.headers()['content-security-policy'] || ''
     const sources = frameSources(csp)
-    assert(sources.includes(ALLOWED_ORIGIN), `${engine}: frame-src does not include ${ALLOWED_ORIGIN}: ${csp}`)
+    assert(
+      sources.includes(ALLOWED_ORIGIN),
+      `${engine}: frame-src does not include ${ALLOWED_ORIGIN}: ${csp}`,
+    )
 
     await waitFor(
-      () => frameNavigations.some((entry) => entry.url.startsWith(ALLOWED_ORIGIN)),
+      () =>
+        frameNavigations.some((entry) => entry.url.startsWith(ALLOWED_ORIGIN)),
       `${engine} allowlisted frame navigation`,
       30_000,
     )
     await page.waitForFunction(
-      (blockedOrigin) => (globalThis.__dossierCspViolations || []).some(
-        (violation) => violation.effectiveDirective === 'frame-src' &&
-          violation.blockedURI.startsWith(blockedOrigin),
-      ),
+      (blockedOrigin) =>
+        (globalThis.__dossierCspViolations || []).some(
+          (violation) =>
+            violation.effectiveDirective === 'frame-src' &&
+            violation.blockedURI.startsWith(blockedOrigin),
+        ),
       new URL(BLOCKED_URL).origin,
       { timeout: 20_000 },
     )
@@ -206,7 +252,9 @@ async function runAllowlistedBrowser(engine, browserType, documentId) {
     const violations = await page.evaluate(
       () => globalThis.__dossierCspViolations || [],
     )
-    const allowedFrame = page.frames().find((frame) => frame.url().startsWith(ALLOWED_ORIGIN))
+    const allowedFrame = page
+      .frames()
+      .find((frame) => frame.url().startsWith(ALLOWED_ORIGIN))
     let allowedFrameOrigin = null
     let allowedFrameOriginError = null
     if (allowedFrame) {
@@ -217,8 +265,10 @@ async function runAllowlistedBrowser(engine, browserType, documentId) {
       }
     }
     const blockedOrigin = new URL(BLOCKED_URL).origin
-    const blockedViolation = violations.find((violation) =>
-      violation.effectiveDirective === 'frame-src' && violation.blockedURI.startsWith(blockedOrigin),
+    const blockedViolation = violations.find(
+      (violation) =>
+        violation.effectiveDirective === 'frame-src' &&
+        violation.blockedURI.startsWith(blockedOrigin),
     )
 
     record.navigation = {
@@ -241,7 +291,9 @@ async function runAllowlistedBrowser(engine, browserType, documentId) {
       allViolations: violations,
     }
     record.findings = {
-      allowlistedFrameNavigated: frameNavigations.some((entry) => entry.url.startsWith(ALLOWED_ORIGIN)),
+      allowlistedFrameNavigated: frameNavigations.some((entry) =>
+        entry.url.startsWith(ALLOWED_ORIGIN),
+      ),
       allowlistedNestedFrameInheritsSandbox: allowedFrameOrigin === 'null',
       nonAllowlistedFrameBlockedByCsp: Boolean(blockedViolation),
     }
@@ -249,12 +301,16 @@ async function runAllowlistedBrowser(engine, browserType, documentId) {
       frameCount: page.frames().length >= 2,
       allowlistedFrameNavigated: record.findings.allowlistedFrameNavigated,
       allowlistedFramePresent: Boolean(allowedFrame),
-      nonAllowlistedFrameBlockedByCsp: record.findings.nonAllowlistedFrameBlockedByCsp,
+      nonAllowlistedFrameBlockedByCsp:
+        record.findings.nonAllowlistedFrameBlockedByCsp,
     }
     const failures = Object.entries(record.assertions)
       .filter(([, passed]) => !passed)
       .map(([name]) => name)
-    assert(failures.length === 0, `${engine}: failed allowlisted assertions: ${failures.join(', ')}`)
+    assert(
+      failures.length === 0,
+      `${engine}: failed allowlisted assertions: ${failures.join(', ')}`,
+    )
     record.status = 'passed'
   } catch (error) {
     record.error = String(error?.stack || error)
@@ -281,20 +337,33 @@ async function runEmptyCase(apiKey, playwright) {
     `browser-embed-outer-${Date.now()}.html`,
   )
   const browsers = []
-  for (const [engine, browserType] of [['chromium', playwright.chromium], ['webkit', playwright.webkit]]) {
-    browsers.push(await runSameOriginBrowser(
-      engine,
-      browserType,
-      outerUpload.document.id,
-      innerUpload.document.id,
-    ))
+  for (const [engine, browserType] of [
+    ['chromium', playwright.chromium],
+    ['webkit', playwright.webkit],
+  ]) {
+    browsers.push(
+      await runSameOriginBrowser(
+        engine,
+        browserType,
+        outerUpload.document.id,
+        innerUpload.document.id,
+      ),
+    )
   }
   return {
-    status: browsers.every((browser) => browser.status === 'passed') ? 'passed' : 'failed',
+    status: browsers.every((browser) => browser.status === 'passed')
+      ? 'passed'
+      : 'failed',
     configuredAllowlist: '',
     documents: {
-      inner: { id: innerUpload.document.id, url: `${BASE_URL}/d/${innerUpload.document.id}` },
-      outer: { id: outerUpload.document.id, url: `${BASE_URL}/d/${outerUpload.document.id}` },
+      inner: {
+        id: innerUpload.document.id,
+        url: `${BASE_URL}/d/${innerUpload.document.id}`,
+      },
+      outer: {
+        id: outerUpload.document.id,
+        url: `${BASE_URL}/d/${outerUpload.document.id}`,
+      },
     },
     browsers,
   }
@@ -311,13 +380,23 @@ async function runAllowlistedCase(apiKey, playwright) {
     `browser-embed-allowlisted-${Date.now()}.html`,
   )
   const browsers = []
-  for (const [engine, browserType] of [['chromium', playwright.chromium], ['webkit', playwright.webkit]]) {
-    browsers.push(await runAllowlistedBrowser(engine, browserType, upload.document.id))
+  for (const [engine, browserType] of [
+    ['chromium', playwright.chromium],
+    ['webkit', playwright.webkit],
+  ]) {
+    browsers.push(
+      await runAllowlistedBrowser(engine, browserType, upload.document.id),
+    )
   }
   return {
-    status: browsers.every((browser) => browser.status === 'passed') ? 'passed' : 'failed',
+    status: browsers.every((browser) => browser.status === 'passed')
+      ? 'passed'
+      : 'failed',
     configuredAllowlist: new URL(ALLOWED_URL).host,
-    document: { id: upload.document.id, url: `${BASE_URL}/d/${upload.document.id}` },
+    document: {
+      id: upload.document.id,
+      url: `${BASE_URL}/d/${upload.document.id}`,
+    },
     allowedUrl: ALLOWED_URL,
     blockedUrl: BLOCKED_URL,
     browsers,
@@ -335,8 +414,14 @@ function existingResult() {
 
 async function main() {
   const { manageServer, caseName } = parseArgs(process.argv.slice(2))
-  assert(['all', 'empty', 'allowlisted'].includes(caseName), '--case must be all, empty, or allowlisted.')
-  assert(manageServer || caseName !== 'all', 'Caller-managed mode requires --case empty or --case allowlisted.')
+  assert(
+    ['all', 'empty', 'allowlisted'].includes(caseName),
+    '--case must be all, empty, or allowlisted.',
+  )
+  assert(
+    manageServer || caseName !== 'all',
+    'Caller-managed mode requires --case empty or --case allowlisted.',
+  )
 
   const prior = manageServer ? null : existingResult()
   const result = {
@@ -356,18 +441,21 @@ async function main() {
     try {
       if (manageServer) {
         server = await startServer({
-          embedHostAllowlist: selectedCase === 'allowlisted' ? new URL(ALLOWED_URL).host : '',
+          embedHostAllowlist:
+            selectedCase === 'allowlisted' ? new URL(ALLOWED_URL).host : '',
         })
       }
-      result.cases[selectedCase] = selectedCase === 'empty'
-        ? await runEmptyCase(apiKey, playwright)
-        : await runAllowlistedCase(apiKey, playwright)
+      result.cases[selectedCase] =
+        selectedCase === 'empty'
+          ? await runEmptyCase(apiKey, playwright)
+          : await runAllowlistedCase(apiKey, playwright)
       if (result.cases[selectedCase].status !== 'passed') selectedFailed = true
     } catch (error) {
       selectedFailed = true
       result.cases[selectedCase] = {
         status: 'failed',
-        configuredAllowlist: selectedCase === 'allowlisted' ? new URL(ALLOWED_URL).host : '',
+        configuredAllowlist:
+          selectedCase === 'allowlisted' ? new URL(ALLOWED_URL).host : '',
         error: String(error?.stack || error),
       }
     } finally {
@@ -383,7 +471,9 @@ async function main() {
   const complete = result.cases.empty && result.cases.allowlisted
   result.status = selectedFailed
     ? 'failed'
-    : complete && result.cases.empty.status === 'passed' && result.cases.allowlisted.status === 'passed'
+    : complete &&
+        result.cases.empty.status === 'passed' &&
+        result.cases.allowlisted.status === 'passed'
       ? 'passed'
       : 'partial'
   result.finishedAt = new Date().toISOString()

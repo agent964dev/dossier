@@ -21,7 +21,9 @@ const {
   writeJson,
 } = require('./lib.cjs')
 
-const FONT_SOURCE = process.env.DOSSIER_FONT_SOURCE ||
+const REPO_DIR = path.resolve(__dirname, '../../..')
+const FONT_SOURCE =
+  process.env.DOSSIER_FONT_SOURCE ||
   path.resolve(__dirname, '../../../packages/cli/test/fixtures/test-font.woff2')
 const BACKGROUND_COLOR = 'oklch(0.62 0.14 240)'
 const FONT_FAMILY = 'Dossier Browser Probe'
@@ -33,10 +35,16 @@ async function fetchAsset(url, expectedContentType) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(20_000) })
       const bytes = Buffer.from(await response.arrayBuffer())
-      assert(response.status === 200, `${url} returned HTTP ${response.status}.`)
+      assert(
+        response.status === 200,
+        `${url} returned HTTP ${response.status}.`,
+      )
       assert(bytes.length > 0, `${url} returned an empty body.`)
       const contentType = response.headers.get('content-type') || ''
-      assert(contentType.startsWith(expectedContentType), `${url} returned Content-Type ${contentType}.`)
+      assert(
+        contentType.startsWith(expectedContentType),
+        `${url} returned Content-Type ${contentType}.`,
+      )
       return {
         url,
         status: response.status,
@@ -52,7 +60,13 @@ async function fetchAsset(url, expectedContentType) {
   throw new Error(`Asset preflight failed for ${url}: ${lastError}`)
 }
 
-async function runBrowser(engine, browserType, documentId, styleSlug, navigationDocumentId) {
+async function runBrowser(
+  engine,
+  browserType,
+  documentId,
+  styleSlug,
+  navigationDocumentId,
+) {
   const record = { engine, status: 'failed' }
   let browser
   let context
@@ -88,54 +102,63 @@ async function runBrowser(engine, browserType, documentId, styleSlug, navigation
       timeout: 45_000,
     })
     assert(response, `${engine}: document navigation returned no response.`)
-    assert(response.status() === 200, `${engine}: document navigation returned HTTP ${response.status()}.`)
+    assert(
+      response.status() === 200,
+      `${engine}: document navigation returned HTTP ${response.status()}.`,
+    )
 
-    const rendering = await page.evaluate(async ({ backgroundColor, fontFamily }) => {
-      let fontLoadError = null
-      try {
-        await Promise.race([
-          (async () => {
-            await document.fonts.load(`16px "${fontFamily}"`, 'Dossier')
-            await document.fonts.ready
-          })(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Timed out loading the probe font.')), 20_000),
-          ),
-        ])
-      } catch (error) {
-        fontLoadError = String(error)
-      }
+    const rendering = await page.evaluate(
+      async ({ backgroundColor, fontFamily }) => {
+        let fontLoadError = null
+        try {
+          await Promise.race([
+            (async () => {
+              await document.fonts.load(`16px "${fontFamily}"`, 'Dossier')
+              await document.fonts.ready
+            })(),
+            new Promise((_, reject) =>
+              setTimeout(
+                () => reject(new Error('Timed out loading the probe font.')),
+                20_000,
+              ),
+            ),
+          ])
+        } catch (error) {
+          fontLoadError = String(error)
+        }
 
-      const probe = document.createElement('span')
-      probe.style.backgroundColor = backgroundColor
-      document.documentElement.appendChild(probe)
-      const expectedBackground = getComputedStyle(probe).backgroundColor
-      probe.remove()
+        const probe = document.createElement('span')
+        probe.style.backgroundColor = backgroundColor
+        document.documentElement.appendChild(probe)
+        const expectedBackground = getComputedStyle(probe).backgroundColor
+        probe.remove()
 
-      const faces = [...document.fonts].map((face) => ({
-        family: face.family,
-        status: face.status,
-        style: face.style,
-        weight: face.weight,
-      }))
-      return {
-        actualBackground: getComputedStyle(document.body).backgroundColor,
-        expectedBackground,
-        fontCheck: document.fonts.check(`16px "${fontFamily}"`),
-        fontLoadError,
-        faces,
-        origin: window.origin,
-        cspViolations: globalThis.__dossierCspViolations || [],
-      }
-    }, { backgroundColor: BACKGROUND_COLOR, fontFamily: FONT_FAMILY })
+        const faces = [...document.fonts].map((face) => ({
+          family: face.family,
+          status: face.status,
+          style: face.style,
+          weight: face.weight,
+        }))
+        return {
+          actualBackground: getComputedStyle(document.body).backgroundColor,
+          expectedBackground,
+          fontCheck: document.fonts.check(`16px "${fontFamily}"`),
+          fontLoadError,
+          faces,
+          origin: window.origin,
+          cspViolations: globalThis.__dossierCspViolations || [],
+        }
+      },
+      { backgroundColor: BACKGROUND_COLOR, fontFamily: FONT_FAMILY },
+    )
 
     const resolvedStyleRequests = await Promise.all(styleRequests)
     const stylesheetCookieHeaders = resolvedStyleRequests
       .map((request) => request.headers.cookie)
       .filter((value) => value !== undefined)
     const consoleViolations = cspConsoleMessages(consoleMessages)
-    const matchingFace = rendering.faces.find((face) =>
-      face.family.replaceAll('"', '') === FONT_FAMILY,
+    const matchingFace = rendering.faces.find(
+      (face) => face.family.replaceAll('"', '') === FONT_FAMILY,
     )
 
     const csp = response.headers()['content-security-policy'] || ''
@@ -158,17 +181,22 @@ async function runBrowser(engine, browserType, documentId, styleSlug, navigation
         loadError: rendering.fontLoadError,
         matchingFace: matchingFace || null,
         faces: rendering.faces,
-        passed: rendering.fontCheck === true && matchingFace?.status === 'loaded',
+        passed:
+          rendering.fontCheck === true && matchingFace?.status === 'loaded',
       },
       csp: {
         consoleViolations,
         eventViolations: rendering.cspViolations,
-        passed: consoleViolations.length === 0 && rendering.cspViolations.length === 0,
+        passed:
+          consoleViolations.length === 0 &&
+          rendering.cspViolations.length === 0,
       },
       stylesheetCookie: {
         requests: resolvedStyleRequests,
         cookieHeaders: stylesheetCookieHeaders,
-        passed: resolvedStyleRequests.length > 0 && stylesheetCookieHeaders.length === 0,
+        passed:
+          resolvedStyleRequests.length > 0 &&
+          stylesheetCookieHeaders.length === 0,
       },
       opaqueOrigin: {
         actual: rendering.origin,
@@ -190,13 +218,19 @@ async function runBrowser(engine, browserType, documentId, styleSlug, navigation
       }
     })
     navigationPage.on('framenavigated', (frame) => {
-      frameNavigations.push({ url: frame.url(), main: frame === navigationPage.mainFrame() })
+      frameNavigations.push({
+        url: frame.url(),
+        main: frame === navigationPage.mainFrame(),
+      })
     })
     const navigationResponse = await navigationPage.goto(
       `${BASE_URL}/d/${navigationDocumentId}`,
       { waitUntil: 'load', timeout: 45_000 },
     )
-    assert(navigationResponse, `${engine}: navigation probe document returned no response.`)
+    assert(
+      navigationResponse,
+      `${engine}: navigation probe document returned no response.`,
+    )
     await new Promise((resolve) => setTimeout(resolve, 1500))
     const resolvedExternalRequests = await Promise.all(externalRequests)
     const navigationViolations = cspConsoleMessages(navigationConsole)
@@ -219,7 +253,10 @@ async function runBrowser(engine, browserType, documentId, styleSlug, navigation
     const failures = Object.entries(record.assertions)
       .filter(([, assertion]) => !assertion.passed)
       .map(([name]) => name)
-    assert(failures.length === 0, `${engine}: failed assertions: ${failures.join(', ')}`)
+    assert(
+      failures.length === 0,
+      `${engine}: failed assertions: ${failures.join(', ')}`,
+    )
     record.status = 'passed'
   } catch (error) {
     record.error = String(error?.stack || error)
@@ -237,7 +274,7 @@ async function main() {
     startedAt: new Date().toISOString(),
     baseUrl: BASE_URL,
     managedServer: manageServer,
-    fontSource: FONT_SOURCE,
+    fontSource: path.relative(REPO_DIR, FONT_SOURCE),
     browsers: [],
   }
   let server
@@ -246,9 +283,15 @@ async function main() {
     const apiKey = requireApiKey()
     if (manageServer) server = await startServer({ embedHostAllowlist: '' })
 
-    assert(fs.existsSync(FONT_SOURCE), `Required WOFF2 fixture is missing: ${FONT_SOURCE}`)
+    assert(
+      fs.existsSync(FONT_SOURCE),
+      `Required WOFF2 fixture is missing: ${FONT_SOURCE}`,
+    )
     const fontBytes = fs.readFileSync(FONT_SOURCE)
-    assert(fontBytes.subarray(0, 4).toString('ascii') === 'wOF2', `${FONT_SOURCE} is not a WOFF2 file.`)
+    assert(
+      fontBytes.subarray(0, 4).toString('ascii') === 'wOF2',
+      `${FONT_SOURCE} is not a WOFF2 file.`,
+    )
 
     const fontSlug = randomSlug('browser-font')
     const styleSlug = randomSlug('browser-theme')
@@ -297,7 +340,11 @@ async function main() {
 
     result.assets = {
       font: { slug: fontSlug, response: fontAsset, preflight: fontPreflight },
-      stylesheet: { slug: styleSlug, response: styleAsset, preflight: stylesheetPreflight },
+      stylesheet: {
+        slug: styleSlug,
+        response: styleAsset,
+        preflight: stylesheetPreflight,
+      },
     }
     result.document = {
       id: upload.document.id,
@@ -311,16 +358,23 @@ async function main() {
     }
 
     const { chromium, webkit } = loadPlaywright()
-    for (const [engine, browserType] of [['chromium', chromium], ['webkit', webkit]]) {
-      result.browsers.push(await runBrowser(
-        engine,
-        browserType,
-        upload.document.id,
-        styleSlug,
-        navigationUpload.document.id,
-      ))
+    for (const [engine, browserType] of [
+      ['chromium', chromium],
+      ['webkit', webkit],
+    ]) {
+      result.browsers.push(
+        await runBrowser(
+          engine,
+          browserType,
+          upload.document.id,
+          styleSlug,
+          navigationUpload.document.id,
+        ),
+      )
     }
-    result.status = result.browsers.every((browser) => browser.status === 'passed')
+    result.status = result.browsers.every(
+      (browser) => browser.status === 'passed',
+    )
       ? 'passed'
       : 'failed'
   } catch (error) {
@@ -333,7 +387,9 @@ async function main() {
   }
 
   if (result.status !== 'passed') {
-    console.error(result.error || 'Render check failed; inspect results/render.json.')
+    console.error(
+      result.error || 'Render check failed; inspect results/render.json.',
+    )
     process.exitCode = 1
   }
 }

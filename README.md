@@ -1,6 +1,10 @@
 # dossier
 
+![CI](https://github.com/agent964dev/dossier/actions/workflows/ci.yml/badge.svg)
+
 Dossier publishes versioned HTML documents into workspace-owned trees on Cloudflare Workers. It keeps every version, supports inherited access boundaries and shares, serves reusable CSS/font assets, and provides both a dark-themed web dashboard and the `@agent964/dossier` CLI.
+
+Provenance: Dossier descends from postplan 0.0.4 (MIT); its reference copy remains in repository history at commit [`5be3f93`](https://github.com/agent964dev/dossier/tree/5be3f93/upstream).
 
 ## Workspace layout
 
@@ -9,8 +13,7 @@ Dossier publishes versioned HTML documents into workspace-owned trees on Cloudfl
 - `packages/contracts` — Effect schemas and the shared `HttpApi` contract.
 - `packages/cli` — the public `@agent964/dossier` command-line client.
 - `packages/cli/skills/dossier` — packaged agent instructions for reading and publishing dossier documents.
-- `docs` — the approved design plan, workflow notes, handoff, and production runbook.
-- `upstream` — read-only Postplan reference source.
+- `docs` — architecture notes, CLI reference, production runbook.
 
 ## Install the CLI
 
@@ -29,6 +32,7 @@ dossier upload report.html --kind report
 dossier list --tree
 dossier tree <document-id>
 dossier diff <document-id>
+dossier update
 dossier assets push theme.css
 dossier trash
 ```
@@ -46,6 +50,15 @@ Run repository checks:
 ```sh
 bun run typecheck
 bun run test
+```
+
+### Lint and format
+
+The repository uses oxc for linting and formatting:
+
+```sh
+bun run lint
+bun run format
 ```
 
 Start the web application and Worker locally:

@@ -20,30 +20,33 @@ function commaSeparatedHosts(value: string): string[] {
     .filter((entry) => entry.length > 0)
 }
 
-export const SystemLive = HttpApiBuilder.group(SystemApi, 'system', (handlers) =>
-  handlers
-    .handle('healthz', () =>
-      Effect.gen(function* () {
-        yield* WorkerEnv
-        return {
-          ok: true as const,
-          service: 'dossier' as const,
-          version: '0.0.0',
-        }
-      }),
-    )
-    .handle('policyCheck', ({ payload }) =>
-      Effect.gen(function* () {
-        const env = yield* WorkerEnv
-        return validateHtml(payload, {
-          maxBytes: positiveInteger(env.MAX_HTML_BYTES, 'MAX_HTML_BYTES'),
-          publicOrigin: env.PUBLIC_BASE_URL,
-          styleHostAllowlist: commaSeparatedHosts(env.STYLE_HOST_ALLOWLIST),
-          embedHostAllowlist: commaSeparatedHosts(env.EMBED_HOST_ALLOWLIST),
-          scriptHostAllowlist: commaSeparatedHosts(env.SCRIPT_HOST_ALLOWLIST),
-        })
-      }),
-    ),
+export const SystemLive = HttpApiBuilder.group(
+  SystemApi,
+  'system',
+  (handlers) =>
+    handlers
+      .handle('healthz', () =>
+        Effect.gen(function* () {
+          yield* WorkerEnv
+          return {
+            ok: true as const,
+            service: 'dossier' as const,
+            version: '0.0.0',
+          }
+        }),
+      )
+      .handle('policyCheck', ({ payload }) =>
+        Effect.gen(function* () {
+          const env = yield* WorkerEnv
+          return validateHtml(payload, {
+            maxBytes: positiveInteger(env.MAX_HTML_BYTES, 'MAX_HTML_BYTES'),
+            publicOrigin: env.PUBLIC_BASE_URL,
+            styleHostAllowlist: commaSeparatedHosts(env.STYLE_HOST_ALLOWLIST),
+            embedHostAllowlist: commaSeparatedHosts(env.EMBED_HOST_ALLOWLIST),
+            scriptHostAllowlist: commaSeparatedHosts(env.SCRIPT_HOST_ALLOWLIST),
+          })
+        }),
+      ),
 )
 
 const ApiLive = HttpApiBuilder.api(SystemApi).pipe(Layer.provide(SystemLive))

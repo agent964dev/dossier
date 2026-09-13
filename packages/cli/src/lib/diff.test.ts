@@ -56,8 +56,16 @@ describe('formatUnifiedDiff', () => {
   })
 
   it.each([
-    { name: 'pure insertion', before: 'one\ntwo\nthree\n', after: 'one\ntwo\nthree\nfour\n' },
-    { name: 'pure deletion', before: 'one\ntwo\nthree\nfour\n', after: 'one\ntwo\nthree\n' },
+    {
+      name: 'pure insertion',
+      before: 'one\ntwo\nthree\n',
+      after: 'one\ntwo\nthree\nfour\n',
+    },
+    {
+      name: 'pure deletion',
+      before: 'one\ntwo\nthree\nfour\n',
+      after: 'one\ntwo\nthree\n',
+    },
     { name: 'empty to content', before: '', after: 'one\ntwo\n' },
   ])('matches diff -u hunk headers for $name', ({ before, after }) => {
     const directory = mkdtempSync(join(tmpdir(), 'dossier-unified-diff-'))
@@ -67,12 +75,16 @@ describe('formatUnifiedDiff', () => {
       writeFileSync(oldFile, before)
       writeFileSync(newFile, after)
       // Zero context exposes empty ranges for insertion/deletion hunks.
-      const native = spawnSync('diff', ['-u', '-U', '0', oldFile, newFile], {
+      // Pass only -U 0: GNU diff keeps the larger of `-u` (3) and `-U 0`,
+      // BSD diff keeps the last one, so `-u -U 0` differs by platform.
+      const native = spawnSync('diff', ['-U', '0', oldFile, newFile], {
         encoding: 'utf8',
       })
       expect(native.error).toBeUndefined()
       expect(native.status).toBe(1)
-      const patch = structuredPatch(oldFile, newFile, before, after, '', '', { context: 0 })!
+      const patch = structuredPatch(oldFile, newFile, before, after, '', '', {
+        context: 0,
+      })!
       const formatted = formatUnifiedDiff({
         ...response,
         hunks: patch.hunks.map((hunk) => ({
@@ -83,7 +95,8 @@ describe('formatUnifiedDiff', () => {
           })),
         })),
       })
-      const headers = (output: string) => output.split('\n').filter((line) => line.startsWith('@@'))
+      const headers = (output: string) =>
+        output.split('\n').filter((line) => line.startsWith('@@'))
       expect(headers(native.stdout)).toHaveLength(1)
       expect(headers(formatted)).toEqual(headers(native.stdout))
     } finally {
@@ -94,10 +107,12 @@ describe('formatUnifiedDiff', () => {
   it('prints the conventional marker when a source lacks its final newline', () => {
     const withoutNewline: DiffResponse = {
       ...response,
-      hunks: [{
-        ...response.hunks[0]!,
-        lines: [{ op: '+', text: '<p>final</p>', noNewline: true }],
-      }],
+      hunks: [
+        {
+          ...response.hunks[0]!,
+          lines: [{ op: '+', text: '<p>final</p>', noNewline: true }],
+        },
+      ],
     }
     expect(formatUnifiedDiff(withoutNewline)).toContain(
       '+<p>final</p>\n\\ No newline at end of file\n',
@@ -109,10 +124,12 @@ describe('formatUnifiedDiff', () => {
     const bell = String.fromCharCode(7)
     const injected: DiffResponse = {
       ...response,
-      hunks: [{
-        ...response.hunks[0]!,
-        lines: [{ op: '+', text: `safe${escape}]52;c;payload${bell}` }],
-      }],
+      hunks: [
+        {
+          ...response.hunks[0]!,
+          lines: [{ op: '+', text: `safe${escape}]52;c;payload${bell}` }],
+        },
+      ],
     }
     const terminal = formatUnifiedDiff(injected, false, true)
     expect(terminal).toContain('safe\\x1b]52;c;payload\\x07')

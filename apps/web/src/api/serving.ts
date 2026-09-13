@@ -52,24 +52,35 @@ export async function handleServingRequest(
   const env = workerEnvWithOptionalRateLimiter(rawEnv)
   const WorkerEnvLive = Layer.succeed(WorkerEnv, env)
   const CoreLive = CoreServicesLive.pipe(Layer.provideMerge(WorkerEnvLive))
-  const hubMatch = /^\/d\/([a-z0-9]{12})\/tree$/.exec(new URL(request.url).pathname)
+  const hubMatch = /^\/d\/([a-z0-9]{12})\/tree$/.exec(
+    new URL(request.url).pathname,
+  )
   const result = await Effect.runPromise(
     Effect.gen(function* () {
       if (hubMatch) {
         const authorization = request.headers.get('authorization')
-        const bearerSupplied = authorization !== null && /^Bearer(?:\s|$)/i.test(authorization)
+        const bearerSupplied =
+          authorization !== null && /^Bearer(?:\s|$)/i.test(authorization)
         const principals = yield* Principal
-        const principalResult = yield* principals.resolve(request).pipe(Effect.either)
+        const principalResult = yield* principals
+          .resolve(request)
+          .pipe(Effect.either)
         if (principalResult._tag === 'Left' && bearerSupplied) {
           const error = principalResult.left
-          return error instanceof DossierError && error.code === 'unauthenticated'
+          return error instanceof DossierError &&
+            error.code === 'unauthenticated'
             ? errorResponse(error)
             : notFound()
         }
-        const principal = principalResult._tag === 'Right' ? principalResult.right : null
+        const principal =
+          principalResult._tag === 'Right' ? principalResult.right : null
         const tree = yield* Tree
-        const response = yield* tree.get(hubMatch[1], principal).pipe(Effect.either)
-        return response._tag === 'Right' ? renderHubPage(response.right) : notFound()
+        const response = yield* tree
+          .get(hubMatch[1], principal)
+          .pipe(Effect.either)
+        return response._tag === 'Right'
+          ? renderHubPage(response.right)
+          : notFound()
       }
       const serving = yield* Serving
       return yield* serving.serve(request)

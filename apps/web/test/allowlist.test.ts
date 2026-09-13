@@ -60,8 +60,9 @@ function resolve(subject: string, email: string) {
 
 describe('allowlist sign-in resolution', () => {
   it('refuses an unmatched email without creating an account', async () => {
-    const before = await env.DB.prepare('SELECT COUNT(*) AS count FROM accounts')
-      .first<{ count: number }>()
+    const before = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM accounts',
+    ).first<{ count: number }>()
     const error = await run(
       Effect.gen(function* () {
         const service = yield* Allowlist
@@ -75,8 +76,9 @@ describe('allowlist sign-in resolution', () => {
           .pipe(Effect.flip)
       }),
     )
-    const after = await env.DB.prepare('SELECT COUNT(*) AS count FROM accounts')
-      .first<{ count: number }>()
+    const after = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM accounts',
+    ).first<{ count: number }>()
     expect(error).toMatchObject({ _tag: 'SignInRefused' })
     expect(after?.count).toBe(before?.count)
   })

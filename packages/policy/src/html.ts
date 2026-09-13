@@ -37,12 +37,19 @@ const URL_ATTRS = new Set([
   'xlink:href',
 ])
 const BLOCKED_PROTOCOLS = ['javascript:', 'vbscript:', 'file:'] as const
-const ALLOWED_SCRIPT_TYPES = new Set(['', 'text/javascript', 'application/javascript'])
+const ALLOWED_SCRIPT_TYPES = new Set([
+  '',
+  'text/javascript',
+  'application/javascript',
+])
 const MAX_DEPTH = 512
 const DOCUMENT_PATH = /^\/d\/[a-z0-9]{12}$/
 const STYLESHEET_PATH = /^\/a\/[a-z0-9][a-z0-9-]{0,63}(?:@[1-9][0-9]*)?\.css$/
 
-export function validateHtml(html: string, options: HtmlPolicyOptions): PolicyResult {
+export function validateHtml(
+  html: string,
+  options: HtmlPolicyOptions,
+): PolicyResult {
   return validateHtmlWithMode(html, options, true)
 }
 
@@ -78,7 +85,9 @@ function validateHtmlWithMode(
 
   const byteLength = new TextEncoder().encode(html).byteLength
   if (enforceServerConfig && byteLength > options.maxBytes) {
-    errors.push(`HTML document is ${byteLength} bytes; maximum is ${options.maxBytes} bytes.`)
+    errors.push(
+      `HTML document is ${byteLength} bytes; maximum is ${options.maxBytes} bytes.`,
+    )
     return emptyResult(errors, warnings)
   }
 
@@ -146,8 +155,8 @@ function validateHtmlWithMode(
 
       if (tagName === 'script') {
         const isSvgScript = node.namespaceURI === SVG_NAMESPACE
-        const svgSourceAttributes = ['src', 'href', 'xlink:href'].filter((name) =>
-          attributes.has(name),
+        const svgSourceAttributes = ['src', 'href', 'xlink:href'].filter(
+          (name) => attributes.has(name),
         )
         const hasHtmlSource = !isSvgScript && attributes.has('src')
 
@@ -161,7 +170,9 @@ function validateHtmlWithMode(
 
           const integrity = (attributes.get('integrity') ?? '').trim()
           if (integrity === '') {
-            errors.push('External script sources require an integrity attribute.')
+            errors.push(
+              'External script sources require an integrity attribute.',
+            )
           } else if (!hasUsableIntegrityMetadata(integrity)) {
             errors.push(
               'External script sources require valid SHA-256, SHA-384, or SHA-512 integrity metadata.',
@@ -191,7 +202,11 @@ function validateHtmlWithMode(
 
         if (URL_ATTRS.has(name)) {
           const normalized = normalizeHtmlUrl(value)
-          if (BLOCKED_PROTOCOLS.some((protocol) => normalized.startsWith(protocol))) {
+          if (
+            BLOCKED_PROTOCOLS.some((protocol) =>
+              normalized.startsWith(protocol),
+            )
+          ) {
             errors.push(`Blocked unsafe URL in "${name}" attribute.`)
           }
         }
@@ -199,7 +214,9 @@ function validateHtmlWithMode(
         if (name === 'style') {
           const cssResult = enforceServerConfig
             ? validateCssDeclarations(value, options)
-            : validateCssDeclarationsStatic(value, { publicOrigin: options.publicOrigin })
+            : validateCssDeclarationsStatic(value, {
+                publicOrigin: options.publicOrigin,
+              })
           if (!cssResult.ok) errors.push('Blocked unsafe inline CSS.')
         }
       }
@@ -207,7 +224,9 @@ function validateHtmlWithMode(
       if (tagName === 'style') {
         const cssResult = enforceServerConfig
           ? validateCss(collectText(node), options)
-          : validateCssStatic(collectText(node), { publicOrigin: options.publicOrigin })
+          : validateCssStatic(collectText(node), {
+              publicOrigin: options.publicOrigin,
+            })
         if (!cssResult.ok) errors.push('Blocked unsafe CSS in <style> tag.')
       }
 
@@ -368,7 +387,9 @@ const INTEGRITY_DIGEST_BYTES = {
 function hasUsableIntegrityMetadata(value: string): boolean {
   return value.split(/\s+/u).some((token) => {
     const metadata = token.split('?', 1)[0] ?? ''
-    const match = /^(sha256|sha384|sha512)-([A-Za-z0-9+/]+={0,2})$/u.exec(metadata)
+    const match = /^(sha256|sha384|sha512)-([A-Za-z0-9+/]+={0,2})$/u.exec(
+      metadata,
+    )
     if (!match) return false
 
     const algorithm = match[1] as keyof typeof INTEGRITY_DIGEST_BYTES
@@ -395,7 +416,9 @@ function attributesOf(element: HtmlElement): Map<string, string> {
   )
 }
 
-function qualifiedAttributeName(attribute: HtmlElement['attrs'][number]): string {
+function qualifiedAttributeName(
+  attribute: HtmlElement['attrs'][number],
+): string {
   const name = attribute.name.toLowerCase()
   return attribute.prefix ? `${attribute.prefix.toLowerCase()}:${name}` : name
 }
@@ -406,7 +429,11 @@ function isElement(node: HtmlNode): node is HtmlElement {
 
 function childNodesOf(node: HtmlNode): HtmlNode[] {
   const children = 'childNodes' in node ? [...node.childNodes] : []
-  if (isElement(node) && node.tagName.toLowerCase() === 'template' && 'content' in node) {
+  if (
+    isElement(node) &&
+    node.tagName.toLowerCase() === 'template' &&
+    'content' in node
+  ) {
     children.push(...node.content.childNodes)
   }
   return children
@@ -456,7 +483,11 @@ function normalizeHtmlUrl(value: string): string {
   let normalized = ''
   for (const character of value) {
     const codePoint = character.codePointAt(0) ?? 0
-    if (codePoint <= 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f) || /\s/u.test(character)) {
+    if (
+      codePoint <= 0x20 ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      /\s/u.test(character)
+    ) {
       continue
     }
     normalized += character

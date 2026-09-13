@@ -93,7 +93,13 @@ scripts/setup.sh --env dev --key-file ../../.dev-bootstrap-key.local
 Expected setup JSON includes:
 
 ```json
-{"ok":true,"workspaceId":"workspace_agent964","workspaceSlug":"agent964","bootstrapAccountId":"acct_bootstrap","bootstrapApiKeyId":"key_bootstrap"}
+{
+  "ok": true,
+  "workspaceId": "workspace_agent964",
+  "workspaceSlug": "agent964",
+  "bootstrapAccountId": "acct_bootstrap",
+  "bootstrapApiKeyId": "key_bootstrap"
+}
 ```
 
 The development origin is <https://dossier-dev.tech964.workers.dev>.

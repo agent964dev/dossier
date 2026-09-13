@@ -94,8 +94,7 @@ function TrashPage() {
                   {document.deletedByAccountId === viewer.accountId
                     ? 'you'
                     : (document.deletedBy ?? 'someone')}{' '}
-                  as part of “
-                  {document.rootTitle}”
+                  as part of “{document.rootTitle}”
                   {document.deletedAt ? (
                     <>
                       {', '}
@@ -115,7 +114,13 @@ function TrashPage() {
   )
 }
 
-function TrashBatchCard({ batch, viewer }: { batch: TrashBatch; viewer: Viewer }) {
+function TrashBatchCard({
+  batch,
+  viewer,
+}: {
+  batch: TrashBatch
+  viewer: Viewer
+}) {
   const { pending, failure, run } = useDocumentAction(viewer.csrfToken)
   const others = batch.deletedCount - 1
 
@@ -195,7 +200,9 @@ function TrashBatchCard({ batch, viewer }: { batch: TrashBatch; viewer: Viewer }
           variant="outline"
           size="sm"
           onClick={restore}
-          disabled={pending !== null || batch.batchId === null || !viewer.publisher}
+          disabled={
+            pending !== null || batch.batchId === null || !viewer.publisher
+          }
           className="shrink-0"
         >
           <RotateCcw aria-hidden />

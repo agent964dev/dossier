@@ -176,10 +176,16 @@ function DiffPage() {
                   <span data-numeric className="text-micro-lg text-neutral-400">
                     v{from.versionNumber} → v{to.versionNumber}
                   </span>
-                  <span data-numeric className="text-micro-lg text-success-200/90">
+                  <span
+                    data-numeric
+                    className="text-micro-lg text-success-200/90"
+                  >
                     +{outcome.added}
                   </span>
-                  <span data-numeric className="text-micro-lg text-error-300/90">
+                  <span
+                    data-numeric
+                    className="text-micro-lg text-error-300/90"
+                  >
                     −{outcome.removed}
                   </span>
                   <span className="text-micro-lg text-neutral-500">

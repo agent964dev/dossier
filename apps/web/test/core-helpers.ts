@@ -1,4 +1,4 @@
-import { Effect, Layer as Layers } from 'effect'
+import { Layer as Layers } from 'effect'
 
 import {
   AccessLive,
@@ -64,7 +64,15 @@ export function makeCoreLayer(
   const shares = SharesLive.pipe(Layers.provide(auth))
   const tree = TreeLive.pipe(Layers.provide(auth))
   const allowlist = AllowlistLive.pipe(Layers.provide(foundation))
-  return Layers.mergeAll(auth, publish, documents, serving, shares, tree, allowlist)
+  return Layers.mergeAll(
+    auth,
+    publish,
+    documents,
+    serving,
+    shares,
+    tree,
+    allowlist,
+  )
 }
 
 export async function sha256(value: string): Promise<string> {

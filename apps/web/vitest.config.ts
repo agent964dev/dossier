@@ -27,6 +27,9 @@ export default defineConfig(async () => {
     ],
     test: {
       setupFiles: ['./test/apply-migrations.ts'],
+      // workerd plus D1 migrations per file is slow on shared CI runners.
+      testTimeout: 30_000,
+      hookTimeout: 60_000,
     },
   }
 })

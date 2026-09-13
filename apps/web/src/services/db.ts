@@ -22,7 +22,8 @@ export function makeDb(database: D1Database): DbService {
     batch: (statements) =>
       Effect.tryPromise({
         try: () => database.batch([...statements]),
-        catch: (cause) => new PersistenceError({ operation: 'D1 batch', cause }),
+        catch: (cause) =>
+          new PersistenceError({ operation: 'D1 batch', cause }),
       }),
   }
 }
@@ -32,4 +33,5 @@ export const DbLive = Layer.effect(
   Effect.map(WorkerEnv, (env) => makeDb(env.DB)),
 )
 
-export const DbLayer = (database: D1Database) => Layer.succeed(Db, makeDb(database))
+export const DbLayer = (database: D1Database) =>
+  Layer.succeed(Db, makeDb(database))

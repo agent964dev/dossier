@@ -1,6 +1,6 @@
 @font-face {
-  font-family: "Dossier Test";
-  src: url("/a/test-font.woff2") format("woff2");
+  font-family: 'Dossier Test';
+  src: url('/a/test-font.woff2') format('woff2');
 }
 
 :root {

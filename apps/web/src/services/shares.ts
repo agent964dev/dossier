@@ -14,16 +14,27 @@ import { Principal, type PrincipalIdentity } from './principal'
 function normalizedEmails(
   values: readonly string[],
 ): Effect.Effect<readonly string[], DossierError> {
-  const emails = [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))]
+  const emails = [
+    ...new Set(
+      values.map((value) => value.trim().toLowerCase()).filter(Boolean),
+    ),
+  ]
   const invalid = emails.find((email) => !/^[^\s@]+@[^\s@]+$/.test(email))
   return invalid
-    ? Effect.fail(apiError('policy_rejected', `Invalid share email: ${invalid}`))
+    ? Effect.fail(
+        apiError('policy_rejected', `Invalid share email: ${invalid}`),
+      )
     : Effect.succeed(emails.sort())
 }
 
-function guardFailure(error: PersistenceError): DossierError | PersistenceError {
+function guardFailure(
+  error: PersistenceError,
+): DossierError | PersistenceError {
   return String(error.cause).includes('publication_guards_ok_check')
-    ? apiError('conflict', 'The document changed while the operation was running.')
+    ? apiError(
+        'conflict',
+        'The document changed while the operation was running.',
+      )
     : error
 }
 
@@ -106,21 +117,30 @@ export const SharesLive = Layer.effect(
               )
               .bind(documentId)
               .all<{ email: string }>(),
-          catch: (cause) => new PersistenceError({ operation: 'load configured shares', cause }),
+          catch: (cause) =>
+            new PersistenceError({
+              operation: 'load configured shares',
+              cause,
+            }),
         })
-        const effective = decision.accessSourceId === null
-          ? { results: [] as { email: string }[] }
-          : yield* Effect.tryPromise({
-              try: () =>
-                db.raw
-                  .prepare(
-                    `SELECT email FROM document_shares
+        const effective =
+          decision.accessSourceId === null
+            ? { results: [] as { email: string }[] }
+            : yield* Effect.tryPromise({
+                try: () =>
+                  db.raw
+                    .prepare(
+                      `SELECT email FROM document_shares
                       WHERE document_id = ? ORDER BY email`,
-                  )
-                  .bind(decision.accessSourceId)
-                  .all<{ email: string }>(),
-              catch: (cause) => new PersistenceError({ operation: 'load effective shares', cause }),
-            })
+                    )
+                    .bind(decision.accessSourceId)
+                    .all<{ email: string }>(),
+                catch: (cause) =>
+                  new PersistenceError({
+                    operation: 'load effective shares',
+                    cause,
+                  }),
+              })
         return {
           configured: configured.results.map((row) => row.email),
           effective: effective.results.map((row) => row.email),
@@ -135,7 +155,9 @@ export const SharesLive = Layer.effect(
       Effect.gen(function* () {
         const decision = (yield* access.resolve([documentId], principal))[0]
         if (!decision || (!decision.editor && !decision.canRead)) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         yield* principals.requirePublisher(principal, decision.workspaceId)
         if (!decision.editor) {
@@ -184,59 +206,84 @@ export const SharesLive = Layer.effect(
         const remove = yield* normalizedEmails(delta.remove ?? [])
         const now = new Date().toISOString()
         const guardId = ids.internalId()
-        yield* db.batch([
-          guard(documentId, principal, guardId),
-          db.raw.prepare(inheritedShareCopySql).bind(
-            documentId,
-            documentId,
-            principal.accountId,
-            now,
-            documentId,
-          ),
-          db.raw.prepare(inheritedVisibilitySql).bind(documentId, documentId),
-          db.raw
-            .prepare(
-              `DELETE FROM document_shares
+        yield* db
+          .batch([
+            guard(documentId, principal, guardId),
+            db.raw
+              .prepare(inheritedShareCopySql)
+              .bind(
+                documentId,
+                documentId,
+                principal.accountId,
+                now,
+                documentId,
+              ),
+            db.raw.prepare(inheritedVisibilitySql).bind(documentId, documentId),
+            db.raw
+              .prepare(
+                `DELETE FROM document_shares
                 WHERE document_id = ? AND email IN (SELECT CAST(value AS TEXT) FROM json_each(?))`,
-            )
-            .bind(documentId, JSON.stringify(remove)),
-          db.raw
-            .prepare(
-              `INSERT OR IGNORE INTO document_shares
+              )
+              .bind(documentId, JSON.stringify(remove)),
+            db.raw
+              .prepare(
+                `INSERT OR IGNORE INTO document_shares
                  (document_id, email, created_by_account_id, created_at)
                SELECT ?, CAST(value AS TEXT), ?, ? FROM json_each(?)`,
-            )
-            .bind(documentId, principal.accountId, now, JSON.stringify(add)),
-          db.raw
-            .prepare(`UPDATE documents SET revision = revision + 1, updated_at = ? WHERE id = ?`)
-            .bind(now, documentId),
-          db.raw.prepare(`DELETE FROM publication_guards WHERE id = ?`).bind(guardId),
-        ]).pipe(Effect.mapError(guardFailure))
+              )
+              .bind(documentId, principal.accountId, now, JSON.stringify(add)),
+            db.raw
+              .prepare(
+                `UPDATE documents SET revision = revision + 1, updated_at = ? WHERE id = ?`,
+              )
+              .bind(now, documentId),
+            db.raw
+              .prepare(`DELETE FROM publication_guards WHERE id = ?`)
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(guardFailure))
         return yield* get(documentId, principal)
       })
 
-    const replace: SharesService['replace'] = (documentId, replacement, principal) =>
+    const replace: SharesService['replace'] = (
+      documentId,
+      replacement,
+      principal,
+    ) =>
       Effect.gen(function* () {
         yield* authorizeMutation(documentId, principal)
         const emails = yield* normalizedEmails(replacement.emails)
         const now = new Date().toISOString()
         const guardId = ids.internalId()
-        yield* db.batch([
-          guard(documentId, principal, guardId, replacement.ifRevision),
-          db.raw.prepare(inheritedVisibilitySql).bind(documentId, documentId),
-          db.raw.prepare(`DELETE FROM document_shares WHERE document_id = ?`).bind(documentId),
-          db.raw
-            .prepare(
-              `INSERT INTO document_shares
+        yield* db
+          .batch([
+            guard(documentId, principal, guardId, replacement.ifRevision),
+            db.raw.prepare(inheritedVisibilitySql).bind(documentId, documentId),
+            db.raw
+              .prepare(`DELETE FROM document_shares WHERE document_id = ?`)
+              .bind(documentId),
+            db.raw
+              .prepare(
+                `INSERT INTO document_shares
                  (document_id, email, created_by_account_id, created_at)
                SELECT ?, CAST(value AS TEXT), ?, ? FROM json_each(?)`,
-            )
-            .bind(documentId, principal.accountId, now, JSON.stringify(emails)),
-          db.raw
-            .prepare(`UPDATE documents SET revision = revision + 1, updated_at = ? WHERE id = ?`)
-            .bind(now, documentId),
-          db.raw.prepare(`DELETE FROM publication_guards WHERE id = ?`).bind(guardId),
-        ]).pipe(Effect.mapError(guardFailure))
+              )
+              .bind(
+                documentId,
+                principal.accountId,
+                now,
+                JSON.stringify(emails),
+              ),
+            db.raw
+              .prepare(
+                `UPDATE documents SET revision = revision + 1, updated_at = ? WHERE id = ?`,
+              )
+              .bind(now, documentId),
+            db.raw
+              .prepare(`DELETE FROM publication_guards WHERE id = ?`)
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(guardFailure))
         return yield* get(documentId, principal)
       })
 

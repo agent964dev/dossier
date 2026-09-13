@@ -52,7 +52,11 @@ describe('Documents', () => {
     const disabled = await run(
       Effect.gen(function* () {
         const service = yield* Documents
-        return yield* service.disable(published.document.id, principal, 'review')
+        return yield* service.disable(
+          published.document.id,
+          principal,
+          'review',
+        )
       }),
     )
     expect(disabled.disabledAt).not.toBeNull()
@@ -88,8 +92,12 @@ describe('Documents', () => {
     expect(trash.documents.map((document) => document.id)).toContain(
       published.document.id,
     )
-    const trashed = trash.documents.find((document) => document.id === published.document.id)
-    expect(trashed && isDocumentEditor(trashed) ? trashed.deletedAt : null).not.toBeNull()
+    const trashed = trash.documents.find(
+      (document) => document.id === published.document.id,
+    )
+    expect(
+      trashed && isDocumentEditor(trashed) ? trashed.deletedAt : null,
+    ).not.toBeNull()
 
     const restored = await run(
       Effect.gen(function* () {

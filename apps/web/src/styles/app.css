@@ -1,5 +1,5 @@
-@import "tailwindcss";
-@import "./tokens.css";
+@import 'tailwindcss';
+@import './tokens.css';
 
 @source "../";
 
@@ -9,24 +9,24 @@
  * ============================================================================= */
 
 @font-face {
-  font-family: "Clash Display";
-  src: url("/fonts/ClashDisplay-Variable.woff2") format("woff2");
+  font-family: 'Clash Display';
+  src: url('/fonts/ClashDisplay-Variable.woff2') format('woff2');
   font-weight: 200 700;
   font-style: normal;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "Geist";
-  src: url("/fonts/Geist-Variable.woff2") format("woff2");
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "Geist Mono";
-  src: url("/fonts/GeistMono-Variable.woff2") format("woff2");
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Variable.woff2') format('woff2');
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -50,7 +50,9 @@
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
-    font-feature-settings: "liga" 1, "kern" 1;
+    font-feature-settings:
+      'liga' 1,
+      'kern' 1;
     line-height: var(--leading-body);
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
@@ -77,12 +79,19 @@
   samp,
   time,
   [data-numeric] {
-    font-feature-settings: "tnum" 1, "liga" 1, "kern" 1;
+    font-feature-settings:
+      'tnum' 1,
+      'liga' 1,
+      'kern' 1;
     font-variant-numeric: tabular-nums;
   }
 
   ::selection {
-    background-color: color-mix(in oklab, var(--color-brand-300) 30%, transparent);
+    background-color: color-mix(
+      in oklab,
+      var(--color-brand-300) 30%,
+      transparent
+    );
     color: var(--color-neutral-50);
   }
 
@@ -133,18 +142,24 @@
 
 .font-clash {
   font-family: var(--font-clash);
-  font-feature-settings: "ss01" 1, "kern" 1;
+  font-feature-settings:
+    'ss01' 1,
+    'kern' 1;
 }
 
 /* Bare brand mark: a cyan halo that intensifies when its lockup is hovered. */
 .mark-glow {
-  filter: drop-shadow(0 0 8px color-mix(in oklab, var(--glow-cyan) 30%, transparent));
+  filter: drop-shadow(
+    0 0 8px color-mix(in oklab, var(--glow-cyan) 30%, transparent)
+  );
   transition: filter 200ms var(--ease-agent);
 }
 
 .group:hover .mark-glow,
 a:hover > .mark-glow {
-  filter: drop-shadow(0 0 12px color-mix(in oklab, var(--glow-cyan) 50%, transparent));
+  filter: drop-shadow(
+    0 0 12px color-mix(in oklab, var(--glow-cyan) 50%, transparent)
+  );
 }
 
 .text-glow-cyan {
@@ -171,7 +186,7 @@ a:hover > .mark-glow {
 }
 
 .chrome-glass::before {
-  content: "";
+  content: '';
   position: absolute;
   inset-inline: 12%;
   top: -1px;

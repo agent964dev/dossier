@@ -42,12 +42,25 @@ function createNonce(): string {
   crypto.getRandomValues(bytes)
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+  return btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll('=', '')
 }
 
 const MONTHS: readonly string[] = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
 ]
 
 interface Timestamp {
@@ -94,7 +107,9 @@ interface KindGroup {
  * Groups children by kind in first-appearance order; the tree query already
  * orders by kind, then title, then id, so the groups come out stable.
  */
-function groupByKind(documents: readonly DocumentReader[]): readonly KindGroup[] {
+function groupByKind(
+  documents: readonly DocumentReader[],
+): readonly KindGroup[] {
   const groups = new Map<string, DocumentReader[]>()
   for (const document of documents) {
     const kind = displayKind(document.kind)
@@ -536,7 +551,9 @@ export function renderHubPage(tree: TreeResponse): Response {
             (ancestor) =>
               `<li><a href="${escapeHtml(ancestor.hubUrl)}">${escapeHtml(ancestor.title)}</a></li>`,
           )
-          .join('')}<li><span aria-current="page">${escapeHtml(focus.title)}</span></li></ol></nav>`
+          .join(
+            '',
+          )}<li><span aria-current="page">${escapeHtml(focus.title)}</span></li></ol></nav>`
       : ''
 
   const childrenSection =

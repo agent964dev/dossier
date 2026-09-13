@@ -21,7 +21,9 @@ async function temporaryHome(): Promise<string> {
 }
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })))
+  await Promise.all(
+    homes.splice(0).map((home) => rm(home, { recursive: true, force: true })),
+  )
 })
 
 describe('CLI state', () => {
@@ -29,23 +31,29 @@ describe('CLI state', () => {
     const home = await temporaryHome()
     const paths = statePaths({ DOSSIER_HOME: home })
 
-    await writeJsonAtomic(paths.credentials, { 'https://example.test': 'ds_secret' })
+    await writeJsonAtomic(paths.credentials, {
+      'https://example.test': 'ds_secret',
+    })
 
     expect(JSON.parse(await readFile(paths.credentials, 'utf8'))).toEqual({
       'https://example.test': 'ds_secret',
     })
     expect(await fileMode(home)).toBe(0o700)
     expect(await fileMode(paths.credentials)).toBe(0o600)
-    expect((await readdir(home)).filter((name) => name.endsWith('.tmp'))).toEqual([])
-    expect((await readdir(home)).filter((name) => name.includes('lock'))).toEqual([])
+    expect(
+      (await readdir(home)).filter((name) => name.endsWith('.tmp')),
+    ).toEqual([])
+    expect(
+      (await readdir(home)).filter((name) => name.includes('lock')),
+    ).toEqual([])
   })
 
   it('serializes writers with a lock file and times out actionably', async () => {
     const home = await temporaryHome()
     const release = await acquireStateLock(home)
-    await expect(acquireStateLock(home, { timeoutMs: 30, retryMs: 5 })).rejects.toThrow(
-      /state is locked by another dossier process/,
-    )
+    await expect(
+      acquireStateLock(home, { timeoutMs: 30, retryMs: 5 }),
+    ).rejects.toThrow(/state is locked by another dossier process/)
     await release()
 
     const releaseAgain = await acquireStateLock(home, { timeoutMs: 30 })
@@ -88,5 +96,4 @@ describe('CLI state', () => {
     })
     expect(await fileMode(paths.documents)).toBe(0o600)
   })
-
 })

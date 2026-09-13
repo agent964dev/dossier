@@ -22,14 +22,17 @@ export function DiffNavigator({ count }: { count: number }) {
               ? 1
               : count
             : Math.min(count, Math.max(1, current + delta))
-        const target = [...document.querySelectorAll<HTMLElement>(`[data-diff-hunk="${next}"]`)].find(
-          (candidate) => candidate.getClientRects().length > 0,
-        )
+        const target = [
+          ...document.querySelectorAll<HTMLElement>(
+            `[data-diff-hunk="${next}"]`,
+          ),
+        ].find((candidate) => candidate.getClientRects().length > 0)
         if (target) {
           target.focus({ preventScroll: true })
           target.scrollIntoView({
             block: 'start',
-            behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            behavior: window.matchMedia('(prefers-reduced-motion: reduce)')
+              .matches
               ? 'auto'
               : 'smooth',
           })

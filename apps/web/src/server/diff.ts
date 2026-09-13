@@ -130,14 +130,27 @@ export interface DiffData {
 const MAX_LINES = 4000
 
 const ADD = new Set(['+', 'add', 'added', 'addition', 'insert', 'inserted'])
-const REMOVE = new Set(['-', 'remove', 'removed', 'deletion', 'delete', 'deleted', 'del'])
+const REMOVE = new Set([
+  '-',
+  'remove',
+  'removed',
+  'deletion',
+  'delete',
+  'deleted',
+  'del',
+])
 
 function readOp(value: unknown, text: string): DiffOp {
   if (typeof value === 'string') {
     const token = value.trim().toLowerCase()
     if (ADD.has(token)) return 'add'
     if (REMOVE.has(token)) return 'remove'
-    if (token === ' ' || token === '' || token === 'context' || token === 'equal') {
+    if (
+      token === ' ' ||
+      token === '' ||
+      token === 'context' ||
+      token === 'equal'
+    ) {
       return 'context'
     }
   }
@@ -476,7 +489,9 @@ export const loadDiff = createServerFn({ method: 'GET' })
         const payload: unknown = exit.value
         const response = (payload ?? {}) as Record<string, unknown>
         const mode = readMode(response.mode, requestedMode)
-        const { hunks, added, removed, omittedHunks } = readHunks(response.hunks)
+        const { hunks, added, removed, omittedHunks } = readHunks(
+          response.hunks,
+        )
         const stats = (response.stats ?? {}) as Record<string, unknown>
 
         // The service answers in `mode`; asking for text and being handed html
@@ -484,7 +499,9 @@ export const loadDiff = createServerFn({ method: 'GET' })
         const declared = readTextSupport(response)
         const resolvedTextSupport =
           declared ??
-          (requestedMode === 'text' ? mode === 'text' && textSupported : textSupported)
+          (requestedMode === 'text'
+            ? mode === 'text' && textSupported
+            : textSupported)
 
         const resolve = (
           side: unknown,

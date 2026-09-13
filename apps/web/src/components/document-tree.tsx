@@ -275,7 +275,10 @@ function TreeRow({
           />
         </button>
       ) : (
-        <span aria-hidden className="flex w-6 shrink-0 items-center justify-center">
+        <span
+          aria-hidden
+          className="flex w-6 shrink-0 items-center justify-center"
+        >
           <span className="size-1 rounded-full bg-neutral-700" />
         </span>
       )}

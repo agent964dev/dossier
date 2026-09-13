@@ -178,7 +178,10 @@ function encodeCursor(updatedAt: string, id: string): string {
   const bytes = new TextEncoder().encode(JSON.stringify([updatedAt, id]))
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+  return btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '')
 }
 
 function decodeCursor(cursor: string | undefined): [string, string] | null {
@@ -189,7 +192,9 @@ function decodeCursor(cursor: string | undefined): [string, string] | null {
     const parsed = JSON.parse(
       new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0))),
     )
-    return Array.isArray(parsed) && parsed.length === 2 && parsed.every((v) => typeof v === 'string')
+    return Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      parsed.every((v) => typeof v === 'string')
       ? [parsed[0], parsed[1]]
       : null
   } catch {
@@ -197,10 +202,15 @@ function decodeCursor(cursor: string | undefined): [string, string] | null {
   }
 }
 
-function guardFailure(error: PersistenceError): DossierError | PersistenceError {
+function guardFailure(
+  error: PersistenceError,
+): DossierError | PersistenceError {
   const text = String(error.cause)
   return text.includes('publication_guards_ok_check')
-    ? apiError('conflict', 'The document changed while the operation was running.')
+    ? apiError(
+        'conflict',
+        'The document changed while the operation was running.',
+      )
     : error
 }
 
@@ -216,8 +226,10 @@ function authorSummaries(
       count: (existing?.count ?? 0) + 1,
     })
   }
-  return [...summaries.values()].sort((left, right) =>
-    left.name.localeCompare(right.name) || left.accountId.localeCompare(right.accountId),
+  return [...summaries.values()].sort(
+    (left, right) =>
+      left.name.localeCompare(right.name) ||
+      left.accountId.localeCompare(right.accountId),
   )
 }
 
@@ -226,7 +238,9 @@ function authorSummaries(
  * reader DTO fields: a hidden physical parent has already become `null`, so
  * its id and storage path cannot influence where a virtual root appears.
  */
-function orderVisibleForest(documents: readonly DocumentView[]): DocumentView[] {
+function orderVisibleForest(
+  documents: readonly DocumentView[],
+): DocumentView[] {
   const byId = new Map(documents.map((document) => [document.id, document]))
   const children = new Map<string, string[]>()
   const roots: string[] = []
@@ -260,7 +274,9 @@ function orderVisibleForest(documents: readonly DocumentView[]): DocumentView[] 
   }
 
   for (const root of roots.sort(compare)) visit(root)
-  for (const orphan of [...byId.keys()].filter((id) => !placed.has(id)).sort(compare)) {
+  for (const orphan of [...byId.keys()]
+    .filter((id) => !placed.has(id))
+    .sort(compare)) {
     visit(orphan)
   }
   return ordered
@@ -328,8 +344,13 @@ export const DocumentsLive = Layer.effect(
       Effect.gen(function* () {
         const decisions = yield* access.resolve([documentId], principal)
         const decision = decisions[0]
-        if (!decision || (!management && !decision.editor && !decision.canRead)) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+        if (
+          !decision ||
+          (!management && !decision.editor && !decision.canRead)
+        ) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         if (management && !decision.editor) {
           if (decision.canRead) {
@@ -337,18 +358,26 @@ export const DocumentsLive = Layer.effect(
               apiError('editor_required', 'Document edit access is required.'),
             )
           }
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         const row = yield* Effect.tryPromise({
           try: () => loadDocumentRow(db.raw, documentId),
-          catch: (cause) => new PersistenceError({ operation: 'load document', cause }),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'load document', cause }),
         })
-        if (!row) return yield* Effect.fail(apiError('not_found', 'Document not found.'))
-        const parentReadable = row.parent_id === null
-          ? false
-          : visibleIds !== undefined
-            ? visibleIds.has(row.parent_id)
-            : (yield* access.resolve([row.parent_id], principal))[0]?.canRead === true
+        if (!row)
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
+        const parentReadable =
+          row.parent_id === null
+            ? false
+            : visibleIds !== undefined
+              ? visibleIds.has(row.parent_id)
+              : (yield* access.resolve([row.parent_id], principal))[0]
+                  ?.canRead === true
         return decision.editor
           ? toDocumentEditor(row, decision, parentReadable, env.PUBLIC_BASE_URL)
           : toDocumentReader(row, decision, parentReadable, env.PUBLIC_BASE_URL)
@@ -358,8 +387,9 @@ export const DocumentsLive = Layer.effect(
       documentId: string,
       principal: PrincipalIdentity,
     ): Effect.Effect<DocumentEditor, DossierError | PersistenceError> =>
-      Effect.map(loadView(documentId, principal, true), (document) =>
-        document as DocumentEditor,
+      Effect.map(
+        loadView(documentId, principal, true),
+        (document) => document as DocumentEditor,
       )
 
     const authorizeMutation = (
@@ -369,7 +399,9 @@ export const DocumentsLive = Layer.effect(
       Effect.gen(function* () {
         const decision = (yield* access.resolve([documentId], principal))[0]
         if (!decision || (!decision.editor && !decision.canRead)) {
-          return yield* Effect.fail(apiError('not_found', 'Document not found.'))
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
         }
         yield* principals.requirePublisher(principal, decision.workspaceId)
         if (!decision.editor) {
@@ -383,14 +415,16 @@ export const DocumentsLive = Layer.effect(
     const get: DocumentsService['get'] = (documentId, principal) =>
       Effect.gen(function* () {
         const document = yield* loadView(documentId, principal)
-        const versions =
-          isDocumentEditor(document)
-            ? yield* Effect.tryPromise({
-                try: () => loadVersions(db.raw, documentId, env.PUBLIC_BASE_URL),
-                catch: (cause) =>
-                  new PersistenceError({ operation: 'load document versions', cause }),
-              })
-            : []
+        const versions = isDocumentEditor(document)
+          ? yield* Effect.tryPromise({
+              try: () => loadVersions(db.raw, documentId, env.PUBLIC_BASE_URL),
+              catch: (cause) =>
+                new PersistenceError({
+                  operation: 'load document versions',
+                  cause,
+                }),
+            })
+          : []
         return { document, versions }
       })
 
@@ -421,12 +455,16 @@ export const DocumentsLive = Layer.effect(
           }
           if (options.parent !== undefined) {
             return yield* Effect.fail(
-              apiError('policy_rejected', 'tree=1 cannot be combined with parent.'),
+              apiError(
+                'policy_rejected',
+                'tree=1 cannot be combined with parent.',
+              ),
             )
           }
-          const scopeWhere = scope === 'mine'
-            ? `d.workspace_id = ?3 AND d.created_by = ?1 AND d.deleted_at IS NULL`
-            : `d.deleted_at IS NULL`
+          const scopeWhere =
+            scope === 'mine'
+              ? `d.workspace_id = ?3 AND d.created_by = ?1 AND d.deleted_at IS NULL`
+              : `d.deleted_at IS NULL`
           const rows = yield* Effect.tryPromise({
             try: () =>
               db.raw
@@ -457,11 +495,11 @@ export const DocumentsLive = Layer.effect(
                 LEFT JOIN accounts deleter ON deleter.id = batch.account_id
                     WHERE decision.can_read = 1`,
                 )
-                .bind(...(
-                  scope === 'mine'
+                .bind(
+                  ...(scope === 'mine'
                     ? [accountId, emails, principal.workspaceId]
-                    : [accountId, emails]
-                ))
+                    : [accountId, emails]),
+                )
                 .all<TreeListRow>(),
             catch: (cause) =>
               new PersistenceError({ operation: 'list document tree', cause }),
@@ -478,10 +516,21 @@ export const DocumentsLive = Layer.effect(
                 editor: row.editor === 1,
                 canRead: true,
               }
-              const parentVisible = row.parent_id !== null && visibleIds.has(row.parent_id)
+              const parentVisible =
+                row.parent_id !== null && visibleIds.has(row.parent_id)
               return decision.editor
-                ? toDocumentEditor(row, decision, parentVisible, env.PUBLIC_BASE_URL)
-                : toDocumentReader(row, decision, parentVisible, env.PUBLIC_BASE_URL)
+                ? toDocumentEditor(
+                    row,
+                    decision,
+                    parentVisible,
+                    env.PUBLIC_BASE_URL,
+                  )
+                : toDocumentReader(
+                    row,
+                    decision,
+                    parentVisible,
+                    env.PUBLIC_BASE_URL,
+                  )
             }),
           )
           return { ok: true as const, documents, nextCursor: null }
@@ -490,7 +539,10 @@ export const DocumentsLive = Layer.effect(
         if (scope === 'trash') {
           if (options.parent !== undefined) {
             return yield* Effect.fail(
-              apiError('policy_rejected', 'Trash cannot be filtered by parent.'),
+              apiError(
+                'policy_rejected',
+                'Trash cannot be filtered by parent.',
+              ),
             )
           }
           const rows = yield* Effect.tryPromise({
@@ -629,13 +681,15 @@ export const DocumentsLive = Layer.effect(
         const pageRows = rows.results.slice(0, limit)
         const documents: DocumentView[] = []
         for (const row of pageRows) {
-          documents.push(yield* loadView(row.id, principal, true).pipe(
-            Effect.catchTag('DossierError', (error) =>
-              error.code === 'editor_required'
-                ? loadView(row.id, principal)
-                : Effect.fail(error),
+          documents.push(
+            yield* loadView(row.id, principal, true).pipe(
+              Effect.catchTag('DossierError', (error) =>
+                error.code === 'editor_required'
+                  ? loadView(row.id, principal)
+                  : Effect.fail(error),
+              ),
             ),
-          ))
+          )
         }
         const last = pageRows.at(-1)
         return {
@@ -648,16 +702,21 @@ export const DocumentsLive = Layer.effect(
         }
       })
 
-    const remove: DocumentsService['delete'] = (documentId, principal, force = false) =>
+    const remove: DocumentsService['delete'] = (
+      documentId,
+      principal,
+      force = false,
+    ) =>
       Effect.gen(function* () {
         yield* authorizeMutation(documentId, principal)
         const now = new Date().toISOString()
         const batchId = ids.internalId()
         const guardId = ids.internalId()
-        const results = yield* db.batch([
-          db.raw
-            .prepare(
-              `INSERT INTO publication_guards (id, ok)
+        const results = yield* db
+          .batch([
+            db.raw
+              .prepare(
+                `INSERT INTO publication_guards (id, ok)
                VALUES (?, CASE WHEN EXISTS (
                  SELECT 1 FROM documents d
                  JOIN accounts a ON a.id = ? AND a.disabled_at IS NULL
@@ -670,11 +729,16 @@ export const DocumentsLive = Layer.effect(
                    AND (a.kind = 'service' OR publisher.account_id IS NOT NULL)
                    AND (d.created_by = a.id OR editor.role = 'admin')
                ) THEN 1 ELSE 0 END)`,
-            )
-            .bind(guardId, principal.accountId, documentId, principal.workspaceId),
-          db.raw
-            .prepare(
-              `WITH RECURSIVE subtree(id) AS (
+              )
+              .bind(
+                guardId,
+                principal.accountId,
+                documentId,
+                principal.workspaceId,
+              ),
+            db.raw
+              .prepare(
+                `WITH RECURSIVE subtree(id) AS (
                  SELECT root.id FROM documents root
                   WHERE root.id = ? AND root.deleted_at IS NULL
                  UNION ALL
@@ -693,18 +757,18 @@ export const DocumentsLive = Layer.effect(
                  FROM documents root
                 WHERE root.id = ? AND root.deleted_at IS NULL
                   AND (? = 1 OR (SELECT COUNT(*) FROM live_subtree) <= 1)`,
-            )
-            .bind(
-              documentId,
-              batchId,
-              principal.accountId,
-              now,
-              documentId,
-              force ? 1 : 0,
-            ),
-          db.raw
-            .prepare(
-              `WITH RECURSIVE subtree(id) AS (
+              )
+              .bind(
+                documentId,
+                batchId,
+                principal.accountId,
+                now,
+                documentId,
+                force ? 1 : 0,
+              ),
+            db.raw
+              .prepare(
+                `WITH RECURSIVE subtree(id) AS (
                  SELECT root.id FROM documents root
                   WHERE root.id = ? AND root.deleted_at IS NULL
                  UNION ALL
@@ -717,11 +781,11 @@ export const DocumentsLive = Layer.effect(
                  JOIN accounts a ON a.id = d.created_by
                 WHERE d.deleted_at IS NULL
                 ORDER BY d.id`,
-            )
-            .bind(documentId),
-          db.raw
-            .prepare(
-              `WITH RECURSIVE subtree(id) AS (
+              )
+              .bind(documentId),
+            db.raw
+              .prepare(
+                `WITH RECURSIVE subtree(id) AS (
                  SELECT root.id FROM documents root
                   WHERE root.id = ? AND root.deleted_at IS NULL
                  UNION ALL
@@ -733,21 +797,28 @@ export const DocumentsLive = Layer.effect(
                 WHERE deleted_at IS NULL
                   AND id IN (SELECT id FROM subtree)
                   AND EXISTS (SELECT 1 FROM deletion_batches WHERE id = ?)`,
-            )
-            .bind(documentId, now, batchId, now, batchId),
-          db.raw
-            .prepare(
-              `SELECT d.id, d.created_by, a.name AS author_name
+              )
+              .bind(documentId, now, batchId, now, batchId),
+            db.raw
+              .prepare(
+                `SELECT d.id, d.created_by, a.name AS author_name
                  FROM documents d
                  JOIN accounts a ON a.id = d.created_by
                 WHERE d.deletion_batch_id = ? AND d.deleted_at = ?
                 ORDER BY d.id`,
-            )
-            .bind(batchId, now),
-          db.raw.prepare(`DELETE FROM publication_guards WHERE id = ?`).bind(guardId),
-        ]).pipe(Effect.mapError(guardFailure))
+              )
+              .bind(batchId, now),
+            db.raw
+              .prepare(`DELETE FROM publication_guards WHERE id = ?`)
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(guardFailure))
 
-        type AffectedRow = { id: string; created_by: string; author_name: string }
+        type AffectedRow = {
+          id: string
+          created_by: string
+          author_name: string
+        }
         const candidates = (results[2]?.results ?? []) as AffectedRow[]
         const tagged = (results[4]?.results ?? []) as AffectedRow[]
         if (tagged.length === 0 && candidates.length > 1 && !force) {
@@ -760,7 +831,10 @@ export const DocumentsLive = Layer.effect(
         }
         if (tagged.length === 0) {
           return yield* Effect.fail(
-            apiError('conflict', 'The document changed while the operation was running.'),
+            apiError(
+              'conflict',
+              'The document changed while the operation was running.',
+            ),
           )
         }
         return {
@@ -771,7 +845,11 @@ export const DocumentsLive = Layer.effect(
         }
       })
 
-    const restore: DocumentsService['restore'] = (documentId, batchId, principal) =>
+    const restore: DocumentsService['restore'] = (
+      documentId,
+      batchId,
+      principal,
+    ) =>
       Effect.gen(function* () {
         const batch = yield* Effect.tryPromise({
           try: () =>
@@ -792,21 +870,31 @@ export const DocumentsLive = Layer.effect(
                 workspace_id: string
                 parent_deleted_at: string | null
               }>(),
-          catch: (cause) => new PersistenceError({ operation: 'load deletion batch', cause }),
+          catch: (cause) =>
+            new PersistenceError({ operation: 'load deletion batch', cause }),
         })
-        if (!batch || batch.root_document_id !== documentId || batch.workspace_id !== principal.workspaceId) {
-          return yield* Effect.fail(apiError('not_found', 'Deletion batch not found.'))
+        if (
+          !batch ||
+          batch.root_document_id !== documentId ||
+          batch.workspace_id !== principal.workspaceId
+        ) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Deletion batch not found.'),
+          )
         }
         yield* authorizeMutation(batch.root_document_id, principal)
         if (batch.parent_id !== null && batch.parent_deleted_at !== null) {
-          return yield* Effect.fail(apiError('conflict', 'The document parent is deleted.'))
+          return yield* Effect.fail(
+            apiError('conflict', 'The document parent is deleted.'),
+          )
         }
         const now = new Date().toISOString()
         const guardId = ids.internalId()
-        yield* db.batch([
-          db.raw
-            .prepare(
-              `INSERT INTO publication_guards (id, ok)
+        yield* db
+          .batch([
+            db.raw
+              .prepare(
+                `INSERT INTO publication_guards (id, ok)
                VALUES (?, CASE WHEN EXISTS (
                  SELECT 1 FROM deletion_batches b
                  JOIN documents d ON d.id = b.root_document_id
@@ -822,20 +910,31 @@ export const DocumentsLive = Layer.effect(
                    AND (a.kind = 'service' OR publisher.account_id IS NOT NULL)
                    AND (d.created_by = a.id OR editor.role = 'admin')
                ) THEN 1 ELSE 0 END)`,
-            )
-            .bind(guardId, principal.accountId, batchId, documentId, principal.workspaceId),
-          db.raw
-            .prepare(
-              `UPDATE documents
+              )
+              .bind(
+                guardId,
+                principal.accountId,
+                batchId,
+                documentId,
+                principal.workspaceId,
+              ),
+            db.raw
+              .prepare(
+                `UPDATE documents
                   SET deleted_at = NULL, deletion_batch_id = NULL, updated_at = ?
                 WHERE deletion_batch_id = ?`,
-            )
-            .bind(now, batchId),
-          db.raw
-            .prepare(`UPDATE deletion_batches SET restored_at = ? WHERE id = ?`)
-            .bind(now, batchId),
-          db.raw.prepare(`DELETE FROM publication_guards WHERE id = ?`).bind(guardId),
-        ]).pipe(Effect.mapError(guardFailure))
+              )
+              .bind(now, batchId),
+            db.raw
+              .prepare(
+                `UPDATE deletion_batches SET restored_at = ? WHERE id = ?`,
+              )
+              .bind(now, batchId),
+            db.raw
+              .prepare(`DELETE FROM publication_guards WHERE id = ?`)
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(guardFailure))
         return yield* loadEditor(documentId, principal)
       })
 
@@ -849,10 +948,11 @@ export const DocumentsLive = Layer.effect(
         yield* authorizeMutation(documentId, principal)
         const now = new Date().toISOString()
         const guardId = ids.internalId()
-        yield* db.batch([
-          db.raw
-            .prepare(
-              `INSERT INTO publication_guards (id, ok)
+        yield* db
+          .batch([
+            db.raw
+              .prepare(
+                `INSERT INTO publication_guards (id, ok)
                VALUES (?, CASE WHEN EXISTS (
                  SELECT 1 FROM documents d
                  JOIN accounts a ON a.id = ? AND a.disabled_at IS NULL
@@ -864,17 +964,30 @@ export const DocumentsLive = Layer.effect(
                    AND (a.kind = 'service' OR publisher.account_id IS NOT NULL)
                    AND (d.created_by = a.id OR editor.role = 'admin')
                ) THEN 1 ELSE 0 END)`,
-            )
-            .bind(guardId, principal.accountId, documentId, principal.workspaceId),
-          db.raw
-            .prepare(
-              `UPDATE documents
+              )
+              .bind(
+                guardId,
+                principal.accountId,
+                documentId,
+                principal.workspaceId,
+              ),
+            db.raw
+              .prepare(
+                `UPDATE documents
                   SET disabled_at = ?, disabled_reason = ?, updated_at = ?, revision = revision + 1
                 WHERE id = ?`,
-            )
-            .bind(disabled ? now : null, disabled ? (reason ?? null) : null, now, documentId),
-          db.raw.prepare(`DELETE FROM publication_guards WHERE id = ?`).bind(guardId),
-        ]).pipe(Effect.mapError(guardFailure))
+              )
+              .bind(
+                disabled ? now : null,
+                disabled ? (reason ?? null) : null,
+                now,
+                documentId,
+              ),
+            db.raw
+              .prepare(`DELETE FROM publication_guards WHERE id = ?`)
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(guardFailure))
         return yield* loadEditor(documentId, principal)
       })
 
@@ -885,7 +998,8 @@ export const DocumentsLive = Layer.effect(
       restore,
       disable: (documentId, principal, reason) =>
         setDisabled(documentId, principal, true, reason),
-      enable: (documentId, principal) => setDisabled(documentId, principal, false),
+      enable: (documentId, principal) =>
+        setDisabled(documentId, principal, false),
     }
   }),
 )

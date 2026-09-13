@@ -21,7 +21,8 @@ const REFUSALS: Readonly<Record<string, string>> = {
     'That destination is gone, archived, disabled, or not one you can read. Reload and pick another.',
   conflict:
     'The document changed while the move was running. Reload the page and retry.',
-  editor_required: 'Only the author or a workspace admin can move this document.',
+  editor_required:
+    'Only the author or a workspace admin can move this document.',
   publisher_required:
     'Moving needs a membership in this workspace. Ask an admin to add you back.',
 }

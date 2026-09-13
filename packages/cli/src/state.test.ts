@@ -14,7 +14,9 @@ const temporaryHomes: string[] = []
 
 afterEach(async () => {
   await Promise.all(
-    temporaryHomes.splice(0).map((home) => rm(home, { recursive: true, force: true })),
+    temporaryHomes
+      .splice(0)
+      .map((home) => rm(home, { recursive: true, force: true })),
   )
 })
 

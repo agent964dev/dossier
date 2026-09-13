@@ -18,17 +18,22 @@ import { requireData, RouteError } from '../-lib/guard'
 export const Route = createFileRoute('/dashboard/')({
   // `scope` is absent from the URL in the default view, so every other page
   // can link to `/dashboard` without carrying search state it does not own.
-  validateSearch: (search: Record<string, unknown>): { scope?: DocumentScope } =>
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { scope?: DocumentScope } =>
     search.scope === 'workspace' ? { scope: 'workspace' } : {},
-  loaderDeps: ({ search }) => ({ scope: search.scope ?? ('mine' as DocumentScope) }),
+  loaderDeps: ({ search }) => ({
+    scope: search.scope ?? ('mine' as DocumentScope),
+  }),
   loader: async ({ deps }) =>
-    requireData(await loadDashboard({ data: { scope: deps.scope } }), '/dashboard'),
+    requireData(
+      await loadDashboard({ data: { scope: deps.scope } }),
+      '/dashboard',
+    ),
   head: () => ({ meta: [{ title: 'Documents — dossier' }] }),
   component: DashboardPage,
   errorComponent: RouteError,
 })
-
-
 
 function DashboardPage() {
   const { viewer, nodes, shared, total, mine, scope, trashCount, truncated } =

@@ -38,7 +38,9 @@ function WorkspacePage() {
 
   async function run(
     key: string,
-    call: () => Promise<{ ok: true; message: string } | { ok: false; message: string }>,
+    call: () => Promise<
+      { ok: true; message: string } | { ok: false; message: string }
+    >,
   ) {
     setPending(key)
     setFeedback(null)
@@ -57,7 +59,11 @@ function WorkspacePage() {
   return (
     <AppShell viewer={viewer} subtitle="Workspace">
       <PageHeader
-        kicker={viewer.workspaceKind === 'team' ? 'Team workspace' : 'Personal workspace'}
+        kicker={
+          viewer.workspaceKind === 'team'
+            ? 'Team workspace'
+            : 'Personal workspace'
+        }
         title={viewer.workspaceName}
         description={
           viewer.admin
@@ -108,12 +114,18 @@ function WorkspacePage() {
                 className="flex min-w-0 flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
               >
                 <div className="flex min-w-0 flex-1 items-center gap-3">
-                  <Avatar name={member.name} src={member.pictureUrl} className="size-8" />
+                  <Avatar
+                    name={member.name}
+                    src={member.pictureUrl}
+                    className="size-8"
+                  />
                   <div className="min-w-0">
                     <p className="flex items-center gap-2 text-sm font-medium text-neutral-100">
                       <span className="truncate">{member.name}</span>
                       {member.accountId === viewer.accountId ? (
-                        <span className="text-micro-lg text-neutral-600">you</span>
+                        <span className="text-micro-lg text-neutral-600">
+                          you
+                        </span>
                       ) : null}
                       {member.kind === 'service' ? (
                         <Badge variant="muted">Service</Badge>
@@ -165,7 +177,10 @@ function WorkspacePage() {
                       size="icon-sm"
                       aria-label={`Remove ${member.name}`}
                       title={`Remove ${member.name}`}
-                      disabled={pending !== null || member.accountId === viewer.accountId}
+                      disabled={
+                        pending !== null ||
+                        member.accountId === viewer.accountId
+                      }
                       onClick={() =>
                         run(`remove:${member.accountId}`, () =>
                           removeMember({
@@ -181,7 +196,9 @@ function WorkspacePage() {
                     </Button>
                   </div>
                 ) : (
-                  <Badge variant={member.role === 'admin' ? 'default' : 'muted'}>
+                  <Badge
+                    variant={member.role === 'admin' ? 'default' : 'muted'}
+                  >
                     {member.role}
                   </Badge>
                 )}
@@ -223,7 +240,9 @@ function WorkspacePage() {
                 }}
               >
                 <div className="grid gap-1.5">
-                  <Label htmlFor="allow-value">Allow an address or domain</Label>
+                  <Label htmlFor="allow-value">
+                    Allow an address or domain
+                  </Label>
                   <Input
                     id="allow-value"
                     value={value}
@@ -253,8 +272,10 @@ function WorkspacePage() {
                 </div>
                 <p className="text-xs leading-ui text-neutral-600">
                   One address, or{' '}
-                  <span className="font-mono text-neutral-500">@example.com</span> to
-                  allow a whole verified domain.
+                  <span className="font-mono text-neutral-500">
+                    @example.com
+                  </span>{' '}
+                  to allow a whole verified domain.
                 </p>
               </form>
 
@@ -277,7 +298,9 @@ function WorkspacePage() {
                       </span>
                       <div className="min-w-0">
                         <p className="truncate font-mono text-xs text-neutral-200">
-                          {entry.kind === 'domain' ? `@${entry.value}` : entry.value}
+                          {entry.kind === 'domain'
+                            ? `@${entry.value}`
+                            : entry.value}
                         </p>
                         <p className="text-micro-lg mt-1 text-neutral-600">
                           {entry.role}

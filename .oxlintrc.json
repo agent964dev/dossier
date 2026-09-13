@@ -1,0 +1,22 @@
+{
+  "plugins": ["typescript", "react", "import", "unicorn"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "no-await-in-loop": "off",
+    "no-underscore-dangle": "off"
+  },
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    ".output",
+    "drizzle",
+    "apps/web/worker-configuration.d.ts",
+    "**/routeTree.gen.ts",
+    "upstream/**"
+  ]
+}
