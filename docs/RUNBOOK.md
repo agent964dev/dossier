@@ -367,7 +367,7 @@ schedule is deployed.
 6. **Confirm the weekly cron is deployed.**
 
    The top level of `apps/web/wrangler.jsonc` carries
-   `"triggers": { "crons": ["17 3 * * 0"] }` beside `"routes"`; the `env.dev`
+   `"triggers": { "crons": ["17 3 * * SUN"] }` beside `"routes"`; the `env.dev`
    block has the same schedule. Deploying production registers it:
 
    ```sh
@@ -376,7 +376,7 @@ schedule is deployed.
    bunx wrangler deploy
    ```
 
-   Expected: Wrangler reports the schedule `17 3 * * 0` for the deployed
+   Expected: Wrangler reports the schedule `17 3 * * SUN` for the deployed
    version. Paste back: the deployed version ID and the schedule line. To pause
    the schedule, remove the top-level `triggers` block and deploy; the admin
    command keeps working either way.
