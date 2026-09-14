@@ -18,9 +18,9 @@
   },
   "devDependencies": {
     "@effect/vitest": "0.30.0",
-    "@types/node": "22.20.2",
+    "@types/node": "26.5.1",
     "typescript": "7.0.2",
-    "vitest": "4.1.11",
+    "vitest": "5.0.0",
     "oxlint": "1.82.0",
     "oxfmt": "0.67.0"
   },
