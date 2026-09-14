@@ -65,6 +65,7 @@ jobs:
           cd /tmp/smoke
           npm init -y >/dev/null
           npm install /tmp/pack/*.tgz
+          test -s ./node_modules/@agent964/dossier/README.md
           ./node_modules/.bin/dossier --version
           ./node_modules/.bin/dossier --help >/dev/null
           unset DOSSIER_UPDATE_REGISTRY_URL
