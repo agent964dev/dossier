@@ -13,6 +13,7 @@ import { PublishLive } from './publish'
 import { PurgeLive } from './purge'
 import { ServingLive } from './serving'
 import { SharesLive } from './shares'
+import { StateLive } from './state'
 import { TreeLive } from './tree'
 import { SessionLive } from './session'
 import { ShooLive } from './shoo'
@@ -35,6 +36,7 @@ export const CoreServicesLive = Layer.mergeAll(
   DiffLive,
   ServingLive,
   SharesLive,
+  StateLive,
   TreeLive,
   WorkspaceLive,
 ).pipe(Layer.provideMerge(SignInLive))

@@ -42,6 +42,7 @@ export const SystemLive = HttpApiBuilder.group(
             ok: true as const,
             service: 'dossier' as const,
             version: buildVersion(),
+            features: ['state'],
           }
         }),
       )

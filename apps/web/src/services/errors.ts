@@ -12,6 +12,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   conflict: 409,
   batch_purged: 409,
   idempotency_conflict: 409,
+  state_not_enabled: 409,
   body_too_large: 413,
   policy_rejected: 422,
   rate_limited: 429,

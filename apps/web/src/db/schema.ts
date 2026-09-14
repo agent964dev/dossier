@@ -172,6 +172,7 @@ export const documents = sqliteTable(
     ),
     disabledAt: text('disabled_at'),
     disabledReason: text('disabled_reason'),
+    stateful: integer('stateful').notNull().default(0),
   },
   (table) => [
     check(
@@ -187,6 +188,7 @@ export const documents = sqliteTable(
       'documents_visibility_check',
       sql`${table.visibility} IS NULL OR ${table.visibility} IN ('public', 'team', 'private')`,
     ),
+    check('documents_stateful_check', sql`${table.stateful} IN (0, 1)`),
     index('documents_path_binary_idx').on(sql`${table.path} COLLATE BINARY`),
     index('documents_parent_deleted_idx').on(table.parentId, table.deletedAt),
     index('documents_workspace_deleted_updated_idx').on(
@@ -234,6 +236,7 @@ export const documentVersions = sqliteTable(
     ciActor: text('ci_actor'),
     idempotencyKey: text('idempotency_key'),
     requestHash: text('request_hash'),
+    stateFieldsJson: text('state_fields_json'),
   },
   (table) => [
     uniqueIndex('document_versions_object_key_unique').on(table.objectKey),
@@ -255,6 +258,72 @@ export const documentVersions = sqliteTable(
     ),
   ],
 )
+
+export const documentState = sqliteTable('document_state', {
+  documentId: text('document_id')
+    .primaryKey()
+    .references(() => documents.id),
+  revision: integer('revision').notNull().default(0),
+  updatedAt: text('updated_at'),
+  bytes: integer('bytes').notNull().default(0),
+})
+
+export const documentStateFields = sqliteTable(
+  'document_state_fields',
+  {
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    name: text('name').notNull(),
+    type: text('type').notNull(),
+    valueJson: text('value_json').notNull(),
+    revision: integer('revision').notNull(),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.documentId, table.name] }),
+    check(
+      'document_state_fields_type_check',
+      sql`${table.type} IN ('text', 'textarea', 'number', 'date', 'checkbox', 'radio', 'select', 'select-multiple', 'json')`,
+    ),
+  ],
+)
+
+export const documentStateGrants = sqliteTable(
+  'document_state_grants',
+  {
+    documentId: text('document_id')
+      .notNull()
+      .references(() => documents.id),
+    email: text('email').notNull(),
+    canSave: integer('can_save').notNull().default(1),
+    createdByAccountId: text('created_by_account_id')
+      .notNull()
+      .references(() => accounts.id),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.documentId, table.email] }),
+    index('document_state_grants_email_idx').on(table.email),
+    check(
+      'document_state_grants_can_save_check',
+      sql`${table.canSave} IN (0, 1)`,
+    ),
+  ],
+)
+
+export const documentEditLinks = sqliteTable('document_edit_links', {
+  documentId: text('document_id')
+    .primaryKey()
+    .references(() => documents.id),
+  generation: integer('generation').notNull().default(1),
+  createdByAccountId: text('created_by_account_id')
+    .notNull()
+    .references(() => accounts.id),
+  createdAt: text('created_at').notNull(),
+  revokedAt: text('revoked_at'),
+})
 
 export const documentShares = sqliteTable(
   'document_shares',

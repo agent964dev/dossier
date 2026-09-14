@@ -17,6 +17,7 @@ import {
   PurgeLive,
   ServingLive,
   SharesLive,
+  StateLive,
   TreeLive,
   SessionLayer,
   WorkerEnv,
@@ -68,6 +69,7 @@ export function makeCoreLayer(
   const documents = DocumentsLive.pipe(Layers.provide(auth))
   const serving = ServingLive.pipe(Layers.provide(auth))
   const shares = SharesLive.pipe(Layers.provide(auth))
+  const state = StateLive.pipe(Layers.provide(auth))
   const tree = TreeLive.pipe(Layers.provide(auth))
   const allowlist = AllowlistLive.pipe(Layers.provide(foundation))
   return Layers.mergeAll(
@@ -78,6 +80,7 @@ export function makeCoreLayer(
     documents,
     serving,
     shares,
+    state,
     tree,
     allowlist,
   )

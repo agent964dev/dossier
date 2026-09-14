@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { scanStateFields, type FieldType } from '@dossier/policy'
 import packageJson from '../package.json' with { type: 'json' }
 
 const exec = promisify(execFile)
@@ -37,6 +38,14 @@ interface StoredDocument {
   parentId: string | null
   authorAccountId: string
   authorName: string
+  stateful: boolean
+  stateRevision: number | null
+  stateUpdatedAt: string | null
+  stateData: Record<string, unknown>
+  stateFields: Record<
+    string,
+    { value: unknown; revision: number; type: FieldType }
+  >
   shares: string[]
   deletionBatchId: string | null
   deletionRootTitle: string | null
@@ -59,6 +68,7 @@ let nextId = 1
 let retryFailureSeen = false
 let redirectWasFollowed = false
 let uploadRequests = 0
+let healthRequests = 0
 let assetRequests = 0
 let lastDiffQuery = ''
 const workspaceMembers = [
@@ -118,6 +128,9 @@ function documentDto(id: string, stored: StoredDocument) {
     authorAccountId: stored.authorAccountId,
     authorName: stored.authorName,
     latestVersionNumber: stored.version,
+    stateful: stored.stateful,
+    stateRevision: stored.stateRevision,
+    stateUpdatedAt: stored.stateUpdatedAt,
     disabled: false,
     url: `${apiUrl}/d/${id}`,
     rawUrl: `${apiUrl}/d/${id}/raw`,
@@ -149,6 +162,9 @@ function readerDto(id: string, stored: StoredDocument) {
     authorAccountId: document.authorAccountId,
     authorName: document.authorName,
     latestVersionNumber: document.latestVersionNumber,
+    stateful: document.stateful,
+    stateRevision: document.stateRevision,
+    stateUpdatedAt: document.stateUpdatedAt,
     disabled: document.disabled,
     url: document.url,
     rawUrl: document.rawUrl,
@@ -174,12 +190,21 @@ function storedDocument(
     parentId: null,
     authorAccountId: 'acct_test',
     authorName: 'Test User',
+    stateful: false,
+    stateRevision: null,
+    stateUpdatedAt: null,
+    stateData: {},
+    stateFields: {},
     shares: [],
     deletionBatchId: null,
     deletionRootTitle: null,
     deletedBy: null,
     ...overrides,
   }
+}
+
+function statefulHtml(title: string): string {
+  return `<!doctype html><html><head><title>${title}</title></head><body><label>Objective <input data-state="objective" value="Launch"></label><label><input type="checkbox" data-state="approved"> Approved</label><textarea data-state="notes"></textarea></body></html>`
 }
 
 function descendantIds(rootId: string): string[] {
@@ -238,9 +263,17 @@ beforeAll(async () => {
     }
 
     if (url.pathname === '/api/healthz') {
+      healthRequests += 1
       response.setHeader('content-type', 'application/json')
       response.end(
-        JSON.stringify({ ok: true, service: 'dossier', version: '0.0.0' }),
+        JSON.stringify({
+          ok: true,
+          service: 'dossier',
+          version: '0.0.0',
+          ...(request.headers.authorization === 'Bearer ds_legacy'
+            ? {}
+            : { features: ['state'] }),
+        }),
       )
       return
     }
@@ -423,6 +456,22 @@ beforeAll(async () => {
         return
       }
       const payload = await bodyJson(request)
+      if (payload.filename === 'server-policy.html') {
+        response.statusCode = 422
+        response.end(
+          JSON.stringify({
+            ok: false,
+            code: 'policy_rejected',
+            message: 'HTML failed the saved-values field policy.',
+            details: {
+              errors: [
+                'data-state "notes" is declared twice: line 3 col 3 and line 4 col 3',
+              ],
+            },
+          }),
+        )
+        return
+      }
       const requestedId =
         typeof payload.documentId === 'string' ? payload.documentId : undefined
       if (typeof payload.idempotencyKey === 'string')
@@ -457,6 +506,20 @@ beforeAll(async () => {
         )
         return
       }
+      const stateful = payload.stateful === true || previous?.stateful === true
+      const stateScan =
+        payload.stateful === true
+          ? scanStateFields(String(payload.html))
+          : undefined
+      const authoredFields = Object.fromEntries(
+        (stateScan?.fields ?? []).map((field) => [
+          field.name,
+          { value: field.default, revision: 0, type: field.type },
+        ]),
+      )
+      const authoredData = Object.fromEntries(
+        (stateScan?.fields ?? []).map((field) => [field.name, field.default]),
+      )
       const stored: StoredDocument = {
         html: Buffer.from(String(payload.html), 'utf8'),
         version: (previous?.version ?? 0) + 1,
@@ -479,6 +542,13 @@ beforeAll(async () => {
             : (previous?.parentId ?? null),
         authorAccountId: previous?.authorAccountId ?? 'acct_test',
         authorName: previous?.authorName ?? 'Test User',
+        stateful,
+        stateRevision: stateful ? (previous?.stateRevision ?? 0) : null,
+        stateUpdatedAt: stateful ? (previous?.stateUpdatedAt ?? null) : null,
+        stateData:
+          previous?.stateful === true ? previous.stateData : authoredData,
+        stateFields:
+          previous?.stateful === true ? previous.stateFields : authoredFields,
         shares:
           Array.isArray(payload.shares) &&
           payload.shares.every((email) => typeof email === 'string')
@@ -501,6 +571,47 @@ beforeAll(async () => {
           draftId: id,
           publicUrl: document.url,
           rawUrl: document.rawUrl,
+        }),
+      )
+      return
+    }
+
+    const stateApi = /^\/api\/documents\/([a-z0-9]{12})\/state$/.exec(
+      url.pathname,
+    )
+    if (stateApi && request.method === 'GET') {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const id = stateApi[1]!
+      const stored = documents.get(id)
+      if (!stored) {
+        response.statusCode = 404
+        response.end(JSON.stringify({ ok: false, code: 'not_found' }))
+        return
+      }
+      if (!stored.stateful) {
+        response.statusCode = 409
+        response.end(
+          JSON.stringify({
+            ok: false,
+            code: 'state_not_enabled',
+            message: 'Saved values are not enabled for this document',
+          }),
+        )
+        return
+      }
+      response.end(
+        JSON.stringify({
+          documentId: id,
+          version: stored.version,
+          revision: stored.stateRevision,
+          updatedAt: stored.stateUpdatedAt,
+          data: stored.stateData,
+          fields: stored.stateFields,
         }),
       )
       return
@@ -975,7 +1086,12 @@ describe('built CLI', () => {
   it('runs under Node and Bun', async () => {
     const node = await cli('node', ['health', '--api-url', apiUrl, '--json'])
     expect(node).toEqual({
-      stdout: `${JSON.stringify({ ok: true, service: 'dossier', version: '0.0.0' })}\n`,
+      stdout: `${JSON.stringify({
+        ok: true,
+        service: 'dossier',
+        version: '0.0.0',
+        features: ['state'],
+      })}\n`,
       stderr: '',
       exitCode: 0,
     })
@@ -985,6 +1101,7 @@ describe('built CLI', () => {
       ok: true,
       service: 'dossier',
       version: '0.0.0',
+      features: ['state'],
     })
   })
 
@@ -1003,6 +1120,7 @@ describe('built CLI', () => {
       ok: true,
       service: 'dossier',
       version: '0.0.0',
+      features: ['state'],
     })
   })
 
@@ -1119,6 +1237,58 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     expect(result.stderr).toContain(`dossier: policy rejected ${file}\n`)
     expect(result.stderr).toContain('  - Blocked <form> tag found.')
     expect(result.stderr).not.toContain('not authenticated')
+  })
+
+  it('rejects invalid saved-value fields before upload', async () => {
+    const home = await temporaryHome()
+    const file = join(home, 'duplicate-state.html')
+    await writeFile(
+      file,
+      `<!doctype html>
+<html><head><title>Duplicate state</title></head><body>
+  <input data-state="notes">
+  <textarea data-state="notes"></textarea>
+</body></html>`,
+      'utf8',
+    )
+    const before = uploadRequests
+    const result = await cli(
+      'node',
+      ['upload', file, '--stateful', '--new', '--api-url', apiUrl],
+      { home },
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(`dossier: policy rejected ${file}
+`)
+    expect(result.stderr).toContain(
+      'data-state "notes" is declared twice: line 3 col 3 and line 4 col 3',
+    )
+    expect(uploadRequests).toBe(before)
+  })
+
+  it('renders server-side policy error details', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'server-policy.html')
+    await writeFile(
+      file,
+      '<!doctype html><html><head><title>Server policy</title></head><body></body></html>',
+      'utf8',
+    )
+    const result = await cli(
+      'node',
+      ['upload', file, '--new', '--api-url', apiUrl],
+      { home },
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(
+      'HTML failed the saved-values field policy.\n',
+    )
+    expect(result.stderr).toContain(
+      '  - data-state "notes" is declared twice: line 3 col 3 and line 4 col 3',
+    )
   })
 
   it('defers foreign stylesheet allowlists to the server', async () => {
@@ -1349,6 +1519,215 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
         (asset: { slug: string }) => asset.slug === 'shared-theme',
       ),
     ).toBe(false)
+  })
+
+  it('uploads stateful documents in human, JSON, and quiet modes', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+
+    const humanFile = join(home, 'stateful-human.html')
+    await writeFile(humanFile, statefulHtml('Stateful human'), 'utf8')
+    const beforeHealth = healthRequests
+    const human = await cli(
+      'node',
+      ['upload', humanFile, '--stateful', '--new', '--api-url', apiUrl],
+      { home },
+    )
+    expect(human.exitCode).toBe(0)
+    expect(human.stderr).toBe('')
+    expect(human.stdout).toContain(
+      'State: enabled, one shared set of saved values\n',
+    )
+    expect(human.stdout).toContain('Last saved: never\n')
+    expect(healthRequests).toBe(beforeHealth + 1)
+
+    await writeFile(humanFile, statefulHtml('Stateful update'), 'utf8')
+    const continued = await cli(
+      'node',
+      ['upload', humanFile, '--api-url', apiUrl],
+      { home },
+    )
+    expect(continued.exitCode).toBe(0)
+    expect(continued.stderr).toBe('')
+    expect(continued.stdout).toContain('Updated\n')
+    expect(continued.stdout).toContain(
+      'State: enabled, one shared set of saved values\n',
+    )
+    expect(continued.stdout).toContain('Last saved: never\n')
+
+    const jsonFile = join(home, 'stateful-json.html')
+    await writeFile(jsonFile, statefulHtml('Stateful JSON'), 'utf8')
+    const json = await cli(
+      'node',
+      ['upload', jsonFile, '--stateful', '--new', '--json'],
+      { home },
+    )
+    expect(json.exitCode).toBe(0)
+    expect(json.stderr).toBe('')
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      created: true,
+      stateful: true,
+      stateRevision: 0,
+      stateUpdatedAt: null,
+    })
+
+    const quietFile = join(home, 'stateful-quiet.html')
+    await writeFile(quietFile, statefulHtml('Stateful quiet'), 'utf8')
+    const quiet = await cli(
+      'node',
+      ['upload', quietFile, '--stateful', '--new', '--quiet'],
+      { home },
+    )
+    expect(quiet).toEqual({
+      stdout: expect.stringMatching(
+        /^http:\/\/127\.0\.0\.1:\d+\/d\/[a-z0-9]{12}\n$/,
+      ),
+      stderr: '',
+      exitCode: 0,
+    })
+  })
+
+  it('reads saved values in human, JSON, and quiet modes', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'stateget0001',
+      storedDocument('State values.html', {
+        version: 3,
+        stateful: true,
+        stateRevision: 7,
+        stateUpdatedAt: '2026-09-14T07:42:00Z',
+        stateData: {
+          objective: 'Launch the new website',
+          approved: false,
+          notes: '',
+        },
+        stateFields: {
+          objective: {
+            value: 'Launch the new website',
+            revision: 3,
+            type: 'text',
+          },
+          approved: { value: false, revision: 0, type: 'checkbox' },
+          notes: { value: '', revision: 7, type: 'textarea' },
+        },
+      }),
+    )
+
+    const human = await cli('node', ['state', 'get', 'stateget0001'], {
+      home,
+    })
+    expect(human.exitCode).toBe(0)
+    expect(human.stderr).toBe('')
+    expect(human.stdout).toContain('Values:\n{\n')
+    expect(human.stdout).toContain('  "approved": false')
+    expect(human.stdout).toContain('  "notes": ""')
+    expect(human.stdout).toContain('Revision: 7\n')
+    expect(human.stdout).toContain('Last saved: 2026-09-14T07:42:00Z\n')
+
+    const json = await cli(
+      'node',
+      ['state', 'get', `${apiUrl}/d/stateget0001/v/3`, '--json'],
+      { home },
+    )
+    expect(json.exitCode).toBe(0)
+    expect(json.stderr).toBe('')
+    expect(JSON.parse(json.stdout)).toEqual({
+      documentId: 'stateget0001',
+      version: 3,
+      revision: 7,
+      updatedAt: '2026-09-14T07:42:00Z',
+      data: {
+        objective: 'Launch the new website',
+        approved: false,
+        notes: '',
+      },
+      fields: {
+        objective: {
+          value: 'Launch the new website',
+          revision: 3,
+          type: 'text',
+        },
+        approved: { value: false, revision: 0, type: 'checkbox' },
+        notes: { value: '', revision: 7, type: 'textarea' },
+      },
+    })
+
+    const quiet = await cli(
+      'node',
+      ['state', 'get', 'stateget0001', '--quiet'],
+      { home },
+    )
+    expect(quiet).toEqual({ stdout: '', stderr: '', exitCode: 0 })
+  })
+
+  it('preserves __proto__ through the derived state client', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'stateproto01',
+      storedDocument('Special state.html', {
+        stateful: true,
+        stateRevision: 0,
+        stateData: JSON.parse('{"__proto__":"keep me"}'),
+        stateFields: JSON.parse(
+          '{"__proto__":{"value":"keep me","revision":0,"type":"text"}}',
+        ),
+      }),
+    )
+
+    const result = await cli(
+      'node',
+      ['state', 'get', 'stateproto01', '--json'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    const response = JSON.parse(result.stdout) as {
+      data: Record<string, unknown>
+      fields: Record<string, unknown>
+    }
+    expect(Object.hasOwn(response.data, '__proto__')).toBe(true)
+    expect(response.data.__proto__).toBe('keep me')
+    expect(Object.hasOwn(response.fields, '__proto__')).toBe(true)
+  })
+
+  it('explains ordinary documents and legacy deployments for saved values', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('stateoff0001', storedDocument('Ordinary.html'))
+
+    const ordinary = await cli('node', ['state', 'get', 'stateoff0001'], {
+      home,
+    })
+    expect(ordinary.exitCode).toBe(1)
+    expect(ordinary.stderr).toContain(
+      'Saved values are not enabled for this document',
+    )
+
+    const file = join(home, 'legacy-stateful.html')
+    await writeFile(file, statefulHtml('Legacy deployment'), 'utf8')
+    const beforeUploads = uploadRequests
+    const legacyUpload = await cli(
+      'node',
+      ['upload', file, '--stateful', '--new', '--api-url', apiUrl],
+      { home, env: { DOSSIER_API_KEY: 'ds_legacy' } },
+    )
+    expect(legacyUpload.exitCode).toBe(1)
+    expect(legacyUpload.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+    expect(uploadRequests).toBe(beforeUploads)
+
+    const legacyGet = await cli(
+      'node',
+      ['state', 'get', 'stateget0001', '--api-url', apiUrl],
+      { home, env: { DOSSIER_API_KEY: 'ds_legacy' } },
+    )
+    expect(legacyGet.exitCode).toBe(1)
+    expect(legacyGet.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
   })
 
   it('creates then updates through the origin-account-path mapping', async () => {

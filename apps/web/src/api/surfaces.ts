@@ -34,6 +34,7 @@ import {
   Principal,
   Publish,
   Shares,
+  State,
   Tree,
   type PrincipalIdentity,
   WorkerEnv,
@@ -447,6 +448,34 @@ const DocumentsLive = HttpApiBuilder.group(
       ),
 )
 
+const StateLive = HttpApiBuilder.group(DossierApi, 'state', (handlers) =>
+  handlers.handleRaw('get', ({ path }) =>
+    withApiErrors(
+      Effect.gen(function* () {
+        const { principal } = yield* ApiRequest
+        const state = yield* State
+        const snapshot = yield* state.read(path.id, {
+          kind: 'account',
+          principal,
+        })
+        return jsonServerResponse({
+          documentId: snapshot.documentId,
+          version: snapshot.version,
+          revision: snapshot.revision,
+          updatedAt: snapshot.updatedAt,
+          data: Object.fromEntries(
+            Object.entries(snapshot.fields).map(([name, field]) => [
+              name,
+              field.value,
+            ]),
+          ),
+          fields: snapshot.fields,
+        })
+      }),
+    ),
+  ),
+)
+
 interface ApiKeyRow {
   readonly id: string
   readonly name: string
@@ -770,6 +799,7 @@ const GroupsLive = Layer.mergeAll(
   UploadsLive,
   AssetsLive,
   DocumentsLive,
+  StateLive,
   KeysLive,
   WorkspaceLive,
   MeLive,

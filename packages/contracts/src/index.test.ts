@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ApiError,
+  DocumentReader,
+  FieldType,
   HealthzResponse,
   PolicyResult,
   PolicyStats,
+  StateResponse,
   UploadRequest,
 } from './index'
 
@@ -18,6 +21,64 @@ describe('shared contracts', () => {
         version: '0.0.0',
       }),
     ).toEqual({ ok: true, service: 'dossier', version: '0.0.0' })
+    expect(
+      Schema.decodeUnknownSync(HealthzResponse)({
+        ok: true,
+        service: 'dossier',
+        version: '0.0.0',
+        features: ['state'],
+      }),
+    ).toMatchObject({ features: ['state'] })
+  })
+
+  it('decodes the saved-value contract additions', () => {
+    const response = {
+      documentId: 'abcdefghijkl',
+      version: 1,
+      revision: 0,
+      updatedAt: null,
+      data: { approved: false, notes: '' },
+      fields: {
+        approved: { value: false, revision: 0, type: 'checkbox' },
+        notes: { value: '', revision: 0, type: 'textarea' },
+      },
+    }
+
+    expect(Schema.decodeUnknownSync(FieldType)('select-multiple')).toBe(
+      'select-multiple',
+    )
+    expect(Schema.decodeUnknownSync(StateResponse)(response)).toEqual(response)
+
+    const specialName = Schema.decodeUnknownSync(StateResponse)({
+      ...response,
+      data: JSON.parse('{"__proto__":"keep me"}'),
+      fields: JSON.parse(
+        '{"__proto__":{"value":"keep me","revision":0,"type":"text"}}',
+      ),
+    })
+    expect(Object.hasOwn(specialName.data, '__proto__')).toBe(true)
+    expect(specialName.data.__proto__).toBe('keep me')
+    expect(Object.hasOwn(specialName.fields, '__proto__')).toBe(true)
+    expect(specialName.fields.__proto__).toEqual({
+      value: 'keep me',
+      revision: 0,
+      type: 'text',
+    })
+    expect(Schema.decodeUnknownSync(DocumentReader.fields.stateful)(true)).toBe(
+      true,
+    )
+    expect(
+      Schema.decodeUnknownSync(DocumentReader.fields.stateRevision)(null),
+    ).toBeNull()
+    expect(
+      Schema.decodeUnknownSync(DocumentReader.fields.stateUpdatedAt)(null),
+    ).toBeNull()
+    expect(
+      Schema.decodeUnknownSync(UploadRequest)({
+        html: '<!doctype html><title>stateful</title>',
+        stateful: true,
+      }),
+    ).toMatchObject({ stateful: true })
   })
 
   it('re-exports the policy schemas', () => {
@@ -84,5 +145,11 @@ describe('shared contracts', () => {
         message: 'already used',
       }),
     ).toMatchObject({ code: 'idempotency_conflict' })
+    expect(
+      Schema.decodeUnknownSync(ApiError)({
+        ok: false,
+        code: 'state_not_enabled',
+      }),
+    ).toMatchObject({ code: 'state_not_enabled' })
   })
 })

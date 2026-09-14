@@ -13,3 +13,16 @@ export type {
   PolicyResult as PolicyResultType,
   PolicyStats as PolicyStatsType,
 } from './schema'
+
+export {
+  FieldType,
+  StateField,
+  StateScan,
+  scanStateFields,
+  statefulHtmlErrors,
+} from './state'
+export type {
+  FieldType as FieldTypeType,
+  StateField as StateFieldType,
+  StateScan as StateScanType,
+} from './state'

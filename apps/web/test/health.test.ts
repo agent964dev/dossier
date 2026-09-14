@@ -17,10 +17,12 @@ describe('worker health route', () => {
       ok: boolean
       service: string
       version: string
+      features: string[]
     }
     expect(body.ok).toBe(true)
     expect(body.service).toBe('dossier')
     // Vite injects the git commit at build time; the test runner has no define.
     expect(body.version).toBe('unknown')
+    expect(body.features).toEqual(['state'])
   })
 })

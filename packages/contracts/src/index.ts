@@ -21,6 +21,52 @@ const Revision = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 export const DocumentId = Schema.String.pipe(Schema.pattern(/^[a-z0-9]{12}$/))
 export type DocumentId = typeof DocumentId.Type
 
+export const FieldType = Schema.Literal(
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'checkbox',
+  'radio',
+  'select',
+  'select-multiple',
+  'json',
+)
+export type FieldType = typeof FieldType.Type
+
+export const StateFieldValue = Schema.Struct({
+  value: Schema.Unknown,
+  revision: Schema.Number,
+  type: FieldType,
+})
+export type StateFieldValue = typeof StateFieldValue.Type
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function recordOf<A, I, R>(valueSchema: Schema.Schema<A, I, R>) {
+  const isValue = Schema.is(valueSchema)
+  return Schema.Unknown.pipe(
+    Schema.filter(
+      (value): value is Readonly<Record<string, A>> =>
+        isRecord(value) &&
+        Object.keys(value).every((key) => isValue(value[key])),
+      { jsonSchema: { type: 'object' } },
+    ),
+  )
+}
+
+export const StateResponse = Schema.Struct({
+  documentId: DocumentId,
+  version: Schema.Number,
+  revision: Schema.Number,
+  updatedAt: Schema.NullOr(Schema.String),
+  data: recordOf(Schema.Unknown),
+  fields: recordOf(StateFieldValue),
+})
+export type StateResponse = typeof StateResponse.Type
+
 export const Visibility = Schema.Literal('public', 'team', 'private')
 export type Visibility = typeof Visibility.Type
 
@@ -52,6 +98,9 @@ export const DocumentReader = Schema.Struct({
   authorAccountId: Schema.String,
   authorName: Schema.String,
   latestVersionNumber: Schema.Number,
+  stateful: Schema.Boolean,
+  stateRevision: Schema.NullOr(Schema.Number),
+  stateUpdatedAt: Schema.NullOr(Schema.String),
   disabled: Schema.Boolean,
   url: Schema.String,
   rawUrl: Schema.String,
@@ -169,6 +218,7 @@ export const UploadRequest = Schema.Struct({
   parentId: Schema.optional(Schema.NullOr(DocumentId)),
   kind: OptionalNullableString,
   visibility: Schema.optional(Schema.NullOr(Visibility)),
+  stateful: Schema.optional(Schema.Boolean),
   description: OptionalNullableString,
   shares: Schema.optional(Schema.Array(Schema.String)),
   metadata: Schema.optional(UploadMetadata),
@@ -455,6 +505,8 @@ export const PolicyRejectedError = errorSchema('policy_rejected')
 export const RateLimitedError = errorSchema('rate_limited')
 export const DiffTooLargeError = errorSchema('diff_too_large')
 export type DiffTooLargeError = typeof DiffTooLargeError.Type
+export const StateNotEnabledError = errorSchema('state_not_enabled')
+export type StateNotEnabledError = typeof StateNotEnabledError.Type
 
 export const ApiError = Schema.Union(
   UnauthenticatedError,
@@ -468,6 +520,7 @@ export const ApiError = Schema.Union(
   BodyTooLargeError,
   PolicyRejectedError,
   RateLimitedError,
+  StateNotEnabledError,
 )
 export type ApiError = typeof ApiError.Type
 
@@ -508,6 +561,7 @@ export const HealthzResponse = Schema.Struct({
   ok: Schema.Literal(true),
   service: Schema.Literal('dossier'),
   version: Schema.String,
+  features: Schema.optional(Schema.Array(Schema.String)),
 })
 export type HealthzResponse = typeof HealthzResponse.Type
 
@@ -556,6 +610,14 @@ export const AssetsApiGroup = HttpApiGroup.make('assets')
   )
 
 const DocumentPath = Schema.Struct({ id: DocumentId })
+
+export const StateApiGroup = HttpApiGroup.make('state').add(
+  HttpApiEndpoint.get('get', '/api/documents/:id/state')
+    .setPath(DocumentPath)
+    .addSuccess(StateResponse)
+    .addError(StateNotEnabledError, { status: 409 }),
+)
+
 const RestorePayload = Schema.Struct({ batchId: Schema.String })
 const DisablePayload = Schema.Struct({ reason: OptionalNullableString })
 
@@ -701,6 +763,7 @@ export const SystemApi = HttpApi.make('dossier').add(SystemApiGroup)
 export const DossierApi = SystemApi.add(UploadsApiGroup)
   .add(AssetsApiGroup)
   .add(DocumentsApiGroup)
+  .add(StateApiGroup)
   .add(KeysApiGroup)
   .add(WorkspaceApiGroup)
   .add(MeApiGroup)

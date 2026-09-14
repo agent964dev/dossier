@@ -36,6 +36,9 @@ export interface DocumentRow {
   latest_version_number: number | null
   version_count: number
   revision: number
+  stateful: number
+  state_revision: number | null
+  state_updated_at: string | null
   deletion_batch_id: string | null
   deletion_root_title: string | null
   deleted_at: string | null
@@ -86,6 +89,9 @@ export function toDocumentReader(
     authorAccountId: row.author_account_id,
     authorName: row.author_name,
     latestVersionNumber: row.latest_version_number ?? 0,
+    stateful: row.stateful === 1,
+    stateRevision: row.state_revision,
+    stateUpdatedAt: row.state_updated_at,
     disabled: row.disabled_at !== null,
     url: `${origin}/d/${row.id}`,
     rawUrl: `${origin}/d/${row.id}/raw`,
@@ -126,13 +132,16 @@ export async function loadDocumentRow(
               d.created_by AS author_account_id, a.name AS author_name,
               cv.version_number AS latest_version_number,
               (SELECT COUNT(*) FROM document_versions v WHERE v.document_id = d.id) AS version_count,
-              d.revision, d.deletion_batch_id, b.root_title AS deletion_root_title,
-              d.deleted_at, deleter.name AS deleted_by, d.disabled_at,
-              d.created_at, d.updated_at
+              d.revision, d.stateful, state.revision AS state_revision,
+              state.updated_at AS state_updated_at, d.deletion_batch_id,
+              b.root_title AS deletion_root_title, d.deleted_at,
+              deleter.name AS deleted_by, d.disabled_at, d.created_at,
+              d.updated_at
          FROM documents d
          JOIN workspaces w ON w.id = d.workspace_id
          JOIN accounts a ON a.id = d.created_by
     LEFT JOIN document_versions cv ON cv.id = d.current_version_id
+    LEFT JOIN document_state state ON state.document_id = d.id
     LEFT JOIN deletion_batches b ON b.id = d.deletion_batch_id
     LEFT JOIN accounts deleter ON deleter.id = b.account_id
         WHERE d.id = ?
@@ -480,7 +489,10 @@ export const DocumentsLive = Layer.effect(
                           cv.version_number AS latest_version_number,
                           (SELECT COUNT(*) FROM document_versions v
                             WHERE v.document_id = d.id) AS version_count,
-                          d.revision, d.deletion_batch_id,
+                          d.revision, d.stateful,
+                          state.revision AS state_revision,
+                          state.updated_at AS state_updated_at,
+                          d.deletion_batch_id,
                           batch.root_title AS deletion_root_title,
                           d.deleted_at, deleter.name AS deleted_by, d.disabled_at,
                           d.created_at, d.updated_at,
@@ -491,6 +503,7 @@ export const DocumentsLive = Layer.effect(
                      JOIN workspaces w ON w.id = d.workspace_id
                      JOIN accounts a ON a.id = d.created_by
                 LEFT JOIN document_versions cv ON cv.id = d.current_version_id
+                LEFT JOIN document_state state ON state.document_id = d.id
                 LEFT JOIN deletion_batches batch ON batch.id = d.deletion_batch_id
                 LEFT JOIN accounts deleter ON deleter.id = batch.account_id
                     WHERE decision.can_read = 1`,

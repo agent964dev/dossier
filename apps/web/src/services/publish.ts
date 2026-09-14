@@ -3,7 +3,7 @@ import type {
   UploadRequest,
   UploadResponse,
 } from '@dossier/contracts'
-import { validateHtml } from '@dossier/policy'
+import { scanStateFields, validateHtml } from '@dossier/policy'
 import { Context, Effect, Layer } from 'effect'
 
 import { Access, accessBindValues, accessCteSql } from './access'
@@ -27,6 +27,7 @@ type IdempotencyRow = {
   version_number: number
   request_hash: string | null
   receipt_json: string | null
+  state_fields_json: string | null
 }
 
 function commaSeparatedHosts(value: string): string[] {
@@ -152,7 +153,7 @@ export const PublishLive = Layer.effect(
           db.raw
             .prepare(
               `SELECT v.id, v.document_id, v.version_number, v.request_hash,
-                      e.metadata_json AS receipt_json
+                      v.state_fields_json, e.metadata_json AS receipt_json
                  FROM document_versions v
             LEFT JOIN upload_events e
                    ON e.document_version_id = v.id AND e.event_type = 'published'
@@ -297,13 +298,15 @@ export const PublishLive = Layer.effect(
         }
         const normalizedKind = yield* normalizeDocumentKind(payload.kind)
         const targetId = payload.documentId ?? legacyId
+        let targetStateful = false
         if (targetId) {
           yield* access.requireEditor(targetId, principal)
           const target = yield* Effect.tryPromise({
             try: () =>
               db.raw
                 .prepare(
-                  `SELECT workspace_id, parent_id, deleted_at, disabled_at
+                  `SELECT workspace_id, parent_id, deleted_at, disabled_at,
+                          stateful
                      FROM documents WHERE id = ? LIMIT 1`,
                 )
                 .bind(targetId)
@@ -312,6 +315,7 @@ export const PublishLive = Layer.effect(
                   parent_id: string | null
                   deleted_at: string | null
                   disabled_at: string | null
+                  stateful: number
                 }>(),
             catch: (cause) =>
               new PersistenceError({
@@ -329,6 +333,7 @@ export const PublishLive = Layer.effect(
               apiError('not_found', 'Document not found.'),
             )
           }
+          targetStateful = target.stateful === 1
           if (
             hasOwn(payload, 'parentId') &&
             (payload.parentId ?? null) !== target.parent_id
@@ -389,12 +394,21 @@ export const PublishLive = Layer.effect(
           }
         }
 
+        const willBeStateful = payload.stateful === true || targetStateful
+        const previous =
+          payload.idempotencyKey !== undefined && principal.apiKeyId
+            ? yield* findIdempotency(principal.apiKeyId, payload.idempotencyKey)
+            : null
+        const requestStateful =
+          payload.stateful === true ||
+          (previous ? previous.state_fields_json !== null : targetStateful)
         const policy = validateHtml(payload.html, {
           maxBytes: positiveInteger(env.MAX_HTML_BYTES, 'MAX_HTML_BYTES'),
           publicOrigin: env.PUBLIC_BASE_URL,
           styleHostAllowlist: commaSeparatedHosts(env.STYLE_HOST_ALLOWLIST),
           embedHostAllowlist: commaSeparatedHosts(env.EMBED_HOST_ALLOWLIST),
           scriptHostAllowlist: commaSeparatedHosts(env.SCRIPT_HOST_ALLOWLIST),
+          stateful: requestStateful,
         })
         if (!policy.ok) {
           return yield* Effect.fail(
@@ -409,6 +423,21 @@ export const PublishLive = Layer.effect(
           )
         }
 
+        const stateScan = requestStateful ? scanStateFields(payload.html) : null
+        if (stateScan !== null && !stateScan.ok) {
+          return yield* Effect.fail(
+            apiError(
+              'policy_rejected',
+              'HTML failed the saved-values field policy.',
+              {
+                errors: stateScan.errors,
+                warnings: policy.warnings,
+              },
+            ),
+          )
+        }
+        const manifest = stateScan?.fields ?? null
+        const manifestJson = manifest === null ? null : JSON.stringify(manifest)
         const htmlBytes = new TextEncoder().encode(payload.html)
         const contentHash = yield* ids.sha256Hex(htmlBytes)
         const requestHash = yield* ids.sha256Hex(
@@ -422,25 +451,21 @@ export const PublishLive = Layer.effect(
             shares: canonicalField(payload, 'shares'),
             metadata: canonicalField(payload, 'metadata'),
             filename: canonicalField(payload, 'filename'),
+            stateful: requestStateful,
+            manifest,
           }),
         )
 
-        if (payload.idempotencyKey !== undefined && principal.apiKeyId) {
-          const previous = yield* findIdempotency(
-            principal.apiKeyId,
-            payload.idempotencyKey,
-          )
-          if (previous) {
-            if (previous.request_hash !== requestHash) {
-              return yield* Effect.fail(
-                apiError(
-                  'idempotency_conflict',
-                  'The idempotency key was already used for a different request.',
-                ),
-              )
-            }
-            return yield* receipt(previous, policy.warnings, principal)
+        if (previous) {
+          if (previous.request_hash !== requestHash) {
+            return yield* Effect.fail(
+              apiError(
+                'idempotency_conflict',
+                'The idempotency key was already used for a different request.',
+              ),
+            )
           }
+          return yield* receipt(previous, policy.warnings, principal)
         }
 
         const documentId = targetId ?? ids.documentId()
@@ -485,6 +510,7 @@ export const PublishLive = Layer.effect(
                      ON editor.workspace_id = d.workspace_id AND editor.account_id = a.id
                    WHERE d.id = ? AND d.workspace_id = ?
                      AND d.deleted_at IS NULL AND d.disabled_at IS NULL
+                     AND d.stateful = ?
                      AND (a.kind = 'service' OR publisher.account_id IS NOT NULL)
                      AND (d.created_by = a.id OR editor.role = 'admin')
                  ) THEN 1 ELSE 0 END)`,
@@ -494,6 +520,7 @@ export const PublishLive = Layer.effect(
                 principal.accountId,
                 documentId,
                 principal.workspaceId,
+                targetStateful ? 1 : 0,
               ),
           )
         } else if (
@@ -593,6 +620,23 @@ export const PublishLive = Layer.effect(
               ),
           )
         }
+        if (willBeStateful) {
+          statements.push(
+            db.raw
+              .prepare(
+                `UPDATE documents
+                    SET stateful = 1
+                  WHERE id = ? AND stateful = 0`,
+              )
+              .bind(documentId),
+            db.raw
+              .prepare(
+                `INSERT OR IGNORE INTO document_state (document_id)
+                 VALUES (?)`,
+              )
+              .bind(documentId),
+          )
+        }
         statements.push(
           db.raw
             .prepare(
@@ -610,9 +654,9 @@ export const PublishLive = Layer.effect(
                   git_commit_sha, git_commit_subject, git_dirty,
                   original_filename, has_inline_script, external_image_hosts,
                   stylesheet_refs, ci_run_url, ci_actor, idempotency_key,
-                  request_hash)
+                  request_hash, state_fields_json)
                SELECT ?, id, next_version_number - 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                  FROM documents WHERE id = ?`,
             )
             .bind(
@@ -641,6 +685,7 @@ export const PublishLive = Layer.effect(
               metadata?.ciActor ?? null,
               payload.idempotencyKey ?? null,
               requestHash,
+              manifestJson,
               documentId,
             ),
           db.raw
@@ -749,17 +794,18 @@ export const PublishLive = Layer.effect(
         const batchResult = yield* db.batch(statements).pipe(Effect.either)
         if (batchResult._tag === 'Left') {
           const failure = batchResult.left
-          const idempotencyConflict =
-            isIdempotencyUniqueFailure(failure) &&
-            payload.idempotencyKey !== undefined &&
-            principal.apiKeyId !== undefined
-
-          if (idempotencyConflict) {
-            // The uniqueness response proves this attempt rolled back. Its R2
-            // object cannot be the winner's because object keys are per attempt.
+          const definiteRollback = isDefiniteRollbackFailure(failure)
+          if (definiteRollback) {
             yield* objects
               .delete(objectKey)
               .pipe(Effect.catchAll(() => Effect.void))
+          }
+
+          const recoverableIdempotencyRace =
+            (isIdempotencyUniqueFailure(failure) || isGuardFailure(failure)) &&
+            payload.idempotencyKey !== undefined &&
+            principal.apiKeyId !== undefined
+          if (recoverableIdempotencyRace) {
             const winner = yield* findIdempotency(
               principal.apiKeyId!,
               payload.idempotencyKey!,
@@ -775,10 +821,6 @@ export const PublishLive = Layer.effect(
               }
               return yield* receipt(winner, policy.warnings, principal)
             }
-          } else if (isDefiniteRollbackFailure(failure)) {
-            yield* objects
-              .delete(objectKey)
-              .pipe(Effect.catchAll(() => Effect.void))
           }
           if (isGuardFailure(failure)) {
             return yield* Effect.fail(
@@ -796,7 +838,7 @@ export const PublishLive = Layer.effect(
             db.raw
               .prepare(
                 `SELECT v.id, v.document_id, v.version_number, v.request_hash,
-                        e.metadata_json AS receipt_json
+                        v.state_fields_json, e.metadata_json AS receipt_json
                    FROM document_versions v
               LEFT JOIN upload_events e
                      ON e.document_version_id = v.id AND e.event_type = 'published'

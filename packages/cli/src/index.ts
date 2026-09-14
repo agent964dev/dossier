@@ -19,10 +19,15 @@ import {
   type HealthzResponse,
   type Me,
   type PurgeReport,
+  type StateResponse,
   type UploadRequest,
   type UploadResponse,
 } from '@dossier/contracts'
-import { validateCssStatic, validateHtmlStatic } from '@dossier/policy'
+import {
+  scanStateFields,
+  validateCssStatic,
+  validateHtmlStatic,
+} from '@dossier/policy'
 import {
   FetchHttpClient,
   HttpApiClient,
@@ -121,13 +126,16 @@ async function runtimeConfig(globals: GlobalOptions): Promise<RuntimeConfig> {
   }
 }
 
-function printJson(value: unknown): void {
+function jsonText(value: unknown, space?: number): string | undefined {
   // JSON.stringify escapes C0; also escape DEL/C1 to neutralize terminal controls.
-  const json = JSON.stringify(value)?.replace(
+  return JSON.stringify(value, null, space)?.replace(
     /[\u007f-\u009f]/g,
     (control) => `\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`,
   )
-  process.stdout.write(`${json}\n`)
+}
+
+function printJson(value: unknown): void {
+  process.stdout.write(`${jsonText(value)}\n`)
 }
 
 function printValue(
@@ -170,10 +178,27 @@ function errorCode(error: unknown): string | undefined {
 
 function errorMessage(error: unknown): string {
   const message = objectValue(error, 'message')
-  if (typeof message === 'string' && message.trim() !== '') return message
   const code = errorCode(error)
-  if (code) return code.replaceAll('_', ' ')
-  return error instanceof Error ? error.message : String(error)
+  const base =
+    typeof message === 'string' && message.trim() !== ''
+      ? message
+      : code
+        ? code.replaceAll('_', ' ')
+        : error instanceof Error
+          ? error.message
+          : String(error)
+  const body = objectValue(error, 'body')
+  const details = objectValue(error, 'details') ?? objectValue(body, 'details')
+  const rawErrors = objectValue(details, 'errors')
+  const detailErrors = Array.isArray(rawErrors)
+    ? rawErrors.filter(
+        (detail): detail is string =>
+          typeof detail === 'string' && detail.trim() !== '',
+      )
+    : []
+  return detailErrors.length === 0
+    ? base
+    : `${base}\n${detailErrors.map((detail) => `  - ${detail}`).join('\n')}`
 }
 
 function asCliError(error: unknown): CliError {
@@ -212,6 +237,7 @@ async function readStdin(): Promise<string> {
 async function readUpload(
   file: string,
   publicOrigin: string,
+  stateful = false,
 ): Promise<{ absolutePath: string; html: string }> {
   const absolutePath = resolve(file)
   let html: string
@@ -223,7 +249,10 @@ async function readUpload(
     )
   }
 
-  const result = validateHtmlStatic(html, { publicOrigin })
+  const result = validateHtmlStatic(html, {
+    publicOrigin,
+    ...(stateful ? { stateful: true } : {}),
+  })
   if (!result.ok) {
     throw new CliError(
       formatPolicyRejection(
@@ -232,6 +261,18 @@ async function readUpload(
         'Document did not pass the static policy.',
       ),
     )
+  }
+  if (stateful) {
+    const stateScan = scanStateFields(html)
+    if (!stateScan.ok) {
+      throw new CliError(
+        formatPolicyRejection(
+          absolutePath,
+          stateScan.errors,
+          'HTML failed the saved-values field policy.',
+        ),
+      )
+    }
   }
   return { absolutePath, html }
 }
@@ -476,6 +517,25 @@ async function apiCall<A, E>(
   } catch (error) {
     throw asCliError(error)
   }
+}
+
+const stateFeatureChecks = new Map<string, Promise<void>>()
+
+async function requireStateFeature(runtime: RuntimeConfig): Promise<void> {
+  let check = stateFeatureChecks.get(runtime.apiOrigin)
+  if (!check) {
+    check = apiCall(runtime, (client) => client.system.healthz()).then(
+      (health) => {
+        if (!health.features?.includes('state')) {
+          throw new CliError(
+            'This Dossier deployment does not support saved values. Update the deployment.',
+          )
+        }
+      },
+    )
+    stateFeatureChecks.set(runtime.apiOrigin, check)
+  }
+  await check
 }
 
 async function requireMe(
@@ -1021,6 +1081,11 @@ const uploadCommand = Command.make(
     share: Options.text('share').pipe(Options.optional),
     description: Options.text('description').pipe(Options.optional),
     newDocument: Options.boolean('new'),
+    stateful: Options.boolean('stateful').pipe(
+      Options.withDescription(
+        'Enable one shared set of saved values for marked controls',
+      ),
+    ),
     document: Options.text('doc').pipe(Options.optional),
     file: Args.text({ name: 'file' }),
   },
@@ -1032,6 +1097,7 @@ const uploadCommand = Command.make(
     share,
     description,
     newDocument,
+    stateful,
     document,
   }) =>
     withGlobals(async (globals) => {
@@ -1042,7 +1108,12 @@ const uploadCommand = Command.make(
           ExitCode.Usage,
         )
       }
-      const { absolutePath, html } = await readUpload(file, runtime.apiUrl)
+      const { absolutePath, html } = await readUpload(
+        file,
+        runtime.apiUrl,
+        stateful,
+      )
+      if (stateful) await requireStateFeature(runtime)
       const me = await requireMe(runtime)
       const documents = await readDocuments(runtime.paths)
       const known = documents[runtime.apiOrigin]?.[me.accountId]?.[absolutePath]
@@ -1076,6 +1147,7 @@ const uploadCommand = Command.make(
         metadata: collectMetadata(dirname(absolutePath)),
         ...(target ? { documentId: target } : {}),
         ...(uploadParent !== undefined ? { parentId: uploadParent } : {}),
+        ...(stateful ? { stateful: true } : {}),
         ...(Option.isSome(kind) ? { kind: Option.getOrUndefined(kind)! } : {}),
         ...(visibilityValue
           ? {
@@ -1147,12 +1219,55 @@ const uploadCommand = Command.make(
         return
       }
       process.stdout.write(
-        `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nParent: ${receipt.document.parentId ?? 'root'}\nVisibility: ${configuredVisibility(receipt.document)}\n`,
+        `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nParent: ${receipt.document.parentId ?? 'root'}\nVisibility: ${configuredVisibility(receipt.document)}\n${receipt.document.stateful ? `State: enabled, one shared set of saved values\nLast saved: ${receipt.document.stateUpdatedAt ?? 'never'}\n` : ''}`,
       )
       for (const warning of receipt.warnings)
         process.stderr.write(`Warning: ${warning}\n`)
     }),
 ).pipe(Command.withDescription('Validate and upload an HTML document'))
+
+function printState(response: StateResponse, runtime: RuntimeConfig): void {
+  if (runtime.json) {
+    printJson(response)
+    return
+  }
+  if (runtime.quiet) return
+  process.stdout.write(
+    `Values:\n${jsonText(response.data, 2) ?? '{}'}\nRevision: ${response.revision}\nLast saved: ${response.updatedAt ?? 'never'}\n`,
+  )
+}
+
+const stateGetCommand = Command.make(
+  'get',
+  { ref: Args.text({ name: 'ref' }) },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      let response: StateResponse
+      try {
+        response = await apiCall(runtime, (client) =>
+          client.state.get({ path: { id } }),
+        )
+      } catch (error) {
+        if (errorCode(error) === 'state_not_enabled') {
+          throw new CliError(
+            'Saved values are not enabled for this document',
+            ExitCode.Failure,
+            error,
+          )
+        }
+        throw error
+      }
+      printState(response, runtime)
+    }),
+).pipe(Command.withDescription('Read current saved values and revision'))
+
+const stateCommand = Command.make('state').pipe(
+  Command.withDescription('Read shared saved values'),
+  Command.withSubcommands([stateGetCommand]),
+)
 
 const fetchCommand = Command.make(
   'fetch',
@@ -2103,6 +2218,7 @@ const dossierCommand = rootCommand.pipe(
     authCommand,
     whoamiCommand,
     uploadCommand,
+    stateCommand,
     fetchCommand,
     diffCommand,
     listCommand,
@@ -2142,11 +2258,20 @@ interface NormalizedArguments {
   readonly health: boolean
 }
 
-const nestedCommands: Readonly<Record<string, ReadonlySet<string>>> = {
-  auth: new Set(['login', 'set', 'logout']),
-  assets: new Set(['push', 'list', 'delete']),
-  workspace: new Set(['members', 'allow', 'disallow', 'promote', 'remove']),
-  admin: new Set(['purge']),
+type CommandTree = { readonly [name: string]: CommandTree | true }
+
+const commandTree: CommandTree = {
+  auth: { login: true, set: true, logout: true },
+  assets: { push: true, list: true, delete: true },
+  workspace: {
+    members: true,
+    allow: true,
+    disallow: true,
+    promote: true,
+    remove: true,
+  },
+  admin: { purge: true },
+  state: { get: true },
 }
 
 const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2170,7 +2295,7 @@ const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
 }
 
 const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
-  upload: new Set(['--new']),
+  upload: new Set(['--new', '--stateful']),
   diff: new Set(['--text']),
   list: new Set(['--all', '--tree', '--trash']),
   delete: new Set(['--force']),
@@ -2182,8 +2307,12 @@ function isGlobalBoolean(argument: string): boolean {
   return argument === '--json' || argument === '--quiet' || argument === '-q'
 }
 
-function detectCommand(rest: readonly string[]): string {
-  let root: string | undefined
+export function detectCommand(
+  rest: readonly string[],
+  tree: CommandTree = commandTree,
+): string {
+  const path: string[] = []
+  let branch = tree
   for (let index = 0; index < rest.length; index += 1) {
     const argument = rest[index]!
     if (argument === '--') break
@@ -2195,20 +2324,21 @@ function detectCommand(rest: readonly string[]): string {
       continue
     }
     if (argument.startsWith('-')) continue
-    if (!root) {
-      root = argument
-      if (!nestedCommands[root]) return root
-      continue
-    }
-    if (nestedCommands[root]?.has(argument)) return `${root} ${argument}`
-    return root
+
+    const next = branch[argument]
+    if (path.length === 0 && next === undefined) return argument
+    if (next === undefined) break
+    path.push(argument)
+    if (next === true) break
+    branch = next
   }
-  return root ?? ''
+  return path.join(' ')
 }
 
 function extractGlobals(
   rest: readonly string[],
   commandName: string,
+  optionValues = valuedOptions,
 ): {
   readonly globals: string[]
   readonly command: string[]
@@ -2216,7 +2346,7 @@ function extractGlobals(
 } {
   const globals: string[] = []
   const command: string[] = []
-  const valued = valuedOptions[commandName]
+  const valued = optionValues[commandName]
   let json = false
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -2257,12 +2387,14 @@ function extractGlobals(
 function optionsBeforeArguments(
   command: readonly string[],
   commandName: string,
+  optionValues = valuedOptions,
+  optionBooleans = booleanOptions,
 ): string[] {
-  const prefixLength = commandName.includes(' ') ? 2 : commandName ? 1 : 0
+  const prefixLength = commandName ? commandName.split(' ').length : 0
   const commandPrefix = command.slice(0, prefixLength)
   const commandArguments = command.slice(prefixLength)
-  const valued = valuedOptions[commandName]
-  const boolean = booleanOptions[commandName]
+  const valued = optionValues[commandName]
+  const boolean = optionBooleans[commandName]
   if (!valued && !boolean) return [...command]
 
   const options: string[] = []
@@ -2292,12 +2424,20 @@ function optionsBeforeArguments(
 
 export function normalizeGlobalOptions(
   argv: readonly string[],
+  tree: CommandTree = commandTree,
+  optionValues = valuedOptions,
+  optionBooleans = booleanOptions,
 ): NormalizedArguments {
   const prefix = argv.slice(0, 2)
   const rest = argv.slice(2)
-  const commandName = detectCommand(rest)
-  const extracted = extractGlobals(rest, commandName)
-  const orderedCommand = optionsBeforeArguments(extracted.command, commandName)
+  const commandName = detectCommand(rest, tree)
+  const extracted = extractGlobals(rest, commandName, optionValues)
+  const orderedCommand = optionsBeforeArguments(
+    extracted.command,
+    commandName,
+    optionValues,
+    optionBooleans,
+  )
   return {
     args: [...prefix, ...extracted.globals, ...orderedCommand],
     json: extracted.json,

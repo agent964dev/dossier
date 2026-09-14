@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { normalizeGlobalOptions, runCli } from './index.js'
+import { detectCommand, normalizeGlobalOptions, runCli } from './index.js'
 
 describe('argument normalization', () => {
   it('allows global options before or after a subcommand', () => {
@@ -36,6 +36,52 @@ describe('argument normalization', () => {
       '--api-url=http://localhost:8787',
       'assets',
       'list',
+    ])
+  })
+
+  it('walks command trees at depth two and three', () => {
+    expect(detectCommand(['state', 'get', '7k2m9x1qz3ab'])).toBe('state get')
+    expect(
+      detectCommand(['state', 'link', 'create', '7k2m9x1qz3ab'], {
+        state: { link: { create: true } },
+      }),
+    ).toBe('state link create')
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        'state',
+        'get',
+        '7k2m9x1qz3ab',
+        '--json',
+      ]).args,
+    ).toEqual(['node', 'dossier', '--json', 'state', 'get', '7k2m9x1qz3ab'])
+    expect(
+      normalizeGlobalOptions(
+        [
+          'node',
+          'dossier',
+          'state',
+          'link',
+          'create',
+          '7k2m9x1qz3ab',
+          '--expires-in',
+          '24h',
+          '--json',
+        ],
+        { state: { link: { create: true } } },
+        { 'state link create': new Set(['--expires-in']) },
+      ).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      '--json',
+      'state',
+      'link',
+      'create',
+      '--expires-in',
+      '24h',
+      '7k2m9x1qz3ab',
     ])
   })
 
