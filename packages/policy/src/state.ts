@@ -56,6 +56,17 @@ const HTML_FLOAT = /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/u
 const HTML_DATE = /^(\d{4,})-(\d{2})-(\d{2})$/u
 const ASCII_WHITESPACE = /[\t\n\f\r ]+/gu
 const ASCII_WHITESPACE_EDGES = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/gu
+const INPUT_NEWLINES = /[\n\r]/gu
+const UNSUPPORTED_STATE_INPUT_TYPES = new Set([
+  'color',
+  'datetime-local',
+  'email',
+  'month',
+  'range',
+  'time',
+  'url',
+  'week',
+])
 
 export function scanStateFields(html: string): StateScan {
   let document: DefaultTreeAdapterTypes.Document
@@ -156,6 +167,14 @@ function scanElement(
     return
   }
 
+  const unsupportedType = unsupportedInputType(element)
+  if (unsupportedType !== null) {
+    errors.push(
+      `data-state ${JSON.stringify(name)} uses unsupported input type ${JSON.stringify(unsupportedType)} at ${renderPosition(position)}`,
+    )
+    return
+  }
+
   const type = fieldTypeOf(element)
   const previous = declarations.get(name)
   if (previous) {
@@ -192,6 +211,12 @@ function scanElement(
   fields.push({ name, type, default: defaultResult.value })
 }
 
+function unsupportedInputType(element: HtmlElement): string | null {
+  if (element.tagName.toLowerCase() !== 'input') return null
+  const type = (attributeValue(element, 'type') ?? '').toLowerCase()
+  return UNSUPPORTED_STATE_INPUT_TYPES.has(type) ? type : null
+}
+
 function fieldTypeOf(element: HtmlElement): FieldType {
   const tagName = element.tagName.toLowerCase()
   if (tagName === 'input') {
@@ -217,7 +242,10 @@ function defaultForElement(
 ): DefaultResult {
   switch (type) {
     case 'text':
-      return { ok: true, value: inputValue(element, '') }
+      return {
+        ok: true,
+        value: inputValue(element, '').replace(INPUT_NEWLINES, ''),
+      }
     case 'textarea':
       return { ok: true, value: collectText(element) }
     case 'number':

@@ -34,6 +34,9 @@ describe('scanStateFields defaults', () => {
       { name: 'title', type: 'text', default: '  Launch  ' },
     ])
     expect(fields('<input data-state="empty">')[0]?.default).toBe('')
+    expect(
+      fields('<input data-state="lines" value="first\nsecond\rthird">'),
+    ).toEqual([{ name: 'lines', type: 'text', default: 'firstsecondthird' }])
   })
 
   it('uses textarea text after the parser strips one leading newline', () => {
@@ -220,6 +223,39 @@ describe('scanStateFields validation', () => {
       { name: 'first', type: 'text', default: 'one' },
       { name: 'last', type: 'text', default: 'two' },
     ])
+  })
+
+  it('rejects input types whose browser values need type-specific sanitizing', () => {
+    const types = [
+      'color',
+      'range',
+      'email',
+      'url',
+      'time',
+      'month',
+      'week',
+      'datetime-local',
+    ]
+    const result = scanStateFields(
+      document(
+        types
+          .map(
+            (type) =>
+              `<input type="${type}" data-state="${type}" value="invalid">`,
+          )
+          .join(''),
+      ),
+    )
+
+    expect(result.fields).toEqual([])
+    expect(result.errors).toHaveLength(types.length)
+    for (const type of types) {
+      expect(result.errors).toContainEqual(
+        expect.stringContaining(
+          `uses unsupported input type ${JSON.stringify(type)}`,
+        ),
+      )
+    }
   })
 
   it('rejects duplicate names with both source positions', () => {

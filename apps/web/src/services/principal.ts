@@ -31,6 +31,10 @@ export interface PrincipalService {
   readonly resolveSession: (
     request: Request,
   ) => Effect.Effect<PrincipalIdentity, DossierError | PersistenceError>
+  readonly fromAccountId: (
+    accountId: string,
+    workspaceId: string,
+  ) => Effect.Effect<PrincipalIdentity, DossierError | PersistenceError>
   readonly requirePublisher: (
     principal: PrincipalIdentity,
     workspaceId?: string,
@@ -156,15 +160,11 @@ export const PrincipalLive = Layer.effect(
         return fromRow(row, yield* verifiedEmails(row.account_id))
       })
 
-    const resolveCookie = (request: Request) =>
+    const fromAccountId: PrincipalService['fromAccountId'] = (
+      accountId,
+      workspaceId,
+    ) =>
       Effect.gen(function* () {
-        const payload = yield* session.readSession(request)
-        if (!payload) {
-          return yield* Effect.fail(
-            apiError('unauthenticated', 'Sign in required.'),
-          )
-        }
-        const workspaceFilter = payload.workspaceId
         const row = yield* Effect.tryPromise({
           try: () =>
             db.raw
@@ -180,16 +180,27 @@ export const PrincipalLive = Layer.effect(
                   WHERE a.id = ? AND a.disabled_at IS NULL
                   LIMIT 1`,
               )
-              .bind(workspaceFilter, payload.accountId)
+              .bind(workspaceId, accountId)
               .first<PrincipalRow>(),
-          catch: (cause) => persistence('resolve session principal', cause),
+          catch: (cause) => persistence('rehydrate account principal', cause),
         })
         if (!row) {
           return yield* Effect.fail(
-            apiError('unauthenticated', 'Session is no longer valid.'),
+            apiError('unauthenticated', 'Account is no longer available.'),
           )
         }
         return fromRow(row, yield* verifiedEmails(row.account_id))
+      })
+
+    const resolveCookie = (request: Request) =>
+      Effect.gen(function* () {
+        const payload = yield* session.readSession(request)
+        if (!payload) {
+          return yield* Effect.fail(
+            apiError('unauthenticated', 'Sign in required.'),
+          )
+        }
+        return yield* fromAccountId(payload.accountId, payload.workspaceId)
       })
 
     const resolveWithBearerStamp = (request: Request, stampUse: boolean) => {
@@ -249,6 +260,7 @@ export const PrincipalLive = Layer.effect(
       resolve,
       resolveReadOnly,
       resolveSession: resolveCookie,
+      fromAccountId,
       requirePublisher,
     }
   }),

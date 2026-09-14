@@ -11,6 +11,7 @@
       "@/*": ["./src/*"]
     }
   },
+  "exclude": ["src/runtime"],
   "include": [
     "src",
     "test",

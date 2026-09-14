@@ -3,14 +3,28 @@ import { Context, Effect, Layer } from 'effect'
 
 import { Access, accessBindValues, accessCteSql } from './access'
 import { Db } from './db'
-import { apiError, DossierError, PersistenceError } from './errors'
+import {
+  apiError,
+  DossierError,
+  PersistenceError,
+  SessionError,
+} from './errors'
 import { Ids } from './ids'
-import type { PrincipalIdentity } from './principal'
+import { Principal, type PrincipalIdentity } from './principal'
+import { Session } from './session'
 
 export type StateActor =
   | { readonly kind: 'account'; readonly principal: PrincipalIdentity }
   | { readonly kind: 'link'; readonly generation: number }
   | { readonly kind: 'public' }
+
+export interface FrameClaims {
+  readonly documentId: string
+  readonly workspaceId: string
+  readonly version: number
+  readonly viewer: `account:${string}` | `link:${number}` | 'public'
+  readonly exp: number
+}
 
 export interface StateFieldSnapshot {
   readonly value: unknown
@@ -32,7 +46,20 @@ export interface StateService {
   readonly read: (
     documentId: string,
     actor: StateActor,
+    pinnedVersion?: number,
   ) => Effect.Effect<StateSnapshot, DossierError | PersistenceError>
+  readonly issueFrameTicket: (
+    documentId: string,
+    workspaceId: string,
+    version: number,
+    actor: StateActor,
+  ) => Effect.Effect<string, SessionError>
+  readonly verifyFrameTicket: (
+    ticket: string,
+  ) => Effect.Effect<FrameClaims, DossierError>
+  readonly resolveFrameViewer: (
+    claims: FrameClaims,
+  ) => Effect.Effect<StateActor, DossierError | PersistenceError>
   readonly save: (
     documentId: string,
     actor: StateActor,
@@ -104,6 +131,17 @@ const MAX_CHANGES = 200
 const MAX_VALUE_BYTES = 64 * 1024
 const MAX_STATE_BYTES = 256 * 1024
 const encoder = new TextEncoder()
+const INPUT_NEWLINES = /[\n\r]/gu
+
+function isFrameViewer(value: unknown): value is FrameClaims['viewer'] {
+  if (value === 'public') return true
+  if (typeof value !== 'string') return false
+  if (/^account:.+$/.test(value)) return true
+  const link = /^link:([1-9][0-9]*)$/.exec(value)
+  if (!link) return false
+  const generation = Number(link[1])
+  return Number.isSafeInteger(generation) && generation > 0
+}
 
 const fieldTypes = new Set<FieldType>([
   'text',
@@ -145,6 +183,12 @@ function parseManifest(value: string | null): readonly ManifestField[] {
       default: manifestField.default,
     }
   })
+}
+
+function normalizeValue(type: FieldType, value: unknown): unknown {
+  return type === 'text' && typeof value === 'string'
+    ? value.replace(INPUT_NEWLINES, '')
+    : value
 }
 
 function valueFits(type: FieldType, value: unknown): boolean {
@@ -195,12 +239,16 @@ function normalizeChanges(
 
   for (const change of changes) {
     const field = manifestByName.get(change.name)
+    const value =
+      field === undefined
+        ? change.value
+        : normalizeValue(field.type, change.value)
     if (
       field === undefined ||
       seen.has(change.name) ||
       !Number.isSafeInteger(change.base) ||
       change.base < 0 ||
-      !valueFits(field.type, change.value)
+      !valueFits(field.type, value)
     ) {
       invalid.push(change.name)
       seen.add(change.name)
@@ -209,7 +257,7 @@ function normalizeChanges(
     seen.add(change.name)
 
     try {
-      const valueJson = JSON.stringify(change.value)
+      const valueJson = JSON.stringify(value)
       if (
         valueJson === undefined ||
         encoder.encode(valueJson).byteLength > MAX_VALUE_BYTES
@@ -316,6 +364,8 @@ export const StateLive = Layer.effect(
     const db = yield* Db
     const access = yield* Access
     const ids = yield* Ids
+    const principals = yield* Principal
+    const session = yield* Session
 
     const loadContext = (documentId: string) =>
       Effect.tryPromise({
@@ -345,6 +395,117 @@ export const StateLive = Layer.effect(
         catch: (cause) =>
           new PersistenceError({ operation: 'parse state manifest', cause }),
       })
+
+    const requirePinnedVersion = (documentId: string, version: number) =>
+      Effect.gen(function* () {
+        const row = yield* Effect.tryPromise({
+          try: () =>
+            db.raw
+              .prepare(
+                `SELECT 1 AS found
+                   FROM document_versions
+                  WHERE document_id = ? AND version_number = ?
+                  LIMIT 1`,
+              )
+              .bind(documentId, version)
+              .first<{ found: number }>(),
+          catch: (cause) =>
+            new PersistenceError({
+              operation: 'load pinned state version',
+              cause,
+            }),
+        })
+        if (!row) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Document version not found.'),
+          )
+        }
+      })
+
+    const issueFrameTicket: StateService['issueFrameTicket'] = (
+      documentId,
+      workspaceId,
+      version,
+      actor,
+    ) => {
+      const viewer: FrameClaims['viewer'] =
+        actor.kind === 'account'
+          ? `account:${actor.principal.accountId}`
+          : actor.kind === 'link'
+            ? `link:${actor.generation}`
+            : 'public'
+      return session.signToken(
+        { purpose: 'frame', documentId, workspaceId, version, viewer },
+        60,
+      )
+    }
+
+    const verifyFrameTicket: StateService['verifyFrameTicket'] = (ticket) =>
+      Effect.gen(function* () {
+        const payload = yield* session.verifyToken(ticket)
+        const viewer = payload?.viewer
+        if (
+          payload === null ||
+          payload.purpose !== 'frame' ||
+          typeof payload.documentId !== 'string' ||
+          !/^[a-z0-9]{12}$/.test(payload.documentId) ||
+          typeof payload.workspaceId !== 'string' ||
+          payload.workspaceId.length === 0 ||
+          typeof payload.version !== 'number' ||
+          !Number.isSafeInteger(payload.version) ||
+          payload.version < 1 ||
+          typeof payload.exp !== 'number' ||
+          !Number.isFinite(payload.exp) ||
+          !isFrameViewer(viewer)
+        ) {
+          return yield* Effect.fail(apiError('not_found', 'Frame not found.'))
+        }
+        return payload as unknown as FrameClaims
+      })
+
+    const resolveFrameViewer: StateService['resolveFrameViewer'] = (claims) =>
+      Effect.gen(function* () {
+        if (claims.viewer === 'public') {
+          return { kind: 'public' } as const
+        }
+        if (claims.viewer.startsWith('account:')) {
+          const accountId = claims.viewer.slice('account:'.length)
+          const principal = yield* principals.fromAccountId(
+            accountId,
+            claims.workspaceId,
+          )
+          return { kind: 'account', principal } as const
+        }
+
+        const generation = Number(claims.viewer.slice('link:'.length))
+        const row = yield* Effect.tryPromise({
+          try: () =>
+            db.raw
+              .prepare(
+                `SELECT generation
+                   FROM document_edit_links
+                  WHERE document_id = ? AND generation = ?
+                    AND revoked_at IS NULL
+                  LIMIT 1`,
+              )
+              .bind(claims.documentId, generation)
+              .first<{ generation: number }>(),
+          catch: (cause) =>
+            new PersistenceError({
+              operation: 'rehydrate frame edit link',
+              cause,
+            }),
+        })
+        if (!row) {
+          return yield* Effect.fail(apiError('not_found', 'Frame not found.'))
+        }
+        return { kind: 'link', generation: row.generation } as const
+      }).pipe(
+        Effect.catchIf(
+          (error): error is DossierError => error instanceof DossierError,
+          () => Effect.fail(apiError('not_found', 'Frame not found.')),
+        ),
+      )
 
     const explainFailure = (
       documentId: string,
@@ -495,7 +656,7 @@ export const StateLive = Layer.effect(
         )
       })
 
-    const read: StateService['read'] = (documentId, actor) =>
+    const read: StateService['read'] = (documentId, actor, pinnedVersion) =>
       Effect.gen(function* () {
         const decision =
           actor.kind === 'link'
@@ -518,6 +679,9 @@ export const StateLive = Layer.effect(
               'Saved values are not enabled for this document.',
             ),
           )
+        }
+        if (pinnedVersion !== undefined) {
+          yield* requirePinnedVersion(documentId, pinnedVersion)
         }
 
         const manifest = yield* manifestFromContext(context)
@@ -801,6 +965,12 @@ export const StateLive = Layer.effect(
         )
       })
 
-    return { read, save }
+    return {
+      read,
+      issueFrameTicket,
+      verifyFrameTicket,
+      resolveFrameViewer,
+      save,
+    }
   }),
 )

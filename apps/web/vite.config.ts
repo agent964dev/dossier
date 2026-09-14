@@ -24,6 +24,14 @@ function buildVersion(): string {
   }
 }
 
+/**
+ * The dev server's port and its local Miniflare state directory. The browser
+ * suite sets both so it never shares a port or a D1 file with a dev server the
+ * developer is already running.
+ */
+const devPort = Number(process.env.DOSSIER_DEV_PORT) || 8787
+const persistPath = process.env.DOSSIER_PERSIST_PATH
+
 export default defineConfig({
   define: {
     __DOSSIER_BUILD_VERSION__: JSON.stringify(buildVersion()),
@@ -33,8 +41,17 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  server: {
+    port: devPort,
+    strictPort: true,
+  },
   plugins: [
-    cloudflare({ viteEnvironment: { name: 'ssr' } }),
+    cloudflare({
+      viteEnvironment: { name: 'ssr' },
+      ...(persistPath === undefined
+        ? {}
+        : { persistState: { path: persistPath } }),
+    }),
     tailwindcss(),
     tanstackStart(),
     react(),

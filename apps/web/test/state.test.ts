@@ -133,6 +133,46 @@ describe('State', () => {
     })
   })
 
+  it('normalizes text input newlines the way the browser does', async () => {
+    const { principal } = await setup('state_text_newlines')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: `<!doctype html><html><head><title>Text newlines</title></head><body>
+              <input data-state="title" value="first
+second">
+            </body></html>`,
+            stateful: true,
+            idempotencyKey: 'state-text-newlines',
+          },
+          principal,
+        )
+      }),
+    )
+
+    const initial = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal,
+        })
+      }),
+    )
+    expect(initial.fields.title?.value).toBe('firstsecond')
+
+    const saved = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).save(
+          published.document.id,
+          { kind: 'account', principal },
+          { changes: [{ name: 'title', value: 'saved\r\nvalue', base: 0 }] },
+        )
+      }),
+    )
+    expect(saved.fields.title?.value).toBe('savedvalue')
+  })
+
   it('includes saved fields absent from the current manifest', async () => {
     const { principal, token } = await setup('state_orphan')
     const published = await run(

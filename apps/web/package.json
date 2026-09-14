@@ -6,9 +6,11 @@
     "build": "vite build",
     "db:generate": "drizzle-kit generate",
     "deploy:dev": "CLOUDFLARE_ENV=dev vite build && wrangler deploy --env dev",
-    "dev": "CLOUDFLARE_ENV=dev vite dev --port 8787",
+    "dev": "CLOUDFLARE_ENV=dev vite dev",
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit"
+    "test:browser": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "typecheck:runtime": "tsc --noEmit -p src/runtime/tsconfig.runtime.json"
   },
   "dependencies": {
     "@dossier/contracts": "workspace:*",
@@ -35,6 +37,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.54.8",
     "@cloudflare/vitest-plugin": "1.1.8",
+    "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",

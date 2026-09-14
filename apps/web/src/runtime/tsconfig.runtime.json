@@ -1,0 +1,12 @@
+{
+  // The two runtime files are plain browser scripts inlined as strings, so they
+  // are checked here rather than by the app's tsconfig, which has no allowJs.
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["messages.d.ts", "frame-runtime.js", "wrapper-runtime.js"]
+}

@@ -1,3 +1,9 @@
 PUBLIC_BASE_URL=http://localhost:8787
+# Signs session cookies, CSRF tokens, and the 60-second frame tickets the
+# wrapper uses. The Playwright browser job needs it too: test/browser reads it
+# from this file (or from the environment) to mint the signed-in session it
+# runs the wrapper specs with.
 SESSION_SECRET=replace-with-a-random-secret
+# Seeds the workspace through POST /api/setup and doubles as the API key the
+# browser job publishes its fixtures with.
 BOOTSTRAP_API_KEY=replace-with-a-bootstrap-api-key
