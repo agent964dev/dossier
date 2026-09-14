@@ -208,6 +208,47 @@ function stateErrorMessage(error: unknown): string | undefined {
     if (lines.length === 0) return undefined
     return `${lines.join('\n')}\nRead the latest saved values, then re-run the command.`
   }
+  if (code === 'state_schema_change') {
+    const retyped = details?.retyped
+    const orphaned = details?.orphaned
+    if (!Array.isArray(retyped) || !Array.isArray(orphaned)) return undefined
+    const retypedLines = retyped.flatMap((rawField) => {
+      const field = record(rawField)
+      if (
+        typeof field?.name !== 'string' ||
+        typeof field.from !== 'string' ||
+        typeof field.to !== 'string'
+      ) {
+        return []
+      }
+      return [`  ${field.name}: ${field.from} -> ${field.to}`]
+    })
+    const orphanedNames = orphaned
+      .filter((name): name is string => typeof name === 'string')
+      .map((name) => `  ${name}`)
+    const sections = [
+      ...(retypedLines.length > 0
+        ? [`Retyped saved values:\n${retypedLines.join('\n')}`]
+        : []),
+      ...(orphanedNames.length > 0
+        ? [
+            `Removed from the document (saved values kept):\n${orphanedNames.join('\n')}`,
+          ]
+        : []),
+    ]
+    if (sections.length === 0) return undefined
+    const outcomes = [
+      ...(retypedLines.length > 0
+        ? ['Retyped values reset to their new defaults.']
+        : []),
+      ...(orphanedNames.length > 0 ? ['Removed values stay saved.'] : []),
+    ]
+    return [
+      ...sections,
+      'Re-run with --accept-state-changes to accept these schema changes.',
+      outcomes.join(' '),
+    ].join('\n')
+  }
   if (code === 'state_type_mismatch') {
     const fields = details?.fields
     if (!Array.isArray(fields)) return undefined
@@ -286,21 +327,12 @@ async function readStdin(): Promise<string> {
   return value
 }
 
-async function readUpload(
-  file: string,
+function validateUpload(
+  absolutePath: string,
+  html: string,
   publicOrigin: string,
   stateful = false,
-): Promise<{ absolutePath: string; html: string }> {
-  const absolutePath = resolve(file)
-  let html: string
-  try {
-    html = await readFile(absolutePath, 'utf8')
-  } catch (error) {
-    throw new CliError(
-      `cannot read ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
-    )
-  }
-
+): void {
   const result = validateHtmlStatic(html, {
     publicOrigin,
     ...(stateful ? { stateful: true } : {}),
@@ -326,6 +358,24 @@ async function readUpload(
       )
     }
   }
+}
+
+async function readUpload(
+  file: string,
+  publicOrigin: string,
+  stateful = false,
+): Promise<{ absolutePath: string; html: string }> {
+  const absolutePath = resolve(file)
+  let html: string
+  try {
+    html = await readFile(absolutePath, 'utf8')
+  } catch (error) {
+    throw new CliError(
+      `cannot read ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  validateUpload(absolutePath, html, publicOrigin, stateful)
   return { absolutePath, html }
 }
 
@@ -1138,6 +1188,9 @@ const uploadCommand = Command.make(
         'Enable one shared set of saved values for marked controls',
       ),
     ),
+    acceptStateChanges: Options.boolean('accept-state-changes').pipe(
+      Options.withDescription('Reset values affected by state schema changes'),
+    ),
     document: Options.text('doc').pipe(Options.optional),
     file: Args.text({ name: 'file' }),
   },
@@ -1150,6 +1203,7 @@ const uploadCommand = Command.make(
     description,
     newDocument,
     stateful,
+    acceptStateChanges,
     document,
   }) =>
     withGlobals(async (globals) => {
@@ -1174,11 +1228,19 @@ const uploadCommand = Command.make(
         known && typeof known.documentId === 'string'
           ? known.documentId
           : undefined
+      const usesMapping =
+        !newDocument &&
+        explicitDocument === undefined &&
+        mappedDocument !== undefined
       const target = newDocument
         ? undefined
         : explicitDocument
           ? parseDocumentId(explicitDocument, runtime)
           : mappedDocument
+      if (usesMapping && known?.stateful === true && !stateful) {
+        validateUpload(absolutePath, html, runtime.apiUrl, true)
+        await requireStateFeature(runtime)
+      }
       const parentValue = Option.getOrUndefined(parent)
       const requestedParent = parentValue
         ? parentValue === 'root'
@@ -1200,6 +1262,7 @@ const uploadCommand = Command.make(
         ...(target ? { documentId: target } : {}),
         ...(uploadParent !== undefined ? { parentId: uploadParent } : {}),
         ...(stateful ? { stateful: true } : {}),
+        ...(acceptStateChanges ? { acceptStateChanges: true } : {}),
         ...(Option.isSome(kind) ? { kind: Option.getOrUndefined(kind)! } : {}),
         ...(visibilityValue
           ? {
@@ -1249,6 +1312,7 @@ const uploadCommand = Command.make(
         documentId: receipt.document.id,
         url: receipt.document.url,
         rawUrl: receipt.document.rawUrl,
+        stateful: receipt.document.stateful,
         updatedAt: new Date().toISOString(),
       }
       await mutateDocuments((state) => {
@@ -1263,6 +1327,7 @@ const uploadCommand = Command.make(
           versionNumber: receipt.versionNumber,
           created,
           warnings: receipt.warnings,
+          resetStateFields: receipt.resetStateFields ?? [],
         })
         return
       }
@@ -1273,6 +1338,13 @@ const uploadCommand = Command.make(
       process.stdout.write(
         `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nParent: ${receipt.document.parentId ?? 'root'}\nVisibility: ${configuredVisibility(receipt.document)}\n${receipt.document.stateful ? `State: enabled, one shared set of saved values\nLast saved: ${receipt.document.stateUpdatedAt ?? 'never'}\n` : ''}`,
       )
+      if (receipt.resetStateFields && receipt.resetStateFields.length > 0) {
+        process.stdout.write(
+          `Reset saved values:\n${receipt.resetStateFields
+            .map((name) => `  - ${name}`)
+            .join('\n')}\n`,
+        )
+      }
       for (const warning of receipt.warnings)
         process.stderr.write(`Warning: ${warning}\n`)
     }),
@@ -2477,7 +2549,7 @@ const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
 }
 
 const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
-  upload: new Set(['--new', '--stateful']),
+  upload: new Set(['--new', '--stateful', '--accept-state-changes']),
   diff: new Set(['--text']),
   list: new Set(['--all', '--tree', '--trash']),
   delete: new Set(['--force']),

@@ -231,6 +231,7 @@ export const UploadRequest = Schema.Struct({
   kind: OptionalNullableString,
   visibility: Schema.optional(Schema.NullOr(Visibility)),
   stateful: Schema.optional(Schema.Boolean),
+  acceptStateChanges: Schema.optional(Schema.Boolean),
   description: OptionalNullableString,
   shares: Schema.optional(Schema.Array(Schema.String)),
   metadata: Schema.optional(UploadMetadata),
@@ -244,6 +245,7 @@ export const UploadResponse = Schema.Struct({
   versionNumber: Schema.Number,
   versionUrl: Schema.String,
   warnings: Schema.Array(Schema.String),
+  resetStateFields: Schema.optional(Schema.Array(Schema.String)),
   draftId: DocumentId,
   publicUrl: Schema.String,
   rawUrl: Schema.String,
@@ -562,6 +564,21 @@ export const StateTooLargeError = stateError(
 )
 export type StateTooLargeError = typeof StateTooLargeError.Type
 
+export const StateSchemaChangeError = stateError(
+  'state_schema_change',
+  Schema.Struct({
+    retyped: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        from: FieldType,
+        to: FieldType,
+      }),
+    ),
+    orphaned: Schema.Array(Schema.String),
+  }),
+)
+export type StateSchemaChangeError = typeof StateSchemaChangeError.Type
+
 export const StateNotEnabledError = errorSchema('state_not_enabled')
 export type StateNotEnabledError = typeof StateNotEnabledError.Type
 export const StateEditRequiredError = errorSchema('state_edit_required')
@@ -585,6 +602,7 @@ export const ApiError = Schema.Union(
   StateVersionChangedError,
   StateTypeMismatchError,
   StateTooLargeError,
+  StateSchemaChangeError,
   StateNotEnabledError,
   StateEditRequiredError,
   StateUnavailableError,
@@ -657,7 +675,9 @@ export const AdminApiGroup = HttpApiGroup.make('admin').add(
 export const UploadsApiGroup = HttpApiGroup.make('uploads').add(
   HttpApiEndpoint.post('publish', '/api/uploads')
     .setPayload(UploadRequest)
-    .addSuccess(UploadResponse),
+    .addSuccess(UploadResponse)
+    .addError(StateSchemaChangeError, { status: 409 })
+    .addError(StateTooLargeError, { status: 413 }),
 )
 
 const AssetPath = Schema.Struct({ slug: AssetSlug })

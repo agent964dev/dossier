@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import {
@@ -64,6 +65,7 @@ interface StoredAsset {
 const documents = new Map<string, StoredDocument>()
 const assets = new Map<string, StoredAsset>()
 const idempotencyKeys: string[] = []
+const stateSchemaRequestHashes: string[] = []
 const listQueries: Array<{ scope: string | null; parent: string | null }> = []
 let nextId = 1
 let retryFailureSeen = false
@@ -224,6 +226,18 @@ function storedDocument(
 
 function statefulHtml(title: string): string {
   return `<!doctype html><html><head><title>${title}</title></head><body><label>Objective <input data-state="objective" value="Launch"></label><label><input type="checkbox" data-state="approved"> Approved</label><textarea data-state="notes"></textarea></body></html>`
+}
+
+function stateSchemaRequestHash(payload: Record<string, unknown>): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        html: payload.html,
+        documentId: payload.documentId ?? null,
+        acceptStateChanges: payload.acceptStateChanges === true,
+      }),
+    )
+    .digest('hex')
 }
 
 function stateResponse(id: string, stored: StoredDocument) {
@@ -515,6 +529,24 @@ beforeAll(async () => {
         )
         return
       }
+      if (payload.filename === 'schema-change.html') {
+        stateSchemaRequestHashes.push(stateSchemaRequestHash(payload))
+        if (payload.acceptStateChanges !== true) {
+          response.statusCode = 409
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'state_schema_change',
+              message: 'Saved-value fields changed.',
+              details: {
+                retyped: [{ name: 'notes', from: 'textarea', to: 'text' }],
+                orphaned: ['legacyNotes'],
+              },
+            }),
+          )
+          return
+        }
+      }
       const requestedId =
         typeof payload.documentId === 'string' ? payload.documentId : undefined
       if (typeof payload.idempotencyKey === 'string')
@@ -611,6 +643,10 @@ beforeAll(async () => {
           versionNumber: stored.version,
           versionUrl: `${apiUrl}/d/${id}/v/${stored.version}`,
           warnings: [],
+          ...(payload.filename === 'schema-change.html' &&
+          payload.acceptStateChanges === true
+            ? { resetStateFields: ['notes'] }
+            : {}),
           draftId: id,
           publicUrl: document.url,
           rawUrl: document.rawUrl,
@@ -1415,6 +1451,67 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     )
   })
 
+  it('renders state schema changes and sends the acceptance flag', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'schema-change.html')
+    await writeFile(
+      file,
+      '<!doctype html><html><head><title>Schema change</title></head><body></body></html>',
+      'utf8',
+    )
+    const before = stateSchemaRequestHashes.length
+
+    const human = await cli('node', ['upload', file, '--new'], { home })
+    expect(human.exitCode).toBe(1)
+    expect(human.stdout).toBe('')
+    expect(human.stderr).toContain(
+      'dossier: Retyped saved values:\n' +
+        '  notes: textarea -> text\n' +
+        'Removed from the document (saved values kept):\n' +
+        '  legacyNotes\n' +
+        'Re-run with --accept-state-changes to accept these schema changes.\n' +
+        'Retyped values reset to their new defaults. Removed values stay saved.\n',
+    )
+
+    const json = await cli('node', ['upload', file, '--new', '--json'], {
+      home,
+    })
+    expect(json.exitCode).toBe(1)
+    expect(JSON.parse(json.stdout)).toEqual({
+      ok: false,
+      code: 'state_schema_change',
+      message: 'Saved-value fields changed.',
+      details: {
+        retyped: [{ name: 'notes', from: 'textarea', to: 'text' }],
+        orphaned: ['legacyNotes'],
+      },
+      exitCode: 1,
+    })
+
+    const accepted = await cli(
+      'node',
+      ['upload', file, '--new', '--accept-state-changes'],
+      { home },
+    )
+    expect(accepted.exitCode).toBe(0)
+    expect(accepted.stdout).toContain('Reset saved values:\n  - notes\n')
+
+    const acceptedJson = await cli(
+      'node',
+      ['upload', file, '--new', '--accept-state-changes', '--json'],
+      { home },
+    )
+    expect(acceptedJson.exitCode).toBe(0)
+    expect(JSON.parse(acceptedJson.stdout)).toMatchObject({
+      resetStateFields: ['notes'],
+    })
+    expect(stateSchemaRequestHashes.slice(before, before + 3)).toHaveLength(3)
+    expect(stateSchemaRequestHashes[before + 2]).not.toBe(
+      stateSchemaRequestHashes[before],
+    )
+  })
+
   it('defers foreign stylesheet allowlists to the server', async () => {
     const home = await temporaryHome()
     await authenticate(home)
@@ -1709,6 +1806,37 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
       stderr: '',
       exitCode: 0,
     })
+  })
+
+  it('uses a stateful path mapping for validation before upload', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'mapped-stateful.html')
+    await writeFile(file, statefulHtml('Mapped stateful'), 'utf8')
+    const created = await cli(
+      'node',
+      ['upload', file, '--stateful', '--new', '--json'],
+      { home },
+    )
+    expect(created.exitCode).toBe(0)
+
+    const mappings = JSON.parse(
+      await readFile(join(home, 'documents.json'), 'utf8'),
+    )
+    expect(mappings[apiUrl].acct_test[file]).toMatchObject({ stateful: true })
+
+    await writeFile(
+      file,
+      '<!doctype html><html><head><title>One</title></head><head><title>Two</title></head><body><input data-state="notes"></body></html>',
+      'utf8',
+    )
+    const beforeUploads = uploadRequests
+    const result = await cli('node', ['upload', file], { home })
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(
+      'Stateful HTML must contain exactly one literal <head> start tag.',
+    )
+    expect(uploadRequests).toBe(beforeUploads)
   })
 
   it('reads saved values in human, JSON, and quiet modes', async () => {

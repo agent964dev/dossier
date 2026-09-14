@@ -456,6 +456,30 @@ export const PurgeLive = Layer.effect(
                   )
                   .bind(...documentIds),
                 db.raw
+                  .prepare(
+                    `DELETE FROM document_state_fields
+                      WHERE document_id IN (${marks})`,
+                  )
+                  .bind(...documentIds),
+                db.raw
+                  .prepare(
+                    `DELETE FROM document_state_grants
+                      WHERE document_id IN (${marks})`,
+                  )
+                  .bind(...documentIds),
+                db.raw
+                  .prepare(
+                    `DELETE FROM document_edit_links
+                      WHERE document_id IN (${marks})`,
+                  )
+                  .bind(...documentIds),
+                db.raw
+                  .prepare(
+                    `DELETE FROM document_state
+                      WHERE document_id IN (${marks})`,
+                  )
+                  .bind(...documentIds),
+                db.raw
                   .prepare(`DELETE FROM documents WHERE id IN (${marks})`)
                   .bind(...documentIds),
               ],

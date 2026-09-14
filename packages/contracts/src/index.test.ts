@@ -93,8 +93,9 @@ describe('shared contracts', () => {
       Schema.decodeUnknownSync(UploadRequest)({
         html: '<!doctype html><title>stateful</title>',
         stateful: true,
+        acceptStateChanges: true,
       }),
-    ).toMatchObject({ stateful: true })
+    ).toMatchObject({ stateful: true, acceptStateChanges: true })
   })
 
   it('decodes every state save error through the derived client', async () => {
@@ -202,6 +203,66 @@ describe('shared contracts', () => {
         Effect.flip(client.state.get({ path: { id: 'abcdefghijkl' } })),
       )
       expect(decodedGet).toEqual(unavailable)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('decodes publication state errors through the derived client', async () => {
+    const errors = [
+      {
+        status: 409,
+        envelope: {
+          ok: false as const,
+          code: 'state_schema_change' as const,
+          message: 'Publishing would change saved-value fields.',
+          details: {
+            retyped: [
+              { name: 'notes', from: 'textarea' as const, to: 'text' as const },
+            ],
+            orphaned: ['approved'],
+          },
+        },
+      },
+      {
+        status: 413,
+        envelope: {
+          ok: false as const,
+          code: 'state_too_large' as const,
+          message: 'Saved values are too large.',
+          details: { bytes: 262_145, limit: 262_144 },
+        },
+      },
+    ] as const
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const client = await Effect.runPromise(
+        HttpApiClient.make(DossierApi, {
+          baseUrl: 'https://dossier.example',
+        }).pipe(Effect.provide(FetchHttpClient.layer)),
+      )
+
+      for (const error of errors) {
+        fetchMock.mockResolvedValueOnce(
+          new Response(JSON.stringify(error.envelope), {
+            status: error.status,
+            headers: { 'content-type': 'application/json; charset=utf-8' },
+          }),
+        )
+        const decoded = await Effect.runPromise(
+          Effect.flip(
+            client.uploads.publish({
+              payload: {
+                html: '<!doctype html><title>Stateful publish</title>',
+                acceptStateChanges: true,
+              },
+            }),
+          ),
+        )
+        expect(decoded).toEqual(error.envelope)
+      }
     } finally {
       vi.unstubAllGlobals()
     }

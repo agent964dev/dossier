@@ -16,6 +16,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   state_conflict: 409,
   state_version_changed: 409,
   state_type_mismatch: 422,
+  state_schema_change: 409,
   state_too_large: 413,
   state_edit_required: 403,
   state_unavailable: 503,
