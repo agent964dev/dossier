@@ -672,7 +672,7 @@ interface DocumentActionInput {
   readonly remove?: readonly string[]
 }
 
-const ACTIONS: readonly DocumentActionName[] = [
+const ACTIONS = new Set<DocumentActionName>([
   'disable',
   'enable',
   'delete',
@@ -680,9 +680,9 @@ const ACTIONS: readonly DocumentActionName[] = [
   'visibility',
   'shares',
   'move',
-]
+])
 
-const VISIBILITIES: readonly string[] = ['public', 'team', 'private']
+const VISIBILITIES = new Set(['public', 'team', 'private'])
 
 function readEmails(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value)) return undefined
@@ -730,7 +730,7 @@ export const documentAction = createServerFn({ method: 'POST' })
     }
     if (
       typeof value.action !== 'string' ||
-      !ACTIONS.includes(value.action as DocumentActionName)
+      !ACTIONS.has(value.action as DocumentActionName)
     ) {
       throw new Error('Unknown document action.')
     }
@@ -741,7 +741,7 @@ export const documentAction = createServerFn({ method: 'POST' })
       const level = value.visibility
       if (level === null || level === 'inherit') {
         visibility = null
-      } else if (typeof level === 'string' && VISIBILITIES.includes(level)) {
+      } else if (typeof level === 'string' && VISIBILITIES.has(level)) {
         visibility = level as Visibility
       } else {
         throw new Error('Pick public, team, private, or inherit.')

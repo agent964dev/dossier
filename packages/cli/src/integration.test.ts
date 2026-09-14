@@ -14,8 +14,11 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import packageJson from '../package.json' with { type: 'json' }
 
 const exec = promisify(execFile)
+const currentVersion = packageJson.version
+const nextVersion = `${Number(currentVersion.split('.')[0]) + 1}.0.0`
 const packageDirectory = new URL('..', import.meta.url).pathname
 const artifact = join(packageDirectory, 'dist/index.js')
 const bomFixture = join(packageDirectory, 'test/fixtures/bom.html')
@@ -230,7 +233,7 @@ beforeAll(async () => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     if (url.pathname === '/@agent964%2Fdossier/latest') {
       response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ version: '0.3.0' }))
+      response.end(JSON.stringify({ version: nextVersion }))
       return
     }
 
@@ -1020,7 +1023,7 @@ describe('built CLI', () => {
       manifest,
       JSON.stringify({
         name: '@agent964/dossier',
-        version: '0.2.0',
+        version: currentVersion,
         type: 'module',
       }),
       'utf8',
@@ -1030,7 +1033,7 @@ describe('built CLI', () => {
       `const fs = require('fs')
 const path = process.env.DOSSIER_TEST_PACKAGE_JSON
 const manifest = JSON.parse(fs.readFileSync(path, 'utf8'))
-manifest.version = '0.3.0'
+manifest.version = ${JSON.stringify(nextVersion)}
 fs.writeFileSync(path, JSON.stringify(manifest))
 `,
       'utf8',
@@ -1063,15 +1066,15 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     expect(result.stderr).toBe('')
     expect(JSON.parse(result.stdout)).toEqual({
       ok: true,
-      currentVersion: '0.2.0',
-      latestVersion: '0.3.0',
+      currentVersion,
+      latestVersion: nextVersion,
       installMethod: 'npm',
       updateAvailable: true,
       checked: false,
       updated: true,
     })
     expect((await readFile(record, 'utf8')).trim().split('\n')).toContain(
-      'install -g @agent964/dossier@0.3.0',
+      `install -g @agent964/dossier@${nextVersion}`,
     )
   })
 

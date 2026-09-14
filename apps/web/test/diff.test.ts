@@ -21,16 +21,16 @@ async function api(
   const headers = new Headers({
     authorization: `Bearer ${options.token}`,
   })
-  let body: string | undefined
+  let requestBody: string | undefined
   if (options.body !== undefined) {
     headers.set('content-type', 'application/json')
-    body = JSON.stringify(options.body)
+    requestBody = JSON.stringify(options.body)
   }
   return worker.fetch(
     new Request(`https://dossier.test${path}`, {
-      method: options.method ?? (body === undefined ? 'GET' : 'POST'),
+      method: options.method ?? (requestBody === undefined ? 'GET' : 'POST'),
       headers,
-      body,
+      body: requestBody,
     }) as Parameters<typeof worker.fetch>[0],
     options.environment ?? env,
   )

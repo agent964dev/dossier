@@ -65,9 +65,9 @@ export function VersionLinks({
   const versions = from.versionNumber === to.versionNumber ? [from] : [from, to]
   return (
     <div className={cn('flex flex-wrap items-center gap-2', className)}>
-      {versions.map((version, index) => (
+      {versions.map((version) => (
         <span
-          key={`${version.versionNumber}-${index}`}
+          key={version.versionNumber}
           className="flex items-center gap-1 rounded-lg border border-border bg-neutral-900/60 py-1 pr-1 pl-2.5"
         >
           <span data-numeric className="text-micro-lg text-neutral-400">

@@ -249,7 +249,7 @@ export const TreeLive = Layer.effect(
         }
       })
 
-    const patch: TreeService['patch'] = (documentId, patch, principal) =>
+    const patch: TreeService['patch'] = (documentId, changes, principal) =>
       Effect.gen(function* () {
         const decision = (yield* access.resolve([documentId], principal))[0]
         if (!decision || (!decision.editor && !decision.canRead)) {
@@ -293,17 +293,17 @@ export const TreeLive = Layer.effect(
           )
         }
         if (
-          patch.ifRevision !== undefined &&
-          patch.ifRevision !== source.revision
+          changes.ifRevision !== undefined &&
+          changes.ifRevision !== source.revision
         ) {
           return yield* Effect.fail(
             apiError('conflict', 'Document revision does not match.'),
           )
         }
-        const kind = yield* normalizeDocumentKind(patch.kind)
-        const moving = hasOwn(patch, 'parentId')
+        const kind = yield* normalizeDocumentKind(changes.kind)
+        const moving = hasOwn(changes, 'parentId')
         const destinationId = moving
-          ? (patch.parentId ?? null)
+          ? (changes.parentId ?? null)
           : source.parent_id
 
         if (moving && destinationId !== null) {
@@ -449,7 +449,7 @@ export const TreeLive = Layer.effect(
                 destinationId,
                 documentId,
                 principal.workspaceId,
-                patch.ifRevision ?? null,
+                changes.ifRevision ?? null,
                 guardId,
               )
           : db.raw
@@ -473,8 +473,8 @@ export const TreeLive = Layer.effect(
                 principal.accountId,
                 documentId,
                 principal.workspaceId,
-                patch.ifRevision ?? null,
-                patch.ifRevision ?? null,
+                changes.ifRevision ?? null,
+                changes.ifRevision ?? null,
               )
 
         const update = moving
@@ -539,13 +539,13 @@ export const TreeLive = Layer.effect(
                 destinationId,
                 principal.workspaceId,
                 now,
-                hasOwn(patch, 'kind') ? 1 : 0,
+                hasOwn(changes, 'kind') ? 1 : 0,
                 kind ?? null,
-                hasOwn(patch, 'description') ? 1 : 0,
-                patch.description ?? null,
-                hasOwn(patch, 'visibility') ? 1 : 0,
-                patch.visibility ?? null,
-                patch.ifRevision ?? null,
+                hasOwn(changes, 'description') ? 1 : 0,
+                changes.description ?? null,
+                hasOwn(changes, 'visibility') ? 1 : 0,
+                changes.visibility ?? null,
+                changes.ifRevision ?? null,
               )
           : db.raw
               .prepare(
@@ -557,12 +557,12 @@ export const TreeLive = Layer.effect(
                   WHERE id = ?`,
               )
               .bind(
-                hasOwn(patch, 'kind') ? 1 : 0,
+                hasOwn(changes, 'kind') ? 1 : 0,
                 kind ?? null,
-                hasOwn(patch, 'description') ? 1 : 0,
-                patch.description ?? null,
-                hasOwn(patch, 'visibility') ? 1 : 0,
-                patch.visibility ?? null,
+                hasOwn(changes, 'description') ? 1 : 0,
+                changes.description ?? null,
+                hasOwn(changes, 'visibility') ? 1 : 0,
+                changes.visibility ?? null,
                 now,
                 documentId,
               )
@@ -578,8 +578,8 @@ export const TreeLive = Layer.effect(
               )
               .bind(
                 documentId,
-                hasOwn(patch, 'visibility') ? 1 : 0,
-                patch.visibility ?? null,
+                hasOwn(changes, 'visibility') ? 1 : 0,
+                changes.visibility ?? null,
               ),
             db.raw
               .prepare(`DELETE FROM publication_guards WHERE id = ?`)
