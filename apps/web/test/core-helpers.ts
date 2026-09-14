@@ -42,6 +42,7 @@ export function testEnv(base: Cloudflare.Env): Cloudflare.Env {
     SESSION_SECRET: TEST_SECRET,
     BOOTSTRAP_API_KEY: undefined,
     UPLOAD_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    STATE_RATE_LIMITER: { limit: async () => ({ success: true }) },
   } as unknown as Cloudflare.Env
 }
 

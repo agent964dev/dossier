@@ -19,6 +19,7 @@ import {
   type HealthzResponse,
   type Me,
   type PurgeReport,
+  type StateChange,
   type StateResponse,
   type UploadRequest,
   type UploadResponse,
@@ -169,15 +170,66 @@ function errorStatus(error: unknown): number | undefined {
   return undefined
 }
 
+function apiErrorValue(error: unknown): Record<string, unknown> | undefined {
+  if (error instanceof CliError) return apiErrorValue(error.details)
+  const candidate = record(error)
+  if (!candidate) return undefined
+  const body = record(candidate.body)
+  if (typeof body?.code === 'string') return body
+  if (typeof candidate.code === 'string') return candidate
+  return undefined
+}
+
 function errorCode(error: unknown): string | undefined {
-  const code = objectValue(error, 'code')
-  if (typeof code === 'string') return code
-  if (error instanceof CliError) return errorCode(error.details)
+  const code = apiErrorValue(error)?.code
+  return typeof code === 'string' ? code : undefined
+}
+
+function stateErrorMessage(error: unknown): string | undefined {
+  const value = apiErrorValue(error)
+  const code = value?.code
+  const details = record(value?.details)
+  if (code === 'state_conflict') {
+    const fields = details?.fields
+    if (!Array.isArray(fields)) return undefined
+    const lines = fields.flatMap((rawField) => {
+      const field = record(rawField)
+      if (
+        typeof field?.name !== 'string' ||
+        typeof field.revision !== 'number' ||
+        !Object.hasOwn(field, 'value')
+      ) {
+        return []
+      }
+      return [
+        `${field.name}: ${jsonText(field.value) ?? 'null'} (revision ${field.revision})`,
+      ]
+    })
+    if (lines.length === 0) return undefined
+    return `${lines.join('\n')}\nRead the latest saved values, then re-run the command.`
+  }
+  if (code === 'state_type_mismatch') {
+    const fields = details?.fields
+    if (!Array.isArray(fields)) return undefined
+    const names = fields.filter(
+      (field): field is string => typeof field === 'string',
+    )
+    return `Values do not match the current types for: ${names.join(', ') || '(unknown)'}`
+  }
+  if (code === 'state_too_large') {
+    const bytes = details?.bytes
+    const limit = details?.limit
+    if (typeof bytes !== 'number' || typeof limit !== 'number') return undefined
+    return `Saved values use ${bytes} bytes; the limit is ${limit} bytes.`
+  }
   return undefined
 }
 
 function errorMessage(error: unknown): string {
-  const message = objectValue(error, 'message')
+  const stateMessage = stateErrorMessage(error)
+  if (stateMessage !== undefined) return stateMessage
+  const value = apiErrorValue(error)
+  const message = value?.message ?? objectValue(error, 'message')
   const code = errorCode(error)
   const base =
     typeof message === 'string' && message.trim() !== ''
@@ -1237,6 +1289,98 @@ function printState(response: StateResponse, runtime: RuntimeConfig): void {
   )
 }
 
+function printStateSaved(
+  response: StateResponse,
+  runtime: RuntimeConfig,
+): void {
+  if (runtime.json) {
+    printJson(response)
+    return
+  }
+  if (runtime.quiet) {
+    process.stdout.write(`${response.revision}\n`)
+    return
+  }
+  process.stdout.write(
+    `Revision: ${response.revision}\nLast saved: ${response.updatedAt ?? 'never'}\n`,
+  )
+}
+
+async function readStateValues(
+  file: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  const absolutePath = resolve(file)
+  let source: string
+  try {
+    source = await readFile(absolutePath, 'utf8')
+  } catch (error) {
+    throw new CliError(
+      `cannot read ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    throw new CliError(
+      `${absolutePath} must contain a JSON object of saved-value names to values`,
+      ExitCode.Usage,
+    )
+  }
+  const values = record(value)
+  if (!values) {
+    throw new CliError(
+      `${absolutePath} must contain a JSON object of saved-value names to values`,
+      ExitCode.Usage,
+    )
+  }
+  return values
+}
+
+function stateChanges(
+  values: Readonly<Record<string, unknown>>,
+  baseline: number | StateResponse,
+): StateChange[] {
+  return Object.entries(values).map(([name, value]) => ({
+    name,
+    value,
+    base:
+      typeof baseline === 'number'
+        ? baseline
+        : (baseline.fields[name]?.revision ?? 0),
+  }))
+}
+
+async function saveState(
+  runtime: RuntimeConfig,
+  id: string,
+  values: Readonly<Record<string, unknown>>,
+  revision?: number,
+): Promise<StateResponse> {
+  if (revision !== undefined) {
+    const changes = stateChanges(values, revision)
+    return apiCall(runtime, (client) =>
+      client.state.set({ path: { id }, payload: { changes } }),
+    )
+  }
+
+  const snapshot = await apiCall(runtime, (client) =>
+    client.state.get({ path: { id } }),
+  )
+  const changes = stateChanges(values, snapshot)
+  try {
+    return await apiCall(runtime, (client) =>
+      client.state.set({ path: { id }, payload: { changes } }),
+    )
+  } catch (error) {
+    if (errorCode(error) !== 'state_version_changed') throw error
+    return apiCall(runtime, (client) =>
+      client.state.set({ path: { id }, payload: { changes } }),
+    )
+  }
+}
+
 const stateGetCommand = Command.make(
   'get',
   { ref: Args.text({ name: 'ref' }) },
@@ -1264,9 +1408,46 @@ const stateGetCommand = Command.make(
     }),
 ).pipe(Command.withDescription('Read current saved values and revision'))
 
+const stateSetCommand = Command.make(
+  'set',
+  {
+    data: Options.text('data').pipe(
+      Options.withDescription(
+        'Path to a JSON file mapping saved-value names to values',
+      ),
+    ),
+    revision: Options.integer('revision').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Baseline from an earlier read when the changes were prepared from it',
+      ),
+    ),
+    ref: Args.text({ name: 'ref' }),
+  },
+  ({ data, revision, ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const baseline = Option.getOrUndefined(revision)
+      if (baseline !== undefined && baseline < 0) {
+        throw new CliError(
+          '--revision must be a non-negative integer',
+          ExitCode.Usage,
+        )
+      }
+      const values = await readStateValues(data)
+      printStateSaved(await saveState(runtime, id, values, baseline), runtime)
+    }),
+).pipe(
+  Command.withDescription(
+    'Save values from JSON. Without --revision, the read-first baseline only guards against saves racing this command; pass --revision from an earlier read when changes were prepared from it.',
+  ),
+)
+
 const stateCommand = Command.make('state').pipe(
-  Command.withDescription('Read shared saved values'),
-  Command.withSubcommands([stateGetCommand]),
+  Command.withDescription('Read and save shared saved values'),
+  Command.withSubcommands([stateGetCommand, stateSetCommand]),
 )
 
 const fetchCommand = Command.make(
@@ -2271,7 +2452,7 @@ const commandTree: CommandTree = {
     remove: true,
   },
   admin: { purge: true },
-  state: { get: true },
+  state: { get: true, set: true },
 }
 
 const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2292,6 +2473,7 @@ const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
   'assets push': new Set(['--slug']),
   'workspace allow': new Set(['--role']),
   'admin purge': new Set(['--retention-days']),
+  'state set': new Set(['--data', '--revision']),
 }
 
 const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2482,7 +2664,12 @@ export async function runCli(
             const cliError = asCliError(error)
             process.stderr.write(`dossier: ${cliError.message}\n`)
             if (normalized.json) {
-              printJson({ ok: false, error: cliError.message, exitCode: code })
+              const value = apiErrorValue(cliError)
+              printJson(
+                typeof value?.code === 'string'
+                  ? { ...value, exitCode: code }
+                  : { ok: false, error: cliError.message, exitCode: code },
+              )
             }
           } else if (normalized.json) {
             printJson({

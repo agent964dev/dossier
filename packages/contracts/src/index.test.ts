@@ -1,14 +1,17 @@
-import { Schema } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { FetchHttpClient, HttpApiClient } from '@effect/platform'
+import { Effect, Schema } from 'effect'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   ApiError,
   DocumentReader,
+  DossierApi,
   FieldType,
   HealthzResponse,
   PolicyResult,
   PolicyStats,
   StateResponse,
+  StateSaveRequest,
   UploadRequest,
 } from './index'
 
@@ -48,6 +51,19 @@ describe('shared contracts', () => {
       'select-multiple',
     )
     expect(Schema.decodeUnknownSync(StateResponse)(response)).toEqual(response)
+    expect(
+      Schema.decodeUnknownSync(StateSaveRequest)({
+        changes: [
+          { name: 'approved', value: true, base: 0 },
+          { name: 'notes', value: 'Ready', base: 2 },
+        ],
+      }),
+    ).toEqual({
+      changes: [
+        { name: 'approved', value: true, base: 0 },
+        { name: 'notes', value: 'Ready', base: 2 },
+      ],
+    })
 
     const specialName = Schema.decodeUnknownSync(StateResponse)({
       ...response,
@@ -79,6 +95,116 @@ describe('shared contracts', () => {
         stateful: true,
       }),
     ).toMatchObject({ stateful: true })
+  })
+
+  it('decodes every state save error through the derived client', async () => {
+    const errors = [
+      {
+        status: 409,
+        code: 'state_conflict',
+        message: 'Saved values changed.',
+        details: {
+          fields: [{ name: 'approved', revision: 3, value: true }],
+        },
+      },
+      {
+        status: 409,
+        code: 'state_version_changed',
+        message: 'The document version changed.',
+        details: { currentVersion: 4 },
+      },
+      {
+        status: 422,
+        code: 'state_type_mismatch',
+        message: 'Saved values do not match the document.',
+        details: { fields: ['approved'] },
+      },
+      {
+        status: 413,
+        code: 'state_too_large',
+        message: 'Saved values are too large.',
+        details: { bytes: 262_145, limit: 262_144 },
+      },
+      {
+        status: 409,
+        code: 'state_not_enabled',
+        message: 'Saved values are not enabled.',
+      },
+      {
+        status: 403,
+        code: 'state_edit_required',
+        message: 'Saved-value edit access is required.',
+      },
+      {
+        status: 503,
+        code: 'state_unavailable',
+        message: 'Saved values are unavailable.',
+      },
+      {
+        status: 429,
+        code: 'rate_limited',
+        message: 'Too many saved-value requests.',
+      },
+    ] as const
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const client = await Effect.runPromise(
+        HttpApiClient.make(DossierApi, {
+          baseUrl: 'https://dossier.example',
+        }).pipe(Effect.provide(FetchHttpClient.layer)),
+      )
+
+      for (const error of errors) {
+        const envelope = {
+          ok: false as const,
+          code: error.code,
+          message: error.message,
+          ...('details' in error ? { details: error.details } : {}),
+        }
+        fetchMock.mockResolvedValueOnce(
+          new Response(JSON.stringify(envelope), {
+            status: error.status,
+            headers: {
+              'cache-control': 'no-store',
+              'content-type': 'application/json; charset=utf-8',
+            },
+          }),
+        )
+
+        const decoded = await Effect.runPromise(
+          Effect.flip(
+            client.state.set({
+              path: { id: 'abcdefghijkl' },
+              payload: { changes: [] },
+            }),
+          ),
+        )
+        expect(decoded).toEqual(envelope)
+      }
+
+      const unavailable = {
+        ok: false as const,
+        code: 'state_unavailable' as const,
+        message: 'Saved values are unavailable.',
+      }
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify(unavailable), {
+          status: 503,
+          headers: {
+            'cache-control': 'no-store',
+            'content-type': 'application/json; charset=utf-8',
+          },
+        }),
+      )
+      const decodedGet = await Effect.runPromise(
+        Effect.flip(client.state.get({ path: { id: 'abcdefghijkl' } })),
+      )
+      expect(decodedGet).toEqual(unavailable)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('re-exports the policy schemas', () => {

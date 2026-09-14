@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { StateChange } from '@dossier/contracts'
 import { scanStateFields, type FieldType } from '@dossier/policy'
 import packageJson from '../package.json' with { type: 'json' }
 
@@ -71,6 +72,24 @@ let uploadRequests = 0
 let healthRequests = 0
 let assetRequests = 0
 let lastDiffQuery = ''
+const stateGetRequests: string[] = []
+const stateSetRequests: Array<{
+  readonly id: string
+  readonly changes: readonly StateChange[]
+}> = []
+const stateVersionChanges = new Map<
+  string,
+  | { readonly kind: 'version-only' }
+  | {
+      readonly kind: 'move-field'
+      readonly name: string
+      readonly value: unknown
+    }
+>()
+const forcedStateErrors = new Map<
+  string,
+  { readonly status: number; readonly value: Record<string, unknown> }
+>()
 const workspaceMembers = [
   {
     accountId: 'acct_test',
@@ -205,6 +224,30 @@ function storedDocument(
 
 function statefulHtml(title: string): string {
   return `<!doctype html><html><head><title>${title}</title></head><body><label>Objective <input data-state="objective" value="Launch"></label><label><input type="checkbox" data-state="approved"> Approved</label><textarea data-state="notes"></textarea></body></html>`
+}
+
+function stateResponse(id: string, stored: StoredDocument) {
+  return {
+    documentId: id,
+    version: stored.version,
+    revision: stored.stateRevision,
+    updatedAt: stored.stateUpdatedAt,
+    data: stored.stateData,
+    fields: stored.stateFields,
+  }
+}
+
+function setStateValue(
+  target: Record<string, unknown>,
+  name: string,
+  value: unknown,
+): void {
+  Object.defineProperty(target, name, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  })
 }
 
 function descendantIds(rootId: string): string[] {
@@ -579,7 +622,7 @@ beforeAll(async () => {
     const stateApi = /^\/api\/documents\/([a-z0-9]{12})\/state$/.exec(
       url.pathname,
     )
-    if (stateApi && request.method === 'GET') {
+    if (stateApi) {
       response.setHeader('content-type', 'application/json')
       if (!authenticated(request)) {
         response.statusCode = 401
@@ -604,17 +647,98 @@ beforeAll(async () => {
         )
         return
       }
-      response.end(
-        JSON.stringify({
-          documentId: id,
-          version: stored.version,
-          revision: stored.stateRevision,
-          updatedAt: stored.stateUpdatedAt,
-          data: stored.stateData,
-          fields: stored.stateFields,
-        }),
-      )
-      return
+
+      if (request.method === 'GET') {
+        stateGetRequests.push(id)
+        response.end(JSON.stringify(stateResponse(id, stored)))
+        return
+      }
+
+      if (request.method === 'PUT') {
+        const payload = await bodyJson(request)
+        const changes = Array.isArray(payload.changes)
+          ? (payload.changes as StateChange[])
+          : []
+        stateSetRequests.push({ id, changes })
+
+        const forcedError = forcedStateErrors.get(id)
+        if (forcedError) {
+          response.statusCode = forcedError.status
+          response.end(JSON.stringify(forcedError.value))
+          return
+        }
+
+        const versionChange = stateVersionChanges.get(id)
+        if (versionChange) {
+          stateVersionChanges.delete(id)
+          stored.version += 1
+          if (versionChange.kind === 'move-field') {
+            const revision = (stored.stateRevision ?? 0) + 1
+            const current = stored.stateFields[versionChange.name]
+            stored.stateRevision = revision
+            stored.stateUpdatedAt = '2026-09-14T09:00:00Z'
+            setStateValue(
+              stored.stateData,
+              versionChange.name,
+              versionChange.value,
+            )
+            stored.stateFields[versionChange.name] = {
+              value: versionChange.value,
+              revision,
+              type: current?.type ?? 'json',
+            }
+          }
+          response.statusCode = 409
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'state_version_changed',
+              message: 'The current document version changed.',
+              details: { currentVersion: stored.version },
+            }),
+          )
+          return
+        }
+
+        const conflicts = changes.flatMap((change) => {
+          const field = stored.stateFields[change.name]
+          if ((field?.revision ?? 0) <= change.base) return []
+          return [
+            {
+              name: change.name,
+              revision: field!.revision,
+              value: field!.value,
+            },
+          ]
+        })
+        if (conflicts.length > 0) {
+          response.statusCode = 409
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'state_conflict',
+              message: 'Saved values changed after the supplied baseline.',
+              details: { fields: conflicts },
+            }),
+          )
+          return
+        }
+
+        const revision = (stored.stateRevision ?? 0) + 1
+        stored.stateRevision = revision
+        stored.stateUpdatedAt = '2026-09-14T09:01:00Z'
+        for (const change of changes) {
+          const current = stored.stateFields[change.name]
+          setStateValue(stored.stateData, change.name, change.value)
+          stored.stateFields[change.name] = {
+            value: change.value,
+            revision,
+            type: current?.type ?? 'json',
+          }
+        }
+        response.end(JSON.stringify(stateResponse(id, stored)))
+        return
+      }
     }
 
     const diffApi = /^\/api\/documents\/([a-z0-9]{12})\/diff$/.exec(
@@ -1659,6 +1783,335 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
       { home },
     )
     expect(quiet).toEqual({ stdout: '', stderr: '', exitCode: 0 })
+  })
+
+  it('explains the omitted-revision baseline in state set help', async () => {
+    const help = await cli('node', ['state', 'set', '--help'])
+    expect(help.exitCode).toBe(0)
+    expect(help.stdout).toContain(
+      'Path to a JSON file mapping saved-value names to values',
+    )
+    expect(help.stdout).toContain(
+      'only guards against saves racing this command',
+    )
+    expect(help.stdout).toContain(
+      'pass --revision from an earlier read when changes were prepared from it',
+    )
+  })
+
+  it('sets saved values in human, JSON, and quiet modes', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'state-values.json')
+    await writeFile(
+      file,
+      JSON.stringify({ objective: 'Ship it', approved: true }),
+      'utf8',
+    )
+    for (const id of ['sethuman0001', 'setjson00001', 'setquiet0001']) {
+      documents.set(
+        id,
+        storedDocument(`${id}.html`, {
+          version: 2,
+          stateful: true,
+          stateRevision: 5,
+          stateUpdatedAt: '2026-09-14T08:00:00Z',
+          stateData: { objective: 'Before', approved: false },
+          stateFields: {
+            objective: { value: 'Before', revision: 4, type: 'text' },
+            approved: { value: false, revision: 0, type: 'checkbox' },
+          },
+        }),
+      )
+    }
+
+    const human = await cli(
+      'node',
+      ['state', 'set', 'sethuman0001', '--data', file],
+      { home },
+    )
+    expect(human).toEqual({
+      stdout: 'Revision: 6\nLast saved: 2026-09-14T09:01:00Z\n',
+      stderr: '',
+      exitCode: 0,
+    })
+
+    const json = await cli(
+      'node',
+      ['state', 'set', 'setjson00001', '--data', file, '--json'],
+      { home },
+    )
+    expect(json.exitCode).toBe(0)
+    expect(json.stderr).toBe('')
+    expect(JSON.parse(json.stdout)).toEqual({
+      documentId: 'setjson00001',
+      version: 2,
+      revision: 6,
+      updatedAt: '2026-09-14T09:01:00Z',
+      data: { objective: 'Ship it', approved: true },
+      fields: {
+        objective: { value: 'Ship it', revision: 6, type: 'text' },
+        approved: { value: true, revision: 6, type: 'checkbox' },
+      },
+    })
+
+    const quiet = await cli(
+      'node',
+      ['state', 'set', 'setquiet0001', '--data', file, '--quiet'],
+      { home },
+    )
+    expect(quiet).toEqual({ stdout: '6\n', stderr: '', exitCode: 0 })
+  })
+
+  it('uses an explicit revision without reading and renders conflicts', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const id = 'setconf00001'
+    const file = join(home, 'conflicting-state.json')
+    await writeFile(file, JSON.stringify({ objective: 'My draft' }), 'utf8')
+    documents.set(
+      id,
+      storedDocument('Conflict.html', {
+        stateful: true,
+        stateRevision: 7,
+        stateUpdatedAt: '2026-09-14T08:00:00Z',
+        stateData: { objective: 'Current value' },
+        stateFields: {
+          objective: { value: 'Current value', revision: 7, type: 'text' },
+        },
+      }),
+    )
+    const beforeGets = stateGetRequests.length
+    const beforeSets = stateSetRequests.length
+    const result = await cli(
+      'node',
+      ['state', 'set', id, '--data', file, '--revision', '3'],
+      { home },
+    )
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('objective: "Current value" (revision 7)')
+    expect(result.stderr).toContain(
+      'Read the latest saved values, then re-run the command.',
+    )
+    expect(stateGetRequests).toHaveLength(beforeGets)
+    expect(stateSetRequests.slice(beforeSets)).toEqual([
+      {
+        id,
+        changes: [{ name: 'objective', value: 'My draft', base: 3 }],
+      },
+    ])
+
+    const json = await cli(
+      'node',
+      ['state', 'set', id, '--data', file, '--revision', '3', '--json'],
+      { home },
+    )
+    expect(json.exitCode).toBe(1)
+    expect(JSON.parse(json.stdout)).toEqual({
+      ok: false,
+      code: 'state_conflict',
+      message: 'Saved values changed after the supplied baseline.',
+      details: {
+        fields: [{ name: 'objective', revision: 7, value: 'Current value' }],
+      },
+      exitCode: 1,
+    })
+  })
+
+  it('retries one version change and succeeds with the original bases', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const id = 'setretry0001'
+    const file = join(home, 'retry-state.json')
+    await writeFile(file, JSON.stringify({ objective: 'After' }), 'utf8')
+    documents.set(
+      id,
+      storedDocument('Retry state.html', {
+        version: 2,
+        stateful: true,
+        stateRevision: 5,
+        stateData: { objective: 'Before' },
+        stateFields: {
+          objective: { value: 'Before', revision: 4, type: 'text' },
+        },
+      }),
+    )
+    stateVersionChanges.set(id, { kind: 'version-only' })
+    const before = stateSetRequests.length
+    const result = await cli(
+      'node',
+      ['state', 'set', id, '--data', file, '--json'],
+      { home },
+    )
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      documentId: id,
+      version: 3,
+      revision: 6,
+      data: { objective: 'After' },
+    })
+    expect(stateSetRequests.slice(before)).toEqual([
+      {
+        id,
+        changes: [{ name: 'objective', value: 'After', base: 4 }],
+      },
+      {
+        id,
+        changes: [{ name: 'objective', value: 'After', base: 4 }],
+      },
+    ])
+  })
+
+  it('keeps the original bases when a field moves before the retry', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const id = 'setmoved0001'
+    const file = join(home, 'moved-state.json')
+    await writeFile(file, JSON.stringify({ objective: 'My draft' }), 'utf8')
+    documents.set(
+      id,
+      storedDocument('Moved state.html', {
+        version: 2,
+        stateful: true,
+        stateRevision: 5,
+        stateData: { objective: 'Before' },
+        stateFields: {
+          objective: { value: 'Before', revision: 4, type: 'text' },
+        },
+      }),
+    )
+    stateVersionChanges.set(id, {
+      kind: 'move-field',
+      name: 'objective',
+      value: 'Collaborator value',
+    })
+    const before = stateSetRequests.length
+    const result = await cli('node', ['state', 'set', id, '--data', file], {
+      home,
+    })
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(
+      'objective: "Collaborator value" (revision 6)',
+    )
+    expect(stateSetRequests.slice(before)).toEqual([
+      {
+        id,
+        changes: [{ name: 'objective', value: 'My draft', base: 4 }],
+      },
+      {
+        id,
+        changes: [{ name: 'objective', value: 'My draft', base: 4 }],
+      },
+    ])
+  })
+
+  it('renders state type and size errors from the typed client', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'invalid-state-values.json')
+    await writeFile(
+      file,
+      JSON.stringify({ objective: 42, approved: 'yes' }),
+      'utf8',
+    )
+    documents.set(
+      'settypes0001',
+      storedDocument('Types.html', { stateful: true, stateRevision: 0 }),
+    )
+    forcedStateErrors.set('settypes0001', {
+      status: 422,
+      value: {
+        ok: false,
+        code: 'state_type_mismatch',
+        message: 'Some values do not match the current field types.',
+        details: { fields: ['objective', 'approved'] },
+      },
+    })
+    const mismatch = await cli(
+      'node',
+      ['state', 'set', 'settypes0001', '--data', file, '--revision', '0'],
+      { home },
+    )
+    expect(mismatch.exitCode).toBe(1)
+    expect(mismatch.stderr).toContain(
+      'Values do not match the current types for: objective, approved',
+    )
+
+    documents.set(
+      'setlarge0001',
+      storedDocument('Large.html', { stateful: true, stateRevision: 0 }),
+    )
+    forcedStateErrors.set('setlarge0001', {
+      status: 413,
+      value: {
+        ok: false,
+        code: 'state_too_large',
+        message: 'Saved values exceed the document limit.',
+        details: { bytes: 300000, limit: 262144 },
+      },
+    })
+    const tooLarge = await cli(
+      'node',
+      ['state', 'set', 'setlarge0001', '--data', file, '--revision', '0'],
+      { home },
+    )
+    expect(tooLarge.exitCode).toBe(1)
+    expect(tooLarge.stderr).toContain(
+      'Saved values use 300000 bytes; the limit is 262144 bytes.',
+    )
+
+    documents.set(
+      'setlimit0001',
+      storedDocument('Rate limit.html', { stateful: true, stateRevision: 0 }),
+    )
+    forcedStateErrors.set('setlimit0001', {
+      status: 429,
+      value: {
+        ok: false,
+        code: 'rate_limited',
+        message: 'State rate limit exceeded.',
+      },
+    })
+    const rateLimited = await cli(
+      'node',
+      [
+        'state',
+        'set',
+        'setlimit0001',
+        '--data',
+        file,
+        '--revision',
+        '0',
+        '--json',
+      ],
+      { home },
+    )
+    expect(rateLimited.exitCode).toBe(1)
+    expect(JSON.parse(rateLimited.stdout)).toEqual({
+      ok: false,
+      code: 'rate_limited',
+      message: 'State rate limit exceeded.',
+      exitCode: 1,
+    })
+  })
+
+  it('rejects state data that is not a JSON object with usage exit code', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const file = join(home, 'state-array.json')
+    await writeFile(file, JSON.stringify(['not', 'an', 'object']), 'utf8')
+    const before = stateSetRequests.length
+    const result = await cli(
+      'node',
+      ['state', 'set', 'settypes0001', '--data', file, '--revision', '0'],
+      { home },
+    )
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain(
+      'must contain a JSON object of saved-value names to values',
+    )
+    expect(stateSetRequests).toHaveLength(before)
   })
 
   it('preserves __proto__ through the derived state client', async () => {

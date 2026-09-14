@@ -67,6 +67,18 @@ export const StateResponse = Schema.Struct({
 })
 export type StateResponse = typeof StateResponse.Type
 
+export const StateChange = Schema.Struct({
+  name: Schema.String,
+  value: Schema.Unknown,
+  base: Schema.Number,
+})
+export type StateChange = typeof StateChange.Type
+
+export const StateSaveRequest = Schema.Struct({
+  changes: Schema.Array(StateChange),
+})
+export type StateSaveRequest = typeof StateSaveRequest.Type
+
 export const Visibility = Schema.Literal('public', 'team', 'private')
 export type Visibility = typeof Visibility.Type
 
@@ -505,8 +517,57 @@ export const PolicyRejectedError = errorSchema('policy_rejected')
 export const RateLimitedError = errorSchema('rate_limited')
 export const DiffTooLargeError = errorSchema('diff_too_large')
 export type DiffTooLargeError = typeof DiffTooLargeError.Type
+
+function stateError<
+  const Code extends string,
+  Details extends Schema.Schema.Any,
+>(code: Code, details: Details) {
+  return Schema.Struct({
+    ok: Schema.Literal(false),
+    code: Schema.Literal(code),
+    message: Schema.String,
+    details,
+  })
+}
+
+export const StateConflictError = stateError(
+  'state_conflict',
+  Schema.Struct({
+    fields: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        revision: Schema.Number,
+        value: Schema.Unknown,
+      }),
+    ),
+  }),
+)
+export type StateConflictError = typeof StateConflictError.Type
+
+export const StateVersionChangedError = stateError(
+  'state_version_changed',
+  Schema.Struct({ currentVersion: Schema.Number }),
+)
+export type StateVersionChangedError = typeof StateVersionChangedError.Type
+
+export const StateTypeMismatchError = stateError(
+  'state_type_mismatch',
+  Schema.Struct({ fields: Schema.Array(Schema.String) }),
+)
+export type StateTypeMismatchError = typeof StateTypeMismatchError.Type
+
+export const StateTooLargeError = stateError(
+  'state_too_large',
+  Schema.Struct({ bytes: Schema.Number, limit: Schema.Number }),
+)
+export type StateTooLargeError = typeof StateTooLargeError.Type
+
 export const StateNotEnabledError = errorSchema('state_not_enabled')
 export type StateNotEnabledError = typeof StateNotEnabledError.Type
+export const StateEditRequiredError = errorSchema('state_edit_required')
+export type StateEditRequiredError = typeof StateEditRequiredError.Type
+export const StateUnavailableError = errorSchema('state_unavailable')
+export type StateUnavailableError = typeof StateUnavailableError.Type
 
 export const ApiError = Schema.Union(
   UnauthenticatedError,
@@ -520,7 +581,13 @@ export const ApiError = Schema.Union(
   BodyTooLargeError,
   PolicyRejectedError,
   RateLimitedError,
+  StateConflictError,
+  StateVersionChangedError,
+  StateTypeMismatchError,
+  StateTooLargeError,
   StateNotEnabledError,
+  StateEditRequiredError,
+  StateUnavailableError,
 )
 export type ApiError = typeof ApiError.Type
 
@@ -611,12 +678,28 @@ export const AssetsApiGroup = HttpApiGroup.make('assets')
 
 const DocumentPath = Schema.Struct({ id: DocumentId })
 
-export const StateApiGroup = HttpApiGroup.make('state').add(
-  HttpApiEndpoint.get('get', '/api/documents/:id/state')
-    .setPath(DocumentPath)
-    .addSuccess(StateResponse)
-    .addError(StateNotEnabledError, { status: 409 }),
-)
+export const StateApiGroup = HttpApiGroup.make('state')
+  .add(
+    HttpApiEndpoint.get('get', '/api/documents/:id/state')
+      .setPath(DocumentPath)
+      .addSuccess(StateResponse)
+      .addError(StateNotEnabledError, { status: 409 })
+      .addError(StateUnavailableError, { status: 503 }),
+  )
+  .add(
+    HttpApiEndpoint.put('set', '/api/documents/:id/state')
+      .setPath(DocumentPath)
+      .setPayload(StateSaveRequest)
+      .addSuccess(StateResponse)
+      .addError(StateConflictError, { status: 409 })
+      .addError(StateVersionChangedError, { status: 409 })
+      .addError(StateNotEnabledError, { status: 409 })
+      .addError(StateTypeMismatchError, { status: 422 })
+      .addError(StateTooLargeError, { status: 413 })
+      .addError(StateEditRequiredError, { status: 403 })
+      .addError(StateUnavailableError, { status: 503 })
+      .addError(RateLimitedError, { status: 429 }),
+  )
 
 const RestorePayload = Schema.Struct({ batchId: Schema.String })
 const DisablePayload = Schema.Struct({ reason: OptionalNullableString })

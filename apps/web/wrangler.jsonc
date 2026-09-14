@@ -43,6 +43,11 @@
       "namespace_id": "1001",
       "simple": { "limit": 30, "period": 60 },
     },
+    {
+      "name": "STATE_RATE_LIMITER",
+      "namespace_id": "1003",
+      "simple": { "limit": 60, "period": 60 },
+    },
   ],
   "env": {
     "dev": {
@@ -80,6 +85,11 @@
           "name": "UPLOAD_RATE_LIMITER",
           "namespace_id": "1002",
           "simple": { "limit": 30, "period": 60 },
+        },
+        {
+          "name": "STATE_RATE_LIMITER",
+          "namespace_id": "1004",
+          "simple": { "limit": 60, "period": 60 },
         },
       ],
     },

@@ -8,6 +8,7 @@ import {
   ShareDelta,
   type DiffMode,
   ShareReplacement,
+  StateSaveRequest,
   isDocumentEditor,
   type DocumentEditor,
   UploadRequest,
@@ -28,6 +29,7 @@ import {
   Diff,
   DiffTooLarge,
   Documents,
+  apiError,
   DossierError,
   Ids,
   PersistenceError,
@@ -35,6 +37,7 @@ import {
   Publish,
   Shares,
   State,
+  type StateSnapshot,
   Tree,
   type PrincipalIdentity,
   WorkerEnv,
@@ -50,6 +53,7 @@ import {
   positiveInteger,
   readBoundedBody,
   requestWithBody,
+  stateRateLimiter,
   workerEnvWithOptionalRateLimiter,
   workerEnvWithoutUploadRateLimit,
 } from './request'
@@ -68,6 +72,43 @@ class ApiRequest extends Context.Tag('@dossier/web/ApiRequest')<
   ApiRequest,
   ApiRequestState
 >() {}
+
+function checkStateRateLimit(documentId: string) {
+  return Effect.gen(function* () {
+    const { principal } = yield* ApiRequest
+    const env = yield* WorkerEnv
+    const limiter = stateRateLimiter(env)
+    if (limiter === undefined) {
+      return yield* Effect.fail(
+        apiError(
+          'state_unavailable',
+          'Saved values are temporarily unavailable.',
+        ),
+      )
+    }
+
+    const outcome = yield* Effect.tryPromise({
+      try: () =>
+        limiter.limit({
+          key: `document:${documentId}:account:${principal.accountId}`,
+        }),
+      catch: () =>
+        apiError(
+          'state_unavailable',
+          'Saved values are temporarily unavailable.',
+        ),
+    })
+    if (!outcome.success) {
+      return yield* Effect.fail(
+        new DossierError({
+          code: 'rate_limited',
+          message: 'State rate limit exceeded.',
+          retryAfter: 60,
+        }),
+      )
+    }
+  })
+}
 
 function malformedInput(_cause?: unknown): DossierError {
   return new DossierError({
@@ -448,32 +489,54 @@ const DocumentsLive = HttpApiBuilder.group(
       ),
 )
 
-const StateLive = HttpApiBuilder.group(DossierApi, 'state', (handlers) =>
-  handlers.handleRaw('get', ({ path }) =>
-    withApiErrors(
-      Effect.gen(function* () {
-        const { principal } = yield* ApiRequest
-        const state = yield* State
-        const snapshot = yield* state.read(path.id, {
-          kind: 'account',
-          principal,
-        })
-        return jsonServerResponse({
-          documentId: snapshot.documentId,
-          version: snapshot.version,
-          revision: snapshot.revision,
-          updatedAt: snapshot.updatedAt,
-          data: Object.fromEntries(
-            Object.entries(snapshot.fields).map(([name, field]) => [
-              name,
-              field.value,
-            ]),
-          ),
-          fields: snapshot.fields,
-        })
-      }),
+function stateResponse(snapshot: StateSnapshot) {
+  return {
+    documentId: snapshot.documentId,
+    version: snapshot.version,
+    revision: snapshot.revision,
+    updatedAt: snapshot.updatedAt,
+    data: Object.fromEntries(
+      Object.entries(snapshot.fields).map(([name, field]) => [
+        name,
+        field.value,
+      ]),
     ),
-  ),
+    fields: snapshot.fields,
+  }
+}
+
+const StateLive = HttpApiBuilder.group(DossierApi, 'state', (handlers) =>
+  handlers
+    .handleRaw('get', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          yield* checkStateRateLimit(path.id)
+          const { principal } = yield* ApiRequest
+          const state = yield* State
+          const snapshot = yield* state.read(path.id, {
+            kind: 'account',
+            principal,
+          })
+          return jsonServerResponse(stateResponse(snapshot))
+        }),
+      ),
+    )
+    .handleRaw('set', ({ path, request }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          yield* checkStateRateLimit(path.id)
+          const { principal } = yield* ApiRequest
+          const state = yield* State
+          const payload = yield* decodeJsonBody(request, StateSaveRequest)
+          const snapshot = yield* state.save(
+            path.id,
+            { kind: 'account', principal },
+            payload,
+          )
+          return jsonServerResponse(stateResponse(snapshot))
+        }),
+      ),
+    ),
 )
 
 interface ApiKeyRow {

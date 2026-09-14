@@ -12,11 +12,36 @@ const permissiveRateLimiter: RateLimit = {
   limit: async () => ({ success: true }),
 }
 
+function isLocalDevelopment(env: Cloudflare.Env): boolean {
+  try {
+    const hostname = new URL(env.PUBLIC_BASE_URL).hostname
+    return hostname === 'localhost' || hostname === '127.0.0.1'
+  } catch {
+    return false
+  }
+}
+
+export function stateRateLimiter(env: Cloudflare.Env): RateLimit | undefined {
+  return (env as Partial<Cloudflare.Env>).STATE_RATE_LIMITER
+}
+
+export function stateFeatureAvailable(env: Cloudflare.Env): boolean {
+  return stateRateLimiter(env) !== undefined || isLocalDevelopment(env)
+}
+
 export function workerEnvWithOptionalRateLimiter(
   env: Cloudflare.Env,
 ): Cloudflare.Env {
-  if (env.UPLOAD_RATE_LIMITER) return env
-  return workerEnvWithoutUploadRateLimit(env)
+  const withUpload = env.UPLOAD_RATE_LIMITER
+    ? env
+    : workerEnvWithoutUploadRateLimit(env)
+  if (stateRateLimiter(withUpload) || !isLocalDevelopment(withUpload)) {
+    return withUpload
+  }
+  return {
+    ...withUpload,
+    STATE_RATE_LIMITER: permissiveRateLimiter,
+  }
 }
 
 export function workerEnvWithoutUploadRateLimit(
