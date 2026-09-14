@@ -9,6 +9,12 @@ updates:
       time: '09:00'
       timezone: Asia/Baghdad
     open-pull-requests-limit: 5
+    # Vitest majors need a coordinated Cloudflare test-plugin migration.
+    # Keep patch/minor updates enabled for both supported Vitest versions.
+    ignore:
+      - dependency-name: vitest
+        update-types:
+          - version-update:semver-major
     groups:
       workspace-dependencies:
         patterns:
