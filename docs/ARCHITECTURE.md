@@ -128,14 +128,17 @@ Disable and enable affect one node only. A disabled node serves 404 to everyone
 but remains visible to its editors in management views. R2 objects are retained
 while documents are restorable.
 
-A batch stays restorable for 30 days after it was archived; after that a daily
-scheduled purge removes it permanently, one batch at a time under a short lease.
+A batch stays restorable for the configured retention window (30 days by
+default, `PURGE_RETENTION_DAYS`); after that it is eligible for permanent
+removal. Removal is an operator action, `dossier admin
+purge --execute`, which is a dry run without the flag. Each deployment also
+runs the same purge once a week (Sunday 03:17 UTC) from a cron trigger. Either
+path removes one batch at a time under a short lease.
 The purge deletes R2 objects first, in chunks, checkpointing as it goes, then
 deletes the version and document rows, so a crash leaves objects gone and rows
 intact and the next run finishes the job. The deletion batch row is kept as an
 audit record of who archived what and when it was purged, and restore refuses a
-batch once the purge has claimed it. Operators can report or run the same work
-with `dossier admin purge`, which is a dry run unless `--execute` is passed.
+batch once the purge has claimed it.
 
 ## Upload policy and serving CSP
 

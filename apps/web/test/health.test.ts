@@ -13,10 +13,14 @@ describe('worker health route', () => {
 
     expect(response.status).toBe(200)
     expect(response.headers.get('content-type')).toContain('application/json')
-    expect(await response.json()).toEqual({
-      ok: true,
-      service: 'dossier',
-      version: '0.0.0',
-    })
+    const body = (await response.json()) as {
+      ok: boolean
+      service: string
+      version: string
+    }
+    expect(body.ok).toBe(true)
+    expect(body.service).toBe('dossier')
+    // Vite injects the git commit at build time; the test runner has no define.
+    expect(body.version).toBe('unknown')
   })
 })

@@ -56,7 +56,7 @@ function TrashPage() {
       {batches.length === 0 && swept.length === 0 ? (
         <EmptyState
           title="Nothing archived"
-          body={`Documents you archive land here until you restore them. Archived documents are permanently removed ${retentionDays} days after archiving.`}
+          body={`Documents you archive land here until you restore them. After ${retentionDays} days a batch becomes eligible for permanent removal by a workspace operator.`}
         />
       ) : null}
 
@@ -192,7 +192,7 @@ function TrashBatchCard({
             </p>
           ) : batch.purgesAt ? (
             <p className="mt-1.5 text-sm leading-ui text-neutral-500">
-              Permanently removed on{' '}
+              Eligible for permanent removal from{' '}
               <span title={absoluteDateTime(batch.purgesAt)}>
                 {absoluteDate(batch.purgesAt)}
               </span>

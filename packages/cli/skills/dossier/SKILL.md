@@ -38,7 +38,7 @@ dossier trash
 dossier restore <id> [--batch <batch-id>]
 ```
 
-`delete` archives a document and its subtree as one batch; use `--force` only when the reported descendant impact is intended. `trash` lists restorable batches. Archived documents are permanently removed after the deployment's retention window, normally 30 days. Restore before removal begins; claimed or purged batches cannot be restored.
+`delete` archives a document and its subtree as one batch; use `--force` only when the reported descendant impact is intended. `trash` lists restorable batches. Archived documents become eligible for permanent removal after the deployment's retention window, normally 30 days; an operator removes them with `dossier admin purge --execute`. Restore before that happens; claimed or purged batches cannot be restored.
 
 Deployment operators can inspect eligible batches without changing data:
 

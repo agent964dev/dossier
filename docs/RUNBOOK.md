@@ -290,15 +290,15 @@ bunx wrangler secret put SEED_ADMIN_EMAIL --env dev
 
 Worker secrets override variables of the same name.
 
-## E. Enable the retention purge in production
+## E. Remove archived documents from production
 
-Archived documents are permanently removed 30 days after archiving; the window
-is the `PURGE_RETENTION_DAYS` var in `apps/web/wrangler.jsonc`. The cron trigger
-that runs the purge is configured for the development environment only, so
-production removes nothing on a schedule until these steps are complete. Step 2
-deploys the purge-capable Worker without a production cron and verifies that the
-operator CLI includes `admin purge`. Step 3 is read-only; step 5 is the first
-permanent removal and step 6 turns the schedule on.
+Archived documents become eligible for permanent removal 30 days after
+archiving; the window is the `PURGE_RETENTION_DAYS` var in
+`apps/web/wrangler.jsonc`. Both environments run the purge once a week (Sunday
+03:17 UTC) from the `triggers` block in that file, and an operator can run it at
+any time with `dossier admin purge`. Steps 1 and 2 are one-time prerequisites,
+step 3 is read-only, step 5 is a manual removal, and step 6 confirms the weekly
+schedule is deployed.
 
 1. **Confirm migration 0003 on the production database.**
 
@@ -315,28 +315,28 @@ permanent removal and step 6 turns the schedule on.
    Expected: `0003_skinny_pet_avengers.sql` is listed as applied, or Wrangler
    reports there is nothing to apply. Paste back: migration names and statuses.
 
-2. **Deploy the purge-capable Worker and operator CLI without enabling the production cron.**
+2. **Confirm the deployed Worker and the operator CLI support the purge.**
 
-   Use the purge-capable repository revision. Before deploying, confirm that
-   `triggers` remains inside `env.dev` only; do not add a top-level trigger yet.
+   The Worker reports the git commit it was built from as `version` in its
+   health response, so the check is a direct comparison with the repository.
 
    ```sh
-   cd /path/to/dossier/apps/web
-   bunx vite build
-   bunx wrangler deploy
-   cd ../..
-   npm install --global @agent964/dossier@<purge-cli-version>
+   cd /path/to/dossier
+   git fetch origin && git rev-parse --short origin/main
+   curl --fail-with-body --silent https://dossier.agent964.com/api/healthz
+   printf '\n'
    dossier --version
    dossier admin purge --help
    ```
 
-   Expected: Wrangler reports the new production Worker version without a cron
-   schedule, and CLI help identifies `purge` as the protected deployment purge
-   command with `--execute` and `--retention-days`. Paste back: the Worker
-   version ID, confirmation that no production schedule is present, the CLI
-   version, and the help synopsis.
+   Expected: the health `version` equals the short commit printed by
+   `git rev-parse`, or a later commit that you know is deployed; that commit
+   is at or after the 0.2.0 merge (`2af0932`). `dossier --version` prints
+   0.2.0 or newer, and the help synopsis lists `--execute` and
+   `--retention-days`. Paste back: the two commits, the CLI version, and the
+   help synopsis.
 
-3. **Dry run the purge.**
+3. **Dry run.**
 
    ```sh
    cd /path/to/dossier
@@ -358,7 +358,7 @@ permanent removal and step 6 turns the schedule on.
    batch row survives as an audit record. If a batch should live, restore it from
    the trash page first, then repeat step 3.
 
-5. **Execute the purge once.**
+5. **Execute.**
 
    ```sh
    cd /path/to/dossier
@@ -368,16 +368,14 @@ permanent removal and step 6 turns the schedule on.
    ```
 
    Expected: the reviewed batches reported under `Purged:`, and a repeat of step
-   3 reporting no batches. Paste back: the totals line from both runs.
+   3 reporting no batches. Paste back: the totals line from both runs. Repeat
+   steps 3 to 5 whenever the trash should be emptied; monthly is enough.
 
-6. **Turn on the production cron.**
+6. **Confirm the weekly cron is deployed.**
 
-   Add the trigger to the top level of `apps/web/wrangler.jsonc`, beside
-   `"routes"`. The `env.dev` block keeps its own schedule:
-
-   ```jsonc
-   "triggers": { "crons": ["17 3 * * *"] },
-   ```
+   The top level of `apps/web/wrangler.jsonc` carries
+   `"triggers": { "crons": ["17 3 * * SUN"] }` beside `"routes"`; the `env.dev`
+   block has the same schedule. Deploying production registers it:
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -385,7 +383,16 @@ permanent removal and step 6 turns the schedule on.
    bunx wrangler deploy
    ```
 
-   Expected: Wrangler reports the schedule `17 3 * * *` for the deployed
-   version. Paste back: the deployed version ID and the schedule line. To stop
-   the scheduled purge, remove the `triggers` block and deploy again; the admin
-   endpoint keeps working either way.
+   Expected: Wrangler reports the schedule `17 3 * * SUN` for the deployed
+   version. Paste back: the deployed version ID and the schedule line.
+
+   To pause the schedule, set the top-level trigger to an explicit empty list
+   and deploy; leaving `triggers` out of the file does not clear a schedule
+   that is already deployed:
+
+   ```jsonc
+   "triggers": { "crons": [] },
+   ```
+
+   Restore the cron expression and deploy to resume. The admin command keeps
+   working either way.
