@@ -62,9 +62,13 @@ or assert browser rendering and cookie behavior.
 Dependabot checks all Bun workspace dependencies and GitHub Actions weekly on
 Monday at 09:00 Baghdad time, with one group for each ecosystem. CI and release
 workflows read the Bun runtime pin from `packageManager` in the root
-`package.json`; update that field when upgrading Bun itself. Keep Node types
-aligned with the CLI's Node 22 minimum, and upgrade Vitest together with a
-compatible Cloudflare test plugin (the current plugin requires Vitest 4).
+`package.json`; update that field when upgrading Bun itself. The CLI, contracts,
+and policy packages use Vitest 5 from the root; `apps/web` pins Vitest 4 because
+the current Cloudflare test plugin requires it. Run tests through the workspace
+scripts so each suite uses its own supported runner. Dependabot leaves Vitest
+major upgrades for a coordinated Cloudflare plugin migration while continuing
+minor and patch updates. Development uses Node 26 type declarations; CI still
+runs the CLI on its supported Node 22 runtime.
 
 ### Lint and format
 
