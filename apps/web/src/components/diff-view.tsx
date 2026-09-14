@@ -163,8 +163,11 @@ function UnifiedGrid({
             first={hunk.index === 1}
             idPrefix={idPrefix}
           />
-          {hunk.lines.map((line, index) => (
-            <div key={`${hunk.index}-${index}`} className="contents">
+          {hunk.lines.map((line) => (
+            <div
+              key={`${line.oldNumber}-${line.newNumber}`}
+              className="contents"
+            >
               <Num value={line.oldNumber} op={line.op} />
               <Num value={line.newNumber} op={line.op} />
               <Code line={line} />
@@ -208,8 +211,11 @@ function SideGrid({
             first={hunk.index === 1}
             idPrefix={idPrefix}
           />
-          {hunk.rows.map((row, index) => (
-            <div key={`${hunk.index}-${index}`} className="contents">
+          {hunk.rows.map((row) => (
+            <div
+              key={`${row.old?.oldNumber}-${row.added?.newNumber}`}
+              className="contents"
+            >
               {row.old === null ? (
                 <>
                   <span aria-hidden className={FILLER} />

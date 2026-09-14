@@ -52,6 +52,20 @@ bun run typecheck
 bun run test
 ```
 
+HTML/CSS policy fixtures live in `packages/policy/test/fixtures` and run through
+`packages/policy/src/fixtures.test.ts`. Worker tests in `apps/web/test` cover
+upload validation, serving headers, and access rules. Both run in CI through
+`bun run test`. The retired `apps/web/browser` probes and their recorded results
+have been removed; the suite does not require a global Playwright installation
+or assert browser rendering and cookie behavior.
+
+Dependabot checks all Bun workspace dependencies and GitHub Actions weekly on
+Monday at 09:00 Baghdad time, with one group for each ecosystem. CI and release
+workflows read the Bun runtime pin from `packageManager` in the root
+`package.json`; update that field when upgrading Bun itself. Keep Node types
+aligned with the CLI's Node 22 minimum, and upgrade Vitest together with a
+compatible Cloudflare test plugin (the current plugin requires Vitest 4).
+
 ### Lint and format
 
 The repository uses oxc for linting and formatting:
@@ -60,6 +74,12 @@ The repository uses oxc for linting and formatting:
 bun run lint
 bun run format
 ```
+
+Lint fails on any warning. `.oxlintrc.json` allows in-place array sorting and
+reversal because these operations use locally owned arrays or explicit copies,
+and allows functions to stay near the service or test that uses them. CSS
+side-effect imports are allowed for the app stylesheet. Shadowed bindings,
+unstable React keys, and other suspicious code remain checked.
 
 Start the web application and Worker locally:
 

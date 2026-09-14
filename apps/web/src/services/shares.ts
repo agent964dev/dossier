@@ -199,11 +199,11 @@ export const SharesLive = Layer.effect(
           ifRevision ?? null,
         )
 
-    const delta: SharesService['delta'] = (documentId, delta, principal) =>
+    const delta: SharesService['delta'] = (documentId, change, principal) =>
       Effect.gen(function* () {
         yield* authorizeMutation(documentId, principal)
-        const add = yield* normalizedEmails(delta.add ?? [])
-        const remove = yield* normalizedEmails(delta.remove ?? [])
+        const add = yield* normalizedEmails(change.add ?? [])
+        const remove = yield* normalizedEmails(change.remove ?? [])
         const now = new Date().toISOString()
         const guardId = ids.internalId()
         yield* db

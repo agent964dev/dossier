@@ -11,7 +11,7 @@
     "typecheck": "bun --filter '*' typecheck",
     "dev": "bun --filter '*' dev",
     "deploy:dev": "bun --filter '*' deploy:dev",
-    "lint": "oxlint --ignore-path .gitignore .",
+    "lint": "oxlint --ignore-path .gitignore --max-warnings 0 .",
     "lint:fix": "oxlint --ignore-path .gitignore --fix .",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check ."

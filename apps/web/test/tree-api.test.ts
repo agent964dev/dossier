@@ -28,16 +28,16 @@ async function api(
 ): Promise<Response> {
   const headers = new Headers()
   if (options.token) headers.set('authorization', `Bearer ${options.token}`)
-  let body: string | undefined
+  let requestBody: string | undefined
   if (options.body !== undefined) {
     headers.set('content-type', 'application/json')
-    body = JSON.stringify(options.body)
+    requestBody = JSON.stringify(options.body)
   }
   return handleApiRequest(
     new Request(`https://dossier.test${path}`, {
-      method: options.method ?? (body === undefined ? 'GET' : 'POST'),
+      method: options.method ?? (requestBody === undefined ? 'GET' : 'POST'),
       headers,
-      body,
+      body: requestBody,
     }),
     env,
   )
@@ -283,14 +283,16 @@ describe('phase two HTTP tree and access', () => {
 
     const response = await serving(`/d/${leaf.document.id}/tree`)
     expect(response.status).toBe(200)
-    const html = await response.text()
-    expect(html).not.toContain('Nested under this')
-    expect(html).not.toContain('Alongside this')
-    expect(html).not.toContain('Nothing nested')
-    expect(html).not.toContain('<dt class="micro">Workspace</dt>')
-    expect(html).toContain('document.execCommand("copy")')
-    expect(html).toContain('data-copy-source')
-    expect(html).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))')
+    const renderedHtml = await response.text()
+    expect(renderedHtml).not.toContain('Nested under this')
+    expect(renderedHtml).not.toContain('Alongside this')
+    expect(renderedHtml).not.toContain('Nothing nested')
+    expect(renderedHtml).not.toContain('<dt class="micro">Workspace</dt>')
+    expect(renderedHtml).toContain('document.execCommand("copy")')
+    expect(renderedHtml).toContain('data-copy-source')
+    expect(renderedHtml).toContain(
+      'grid-template-columns: repeat(2, minmax(0, 1fr))',
+    )
   })
 
   it('returns unpaginated public-field-ordered visible forests and never leaks hidden ancestry', async () => {
