@@ -40,6 +40,7 @@ export function testEnv(base: Cloudflare.Env): Cloudflare.Env {
     SEED_WORKSPACE: 'test:test.example',
     SEED_ADMIN_EMAIL: 'admin@test.example',
     SESSION_SECRET: TEST_SECRET,
+    LINK_SECRET: 'test-link-secret-at-least-32-bytes',
     BOOTSTRAP_API_KEY: undefined,
     UPLOAD_RATE_LIMITER: { limit: async () => ({ success: true }) },
     STATE_RATE_LIMITER: { limit: async () => ({ success: true }) },

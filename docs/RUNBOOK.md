@@ -2,6 +2,23 @@
 
 This runbook is ordered for a human operator or a computer-use agent. Run shell commands from a clone of this repository. Never paste either production secret into chat, logs, screenshots, or a ticket. Replace `<date>`, `<version>`, `<document-id>`, and email placeholders before running commands.
 
+### Upgrade prerequisite for saved values
+
+Before deploying the first release that includes saved values to an existing
+deployment, set `LINK_SECRET` in production and development. The State service
+is part of the Worker's core layer, so a missing secret prevents every route
+from starting, not only the saved-values routes. Set the secrets before the
+code deploy:
+
+```sh
+cd /path/to/dossier/apps/web
+openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET
+openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET --env dev
+```
+
+Fresh deployments also set the production secret in step A5. Never reuse a
+value between environments or print either value.
+
 ## A. Production cutover operator checklist
 
 The phase-4 integrator normally completes this section before handing the deployment to the owner. Preserve the evidence requested by each step, but redact tokens and secret values.
@@ -49,6 +66,7 @@ The phase-4 integrator normally completes this section before handing the deploy
    ```sh
    cd /path/to/dossier/apps/web
    openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put SESSION_SECRET
+   openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET
    bunx wrangler secret put SEED_ADMIN_EMAIL
    openssl rand -base64 48 | tr -d '\n' > ../../.prod-bootstrap-key.local
    chmod 600 ../../.prod-bootstrap-key.local
@@ -61,9 +79,9 @@ The phase-4 integrator normally completes this section before handing the deploy
    production email. The value in `wrangler.jsonc` is only a placeholder. On
    Linux, replace the `stat` command with
    `stat -c '%a %n' ../../.prod-bootstrap-key.local`. Expected: file mode
-   `600`; the secret list names `SESSION_SECRET`, `SEED_ADMIN_EMAIL`, and
-   `BOOTSTRAP_API_KEY` without revealing values. Paste back: the mode line and
-   secret names only.
+   `600`; the secret list names `SESSION_SECRET`, `LINK_SECRET`,
+   `SEED_ADMIN_EMAIL`, and `BOOTSTRAP_API_KEY` without revealing values. Paste
+   back: the mode line and secret names only.
 
 6. **Apply production migrations.**
 
@@ -236,7 +254,24 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    Expected: secret update succeeds, D1 reports one changed row, and setup returns `"ok":true`. Paste back: statuses and setup JSON only.
 
-2. **Add an allowlist entry.**
+2. **Rotate every anonymous edit link.**
+
+   `LINK_SECRET` is set separately in each environment. Rotating it immediately
+   invalidates every anonymous edit link in that environment; signed-in access,
+   saved values, and link-generation rows are unchanged. Use this only for a
+   deployment-wide link reset.
+
+   ```sh
+   cd /path/to/dossier/apps/web
+   openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET
+   ```
+
+   Redeploy if Wrangler does not activate the secret change automatically, then
+   create a new link for each document that still needs anonymous editing.
+   Expected: old edit links answer `410 link_revoked`; newly created links work.
+   Never print the secret value.
+
+3. **Add an allowlist entry.**
 
    ```sh
    env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com workspace allow name@example.com --role member
@@ -245,7 +280,7 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    Expected: the allowlist shows the normalized email and role `member`. For a whole domain, use `@example.com`. Paste back: the added line.
 
-3. **Restore a document subtree from trash.**
+4. **Restore a document subtree from trash.**
 
    ```sh
    dossier trash
@@ -255,7 +290,7 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    Copy the root document ID and batch ID from `dossier trash`. Expected: `Restored`, followed by a readable tree. Paste back: document ID, batch ID, and restore/tree output.
 
-4. **Roll back a production deploy.**
+5. **Roll back a production deploy.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -269,7 +304,7 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    Expected: Wrangler confirms the selected version is active and health returns `"ok":true`. Paste back: old/new version IDs, reason, and health JSON. A code rollback does not roll back D1 migrations; restore database data separately if the incident requires it.
 
-5. **Read production logs.**
+6. **Read production logs.**
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -278,13 +313,15 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    Expected: live request and exception events from the production Worker. Reproduce one request, capture only relevant lines, then stop with `Ctrl-C`. Paste back: timestamp, request path, status, and exception text with secrets, cookies, emails, and Bearer headers redacted.
 
-## D. Development seed admin email
+## D. Development Worker secrets
 
-Production `SEED_ADMIN_EMAIL` is configured before deployment in step A5.
-Set the development value separately when preparing the development Worker:
+Production `LINK_SECRET` and `SEED_ADMIN_EMAIL` are configured before
+deployment in step A5. Set both development values separately when preparing
+the development Worker:
 
 ```sh
 cd /path/to/dossier/apps/web
+openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET --env dev
 bunx wrangler secret put SEED_ADMIN_EMAIL --env dev
 ```
 

@@ -325,6 +325,187 @@ describe('saved-values browser surface', () => {
     })
   })
 
+  it('reads and saves a private document through the edit-token header', async () => {
+    const owner = await setup('surface_link')
+    const published = await publish(owner, {
+      html: statefulHtml('Private link surface'),
+      stateful: true,
+      visibility: 'private',
+      key: 'surface-link',
+    })
+    const editLink = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).links.create(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+    const token = new URL(editLink.editUrl!).hash.slice(1)
+    const keys: string[] = []
+    const original = env.STATE_RATE_LIMITER
+    env.STATE_RATE_LIMITER = {
+      limit: async ({ key }) => {
+        keys.push(key)
+        return { success: true }
+      },
+    }
+
+    try {
+      const editPage = await request(`/d/${published.document.id}/edit`)
+      const editHtml = await editPage.text()
+      expect(editPage.status).toBe(200)
+      expect(editHtml).toContain('<body data-mode="link">')
+      expect(editHtml).toContain(
+        `<script type="application/json" id="dossier-bootstrap">{"documentId":"${published.document.id}"}</script>`,
+      )
+      expect(editHtml).not.toContain('"snapshot"')
+      // The link page carries no session of its own and no chrome that would
+      // name the tree, the author, or the workspace around the document.
+      expect(editPage.headers.get('set-cookie')).toBeNull()
+      expect(editHtml).not.toContain('Private link surface')
+      expect(editHtml).toContain('<h1 id="dossier-title">Edit document</h1>')
+
+      const { response: get, body } = await surface(published.document.id, {
+        headers: { 'x-dossier-edit-token': token },
+      })
+      expect(get.status).toBe(200)
+      expect(body).toMatchObject({
+        documentId: published.document.id,
+        viewer: 'link',
+        canSave: true,
+        frameVersion: 1,
+      })
+      expect(body.csrfToken).toBeUndefined()
+
+      const frame = await request(
+        `/d/${published.document.id}/frame?t=${encodeURIComponent(body.frameTicket)}`,
+      )
+      expect(frame.status).toBe(200)
+
+      const save = await request(`/d/${published.document.id}/state`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-dossier-edit-token': token,
+        },
+        body: JSON.stringify({
+          version: body.version,
+          changes: [{ name: 'name', value: 'Grace', base: 0 }],
+        }),
+      })
+      expect(save.status, await save.clone().text()).toBe(200)
+      expect(await save.json()).toMatchObject({
+        viewer: 'link',
+        fields: { name: { value: 'Grace', revision: 1 } },
+      })
+      expect(keys).toEqual([
+        `document:${published.document.id}:link:1`,
+        `document:${published.document.id}:link:1`,
+      ])
+
+      await run(
+        Effect.gen(function* () {
+          yield* (yield* State).links.revoke(
+            published.document.id,
+            owner.principal,
+          )
+        }),
+      )
+      const revokedGet = await request(`/d/${published.document.id}/state`, {
+        headers: { 'x-dossier-edit-token': token },
+      })
+      expect(revokedGet.status).toBe(410)
+      expect(await revokedGet.json()).toMatchObject({ code: 'link_revoked' })
+
+      const revokedFrame = await request(
+        `/d/${published.document.id}/frame?t=${encodeURIComponent(body.frameTicket)}`,
+      )
+      expect(revokedFrame.status).toBe(410)
+      expect(await revokedFrame.json()).toMatchObject({ code: 'link_revoked' })
+
+      const revokedSave = await request(`/d/${published.document.id}/state`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-dossier-edit-token': token,
+        },
+        body: JSON.stringify({
+          version: body.version,
+          changes: [{ name: 'name', value: 'Katherine', base: 1 }],
+        }),
+      })
+      expect(revokedSave.status).toBe(410)
+      expect(await revokedSave.json()).toMatchObject({ code: 'link_revoked' })
+
+      const replacement = await run(
+        Effect.gen(function* () {
+          return yield* (yield* State).links.create(
+            published.document.id,
+            owner.principal,
+          )
+        }),
+      )
+      const replacementToken = new URL(replacement.editUrl!).hash.slice(1)
+      const replacementGet = await request(
+        `/d/${published.document.id}/state`,
+        {
+          headers: { 'x-dossier-edit-token': replacementToken },
+        },
+      )
+      expect(replacementGet.status).toBe(200)
+      expect(keys.at(-1)).toBe(`document:${published.document.id}:link:2`)
+    } finally {
+      env.STATE_RATE_LIMITER = original
+    }
+  })
+
+  it('ignores edit tokens on document, tree, raw, and protected API routes', async () => {
+    const owner = await setup('surface_link_scope')
+    const published = await publish(owner, {
+      html: statefulHtml('Scoped private link'),
+      stateful: true,
+      visibility: 'private',
+      key: 'surface-link-scope',
+    })
+    const editLink = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).links.create(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+    const token = new URL(editLink.editUrl!).hash.slice(1)
+    const headers = { 'x-dossier-edit-token': token }
+
+    for (const path of [
+      `/d/${published.document.id}`,
+      `/d/${published.document.id}/tree`,
+      `/d/${published.document.id}/raw`,
+    ]) {
+      const response = await request(path, { headers })
+      expect(response.status, path).toBe(404)
+    }
+
+    const unauthenticatedApi = await request(
+      `/api/documents/${published.document.id}/state`,
+      { headers },
+    )
+    expect(unauthenticatedApi.status).toBe(401)
+
+    const authenticatedApi = await request(
+      `/api/documents/${published.document.id}/state`,
+      {
+        headers: {
+          authorization: `Bearer ${owner.token}`,
+          'x-dossier-edit-token': 'not-a-link-token',
+        },
+      },
+    )
+    expect(authenticatedApi.status).toBe(200)
+  })
+
   it('saves with a cookie and account-bound CSRF token', async () => {
     const owner = await setup('surface_save')
     const published = await publish(owner, {

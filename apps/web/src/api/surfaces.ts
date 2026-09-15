@@ -536,6 +536,36 @@ const StateLive = HttpApiBuilder.group(DossierApi, 'state', (handlers) =>
           return jsonServerResponse(stateResponse(snapshot))
         }),
       ),
+    )
+    .handleRaw('linkCreate', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const state = yield* State
+          return jsonServerResponse(
+            yield* state.links.create(path.id, principal),
+          )
+        }),
+      ),
+    )
+    .handleRaw('linkGet', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const state = yield* State
+          return jsonServerResponse(yield* state.links.get(path.id, principal))
+        }),
+      ),
+    )
+    .handleRaw('linkRevoke', ({ path }) =>
+      withApiErrors(
+        Effect.gen(function* () {
+          const { principal } = yield* ApiRequest
+          const state = yield* State
+          const { revoked } = yield* state.links.revoke(path.id, principal)
+          return jsonServerResponse({ documentId: path.id, revoked })
+        }),
+      ),
     ),
 )
 

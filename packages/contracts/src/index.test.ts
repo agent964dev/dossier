@@ -6,6 +6,7 @@ import {
   ApiError,
   DocumentReader,
   DossierApi,
+  EditLinkResponse,
   FieldType,
   HealthzResponse,
   PolicyResult,
@@ -53,6 +54,17 @@ describe('shared contracts', () => {
       'select-multiple',
     )
     expect(Schema.decodeUnknownSync(StateResponse)(response)).toEqual(response)
+    expect(
+      Schema.decodeUnknownSync(EditLinkResponse)({
+        documentId: 'abcdefghijkl',
+        active: false,
+        editUrl: null,
+      }),
+    ).toEqual({
+      documentId: 'abcdefghijkl',
+      active: false,
+      editUrl: null,
+    })
     expect(
       Schema.decodeUnknownSync(StateSaveRequest)({
         changes: [
@@ -234,6 +246,54 @@ describe('shared contracts', () => {
     }
   })
 
+  it('decodes state-not-enabled on every edit-link endpoint', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const client = await Effect.runPromise(
+        HttpApiClient.make(DossierApi, {
+          baseUrl: 'https://dossier.example',
+        }).pipe(Effect.provide(FetchHttpClient.layer)),
+      )
+      const calls = [
+        () =>
+          Effect.runPromise(
+            Effect.flip(
+              client.state.linkCreate({ path: { id: 'abcdefghijkl' } }),
+            ),
+          ),
+        () =>
+          Effect.runPromise(
+            Effect.flip(client.state.linkGet({ path: { id: 'abcdefghijkl' } })),
+          ),
+        () =>
+          Effect.runPromise(
+            Effect.flip(
+              client.state.linkRevoke({ path: { id: 'abcdefghijkl' } }),
+            ),
+          ),
+      ] as const
+
+      for (const call of calls) {
+        const envelope = {
+          ok: false as const,
+          code: 'state_not_enabled' as const,
+          message: 'Saved values are not enabled.',
+        }
+        fetchMock.mockResolvedValueOnce(
+          new Response(JSON.stringify(envelope), {
+            status: 409,
+            headers: { 'content-type': 'application/json; charset=utf-8' },
+          }),
+        )
+        expect(await call()).toEqual(envelope)
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('decodes publication state errors through the derived client', async () => {
     const errors = [
       {
@@ -364,5 +424,11 @@ describe('shared contracts', () => {
         code: 'state_not_enabled',
       }),
     ).toMatchObject({ code: 'state_not_enabled' })
+    expect(
+      Schema.decodeUnknownSync(ApiError)({
+        ok: false,
+        code: 'link_revoked',
+      }),
+    ).toMatchObject({ code: 'link_revoked' })
   })
 })

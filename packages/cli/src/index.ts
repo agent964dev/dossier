@@ -10,6 +10,7 @@ import {
   AssetPushResponse,
   DiffResponse as DiffResponseSchema,
   DossierApi,
+  type EditLinkResponse,
   isDocumentEditor,
   PurgeReport as PurgeReportSchema,
   type DiffResponse as DiffResponseType,
@@ -1555,9 +1556,99 @@ const stateSetCommand = Command.make(
   ),
 )
 
+const EDIT_LINK_WARNING =
+  'Anyone with this link can read and change the saved values and can forward it.'
+
+function printEditLink(
+  response: EditLinkResponse,
+  runtime: RuntimeConfig,
+  warn: boolean,
+): void {
+  if (runtime.json) {
+    printJson(response)
+    return
+  }
+  if (!response.active || response.editUrl === null) {
+    if (!runtime.quiet) process.stdout.write('No active edit link\n')
+    return
+  }
+  if (runtime.quiet) {
+    process.stdout.write(`${response.editUrl}\n`)
+    return
+  }
+  process.stdout.write(
+    warn
+      ? `${EDIT_LINK_WARNING}\n${response.editUrl}\n`
+      : `${response.editUrl}\n`,
+  )
+}
+
+const stateLinkCreateCommand = Command.make(
+  'create',
+  { ref: Args.text({ name: 'ref' }) },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const response = await apiCall(runtime, (client) =>
+        client.state.linkCreate({ path: { id } }),
+      )
+      printEditLink(response, runtime, true)
+    }),
+).pipe(Command.withDescription('Create or return the active bearer edit link'))
+
+const stateLinkGetCommand = Command.make(
+  'get',
+  { ref: Args.text({ name: 'ref' }) },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const response = await apiCall(runtime, (client) =>
+        client.state.linkGet({ path: { id } }),
+      )
+      printEditLink(response, runtime, false)
+    }),
+).pipe(Command.withDescription('Show the active bearer edit link, if any'))
+
+const stateLinkRevokeCommand = Command.make(
+  'revoke',
+  { ref: Args.text({ name: 'ref' }) },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const response = await apiCall(runtime, (client) =>
+        client.state.linkRevoke({ path: { id } }),
+      )
+      if (runtime.json) printJson(response)
+      else if (!runtime.quiet) {
+        process.stdout.write(
+          response.revoked ? 'Edit link revoked\n' : 'No edit link to revoke\n',
+        )
+      }
+    }),
+).pipe(
+  Command.withDescription('Revoke the bearer edit link and stop its access'),
+)
+
+const stateLinkCommand = Command.make('link').pipe(
+  Command.withDescription(
+    'Manage a bearer edit link. Anyone with it can read and change saved values and forward it; revoking it stops access.',
+  ),
+  Command.withSubcommands([
+    stateLinkCreateCommand,
+    stateLinkGetCommand,
+    stateLinkRevokeCommand,
+  ]),
+)
+
 const stateCommand = Command.make('state').pipe(
   Command.withDescription('Read and save shared saved values'),
-  Command.withSubcommands([stateGetCommand, stateSetCommand]),
+  Command.withSubcommands([stateGetCommand, stateSetCommand, stateLinkCommand]),
 )
 
 const fetchCommand = Command.make(
@@ -2598,7 +2689,11 @@ const commandTree: CommandTree = {
     remove: true,
   },
   admin: { purge: true },
-  state: { get: true, set: true },
+  state: {
+    get: true,
+    set: true,
+    link: { create: true, get: true, revoke: true },
+  },
 }
 
 const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {

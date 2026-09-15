@@ -120,7 +120,11 @@ function serveFrame(
       .resolveFrameViewer(claims)
       .pipe(Effect.either)
     if (actorResult._tag === 'Left') {
-      if (actorResult.left instanceof DossierError) return notFound()
+      if (actorResult.left instanceof DossierError) {
+        return actorResult.left.code === 'link_revoked'
+          ? errorResponse(actorResult.left)
+          : notFound()
+      }
       return yield* Effect.fail(actorResult.left)
     }
     const actor = actorResult.right
@@ -211,6 +215,7 @@ export async function handleServingRequest(
   const frameMatch = /^\/d\/([a-z0-9]{12})(?:\/v\/([1-9][0-9]*))?\/frame$/.exec(
     pathname,
   )
+  const editMatch = /^\/d\/([a-z0-9]{12})\/edit$/.exec(pathname)
   const docMatch = /^\/d\/([a-z0-9]{12})(?:\/v\/([1-9][0-9]*))?$/.exec(pathname)
   const result = await Effect.runPromise(
     Effect.gen(function* () {
@@ -249,6 +254,21 @@ export async function handleServingRequest(
           frameMatch[2] === undefined ? undefined : Number(frameMatch[2]),
         )
       }
+      if (
+        editMatch &&
+        (request.method === 'GET' || request.method === 'HEAD')
+      ) {
+        const response = renderWrapperPage({
+          mode: 'link',
+          documentId: editMatch[1],
+        })
+        return request.method === 'HEAD'
+          ? new Response(null, {
+              status: response.status,
+              headers: response.headers,
+            })
+          : response
+      }
       if (docMatch && (request.method === 'GET' || request.method === 'HEAD')) {
         const db = yield* Db
         const document = yield* Effect.tryPromise({
@@ -277,7 +297,7 @@ export async function handleServingRequest(
           }
           const surface = surfaceResult.right
           const response = renderWrapperPage({
-            mode: surface.mode,
+            mode: surface.mode === 'link' ? 'public' : surface.mode,
             snapshot: surface.snapshot,
             ticket: surface.frameTicket,
             version: surface.frameVersion,

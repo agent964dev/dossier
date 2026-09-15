@@ -34,7 +34,7 @@ interface StateSurfaceRow {
 }
 
 export interface StateSurfaceData {
-  readonly mode: 'account' | 'public'
+  readonly mode: 'account' | 'link' | 'public'
   readonly snapshot: StateSnapshot
   readonly frameTicket: string
   readonly frameVersion: number
@@ -81,8 +81,22 @@ function malformedInput(): DossierError {
 
 function resolveActor(
   request: Request,
-): Effect.Effect<StateActor, DossierError | PersistenceError, Principal> {
+  documentId: string,
+  acceptEditToken: boolean,
+): Effect.Effect<
+  StateActor,
+  DossierError | PersistenceError,
+  Principal | State
+> {
   return Effect.gen(function* () {
+    const editToken = acceptEditToken
+      ? request.headers.get('x-dossier-edit-token')
+      : null
+    if (editToken !== null) {
+      const state = yield* State
+      return yield* state.resolveEditToken(documentId, editToken)
+    }
+
     const principals = yield* Principal
     const principalResult = yield* principals
       .resolveSession(request)
@@ -149,7 +163,7 @@ function decodeSaveRequest(
 
 function checkStateRateLimit(
   documentId: string,
-  accountId: string,
+  actor: Exclude<StateActor, { readonly kind: 'public' }>,
 ): Effect.Effect<void, DossierError, WorkerEnv> {
   return Effect.gen(function* () {
     const env = yield* WorkerEnv
@@ -163,11 +177,12 @@ function checkStateRateLimit(
       )
     }
 
+    const actorKey =
+      actor.kind === 'account'
+        ? `account:${actor.principal.accountId}`
+        : `link:${actor.generation}`
     const outcome = yield* Effect.tryPromise({
-      try: () =>
-        limiter.limit({
-          key: `document:${documentId}:account:${accountId}`,
-        }),
+      try: () => limiter.limit({ key: `document:${documentId}:${actorKey}` }),
       catch: () =>
         apiError(
           'state_unavailable',
@@ -186,26 +201,25 @@ function checkStateRateLimit(
   })
 }
 
-export function loadStateSurface(
-  request: Request,
+function loadStateSurfaceForActor(
   documentId: string,
-  requestedVersion?: number,
+  version: number | undefined,
+  actor: StateActor,
 ): Effect.Effect<
   StateSurfaceData,
   DossierError | PersistenceError | SessionError,
-  Access | Db | Principal | Session | State
+  Access | Db | Session | State
 > {
   return Effect.gen(function* () {
-    const version = requestedVersion
-    const actor = yield* resolveActor(request)
-
     const state = yield* State
     const snapshot = yield* state.read(documentId, actor, version)
-    const access = yield* Access
-    const decision = yield* access.requireReadable(
-      documentId,
-      actor.kind === 'account' ? actor.principal : null,
-    )
+    const decision =
+      actor.kind === 'link'
+        ? null
+        : yield* (yield* Access).requireReadable(
+            documentId,
+            actor.kind === 'account' ? actor.principal : null,
+          )
     const frameVersion = version ?? snapshot.version
     const db = yield* Db
     const row = yield* Effect.tryPromise({
@@ -229,13 +243,16 @@ export function loadStateSurface(
           cause,
         }),
     })
-    if (!row || row.workspace_id !== decision.workspaceId) {
+    if (
+      !row ||
+      (decision !== null && row.workspace_id !== decision.workspaceId)
+    ) {
       return yield* Effect.fail(apiError('not_found', 'Document not found.'))
     }
 
     const frameTicket = yield* state.issueFrameTicket(
       documentId,
-      decision.workspaceId,
+      row.workspace_id,
       row.version_number,
       actor,
     )
@@ -244,7 +261,7 @@ export function loadStateSurface(
         ? yield* issueCsrfToken(actor.principal.accountId)
         : undefined
     return {
-      mode: actor.kind === 'account' ? 'account' : 'public',
+      mode: actor.kind,
       snapshot,
       frameTicket,
       frameVersion: row.version_number,
@@ -255,28 +272,47 @@ export function loadStateSurface(
   })
 }
 
+export function loadStateSurface(
+  request: Request,
+  documentId: string,
+  requestedVersion?: number,
+): Effect.Effect<
+  StateSurfaceData,
+  DossierError | PersistenceError | SessionError,
+  Access | Db | Principal | Session | State
+> {
+  return Effect.gen(function* () {
+    const actor = yield* resolveActor(request, documentId, false)
+    return yield* loadStateSurfaceForActor(documentId, requestedVersion, actor)
+  })
+}
+
 function getStateSurface(
   request: Request,
   documentId: string,
 ): Effect.Effect<
   Response,
   DossierError | PersistenceError | SessionError,
-  Access | Db | Principal | Session | State
+  Access | Db | Principal | Session | State | WorkerEnv
 > {
-  return pinnedVersion(request).pipe(
-    Effect.flatMap((version) => loadStateSurface(request, documentId, version)),
-    Effect.map((surface) =>
-      jsonResponse({
-        ...surface.snapshot,
-        frameTicket: surface.frameTicket,
-        frameVersion: surface.frameVersion,
-        frameHasRuntime: surface.frameHasRuntime,
-        ...(surface.csrfToken === undefined
-          ? {}
-          : { csrfToken: surface.csrfToken }),
-      }),
-    ),
-  )
+  return Effect.gen(function* () {
+    const version = yield* pinnedVersion(request)
+    const actor = yield* resolveActor(request, documentId, true)
+    if (actor.kind !== 'public') {
+      yield* checkStateRateLimit(documentId, actor)
+    }
+    const surface = yield* loadStateSurfaceForActor(documentId, version, actor)
+    return jsonResponse({
+      ...surface.snapshot,
+      title: surface.title,
+      frameTicket: surface.frameTicket,
+      frameVersion: surface.frameVersion,
+      frameHasRuntime: surface.frameHasRuntime,
+      ...(surface.csrfToken === undefined
+        ? {}
+        : { csrfToken: surface.csrfToken }),
+    })
+  })
 }
 
 function postStateSurface(
@@ -288,23 +324,25 @@ function postStateSurface(
   Principal | Session | State | WorkerEnv
 > {
   return Effect.gen(function* () {
-    const actor = yield* resolveActor(request)
-    if (actor.kind !== 'account') {
+    const actor = yield* resolveActor(request, documentId, true)
+    if (actor.kind === 'public') {
       return yield* Effect.fail(
         apiError('state_edit_required', 'State edit access is required.'),
       )
     }
 
-    yield* verifyCsrf({
-      request,
-      token: request.headers.get('x-dossier-csrf'),
-      accountId: actor.principal.accountId,
-    }).pipe(
-      Effect.mapError(() =>
-        apiError('state_edit_required', 'State edit access is required.'),
-      ),
-    )
-    yield* checkStateRateLimit(documentId, actor.principal.accountId)
+    if (actor.kind === 'account') {
+      yield* verifyCsrf({
+        request,
+        token: request.headers.get('x-dossier-csrf'),
+        accountId: actor.principal.accountId,
+      }).pipe(
+        Effect.mapError(() =>
+          apiError('state_edit_required', 'State edit access is required.'),
+        ),
+      )
+    }
+    yield* checkStateRateLimit(documentId, actor)
     const payload = yield* decodeSaveRequest(request)
     const state = yield* State
     const snapshot = yield* state.save(documentId, actor, payload)

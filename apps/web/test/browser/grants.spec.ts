@@ -215,3 +215,26 @@ test('toggles and removes a grant from the dashboard access panel', async ({
 
   await api.dispose()
 })
+
+test('creates and revokes an edit link from the dashboard', async ({
+  page,
+}) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const documentId = await publishPrivate(api)
+
+  await page.goto(`/dashboard/documents/${documentId}`)
+  const create = page.getByRole('button', { name: 'Create link' })
+  await hydrated(create)
+  await create.click()
+
+  await expect(page.getByRole('button', { name: 'Copy link' })).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Copy the edit link' }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Revoke', exact: true }).click()
+  await expect(page.getByText('Revoke this link?')).toBeVisible()
+  await page.getByRole('button', { name: 'Revoke link' }).click()
+  await expect(page.getByRole('button', { name: 'Create link' })).toBeVisible()
+
+  await api.dispose()
+})

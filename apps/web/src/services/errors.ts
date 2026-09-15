@@ -19,6 +19,7 @@ const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   state_schema_change: 409,
   state_too_large: 413,
   state_edit_required: 403,
+  link_revoked: 410,
   state_unavailable: 503,
   body_too_large: 413,
   policy_rejected: 422,

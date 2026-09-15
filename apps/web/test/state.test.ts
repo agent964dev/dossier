@@ -406,6 +406,334 @@ async function stateRequest(
   )
 }
 
+describe('State edit links', () => {
+  it('derives one active link and rejects its old generation everywhere', async () => {
+    const owner = await setup('state_link_owner')
+    const published = await publishState(
+      owner.principal,
+      'state-link-owner',
+      statefulHtml('Private link target'),
+      'private',
+    )
+    const other = await publishState(
+      owner.principal,
+      'state-link-other',
+      statefulHtml('Other private target'),
+      'private',
+    )
+
+    const result = await run(
+      Effect.gen(function* () {
+        const state = yield* State
+        const first = yield* state.links.create(
+          published.document.id,
+          owner.principal,
+        )
+        const second = yield* state.links.create(
+          published.document.id,
+          owner.principal,
+        )
+        const fetched = yield* state.links.get(
+          published.document.id,
+          owner.principal,
+        )
+        const token = new URL(first.editUrl!).hash.slice(1)
+        const actor = yield* state.resolveEditToken(
+          published.document.id,
+          token,
+        )
+        const snapshot = yield* state.read(published.document.id, actor)
+        const ticket = yield* state.issueFrameTicket(
+          published.document.id,
+          owner.principal.workspaceId,
+          snapshot.version,
+          actor,
+        )
+        const claims = yield* state.verifyFrameTicket(ticket)
+        const wrongDocument = yield* state
+          .resolveEditToken(other.document.id, token)
+          .pipe(Effect.either)
+
+        const revoked = yield* state.links.revoke(
+          published.document.id,
+          owner.principal,
+        )
+        const replacement = yield* state.links.create(
+          published.document.id,
+          owner.principal,
+        )
+        const oldGet = yield* state
+          .resolveEditToken(published.document.id, token)
+          .pipe(Effect.either)
+        const oldFrame = yield* state
+          .resolveFrameViewer(claims)
+          .pipe(Effect.either)
+        const oldSave = yield* state
+          .save(published.document.id, actor, {
+            version: snapshot.version,
+            changes: [{ name: 'approved', value: true, base: 0 }],
+          })
+          .pipe(Effect.either)
+        return {
+          first,
+          second,
+          fetched,
+          snapshot,
+          wrongDocument,
+          revoked,
+          replacement,
+          oldGet,
+          oldFrame,
+          oldSave,
+        }
+      }),
+    )
+
+    expect(result.second).toEqual(result.first)
+    expect(result.fetched).toEqual(result.first)
+    expect(result.snapshot).toMatchObject({
+      documentId: published.document.id,
+      viewer: 'link',
+      canSave: true,
+    })
+    expect(result.wrongDocument).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'link_revoked', status: 410 },
+    })
+    expect(result.revoked).toEqual({ revoked: true })
+    expect(result.replacement.active).toBe(true)
+    expect(result.replacement.editUrl).not.toBe(result.first.editUrl)
+    for (const refused of [result.oldGet, result.oldFrame, result.oldSave]) {
+      expect(refused).toMatchObject({
+        _tag: 'Left',
+        left: { code: 'link_revoked', status: 410 },
+      })
+    }
+
+    const row = await env.DB.prepare(
+      `SELECT generation, revoked_at FROM document_edit_links
+        WHERE document_id = ?`,
+    )
+      .bind(published.document.id)
+      .first<{ generation: number; revoked_at: string | null }>()
+    expect(row).toEqual({ generation: 2, revoked_at: null })
+  })
+
+  it('serves create, get, and revoke through the Bearer API', async () => {
+    const owner = await setup('state_link_api')
+    const published = await publishState(
+      owner.principal,
+      'state-link-api',
+      statefulHtml('Link API'),
+      'private',
+    )
+    const path = `/api/documents/${published.document.id}/state/link`
+
+    const create = await stateRequest(path, owner.token, env, {
+      method: 'POST',
+    })
+    expect(create.status, await create.clone().text()).toBe(200)
+    const created = (await create.json()) as {
+      documentId: string
+      active: boolean
+      editUrl: string
+    }
+    expect(created).toMatchObject({
+      documentId: published.document.id,
+      active: true,
+    })
+    expect(created.editUrl).toContain(`/d/${published.document.id}/edit#`)
+
+    const get = await stateRequest(path, owner.token, env)
+    expect(await get.json()).toEqual(created)
+
+    const revoke = await stateRequest(path, owner.token, env, {
+      method: 'DELETE',
+    })
+    expect(await revoke.json()).toEqual({
+      documentId: published.document.id,
+      revoked: true,
+    })
+
+    const absent = await stateRequest(path, owner.token, env)
+    expect(await absent.json()).toEqual({
+      documentId: published.document.id,
+      active: false,
+      editUrl: null,
+    })
+  })
+
+  it('requires saved values on every edit-link management endpoint', async () => {
+    const owner = await setup('state_link_not_enabled')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: '<!doctype html><title>Ordinary link target</title>',
+            idempotencyKey: 'state-link-not-enabled',
+          },
+          owner.principal,
+        )
+      }),
+    )
+    const path = `/api/documents/${published.document.id}/state/link`
+
+    for (const method of ['POST', 'GET', 'DELETE'] as const) {
+      const response = await stateRequest(path, owner.token, env, { method })
+      expect(response.status, method).toBe(409)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        code: 'state_not_enabled',
+      })
+    }
+  })
+
+  it('withholds and preserves edit links after author membership is removed', async () => {
+    const owner = await setup('state_link_removed_author')
+    const published = await publishState(
+      owner.principal,
+      'state-link-removed-author',
+      statefulHtml('Removed author link'),
+      'private',
+    )
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* State).links.create(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+    await env.DB.prepare(
+      'DELETE FROM memberships WHERE workspace_id = ? AND account_id = ?',
+    )
+      .bind(owner.principal.workspaceId, owner.principal.accountId)
+      .run()
+
+    const path = `/api/documents/${published.document.id}/state/link`
+    for (const method of ['POST', 'GET', 'DELETE'] as const) {
+      const response = await stateRequest(path, owner.token, env, { method })
+      expect(response.status, method).toBe(403)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        code: 'publisher_required',
+      })
+    }
+
+    const status = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).links.status(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+    expect(status).toEqual({ active: true })
+  })
+
+  it('checks membership again inside edit-link mutation batches', async () => {
+    const owner = await setup('state_link_membership_race')
+    const published = await publishState(
+      owner.principal,
+      'state-link-membership-race',
+    )
+    const actualDb = makeDb(env.DB)
+    const removeMembership = () =>
+      env.DB.prepare(
+        'DELETE FROM memberships WHERE workspace_id = ? AND account_id = ?',
+      )
+        .bind(owner.principal.workspaceId, owner.principal.accountId)
+        .run()
+
+    let createRaced = false
+    const createLayer = makeCoreLayer(env, {
+      db: {
+        ...actualDb,
+        batch: (statements) =>
+          Effect.gen(function* () {
+            if (!createRaced) {
+              createRaced = true
+              yield* Effect.promise(removeMembership)
+            }
+            return yield* actualDb.batch(statements)
+          }),
+      },
+    })
+    const createResult = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* State).links
+          .create(published.document.id, owner.principal)
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(createLayer)),
+    )
+    expect(createRaced).toBe(true)
+    expect(createResult).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'conflict', status: 409 },
+    })
+    expect(
+      await env.DB.prepare(
+        'SELECT generation FROM document_edit_links WHERE document_id = ?',
+      )
+        .bind(published.document.id)
+        .first(),
+    ).toBeNull()
+
+    await env.DB.prepare(
+      `INSERT INTO memberships (workspace_id, account_id, role, created_at)
+       VALUES (?, ?, 'member', ?)`,
+    )
+      .bind(
+        owner.principal.workspaceId,
+        owner.principal.accountId,
+        new Date().toISOString(),
+      )
+      .run()
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* State).links.create(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+
+    let revokeRaced = false
+    const revokeLayer = makeCoreLayer(env, {
+      db: {
+        ...actualDb,
+        batch: (statements) =>
+          Effect.gen(function* () {
+            if (!revokeRaced) {
+              revokeRaced = true
+              yield* Effect.promise(removeMembership)
+            }
+            return yield* actualDb.batch(statements)
+          }),
+      },
+    })
+    const revokeResult = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* State).links
+          .revoke(published.document.id, owner.principal)
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(revokeLayer)),
+    )
+    expect(revokeRaced).toBe(true)
+    expect(revokeResult).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'conflict', status: 409 },
+    })
+    expect(
+      await env.DB.prepare(
+        'SELECT revoked_at FROM document_edit_links WHERE document_id = ?',
+      )
+        .bind(published.document.id)
+        .first<{ revoked_at: string | null }>(),
+    ).toEqual({ revoked_at: null })
+  })
+})
+
 describe('State saves', () => {
   it('lets a verified grant save, then keeps reading after save is removed', async () => {
     const owner = await setup('state_grant_owner')

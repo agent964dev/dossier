@@ -63,8 +63,14 @@ interface StoredAsset {
   deleted: boolean
 }
 
+interface StoredEditLink {
+  generation: number
+  active: boolean
+}
+
 const documents = new Map<string, StoredDocument>()
 const assets = new Map<string, StoredAsset>()
+const editLinks = new Map<string, StoredEditLink>()
 const idempotencyKeys: string[] = []
 const stateSchemaRequestHashes: string[] = []
 const listQueries: Array<{ scope: string | null; parent: string | null }> = []
@@ -251,6 +257,18 @@ function stateResponse(id: string, stored: StoredDocument) {
     updatedAt: stored.stateUpdatedAt,
     data: stored.stateData,
     fields: stored.stateFields,
+  }
+}
+
+function editLinkResponse(id: string) {
+  const link = editLinks.get(id)
+  const active = link?.active === true
+  return {
+    documentId: id,
+    active,
+    editUrl: active
+      ? `${apiUrl}/d/${id}/edit#edit-link-${link!.generation}`
+      : null,
   }
 }
 
@@ -657,6 +675,59 @@ beforeAll(async () => {
         }),
       )
       return
+    }
+
+    const stateLinkApi = /^\/api\/documents\/([a-z0-9]{12})\/state\/link$/.exec(
+      url.pathname,
+    )
+    if (stateLinkApi) {
+      response.setHeader('content-type', 'application/json')
+      if (!authenticated(request)) {
+        response.statusCode = 401
+        response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
+        return
+      }
+      const id = stateLinkApi[1]!
+      const stored = documents.get(id)
+      if (!stored) {
+        response.statusCode = 404
+        response.end(JSON.stringify({ ok: false, code: 'not_found' }))
+        return
+      }
+      if (!stored.stateful) {
+        response.statusCode = 409
+        response.end(
+          JSON.stringify({
+            ok: false,
+            code: 'state_not_enabled',
+            message: 'Saved values are not enabled for this document',
+          }),
+        )
+        return
+      }
+
+      if (request.method === 'POST') {
+        const current = editLinks.get(id)
+        if (current?.active !== true) {
+          editLinks.set(id, {
+            generation: (current?.generation ?? 0) + 1,
+            active: true,
+          })
+        }
+        response.end(JSON.stringify(editLinkResponse(id)))
+        return
+      }
+      if (request.method === 'GET') {
+        response.end(JSON.stringify(editLinkResponse(id)))
+        return
+      }
+      if (request.method === 'DELETE') {
+        const current = editLinks.get(id)
+        const revoked = current?.active === true
+        if (current) current.active = false
+        response.end(JSON.stringify({ documentId: id, revoked }))
+        return
+      }
     }
 
     const stateApi = /^\/api\/documents\/([a-z0-9]{12})\/state$/.exec(
@@ -1939,6 +2010,174 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     expect(quiet).toEqual({ stdout: '', stderr: '', exitCode: 0 })
   })
 
+  it('manages edit links in human, JSON, and quiet modes', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const ids = [
+      'linkcreate01',
+      'linkcreate02',
+      'linkcreate03',
+      'linkget00001',
+      'linkget00002',
+      'linkget00003',
+      'linkrevoke01',
+      'linkrevoke02',
+      'linkrevoke03',
+    ]
+    for (const id of ids) {
+      documents.set(
+        id,
+        storedDocument(`${id}.html`, {
+          stateful: true,
+          stateRevision: 0,
+        }),
+      )
+    }
+
+    const warning =
+      'Anyone with this link can read and change the saved values and can forward it.'
+    const url = (id: string, generation: number) =>
+      `${apiUrl}/d/${id}/edit#edit-link-${generation}`
+
+    const humanCreate = await cli(
+      'node',
+      ['state', 'link', 'create', 'linkcreate01'],
+      { home },
+    )
+    expect(humanCreate).toEqual({
+      stdout: `${warning}\n${url('linkcreate01', 1)}\n`,
+      stderr: '',
+      exitCode: 0,
+    })
+
+    const jsonCreate = await cli(
+      'node',
+      ['state', 'link', 'create', 'linkcreate02', '--json'],
+      { home },
+    )
+    expect(jsonCreate.exitCode).toBe(0)
+    expect(jsonCreate.stderr).toBe('')
+    expect(JSON.parse(jsonCreate.stdout)).toEqual({
+      documentId: 'linkcreate02',
+      active: true,
+      editUrl: url('linkcreate02', 1),
+    })
+
+    const quietCreate = await cli(
+      'node',
+      ['state', 'link', 'create', 'linkcreate03', '--quiet'],
+      { home },
+    )
+    expect(quietCreate).toEqual({
+      stdout: `${url('linkcreate03', 1)}\n`,
+      stderr: '',
+      exitCode: 0,
+    })
+
+    editLinks.set('linkget00001', { generation: 4, active: true })
+    editLinks.set('linkget00003', { generation: 8, active: true })
+    const humanGet = await cli(
+      'node',
+      ['state', 'link', 'get', 'linkget00001'],
+      { home },
+    )
+    expect(humanGet).toEqual({
+      stdout: `${url('linkget00001', 4)}\n`,
+      stderr: '',
+      exitCode: 0,
+    })
+
+    const jsonGet = await cli(
+      'node',
+      ['state', 'link', 'get', 'linkget00002', '--json'],
+      { home },
+    )
+    expect(jsonGet.exitCode).toBe(0)
+    expect(jsonGet.stderr).toBe('')
+    expect(JSON.parse(jsonGet.stdout)).toEqual({
+      documentId: 'linkget00002',
+      active: false,
+      editUrl: null,
+    })
+
+    const quietGet = await cli(
+      'node',
+      ['state', 'link', 'get', 'linkget00003', '--quiet'],
+      { home },
+    )
+    expect(quietGet).toEqual({
+      stdout: `${url('linkget00003', 8)}\n`,
+      stderr: '',
+      exitCode: 0,
+    })
+
+    const noActiveGet = await cli(
+      'node',
+      ['state', 'link', 'get', 'linkget00002'],
+      { home },
+    )
+    expect(noActiveGet).toEqual({
+      stdout: 'No active edit link\n',
+      stderr: '',
+      exitCode: 0,
+    })
+
+    editLinks.set('linkrevoke01', { generation: 2, active: true })
+    editLinks.set('linkrevoke03', { generation: 9, active: true })
+    const humanRevoke = await cli(
+      'node',
+      ['state', 'link', 'revoke', 'linkrevoke01'],
+      { home },
+    )
+    expect(humanRevoke).toEqual({
+      stdout: 'Edit link revoked\n',
+      stderr: '',
+      exitCode: 0,
+    })
+
+    const jsonRevoke = await cli(
+      'node',
+      ['state', 'link', 'revoke', 'linkrevoke02', '--json'],
+      { home },
+    )
+    expect(jsonRevoke.exitCode).toBe(0)
+    expect(jsonRevoke.stderr).toBe('')
+    expect(JSON.parse(jsonRevoke.stdout)).toEqual({
+      documentId: 'linkrevoke02',
+      revoked: false,
+    })
+
+    const quietRevoke = await cli(
+      'node',
+      ['state', 'link', 'revoke', 'linkrevoke03', '--quiet'],
+      { home },
+    )
+    expect(quietRevoke).toEqual({ stdout: '', stderr: '', exitCode: 0 })
+    expect(editLinks.get('linkrevoke03')?.active).toBe(false)
+
+    const noRevoke = await cli(
+      'node',
+      ['state', 'link', 'revoke', 'linkrevoke02'],
+      { home },
+    )
+    expect(noRevoke).toEqual({
+      stdout: 'No edit link to revoke\n',
+      stderr: '',
+      exitCode: 0,
+    })
+  })
+
+  it('explains the bearer authority and revocation in state link help', async () => {
+    const help = await cli('node', ['state', 'link', '--help'])
+    expect(help.exitCode).toBe(0)
+    expect(help.stderr).toBe('')
+    expect(help.stdout).toContain('bearer edit link')
+    expect(help.stdout).toContain(
+      'Anyone with it can read and change saved values',
+    )
+    expect(help.stdout).toContain('revoking it stops access')
+  })
+
   it('explains the omitted-revision baseline in state set help', async () => {
     const help = await cli('node', ['state', 'set', '--help'])
     expect(help.exitCode).toBe(0)
@@ -2333,6 +2572,16 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     )
     expect(legacyGet.exitCode).toBe(1)
     expect(legacyGet.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+
+    const legacyLink = await cli(
+      'node',
+      ['state', 'link', 'get', 'stateget0001', '--api-url', apiUrl],
+      { home, env: { DOSSIER_API_KEY: 'ds_legacy' } },
+    )
+    expect(legacyLink.exitCode).toBe(1)
+    expect(legacyLink.stderr).toContain(
       'This Dossier deployment does not support saved values. Update the deployment.',
     )
   })

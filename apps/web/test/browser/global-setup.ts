@@ -30,6 +30,7 @@ const GRANTED_EMAIL = 'granted@browser.test'
  */
 interface DevVars {
   readonly sessionSecret: string
+  readonly linkSecret: string
   readonly bootstrapApiKey: string
   readonly publicBaseUrl: string
 }
@@ -55,16 +56,19 @@ function parseDevVars(): Record<string, string> {
 function devVars(): DevVars {
   const file = parseDevVars()
   const sessionSecret = process.env.SESSION_SECRET ?? file.SESSION_SECRET
+  const linkSecret = process.env.LINK_SECRET ?? file.LINK_SECRET
   const bootstrapApiKey =
     process.env.BOOTSTRAP_API_KEY ?? file.BOOTSTRAP_API_KEY
-  if (!sessionSecret || !bootstrapApiKey) {
+  if (!sessionSecret || !linkSecret || !bootstrapApiKey) {
     throw new Error(
-      'The browser suite needs SESSION_SECRET and BOOTSTRAP_API_KEY, from ' +
-        'apps/web/.dev.vars or the environment. See .dev.vars.example.',
+      'The browser suite needs SESSION_SECRET, LINK_SECRET, and ' +
+        'BOOTSTRAP_API_KEY, from apps/web/.dev.vars or the environment. ' +
+        'See .dev.vars.example.',
     )
   }
   return {
     sessionSecret,
+    linkSecret,
     bootstrapApiKey,
     publicBaseUrl:
       process.env.PUBLIC_BASE_URL ??

@@ -11,7 +11,7 @@
  * on the answer. A conflict, a changed version, a revoked authority, and a
  * network error all keep the draft on screen; none of them ever says Saved.
  */
-;(() => {
+;(async () => {
   /** Five seconds without ready and applied is a load failure. */
   const LOAD_TIMEOUT_MS = 5000
   /** The frame answers in one turn, so this only catches a dead frame. */
@@ -57,6 +57,7 @@
   const frame = /** @type {HTMLIFrameElement | null} */ (
     document.getElementById('dossier-frame')
   )
+  const titleLine = document.getElementById('dossier-title')
   const statusLine = document.getElementById('dossier-status')
   const overlay = document.getElementById('dossier-overlay')
   const loadingPanel = document.getElementById('dossier-overlay-loading')
@@ -95,6 +96,7 @@
   if (
     bootstrapNode === null ||
     frame === null ||
+    titleLine === null ||
     statusLine === null ||
     overlay === null ||
     loadingPanel === null ||
@@ -125,6 +127,120 @@
   }
   if (bootstrap === null) return
 
+  const linkMode = document.body.dataset.mode === 'link'
+  const editToken = linkMode ? window.location.hash.slice(1) : null
+  /**
+   * A link tab proves itself with the custom header alone, so it sends no
+   * cookie and needs no CSRF token. Every other mode still rides the session.
+   */
+  const stateCredentials = linkMode ? 'omit' : 'same-origin'
+  /** The one sentence a dead link gets, on open and on its next save. */
+  const REVOKED_TEXT = 'This edit link was revoked'
+
+  /** @type {(json?: boolean) => Record<string, string>} */
+  const stateHeaders = (json = false) => ({
+    accept: 'application/json',
+    ...(json ? { 'content-type': 'application/json' } : {}),
+    ...(editToken === null ? {} : { 'x-dossier-edit-token': editToken }),
+  })
+
+  /** @type {(response: Response) => Promise<string | null>} */
+  const refusalCode = async (response) => {
+    /** @type {unknown} */
+    const body = await response.json().catch(() => null)
+    const envelope = /** @type {ErrorEnvelope} */ (
+      typeof body === 'object' && body !== null ? body : {}
+    )
+    return typeof envelope.code === 'string' ? envelope.code : null
+  }
+
+  if (!('snapshot' in bootstrap)) {
+    const linkDocumentId = bootstrap.documentId
+    // A copied path without its fragment lands here, so an empty token is a
+    // case of its own rather than a mystery failure.
+    const noToken = editToken === null || editToken.length === 0
+    let revoked = false
+    try {
+      if (noToken) throw new Error('the edit link has no token')
+      const response = await fetch(`/d/${linkDocumentId}/state`, {
+        credentials: stateCredentials,
+        headers: stateHeaders(),
+      })
+      if (!response.ok) {
+        revoked =
+          response.status === 410 &&
+          (await refusalCode(response)) === 'link_revoked'
+        throw new Error(`state GET answered ${response.status}`)
+      }
+      /** @type {unknown} */
+      const body = await response.json()
+      const surface = /** @type {Partial<DossierStateSurface>} */ (
+        typeof body === 'object' && body !== null ? body : {}
+      )
+      if (
+        surface.documentId !== linkDocumentId ||
+        typeof surface.title !== 'string' ||
+        typeof surface.version !== 'number' ||
+        !Number.isSafeInteger(surface.version) ||
+        typeof surface.revision !== 'number' ||
+        !Number.isSafeInteger(surface.revision) ||
+        typeof surface.fields !== 'object' ||
+        surface.fields === null ||
+        surface.canSave !== true ||
+        surface.viewer !== 'link' ||
+        typeof surface.frameTicket !== 'string' ||
+        surface.frameTicket.length === 0 ||
+        typeof surface.frameVersion !== 'number' ||
+        !Number.isSafeInteger(surface.frameVersion) ||
+        surface.frameVersion < 1 ||
+        typeof surface.frameHasRuntime !== 'boolean'
+      ) {
+        throw new Error('state GET returned an invalid link surface')
+      }
+      bootstrap = {
+        snapshot: /** @type {DossierSnapshot} */ (surface),
+        frameTicket: surface.frameTicket,
+        frameVersion: surface.frameVersion,
+        frameHasRuntime: surface.frameHasRuntime,
+      }
+      titleLine.textContent = surface.title
+      document.title = `${surface.title} — dossier`
+      frame.title = surface.title
+      const framePath = `/d/${linkDocumentId}/frame`
+      frame.setAttribute(
+        'src',
+        `${framePath}?t=${encodeURIComponent(surface.frameTicket)}`,
+      )
+    } catch (error) {
+      console.error('dossier: the edit link could not be opened.', error)
+      loadingPanel.hidden = true
+      errorPanel.hidden = false
+      overlay.hidden = false
+      statusLine.textContent = revoked
+        ? REVOKED_TEXT
+        : noToken
+          ? 'Open the edit link again'
+          : 'Edit link unavailable'
+      const errorTitle = errorPanel.querySelector('.overlay-title')
+      if (errorTitle !== null) {
+        errorTitle.textContent = revoked
+          ? REVOKED_TEXT
+          : noToken
+            ? 'This page needs the whole edit link, including the # part'
+            : 'Could not open the edit link'
+      }
+      // Only a failure a reload could clear offers one. The address bar still
+      // holds the fragment in that case, so the reload keeps the token.
+      retry.hidden = revoked || noToken
+      if (!retry.hidden) {
+        retry.textContent = 'Try again'
+        retry.addEventListener('click', () => window.location.reload())
+      }
+      return
+    }
+  }
+
+  if (!('snapshot' in bootstrap)) return
   let snapshot = bootstrap.snapshot
   let loadedFrameVersion = bootstrap.frameVersion
   const documentId = snapshot.documentId
@@ -406,7 +522,10 @@
     notice = {
       kind: 'version',
       text: 'Unsaved changes · ',
-      href: `/d/${documentId}`,
+      href:
+        linkMode && editToken
+          ? `/d/${documentId}/edit#${editToken}`
+          : `/d/${documentId}`,
       linkText:
         Number.isSafeInteger(version) && version > 0
           ? `version ${version} is current`
@@ -432,8 +551,8 @@
 
     try {
       const response = await fetch(`/d/${documentId}/state`, {
-        credentials: 'same-origin',
-        headers: { accept: 'application/json' },
+        credentials: stateCredentials,
+        headers: stateHeaders(),
       })
       if (!response.ok) throw new Error(`state GET answered ${response.status}`)
       /** @type {unknown} */
@@ -488,14 +607,11 @@
       let response
       try {
         /** @type {Record<string, string>} */
-        const headers = {
-          accept: 'application/json',
-          'content-type': 'application/json',
-        }
+        const headers = stateHeaders(true)
         if (csrfToken !== null) headers['x-dossier-csrf'] = csrfToken
         response = await fetch(`/d/${documentId}/state`, {
           method: 'POST',
-          credentials: 'same-origin',
+          credentials: stateCredentials,
           headers,
           body: JSON.stringify({ version: loadedFrameVersion, changes }),
         })
@@ -552,7 +668,10 @@
       ) {
         notice = {
           kind: 'denied',
-          text: 'Could not save · saving is no longer allowed',
+          text:
+            envelope.code === 'link_revoked'
+              ? REVOKED_TEXT
+              : 'Could not save · saving is no longer allowed',
         }
         retryAction = null
         state = 'denied'
@@ -776,8 +895,8 @@
         ? `?version=${encodeURIComponent(String(loadedFrameVersion))}`
         : ''
       const response = await fetch(`/d/${documentId}/state${versionQuery}`, {
-        credentials: 'same-origin',
-        headers: { accept: 'application/json' },
+        credentials: stateCredentials,
+        headers: stateHeaders(),
       })
       if (!response.ok) throw new Error(`state GET answered ${response.status}`)
       const surface = /** @type {Partial<DossierStateSurface>} */ (

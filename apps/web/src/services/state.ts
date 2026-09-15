@@ -1,4 +1,8 @@
-import type { FieldType, StateChange } from '@dossier/contracts'
+import type {
+  EditLinkResponse,
+  FieldType,
+  StateChange,
+} from '@dossier/contracts'
 import { Context, Effect, Layer } from 'effect'
 
 import { Access, accessBindValues, accessCteSql } from './access'
@@ -12,6 +16,7 @@ import {
 import { Ids } from './ids'
 import { Principal, type PrincipalIdentity } from './principal'
 import { Session } from './session'
+import { WorkerEnv } from './env'
 
 export type StateActor =
   | { readonly kind: 'account'; readonly principal: PrincipalIdentity }
@@ -60,6 +65,34 @@ export interface StateService {
   readonly resolveFrameViewer: (
     claims: FrameClaims,
   ) => Effect.Effect<StateActor, DossierError | PersistenceError>
+  readonly resolveEditToken: (
+    documentId: string,
+    token: string,
+  ) => Effect.Effect<StateActor, DossierError | PersistenceError>
+  readonly links: {
+    readonly create: (
+      documentId: string,
+      principal: PrincipalIdentity,
+    ) => Effect.Effect<EditLinkResponse, DossierError | PersistenceError>
+    readonly get: (
+      documentId: string,
+      principal: PrincipalIdentity,
+    ) => Effect.Effect<EditLinkResponse, DossierError | PersistenceError>
+    readonly status: (
+      documentId: string,
+      principal: PrincipalIdentity,
+    ) => Effect.Effect<
+      { readonly active: boolean },
+      DossierError | PersistenceError
+    >
+    readonly revoke: (
+      documentId: string,
+      principal: PrincipalIdentity,
+    ) => Effect.Effect<
+      { readonly revoked: boolean },
+      DossierError | PersistenceError
+    >
+  }
   readonly save: (
     documentId: string,
     actor: StateActor,
@@ -95,6 +128,11 @@ interface GrantRow {
   readonly can_save: number
 }
 
+interface EditLinkRow {
+  readonly generation: number
+  readonly revoked_at: string | null
+}
+
 interface SaveSnapshotRow {
   readonly name: string | null
   readonly type: FieldType | null
@@ -112,6 +150,7 @@ interface FailureRow {
   readonly version_number: number | null
   readonly can_read: number
   readonly can_edit: number
+  readonly link_live: number
   readonly calculated_bytes: number | null
   readonly conflict_name: string | null
   readonly conflict_revision: number | null
@@ -136,6 +175,29 @@ const MAX_VALUE_BYTES = 64 * 1024
 const MAX_STATE_BYTES = 256 * 1024
 const encoder = new TextEncoder()
 const INPUT_NEWLINES = /[\n\r]/gu
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '')
+}
+
+function decodeBase64Url(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return null
+  try {
+    const base64 = value.replaceAll('-', '+').replaceAll('_', '/')
+    const binary = atob(`${base64}=`)
+    const bytes = Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    )
+    return bytes.byteLength === 32 ? bytes : null
+  } catch {
+    return null
+  }
+}
 
 function isFrameViewer(value: unknown): value is FrameClaims['viewer'] {
   if (value === 'public') return true
@@ -370,6 +432,15 @@ export const StateLive = Layer.effect(
     const ids = yield* Ids
     const principals = yield* Principal
     const session = yield* Session
+    const env = yield* WorkerEnv
+    if (!env.LINK_SECRET) throw new Error('LINK_SECRET is not configured.')
+    const linkKey = crypto.subtle.importKey(
+      'raw',
+      encoder.encode(env.LINK_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign', 'verify'],
+    )
 
     const loadContext = (documentId: string) =>
       Effect.tryPromise({
@@ -418,6 +489,270 @@ export const StateLive = Layer.effect(
             .first<GrantRow>(),
         catch: (cause) =>
           new PersistenceError({ operation: 'load state grant', cause }),
+      })
+
+    const loadEditLink = (documentId: string) =>
+      Effect.tryPromise({
+        try: () =>
+          db.raw
+            .prepare(
+              `SELECT generation, revoked_at
+                 FROM document_edit_links
+                WHERE document_id = ?
+                LIMIT 1`,
+            )
+            .bind(documentId)
+            .first<EditLinkRow>(),
+        catch: (cause) =>
+          new PersistenceError({ operation: 'load document edit link', cause }),
+      })
+
+    const deriveEditToken = (documentId: string, generation: number) =>
+      Effect.tryPromise({
+        try: async () => {
+          const signature = await crypto.subtle.sign(
+            'HMAC',
+            await linkKey,
+            encoder.encode(`${documentId}${generation}`),
+          )
+          return base64Url(new Uint8Array(signature))
+        },
+        catch: (cause) =>
+          new PersistenceError({
+            operation: 'derive document edit link',
+            cause,
+          }),
+      })
+
+    const editLinkResponse = (
+      documentId: string,
+      row: EditLinkRow | null,
+    ): Effect.Effect<EditLinkResponse, PersistenceError> =>
+      Effect.gen(function* () {
+        if (row === null || row.revoked_at !== null) {
+          return { documentId, active: false, editUrl: null }
+        }
+        const token = yield* deriveEditToken(documentId, row.generation)
+        return {
+          documentId,
+          active: true,
+          editUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, '')}/d/${documentId}/edit#${token}`,
+        }
+      })
+
+    const authorizeLinkManagement = (
+      documentId: string,
+      principal: PrincipalIdentity,
+    ) =>
+      Effect.gen(function* () {
+        const decision = (yield* access.resolve([documentId], principal))[0]
+        if (!decision || (!decision.editor && !decision.canRead)) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
+        }
+        yield* principals.requirePublisher(principal, decision.workspaceId)
+        if (!decision.editor) {
+          return yield* Effect.fail(
+            apiError('editor_required', 'Document edit access is required.'),
+          )
+        }
+        return decision
+      })
+
+    const requireStatefulLinkDocument = (documentId: string) =>
+      Effect.gen(function* () {
+        const context = yield* loadContext(documentId)
+        if (context === null) {
+          return yield* Effect.fail(
+            apiError('not_found', 'Document not found.'),
+          )
+        }
+        if (context.stateful !== 1) {
+          return yield* Effect.fail(
+            apiError(
+              'state_not_enabled',
+              'Saved values are not enabled for this document.',
+            ),
+          )
+        }
+      })
+
+    const editLinkGuard = (
+      documentId: string,
+      principal: PrincipalIdentity,
+      guardId: string,
+    ) =>
+      db.raw
+        .prepare(
+          `INSERT INTO publication_guards (id, ok)
+           VALUES (?, CASE WHEN EXISTS (
+             SELECT 1 FROM documents d
+             JOIN accounts actor
+               ON actor.id = ? AND actor.disabled_at IS NULL
+        LEFT JOIN memberships publisher
+               ON publisher.workspace_id = d.workspace_id
+              AND publisher.account_id = actor.id
+        LEFT JOIN memberships editor_membership
+               ON editor_membership.workspace_id = d.workspace_id
+              AND editor_membership.account_id = actor.id
+            WHERE d.id = ? AND d.workspace_id = ?
+              AND d.deleted_at IS NULL AND d.disabled_at IS NULL
+              AND d.stateful = 1
+              AND (actor.kind = 'service' OR publisher.account_id IS NOT NULL)
+              AND (
+                d.created_by = actor.id OR editor_membership.role = 'admin'
+              )
+           ) THEN 1 ELSE 0 END)`,
+        )
+        .bind(guardId, principal.accountId, documentId, principal.workspaceId)
+
+    const linkGuardFailure = (
+      error: PersistenceError,
+    ): DossierError | PersistenceError =>
+      isGuardFailure(error)
+        ? apiError(
+            'conflict',
+            'The document changed while the operation was running.',
+          )
+        : error
+
+    const linkGet: StateService['links']['get'] = (documentId, principal) =>
+      Effect.gen(function* () {
+        yield* authorizeLinkManagement(documentId, principal)
+        yield* requireStatefulLinkDocument(documentId)
+        return yield* editLinkResponse(
+          documentId,
+          yield* loadEditLink(documentId),
+        )
+      })
+
+    const linkStatus: StateService['links']['status'] = (
+      documentId,
+      principal,
+    ) =>
+      Effect.gen(function* () {
+        yield* access.requireEditor(documentId, principal)
+        const row = yield* loadEditLink(documentId)
+        return { active: row !== null && row.revoked_at === null }
+      })
+
+    const linkCreate: StateService['links']['create'] = (
+      documentId,
+      principal,
+    ) =>
+      Effect.gen(function* () {
+        yield* authorizeLinkManagement(documentId, principal)
+        yield* requireStatefulLinkDocument(documentId)
+        const now = new Date().toISOString()
+        const guardId = ids.internalId()
+        const batch = yield* db
+          .batch([
+            editLinkGuard(documentId, principal, guardId),
+            db.raw
+              .prepare(
+                `INSERT INTO document_edit_links
+                   (document_id, generation, created_by_account_id, created_at,
+                    revoked_at)
+                 VALUES (?, 1, ?, ?, NULL)
+                 ON CONFLICT (document_id) DO UPDATE SET
+                   generation = CASE
+                     WHEN document_edit_links.revoked_at IS NULL
+                       THEN document_edit_links.generation
+                     ELSE document_edit_links.generation + 1
+                   END,
+                   created_by_account_id = CASE
+                     WHEN document_edit_links.revoked_at IS NULL
+                       THEN document_edit_links.created_by_account_id
+                     ELSE excluded.created_by_account_id
+                   END,
+                   created_at = CASE
+                     WHEN document_edit_links.revoked_at IS NULL
+                       THEN document_edit_links.created_at
+                     ELSE excluded.created_at
+                   END,
+                   revoked_at = NULL`,
+              )
+              .bind(documentId, principal.accountId, now),
+            db.raw
+              .prepare('DELETE FROM publication_guards WHERE id = ?')
+              .bind(guardId),
+            db.raw
+              .prepare(
+                `SELECT generation, revoked_at
+                   FROM document_edit_links
+                  WHERE document_id = ?`,
+              )
+              .bind(documentId),
+          ])
+          .pipe(Effect.mapError(linkGuardFailure))
+        const row = (batch.at(-1)?.results[0] ?? null) as EditLinkRow | null
+        return yield* editLinkResponse(documentId, row)
+      })
+
+    const linkRevoke: StateService['links']['revoke'] = (
+      documentId,
+      principal,
+    ) =>
+      Effect.gen(function* () {
+        yield* authorizeLinkManagement(documentId, principal)
+        yield* requireStatefulLinkDocument(documentId)
+        const guardId = ids.internalId()
+        const batch = yield* db
+          .batch([
+            editLinkGuard(documentId, principal, guardId),
+            db.raw
+              .prepare(
+                `UPDATE document_edit_links
+                    SET revoked_at = ?
+                  WHERE document_id = ? AND revoked_at IS NULL`,
+              )
+              .bind(new Date().toISOString(), documentId),
+            db.raw
+              .prepare('DELETE FROM publication_guards WHERE id = ?')
+              .bind(guardId),
+          ])
+          .pipe(Effect.mapError(linkGuardFailure))
+        return { revoked: (batch[1]?.meta.changes ?? 0) > 0 }
+      })
+
+    const resolveEditToken: StateService['resolveEditToken'] = (
+      documentId,
+      token,
+    ) =>
+      Effect.gen(function* () {
+        const row = yield* loadEditLink(documentId)
+        if (row === null) {
+          return yield* Effect.fail(
+            apiError('link_revoked', 'This edit link is no longer active.'),
+          )
+        }
+        const signature = decodeBase64Url(token)
+        if (row.revoked_at !== null || signature === null) {
+          return yield* Effect.fail(
+            apiError('link_revoked', 'This edit link is no longer active.'),
+          )
+        }
+        const valid = yield* Effect.tryPromise({
+          try: async () =>
+            crypto.subtle.verify(
+              'HMAC',
+              await linkKey,
+              Uint8Array.from(signature).buffer,
+              encoder.encode(`${documentId}${row.generation}`),
+            ),
+          catch: (cause) =>
+            new PersistenceError({
+              operation: 'verify document edit link',
+              cause,
+            }),
+        })
+        if (!valid) {
+          return yield* Effect.fail(
+            apiError('link_revoked', 'This edit link is no longer active.'),
+          )
+        }
+        return { kind: 'link', generation: row.generation } as const
       })
 
     const requirePinnedVersion = (documentId: string, version: number) =>
@@ -494,10 +829,14 @@ export const StateLive = Layer.effect(
         }
         if (claims.viewer.startsWith('account:')) {
           const accountId = claims.viewer.slice('account:'.length)
-          const principal = yield* principals.fromAccountId(
-            accountId,
-            claims.workspaceId,
-          )
+          const principal = yield* principals
+            .fromAccountId(accountId, claims.workspaceId)
+            .pipe(
+              Effect.catchIf(
+                (error): error is DossierError => error instanceof DossierError,
+                () => Effect.fail(apiError('not_found', 'Frame not found.')),
+              ),
+            )
           return { kind: 'account', principal } as const
         }
 
@@ -521,25 +860,24 @@ export const StateLive = Layer.effect(
             }),
         })
         if (!row) {
-          return yield* Effect.fail(apiError('not_found', 'Frame not found.'))
+          return yield* Effect.fail(
+            apiError('link_revoked', 'This edit link is no longer active.'),
+          )
         }
         return { kind: 'link', generation: row.generation } as const
-      }).pipe(
-        Effect.catchIf(
-          (error): error is DossierError => error instanceof DossierError,
-          () => Effect.fail(apiError('not_found', 'Frame not found.')),
-        ),
-      )
+      })
 
     const explainFailure = (
       documentId: string,
-      actor: Extract<StateActor, { readonly kind: 'account' }>,
+      actor: Exclude<StateActor, { readonly kind: 'public' }>,
       observedVersionId: string,
       changesJson: string,
       incomingBytes: number,
     ): Effect.Effect<never, DossierError | PersistenceError> =>
       Effect.gen(function* () {
-        const [accountId, emails] = accessBindValues(actor.principal)
+        const principal = actor.kind === 'account' ? actor.principal : null
+        const [accountId, emails] = accessBindValues(principal)
+        const generation = actor.kind === 'link' ? actor.generation : null
         const result = yield* Effect.tryPromise({
           try: () =>
             db.raw
@@ -567,6 +905,12 @@ export const StateLive = Layer.effect(
                                  AND identity.email_verified = 1
                             )
                           ) THEN 1 ELSE 0 END AS can_edit,
+                          CASE WHEN EXISTS (
+                            SELECT 1 FROM document_edit_links edit_link
+                             WHERE edit_link.document_id = d.id
+                               AND edit_link.generation = ?6
+                               AND edit_link.revoked_at IS NULL
+                          ) THEN 1 ELSE 0 END AS link_live,
                           state.bytes
                             - COALESCE((
                                 SELECT SUM(
@@ -601,7 +945,14 @@ export const StateLive = Layer.effect(
                     AND field.name = json_extract(change.value, '$.name')
                     AND field.revision > json_extract(change.value, '$.base')`,
               )
-              .bind(accountId, emails, documentId, changesJson, incomingBytes)
+              .bind(
+                accountId,
+                emails,
+                documentId,
+                changesJson,
+                incomingBytes,
+                generation,
+              )
               .all<FailureRow>(),
           catch: (cause) =>
             new PersistenceError({
@@ -614,7 +965,7 @@ export const StateLive = Layer.effect(
           first === undefined ||
           first.deleted_at !== null ||
           first.disabled_at !== null ||
-          first.can_read !== 1
+          (actor.kind === 'account' && first.can_read !== 1)
         ) {
           return yield* Effect.fail(
             apiError('not_found', 'Document not found.'),
@@ -628,7 +979,12 @@ export const StateLive = Layer.effect(
             ),
           )
         }
-        if (first.can_edit !== 1) {
+        if (actor.kind === 'link' && first.link_live !== 1) {
+          return yield* Effect.fail(
+            apiError('link_revoked', 'This edit link is no longer active.'),
+          )
+        }
+        if (actor.kind === 'account' && first.can_edit !== 1) {
           return yield* Effect.fail(
             apiError('state_edit_required', 'State edit access is required.'),
           )
@@ -743,7 +1099,7 @@ export const StateLive = Layer.effect(
           context.updated_at,
           manifest,
           saved.results,
-          editor || grant?.can_save === 1,
+          actor.kind === 'link' || editor || grant?.can_save === 1,
           editor
             ? 'editor'
             : grant
@@ -756,20 +1112,25 @@ export const StateLive = Layer.effect(
 
     const save: StateService['save'] = (documentId, actor, input) =>
       Effect.gen(function* () {
-        if (actor.kind !== 'account') {
+        if (actor.kind === 'public') {
           return yield* Effect.fail(
             apiError('state_edit_required', 'State edit access is required.'),
           )
         }
 
-        const decision = yield* access.requireReadable(
-          documentId,
-          actor.principal,
-        )
-        const grant = decision.editor
-          ? null
-          : yield* loadGrant(documentId, actor.principal.accountId)
-        if (!decision.editor && grant?.can_save !== 1) {
+        const decision =
+          actor.kind === 'account'
+            ? yield* access.requireReadable(documentId, actor.principal)
+            : null
+        const grant =
+          actor.kind === 'account' && decision?.editor !== true
+            ? yield* loadGrant(documentId, actor.principal.accountId)
+            : null
+        if (
+          actor.kind === 'account' &&
+          decision?.editor !== true &&
+          grant?.can_save !== 1
+        ) {
           return yield* Effect.fail(
             apiError('state_edit_required', 'State edit access is required.'),
           )
@@ -815,7 +1176,13 @@ export const StateLive = Layer.effect(
         const guardId = ids.internalId()
         const eventId = ids.internalId()
         const now = new Date().toISOString()
-        const updatedBy = `account:${actor.principal.accountId}`
+        const accountId =
+          actor.kind === 'account' ? actor.principal.accountId : null
+        const generation = actor.kind === 'link' ? actor.generation : null
+        const updatedBy =
+          actor.kind === 'account'
+            ? `account:${actor.principal.accountId}`
+            : `link:${actor.generation}`
         const namesJson = JSON.stringify(changes.map((change) => change.name))
 
         const batch = yield* db
@@ -834,26 +1201,33 @@ export const StateLive = Layer.effect(
                       AND d.disabled_at IS NULL
                       AND d.stateful = 1
                       AND d.current_version_id = ?
-                      AND EXISTS (
-                        SELECT 1 FROM accounts actor
-                         WHERE actor.id = ? AND actor.disabled_at IS NULL
-                           AND (
-                             d.created_by = actor.id OR EXISTS (
-                               SELECT 1 FROM memberships editor
-                                WHERE editor.workspace_id = d.workspace_id
-                                  AND editor.account_id = actor.id
-                                  AND editor.role = 'admin'
-                             ) OR EXISTS (
-                               SELECT 1
-                                 FROM document_state_grants grant_row
-                                 JOIN identities identity
-                                   ON identity.email = grant_row.email
-                                WHERE grant_row.document_id = d.id
-                                  AND grant_row.can_save = 1
-                                  AND identity.account_id = actor.id
-                                  AND identity.email_verified = 1
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM accounts actor
+                           WHERE actor.id = ? AND actor.disabled_at IS NULL
+                             AND (
+                               d.created_by = actor.id OR EXISTS (
+                                 SELECT 1 FROM memberships editor
+                                  WHERE editor.workspace_id = d.workspace_id
+                                    AND editor.account_id = actor.id
+                                    AND editor.role = 'admin'
+                               ) OR EXISTS (
+                                 SELECT 1
+                                   FROM document_state_grants grant_row
+                                   JOIN identities identity
+                                     ON identity.email = grant_row.email
+                                  WHERE grant_row.document_id = d.id
+                                    AND grant_row.can_save = 1
+                                    AND identity.account_id = actor.id
+                                    AND identity.email_verified = 1
+                               )
                              )
-                           )
+                        ) OR EXISTS (
+                          SELECT 1 FROM document_edit_links edit_link
+                           WHERE edit_link.document_id = d.id
+                             AND edit_link.generation = ?
+                             AND edit_link.revoked_at IS NULL
+                        )
                       )
                       AND NOT EXISTS (
                         SELECT 1
@@ -884,7 +1258,8 @@ export const StateLive = Layer.effect(
                 guardId,
                 documentId,
                 context.version_id,
-                actor.principal.accountId,
+                accountId,
+                generation,
                 changesJson,
                 changesJson,
                 incomingBytes,
@@ -946,8 +1321,10 @@ export const StateLive = Layer.effect(
                 eventId,
                 documentId,
                 context.version_id,
-                actor.principal.accountId,
-                actor.principal.apiKeyId ?? null,
+                accountId,
+                actor.kind === 'account'
+                  ? (actor.principal.apiKeyId ?? null)
+                  : null,
                 namesJson,
                 actor.kind,
                 now,
@@ -1016,7 +1393,11 @@ export const StateLive = Layer.effect(
           manifest,
           savedRows,
           true,
-          decision.editor ? 'editor' : 'granted',
+          actor.kind === 'link'
+            ? 'link'
+            : decision?.editor === true
+              ? 'editor'
+              : 'granted',
         )
       })
 
@@ -1025,6 +1406,13 @@ export const StateLive = Layer.effect(
       issueFrameTicket,
       verifyFrameTicket,
       resolveFrameViewer,
+      resolveEditToken,
+      links: {
+        create: linkCreate,
+        get: linkGet,
+        status: linkStatus,
+        revoke: linkRevoke,
+      },
       save,
     }
   }),

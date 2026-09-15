@@ -143,8 +143,8 @@ interface DossierSnapshot {
   readonly viewer: 'editor' | 'granted' | 'link' | 'reader'
 }
 
-/** The JSON block the wrapper page embeds as #dossier-bootstrap. */
-interface DossierBootstrap {
+/** The JSON block a normal wrapper embeds as #dossier-bootstrap. */
+interface DossierSnapshotBootstrap {
   readonly snapshot: DossierSnapshot
   readonly frameTicket: string
   readonly frameVersion: number
@@ -152,8 +152,16 @@ interface DossierBootstrap {
   readonly csrfToken?: string
 }
 
+/** Link wrappers carry no values or ticket before the fragment is verified. */
+interface DossierLinkBootstrap {
+  readonly documentId: string
+}
+
+type DossierBootstrap = DossierSnapshotBootstrap | DossierLinkBootstrap
+
 /** The GET /d/:id/state response used to refresh a frame ticket. */
 interface DossierStateSurface extends DossierSnapshot {
+  readonly title: string
   readonly frameTicket: string
   readonly frameVersion: number
   readonly frameHasRuntime: boolean

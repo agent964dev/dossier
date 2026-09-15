@@ -111,6 +111,7 @@ jobs:
           {
             printf 'PUBLIC_BASE_URL=http://localhost:8790\n'
             printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
+            printf 'LINK_SECRET=%s\n' "$(openssl rand -hex 32)"
             printf 'BOOTSTRAP_API_KEY=%s\n' "$(openssl rand -hex 32)"
           } > apps/web/.dev.vars
 

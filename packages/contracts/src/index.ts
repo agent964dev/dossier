@@ -79,6 +79,19 @@ export const StateSaveRequest = Schema.Struct({
 })
 export type StateSaveRequest = typeof StateSaveRequest.Type
 
+export const EditLinkResponse = Schema.Struct({
+  documentId: DocumentId,
+  active: Schema.Boolean,
+  editUrl: Schema.NullOr(Schema.String),
+})
+export type EditLinkResponse = typeof EditLinkResponse.Type
+
+export const LinkRevokeResponse = Schema.Struct({
+  documentId: DocumentId,
+  revoked: Schema.Boolean,
+})
+export type LinkRevokeResponse = typeof LinkRevokeResponse.Type
+
 export const Visibility = Schema.Literal('public', 'team', 'private')
 export type Visibility = typeof Visibility.Type
 
@@ -593,6 +606,8 @@ export const StateNotEnabledError = errorSchema('state_not_enabled')
 export type StateNotEnabledError = typeof StateNotEnabledError.Type
 export const StateEditRequiredError = errorSchema('state_edit_required')
 export type StateEditRequiredError = typeof StateEditRequiredError.Type
+export const LinkRevokedError = errorSchema('link_revoked')
+export type LinkRevokedError = typeof LinkRevokedError.Type
 export const StateUnavailableError = errorSchema('state_unavailable')
 export type StateUnavailableError = typeof StateUnavailableError.Type
 
@@ -615,6 +630,7 @@ export const ApiError = Schema.Union(
   StateSchemaChangeError,
   StateNotEnabledError,
   StateEditRequiredError,
+  LinkRevokedError,
   StateUnavailableError,
 )
 export type ApiError = typeof ApiError.Type
@@ -729,6 +745,24 @@ export const StateApiGroup = HttpApiGroup.make('state')
       .addError(StateEditRequiredError, { status: 403 })
       .addError(StateUnavailableError, { status: 503 })
       .addError(RateLimitedError, { status: 429 }),
+  )
+  .add(
+    HttpApiEndpoint.post('linkCreate', '/api/documents/:id/state/link')
+      .setPath(DocumentPath)
+      .addSuccess(EditLinkResponse)
+      .addError(StateNotEnabledError, { status: 409 }),
+  )
+  .add(
+    HttpApiEndpoint.get('linkGet', '/api/documents/:id/state/link')
+      .setPath(DocumentPath)
+      .addSuccess(EditLinkResponse)
+      .addError(StateNotEnabledError, { status: 409 }),
+  )
+  .add(
+    HttpApiEndpoint.del('linkRevoke', '/api/documents/:id/state/link')
+      .setPath(DocumentPath)
+      .addSuccess(LinkRevokeResponse)
+      .addError(StateNotEnabledError, { status: 409 }),
   )
 
 const RestorePayload = Schema.Struct({ batchId: Schema.String })

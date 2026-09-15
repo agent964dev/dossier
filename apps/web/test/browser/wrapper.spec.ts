@@ -281,6 +281,7 @@ async function publish(
     readonly html: string
     readonly documentId?: string
     readonly acceptStateChanges?: boolean
+    readonly visibility?: 'public' | 'team' | 'private'
   },
 ): Promise<PublishedDocument> {
   const response = await api.post('/api/uploads', {
@@ -288,7 +289,7 @@ async function publish(
     data: {
       html: input.html,
       stateful: true,
-      visibility: 'public',
+      visibility: input.visibility ?? 'public',
       kind: 'plan',
       ...(input.documentId === undefined
         ? {}
@@ -453,6 +454,238 @@ test('fills marked inputs and a registered custom field from a CLI save', async 
   await expect(frame.locator('#decision-votes')).toHaveText('3')
   // The runtime dispatched dossier:state-applied after writing every field.
   await expect(frame.locator('body')).toHaveAttribute('data-applied', 'yes')
+})
+
+interface EditLink {
+  readonly active: boolean
+  readonly editUrl: string | null
+}
+
+/**
+ * The Worker derives the URL from PUBLIC_BASE_URL, which in local development
+ * is the normal dev origin rather than this suite's isolated port. Keep the
+ * path and the fragment the Worker issued, and point them at this server.
+ */
+function localEditUrl(editUrl: string): string {
+  const issued = new URL(editUrl)
+  return `${baseURL}${issued.pathname}${issued.hash}`
+}
+
+async function createEditLink(
+  api: APIRequestContext,
+  documentId: string,
+): Promise<string> {
+  const response = await api.post(`/api/documents/${documentId}/state/link`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+  })
+  expect(response.status(), await response.text()).toBe(200)
+  const link = (await response.json()) as EditLink
+  expect(link.active).toBe(true)
+  expect(link.editUrl).not.toBeNull()
+  return localEditUrl(link.editUrl ?? '')
+}
+
+async function revokeEditLink(
+  api: APIRequestContext,
+  documentId: string,
+): Promise<void> {
+  const response = await api.delete(`/api/documents/${documentId}/state/link`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+  })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
+/** What the author reads back over /api, where the link is no credential. */
+async function readApiState(
+  api: APIRequestContext,
+  documentId: string,
+): Promise<Readonly<Record<string, { readonly value: unknown }>>> {
+  const response = await api.get(`/api/documents/${documentId}/state`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+  })
+  expect(response.status(), await response.text()).toBe(200)
+  const body = (await response.json()) as {
+    readonly fields: Readonly<Record<string, { readonly value: unknown }>>
+  }
+  return body.fields
+}
+
+test('saves through a private edit link and loses it on revocation', async ({
+  browser,
+}) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const review = await publish(api, {
+    html: REVIEW_PAGE_HTML,
+    visibility: 'private',
+  })
+  const editUrl = await createEditLink(api, review.id)
+
+  // No cookie, no CSRF token, no account: the fragment is the whole authority.
+  const context = await browser.newContext({
+    storageState: { cookies: [], origins: [] },
+    permissions: ['clipboard-read', 'clipboard-write'],
+  })
+  const page = await context.newPage()
+  await page.goto(editUrl)
+  await expect(page.locator('body')).toHaveAttribute('data-mode', 'link')
+  await expect(page.locator('#dossier-title')).toHaveText('Design review')
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(page.locator('#dossier-save')).toBeEnabled()
+
+  // The token stays in the wrapper URL so reloads and bookmarks keep working,
+  // but it never enters the frame URL or the frame's view of the world.
+  const token = new URL(editUrl).hash.slice(1)
+  expect(token).not.toBe('')
+  await expect
+    .poll(() => page.evaluate(() => window.location.hash))
+    .toBe(`#${token}`)
+  const frameSrc = await page.locator('#dossier-frame').getAttribute('src')
+  expect(frameSrc ?? '').not.toContain(token)
+  expect(
+    await page
+      .frameLocator('#dossier-frame')
+      .locator('body')
+      .evaluate(() => {
+        return `${window.location.href}${document.referrer}`
+      }),
+  ).not.toContain(token)
+  expect(await context.cookies()).toEqual([])
+
+  const frame = page.frameLocator('#dossier-frame')
+  await expect(frame.locator('#summary')).toHaveValue('Ship the wrapper')
+  await frame.locator('#summary').fill('Saved through the link')
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toContainText('Saved')
+
+  // The author reads the link holder's value back through the API.
+  expect((await readApiState(api, review.id)).summary?.value).toBe(
+    'Saved through the link',
+  )
+
+  await frame.locator('#notes').fill('Draft after revocation')
+  await revokeEditLink(api, review.id)
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toHaveText(
+    'This edit link was revoked',
+  )
+  await expect(page.locator('#dossier-save')).toBeDisabled()
+  await expect(frame.locator('#notes')).toHaveValue('Draft after revocation')
+
+  const copy = page.locator('#dossier-copy-draft')
+  await expect(copy).toBeVisible()
+  await copy.click()
+  await expect(copy).toHaveText('Draft copied')
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText())
+  expect(JSON.parse(clipboard)).toMatchObject({
+    notes: 'Draft after revocation',
+  })
+  // The refused save never reached the values.
+  expect((await readApiState(api, review.id)).notes?.value).toBe('Draft notes')
+
+  await context.close()
+  await api.dispose()
+})
+
+test('refuses a revoked edit link and issues a different one', async ({
+  browser,
+}) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const review = await publish(api, {
+    html: REVIEW_PAGE_HTML,
+    visibility: 'private',
+  })
+  const first = await createEditLink(api, review.id)
+  await revokeEditLink(api, review.id)
+  const second = await createEditLink(api, review.id)
+  expect(second).not.toBe(first)
+
+  const context = await browser.newContext({
+    storageState: { cookies: [], origins: [] },
+  })
+  // Two tabs, because the two URLs differ only in their fragment and a
+  // same-document navigation would never rerun the page.
+  const stale = await context.newPage()
+  await stale.goto(first)
+  await expect(stale.locator('#dossier-status')).toHaveText(
+    'This edit link was revoked',
+  )
+  await expect(stale.locator('#dossier-overlay-error')).toBeVisible()
+  await expect(stale.locator('#dossier-overlay-error')).toContainText(
+    'This edit link was revoked',
+  )
+  // Nothing to retry, and no values behind the overlay.
+  await expect(stale.locator('#dossier-retry')).toBeHidden()
+  await expect(stale.locator('#dossier-save')).toBeDisabled()
+  await expect(stale.locator('#dossier-frame')).toHaveAttribute(
+    'src',
+    'about:blank',
+  )
+
+  const live = await context.newPage()
+  await live.goto(second)
+  await expect(live.locator('#dossier-save')).toBeEnabled()
+  await expect(
+    live.frameLocator('#dossier-frame').locator('#summary'),
+  ).toHaveValue('Ship the wrapper')
+
+  // Reloading reuses the fragment and opens the live generation again.
+  await live.reload()
+  await expect(live.locator('#dossier-overlay')).toBeHidden()
+  await expect(live.locator('#dossier-save')).toBeEnabled()
+  await expect(
+    live.frameLocator('#dossier-frame').locator('#summary'),
+  ).toHaveValue('Ship the wrapper')
+
+  await context.close()
+  await api.dispose()
+})
+
+test('opens the current saveable link after a republish', async ({
+  browser,
+}) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const review = await publish(api, {
+    html: REVIEW_PAGE_HTML,
+    visibility: 'private',
+  })
+  const editUrl = await createEditLink(api, review.id)
+  const token = new URL(editUrl).hash.slice(1)
+  const context = await browser.newContext({
+    storageState: { cookies: [], origins: [] },
+  })
+  const page = await context.newPage()
+  await page.goto(editUrl)
+  await expect(page.locator('#dossier-save')).toBeEnabled()
+
+  const current = await publish(api, {
+    html: REVIEW_PAGE_HTML.replace('Design review', 'Design review current'),
+    documentId: review.id,
+    visibility: 'private',
+  })
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('Draft from the old version')
+  await page.locator('#dossier-save').click()
+
+  const status = page.locator('#dossier-status')
+  await expect(status).toContainText('Unsaved changes')
+  const link = status.locator('a')
+  await expect(link).toHaveText(`version ${current.version} is current`)
+  await expect(link).toHaveAttribute('href', `/d/${review.id}/edit#${token}`)
+
+  const [currentPage] = await Promise.all([
+    context.waitForEvent('page'),
+    link.click(),
+  ])
+  await currentPage.waitForLoadState()
+  await expect(currentPage.locator('body')).toHaveAttribute('data-mode', 'link')
+  await expect(currentPage.locator('#dossier-overlay')).toBeHidden()
+  await expect(currentPage.locator('#dossier-save')).toBeEnabled()
+  await expect(
+    currentPage.frameLocator('#dossier-frame').locator('#summary'),
+  ).toHaveValue('Ship the wrapper')
+
+  await context.close()
+  await api.dispose()
 })
 
 test('serves the same values to an anonymous reader of a public document', async ({

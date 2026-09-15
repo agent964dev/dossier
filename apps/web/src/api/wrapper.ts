@@ -1,7 +1,7 @@
 import wrapperRuntime from '../runtime/wrapper-runtime.js?raw'
 import type { StateSnapshot } from '../services'
 
-export interface WrapperPageOptions {
+interface SnapshotWrapperPageOptions {
   readonly mode: 'account' | 'public'
   readonly snapshot: StateSnapshot
   readonly ticket: string
@@ -12,6 +12,16 @@ export interface WrapperPageOptions {
   readonly csrfToken?: string
   readonly nonce?: string
 }
+
+interface LinkWrapperPageOptions {
+  readonly mode: 'link'
+  readonly documentId: string
+  readonly nonce?: string
+}
+
+export type WrapperPageOptions =
+  | SnapshotWrapperPageOptions
+  | LinkWrapperPageOptions
 
 function escapeHtml(value: string): string {
   return value
@@ -352,31 +362,47 @@ h1 {
 
 export function renderWrapperPage(options: WrapperPageOptions): Response {
   const nonce = options.nonce ?? createNonce()
-  const snapshot = options.snapshot
-  const pinned = options.pinned ?? options.version !== snapshot.version
-  const canSave = options.hasRuntime && !pinned && snapshot.canSave
-  const status = !options.hasRuntime
-    ? 'Published before saved values'
+  const linkMode = options.mode === 'link'
+  const documentId = linkMode ? options.documentId : options.snapshot.documentId
+  const title = linkMode ? 'Edit document' : options.title
+  const pinned = linkMode
+    ? false
+    : (options.pinned ?? options.version !== options.snapshot.version)
+  const canSave =
+    !linkMode && options.hasRuntime && !pinned && options.snapshot.canSave
+  const status = linkMode
+    ? 'Opening edit link'
+    : !options.hasRuntime
+      ? 'Published before saved values'
+      : pinned
+        ? 'Older version, read only'
+        : canSave
+          ? 'Save'
+          : 'Read only'
+  const framePath = linkMode
+    ? 'about:blank'
     : pinned
-      ? 'Older version, read only'
-      : canSave
-        ? 'Save'
-        : 'Read only'
-  const framePath = pinned
-    ? `/d/${snapshot.documentId}/v/${options.version}/frame`
-    : `/d/${snapshot.documentId}/frame`
-  const frameSrc = `${framePath}?t=${encodeURIComponent(options.ticket)}`
-  const bootstrap = bootstrapJson({
-    snapshot,
-    frameTicket: options.ticket,
-    frameVersion: options.version,
-    frameHasRuntime: options.hasRuntime,
-    ...(options.mode === 'account' && options.csrfToken
-      ? { csrfToken: options.csrfToken }
-      : {}),
-  })
-  const overlayHidden = options.hasRuntime ? '' : ' hidden'
-  const frameConcealed = options.hasRuntime ? ' inert aria-hidden="true"' : ''
+      ? `/d/${documentId}/v/${options.version}/frame`
+      : `/d/${documentId}/frame`
+  const frameSrc = linkMode
+    ? framePath
+    : `${framePath}?t=${encodeURIComponent(options.ticket)}`
+  const bootstrap = bootstrapJson(
+    linkMode
+      ? { documentId }
+      : {
+          snapshot: options.snapshot,
+          frameTicket: options.ticket,
+          frameVersion: options.version,
+          frameHasRuntime: options.hasRuntime,
+          ...(options.mode === 'account' && options.csrfToken
+            ? { csrfToken: options.csrfToken }
+            : {}),
+        },
+  )
+  const overlayHidden = linkMode || options.hasRuntime ? '' : ' hidden'
+  const frameConcealed =
+    linkMode || options.hasRuntime ? ' inert aria-hidden="true"' : ''
 
   const html = `<!doctype html>
 <html lang="en">
@@ -386,14 +412,14 @@ export function renderWrapperPage(options: WrapperPageOptions): Response {
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#031119">
 <meta name="robots" content="noindex">
-<title>${escapeHtml(options.title)} — dossier</title>
+<title>${escapeHtml(title)} — dossier</title>
 <style>${STYLE}</style>
 </head>
 <body data-mode="${options.mode}">
 <header class="chrome">
   <div class="identity">
     <span class="mark">${MARK}</span>
-    <h1>${escapeHtml(options.title)}</h1>
+    <h1 id="dossier-title">${escapeHtml(title)}</h1>
   </div>
   <p class="status" id="dossier-status" aria-live="polite">${status}</p>
   <div class="actions">
@@ -403,7 +429,7 @@ export function renderWrapperPage(options: WrapperPageOptions): Response {
   </div>
 </header>
 <main class="stage">
-  <iframe class="frame" id="dossier-frame" title="${escapeHtml(options.title)}" src="${escapeHtml(frameSrc)}" sandbox="allow-scripts allow-popups"${frameConcealed}></iframe>
+  <iframe class="frame" id="dossier-frame" title="${escapeHtml(title)}" src="${escapeHtml(frameSrc)}" sandbox="allow-scripts allow-popups"${frameConcealed}></iframe>
   <div class="overlay" id="dossier-overlay"${overlayHidden}>
     <div class="overlay-panel" id="dossier-overlay-loading" role="status" aria-live="polite" aria-atomic="true">
       <div class="loader" aria-hidden="true"></div>

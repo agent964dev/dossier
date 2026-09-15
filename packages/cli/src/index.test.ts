@@ -45,11 +45,32 @@ describe('argument normalization', () => {
   it('walks command trees at depth two and three', () => {
     expect(detectCommand(['state', 'get', '7k2m9x1qz3ab'])).toBe('state get')
     expect(detectCommand(['state', 'set', '7k2m9x1qz3ab'])).toBe('state set')
-    expect(
-      detectCommand(['state', 'link', 'create', '7k2m9x1qz3ab'], {
-        state: { link: { create: true } },
-      }),
-    ).toBe('state link create')
+
+    for (const action of ['create', 'get', 'revoke'] as const) {
+      expect(detectCommand(['state', 'link', action, '7k2m9x1qz3ab'])).toBe(
+        `state link ${action}`,
+      )
+      expect(
+        normalizeGlobalOptions([
+          'node',
+          'dossier',
+          'state',
+          'link',
+          action,
+          '7k2m9x1qz3ab',
+          '--json',
+        ]).args,
+      ).toEqual([
+        'node',
+        'dossier',
+        '--json',
+        'state',
+        'link',
+        action,
+        '7k2m9x1qz3ab',
+      ])
+    }
+
     expect(
       normalizeGlobalOptions([
         'node',
@@ -60,6 +81,7 @@ describe('argument normalization', () => {
         '--json',
       ]).args,
     ).toEqual(['node', 'dossier', '--json', 'state', 'get', '7k2m9x1qz3ab'])
+
     expect(
       normalizeGlobalOptions(
         [
@@ -70,8 +92,7 @@ describe('argument normalization', () => {
           'create',
           '7k2m9x1qz3ab',
           '--expires-in',
-          '24h',
-          '--json',
+          '3600',
         ],
         { state: { link: { create: true } } },
         { 'state link create': new Set(['--expires-in']) },
@@ -79,12 +100,11 @@ describe('argument normalization', () => {
     ).toEqual([
       'node',
       'dossier',
-      '--json',
       'state',
       'link',
       'create',
       '--expires-in',
-      '24h',
+      '3600',
       '7k2m9x1qz3ab',
     ])
   })

@@ -6,6 +6,7 @@ import type {
 } from '@dossier/contracts'
 import { Check, Mail, Plus, X } from 'lucide-react'
 
+import { CopyField } from './copy-field'
 import { VisibilityTag } from './document-list'
 import { StatusMessage } from './status-message'
 import { Badge } from './ui/badge'
@@ -64,15 +65,173 @@ function splitEmails(value: string): string[] {
     .filter((entry) => entry.length > 0)
 }
 
+/**
+ * One anonymous edit link per stateful document. The token lives only in the
+ * URL a create answers with, so the card shows that URL once and afterwards
+ * offers Copy link, which creates again and gets the same one back.
+ */
+function EditLinkCard({
+  documentId,
+  active,
+  canEdit,
+  pending,
+  run,
+  setNote,
+}: {
+  documentId: string
+  active: boolean
+  canEdit: boolean
+  pending: string | null
+  run: ReturnType<typeof useDocumentAction>['run']
+  setNote: (note: string | null) => void
+}) {
+  const [linkActive, setLinkActive] = useState(active)
+  const [editUrl, setEditUrl] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState(false)
+
+  async function createLink(copy: boolean) {
+    setNote(null)
+    setConfirmRevoke(false)
+    const result = await run(
+      'link:create',
+      { id: documentId, action: 'link_create' },
+      { refresh: false },
+    )
+    if (result === null || result.action !== 'link') return
+    setLinkActive(result.link.active)
+    setEditUrl(result.link.editUrl)
+    if (result.link.editUrl === null) return
+
+    if (copy) {
+      try {
+        await navigator.clipboard.writeText(result.link.editUrl)
+        setNote('Edit link copied.')
+        return
+      } catch {
+        setNote('The active edit link is shown below so you can copy it.')
+        return
+      }
+    }
+    setNote('Edit link created. Copy it before leaving this page.')
+  }
+
+  async function revokeLink() {
+    setNote(null)
+    const result = await run(
+      'link:revoke',
+      { id: documentId, action: 'link_revoke' },
+      { refresh: false },
+    )
+    if (result === null || result.action !== 'link') return
+    setLinkActive(false)
+    setEditUrl(null)
+    setConfirmRevoke(false)
+    setNote(
+      'Edit link revoked. Open tabs will be refused on their next request.',
+    )
+  }
+
+  return (
+    <div className="border-t border-border/70 pt-4">
+      <div className="flex items-center justify-between gap-3 pb-2">
+        <span className="text-micro-lg text-neutral-500">Edit link</span>
+        <Badge variant={linkActive ? 'success' : 'muted'}>
+          {linkActive ? 'active' : 'none'}
+        </Badge>
+      </div>
+      <p className="text-xs leading-ui text-neutral-500">
+        Anyone with the link can read and change values and can forward it.
+      </p>
+
+      {editUrl ? (
+        <div className="mt-3">
+          <CopyField value={editUrl} label="Copy the edit link" />
+        </div>
+      ) : null}
+
+      {canEdit ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {linkActive ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={pending !== null}
+                onClick={() => void createLink(true)}
+              >
+                {pending === 'link:create' ? 'Copying…' : 'Copy link'}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={pending !== null}
+                onClick={() => setConfirmRevoke(true)}
+              >
+                Revoke
+              </Button>
+            </>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending !== null}
+              onClick={() => void createLink(false)}
+            >
+              {pending === 'link:create' ? 'Creating…' : 'Create link'}
+            </Button>
+          )}
+        </div>
+      ) : null}
+
+      {confirmRevoke ? (
+        <div
+          role="alert"
+          className="mt-3 rounded-lg border border-warning-400/35 bg-warning-400/[0.07] px-3 py-3"
+        >
+          <p className="text-sm leading-ui text-warning-100">
+            Revoke this link? Open tabs will lose access on their next load or
+            save.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="warn"
+              disabled={pending !== null}
+              onClick={() => void revokeLink()}
+            >
+              {pending === 'link:revoke' ? 'Revoking…' : 'Revoke link'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={pending !== null}
+              onClick={() => setConfirmRevoke(false)}
+            >
+              Keep link
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function AccessPanel({
   document,
   shares,
+  editLink,
   csrfToken,
   workspaceSlug,
   canEdit,
 }: {
   document: DocumentEditor
   shares: SharesResponse
+  editLink: { readonly active: boolean }
   csrfToken: string
   workspaceSlug: string
   canEdit: boolean
@@ -514,6 +673,17 @@ export function AccessPanel({
           </ul>
         )}
       </div>
+
+      {document.stateful ? (
+        <EditLinkCard
+          documentId={document.id}
+          active={editLink.active}
+          canEdit={canEdit}
+          pending={pending}
+          run={run}
+          setNote={setNote}
+        />
+      ) : null}
 
       {failure ? (
         <StatusMessage tone="error">

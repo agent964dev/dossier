@@ -14,6 +14,7 @@
   "assets": {
     "binding": "ASSETS",
   },
+  // Set LINK_SECRET with `wrangler secret put LINK_SECRET` in each environment.
   "vars": {
     "PUBLIC_BASE_URL": "https://dossier.agent964.com",
     "SEED_WORKSPACE": "agent964:agent964.com",
@@ -51,6 +52,7 @@
   ],
   "env": {
     "dev": {
+      // Set LINK_SECRET with `wrangler secret put LINK_SECRET --env dev`.
       "workers_dev": true,
       "triggers": { "crons": ["17 3 * * SUN"] },
       "preview_urls": true,
