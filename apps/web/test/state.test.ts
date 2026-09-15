@@ -8,6 +8,7 @@ import worker from '../src/worker'
 import {
   Principal,
   Publish,
+  Shares,
   State,
   apiError,
   errorResponse,
@@ -25,11 +26,17 @@ function run<A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> {
   )
 }
 
-async function setup(suffix: string): Promise<{
+async function setup(
+  suffix: string,
+  email?: string,
+): Promise<{
   readonly principal: PrincipalIdentity
   readonly token: string
 }> {
-  const seeded = await seedPrincipal(env, { suffix })
+  const seeded = await seedPrincipal(env, {
+    suffix,
+    ...(email === undefined ? {} : { email }),
+  })
   const principal = await run(
     Effect.gen(function* () {
       return yield* (yield* Principal).resolve(
@@ -400,6 +407,264 @@ async function stateRequest(
 }
 
 describe('State saves', () => {
+  it('lets a verified grant save, then keeps reading after save is removed', async () => {
+    const owner = await setup('state_grant_owner')
+    const saver = await setup('state_grant_saver', 'saver@state-grant.test')
+    const reader = await setup('state_grant_reader', 'reader@state-grant.test')
+    const published = await publishState(
+      owner.principal,
+      'state-grant',
+      statefulHtml('State grant'),
+      'private',
+    )
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          published.document.id,
+          {
+            add: ['reader@state-grant.test'],
+            addSavers: [' Saver@State-Grant.Test '],
+          },
+          owner.principal,
+        )
+      }),
+    )
+
+    const granted = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal: saver.principal,
+        })
+      }),
+    )
+    expect(granted).toMatchObject({ viewer: 'granted', canSave: true })
+
+    const saved = await saveState(published.document.id, saver.principal, [
+      { name: 'approved', value: true, base: 0 },
+    ])
+    expect(saved).toMatchObject({
+      _tag: 'Right',
+      right: {
+        viewer: 'granted',
+        canSave: true,
+        fields: { approved: { value: true, revision: 1 } },
+      },
+    })
+
+    const viewOnly = await stateRequest(
+      `/api/documents/${published.document.id}/state`,
+      reader.token,
+      env,
+      {
+        method: 'PUT',
+        body: {
+          changes: [{ name: 'notes', value: 'No', base: 0 }],
+        },
+      },
+    )
+    expect(viewOnly.status).toBe(403)
+    expect(await viewOnly.json()).toMatchObject({
+      code: 'state_edit_required',
+    })
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          published.document.id,
+          { removeSavers: ['SAVER@STATE-GRANT.TEST'] },
+          owner.principal,
+        )
+      }),
+    )
+
+    const stillReadable = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal: saver.principal,
+        })
+      }),
+    )
+    expect(stillReadable).toMatchObject({
+      viewer: 'granted',
+      canSave: false,
+      fields: { approved: { value: true } },
+    })
+    const stopped = await saveState(published.document.id, saver.principal, [
+      { name: 'notes', value: 'Stopped', base: 0 },
+    ])
+    expect(stopped).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'state_edit_required', status: 403 },
+    })
+  })
+
+  it('removes a local grant without materializing inherited access', async () => {
+    const owner = await setup('state_remove_grant_owner')
+    const parent = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: '<!doctype html><title>Grant parent</title>',
+            visibility: 'private',
+            shares: ['inherited@state-grant.test'],
+            idempotencyKey: 'state-remove-grant-parent',
+          },
+          owner.principal,
+        )
+      }),
+    )
+    const child = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('Grant child'),
+            stateful: true,
+            parentId: parent.document.id,
+            idempotencyKey: 'state-remove-grant-child',
+          },
+          owner.principal,
+        )
+      }),
+    )
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          child.document.id,
+          { addSavers: ['local@state-grant.test'] },
+          owner.principal,
+        )
+        yield* (yield* Shares).delta(
+          child.document.id,
+          { removeGrants: ['LOCAL@STATE-GRANT.TEST'] },
+          owner.principal,
+        )
+      }),
+    )
+
+    const row = await env.DB.prepare(
+      `SELECT visibility,
+              (SELECT COUNT(*) FROM document_shares share
+                WHERE share.document_id = documents.id) AS shares
+         FROM documents WHERE id = ?`,
+    )
+      .bind(child.document.id)
+      .first<{ visibility: string | null; shares: number }>()
+    expect(row).toEqual({ visibility: null, shares: 0 })
+
+    const response = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Shares).get(child.document.id, owner.principal)
+      }),
+    )
+    expect(response).toEqual({
+      configured: [],
+      effective: ['inherited@state-grant.test'],
+      accessSource: 'inherited',
+      grants: [],
+    })
+  })
+
+  it('does not turn a saver into an editor or workspace member', async () => {
+    const owner = await setup('state_saver_scope_owner')
+    const saver = await setup(
+      'state_saver_scope_saver',
+      'saver@state-scope.test',
+    )
+    const target = await publishState(
+      owner.principal,
+      'state-saver-scope',
+      statefulHtml('State saver scope'),
+      'team',
+    )
+    const child = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('Private saver child'),
+            stateful: true,
+            parentId: target.document.id,
+            visibility: 'private',
+            idempotencyKey: 'state-saver-private-child',
+          },
+          owner.principal,
+        )
+      }),
+    )
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          target.document.id,
+          { addSavers: ['saver@state-scope.test'] },
+          owner.principal,
+        )
+      }),
+    )
+
+    const membership = await env.DB.prepare(
+      `SELECT 1 AS found FROM memberships
+        WHERE workspace_id = ? AND account_id = ?`,
+    )
+      .bind(owner.principal.workspaceId, saver.principal.accountId)
+      .first<{ found: number }>()
+    expect(membership).toBeNull()
+
+    const republish = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish)
+          .publish(
+            {
+              html: statefulHtml('Saver cannot publish'),
+              stateful: true,
+              documentId: target.document.id,
+              idempotencyKey: 'state-saver-cannot-publish',
+            },
+            saver.principal,
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(republish).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'editor_required', status: 403 },
+    })
+
+    const sharing = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Shares)
+          .delta(
+            target.document.id,
+            { add: ['no@state-scope.test'] },
+            saver.principal,
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(sharing).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'publisher_required', status: 403 },
+    })
+
+    const privateChild = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .read(child.document.id, {
+            kind: 'account',
+            principal: saver.principal,
+          })
+          .pipe(Effect.either)
+      }),
+    )
+    expect(privateChild).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'not_found', status: 404 },
+    })
+  })
+
   it('allows disjoint saves and reports the moved field for a stale base', async () => {
     const { principal } = await setup('state_conflicts')
     const published = await publishState(principal, 'state-conflicts')

@@ -16,6 +16,14 @@ const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 const SECOND_ACCOUNT_ID = 'acct_browser_second'
 
 /**
+ * The third person: no membership, no invite, one verified email. Everything
+ * it can do on a document comes from a saved-values grant, which is what the
+ * grant spec signs in as it to prove.
+ */
+const GRANTED_ACCOUNT_ID = 'acct_browser_granted'
+const GRANTED_EMAIL = 'granted@browser.test'
+
+/**
  * The secrets the browser job needs. They come from `.dev.vars`, the same file
  * `bun run dev` reads, or from the environment when there is no such file (CI
  * writes one, but an operator may prefer to export them instead).
@@ -138,16 +146,41 @@ function applyMigrations(): void {
  */
 function seedSecondAccount(workspaceId: string): void {
   const now = new Date().toISOString()
-  const statements = [
+  execute('second-account.sql', [
     `INSERT OR IGNORE INTO accounts
        (id, name, kind, deployment_admin, disabled_at, created_at, updated_at)
      VALUES ('${SECOND_ACCOUNT_ID}', 'Second reviewer', 'user', 0, NULL,
              '${now}', '${now}');`,
     `INSERT OR IGNORE INTO memberships (workspace_id, account_id, role, created_at)
      VALUES ('${workspaceId}', '${SECOND_ACCOUNT_ID}', 'admin', '${now}');`,
-  ].join('\n')
-  const file = path.join(authDirectory, 'second-account.sql')
-  writeFileSync(file, statements)
+  ])
+}
+
+/**
+ * The granted account. It gets an identity row because a grant is matched by
+ * verified email, and deliberately no membership row: a grant must open the
+ * document on its own.
+ */
+function seedGrantedAccount(): void {
+  const now = new Date().toISOString()
+  execute('granted-account.sql', [
+    `INSERT OR IGNORE INTO accounts
+       (id, name, kind, deployment_admin, disabled_at, created_at, updated_at)
+     VALUES ('${GRANTED_ACCOUNT_ID}', 'Granted reviewer', 'user', 0, NULL,
+             '${now}', '${now}');`,
+    `INSERT OR IGNORE INTO identities
+       (id, account_id, provider, subject, email, email_verified,
+        display_name, picture_url, pii_subject, created_at, last_login_at)
+     VALUES ('identity_browser_granted', '${GRANTED_ACCOUNT_ID}', 'shoo',
+             'subject_browser_granted', '${GRANTED_EMAIL}', 1, NULL, NULL,
+             NULL, '${now}', '${now}');`,
+  ])
+}
+
+/** Runs one SQL file against the browser suite's own local D1. */
+function execute(name: string, statements: readonly string[]): void {
+  const file = path.join(authDirectory, name)
+  writeFileSync(file, statements.join('\n'))
   wrangler([
     'd1',
     'execute',
@@ -257,8 +290,20 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     }),
   })
 
+  seedGrantedAccount()
+  const grantStorageState = writeStorageState('granted.json', {
+    baseURL,
+    cookieName,
+    token: sessionToken(vars.sessionSecret, {
+      accountId: GRANTED_ACCOUNT_ID,
+      workspaceId: seeded.workspaceId,
+    }),
+  })
+
   // The specs publish their own fixtures through the API with this key.
   process.env.DOSSIER_BROWSER_API_KEY = vars.bootstrapApiKey
   process.env.DOSSIER_BROWSER_BASE_URL = baseURL
   process.env.DOSSIER_BROWSER_SECOND_STORAGE = secondStorageState
+  process.env.DOSSIER_BROWSER_GRANT_STORAGE = grantStorageState
+  process.env.DOSSIER_BROWSER_GRANT_EMAIL = GRANTED_EMAIL
 }

@@ -783,6 +783,55 @@ describe('phase two HTTP tree and access', () => {
     expect(oldAfter.document.deletionBatchId).toBe(oldDelete.batchId)
   })
 
+  it('returns local saver grants for all three share delta operations', async () => {
+    const owner = await seedPrincipal(env, {
+      suffix: 'http_state_grants_owner',
+    })
+    await actor('http_state_grants_saver', {
+      email: 'saver@http-state-grants.test',
+    })
+    const document = await upload(owner.token, 'HTTP state grants', {
+      visibility: 'private',
+    })
+
+    const added = await api(`/api/documents/${document.document.id}/shares`, {
+      token: owner.token,
+      body: { addSavers: [' Saver@HTTP-State-Grants.Test '] },
+    })
+    expect(added.status).toBe(200)
+    expect(await body(added)).toMatchObject({
+      configured: [],
+      grants: [{ email: 'saver@http-state-grants.test', canSave: true }],
+    })
+
+    const fetched = await body(
+      await api(`/api/documents/${document.document.id}/shares`, {
+        token: owner.token,
+      }),
+    )
+    expect(fetched.grants).toEqual([
+      { email: 'saver@http-state-grants.test', canSave: true },
+    ])
+
+    const stopped = await body(
+      await api(`/api/documents/${document.document.id}/shares`, {
+        token: owner.token,
+        body: { removeSavers: ['SAVER@HTTP-STATE-GRANTS.TEST'] },
+      }),
+    )
+    expect(stopped.grants).toEqual([
+      { email: 'saver@http-state-grants.test', canSave: false },
+    ])
+
+    const removed = await body(
+      await api(`/api/documents/${document.document.id}/shares`, {
+        token: owner.token,
+        body: { removeGrants: ['saver@http-state-grants.test'] },
+      }),
+    )
+    expect(removed.grants).toEqual([])
+  })
+
   it('composes concurrent share deltas and maps tree/share/patch failures to the HTTP contract', async () => {
     const owner = await seedPrincipal(env, { suffix: 'http_shares_owner' })
     const member = await actor('http_shares_member', {

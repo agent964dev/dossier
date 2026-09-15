@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { StateChange } from '@dossier/contracts'
+import type { ShareDelta, StateChange, StateGrant } from '@dossier/contracts'
 import { scanStateFields, type FieldType } from '@dossier/policy'
 import packageJson from '../package.json' with { type: 'json' }
 
@@ -49,6 +49,7 @@ interface StoredDocument {
     { value: unknown; revision: number; type: FieldType }
   >
   shares: string[]
+  grants: StateGrant[]
   deletionBatchId: string | null
   deletionRootTitle: string | null
   deletedBy: string | null
@@ -67,6 +68,7 @@ const assets = new Map<string, StoredAsset>()
 const idempotencyKeys: string[] = []
 const stateSchemaRequestHashes: string[] = []
 const listQueries: Array<{ scope: string | null; parent: string | null }> = []
+const shareDeltas: ShareDelta[] = []
 let nextId = 1
 let retryFailureSeen = false
 let redirectWasFollowed = false
@@ -217,6 +219,7 @@ function storedDocument(
     stateData: {},
     stateFields: {},
     shares: [],
+    grants: [],
     deletionBatchId: null,
     deletionRootTitle: null,
     deletedBy: null,
@@ -629,6 +632,7 @@ beforeAll(async () => {
           payload.shares.every((email) => typeof email === 'string')
             ? payload.shares
             : (previous?.shares ?? []),
+        grants: previous?.grants ?? [],
         deletionBatchId: previous?.deletionBatchId ?? null,
         deletionRootTitle: previous?.deletionRootTitle ?? null,
         deletedBy: previous?.deletedBy ?? null,
@@ -1038,26 +1042,48 @@ beforeAll(async () => {
             configured: stored.shares,
             effective: stored.shares,
             accessSource: 'own',
+            grants: stored.grants,
           }),
         )
         return
       }
       if (action === 'shares' && request.method === 'POST') {
         const payload = await bodyJson(request)
+        shareDeltas.push(payload as ShareDelta)
         const shares = new Set(stored.shares)
+        const grants = new Map(
+          stored.grants.map((grant) => [grant.email, grant.canSave]),
+        )
         if (Array.isArray(payload.add)) {
           for (const email of payload.add) shares.add(String(email))
         }
         if (Array.isArray(payload.remove)) {
           for (const email of payload.remove) shares.delete(String(email))
         }
+        if (Array.isArray(payload.addSavers)) {
+          for (const email of payload.addSavers) grants.set(String(email), true)
+        }
+        if (Array.isArray(payload.removeSavers)) {
+          for (const email of payload.removeSavers) {
+            const normalized = String(email)
+            if (grants.has(normalized)) grants.set(normalized, false)
+          }
+        }
+        if (Array.isArray(payload.removeGrants)) {
+          for (const email of payload.removeGrants) grants.delete(String(email))
+        }
         stored.shares = [...shares]
+        stored.grants = [...grants].map(([email, canSave]) => ({
+          email,
+          canSave,
+        }))
         stored.revision += 1
         response.end(
           JSON.stringify({
             configured: stored.shares,
             effective: stored.shares,
             accessSource: 'own',
+            grants: stored.grants,
           }),
         )
         return
@@ -2709,6 +2735,7 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
       'sharedoc0001',
       storedDocument('Shared Document.html', { shares: ['old@example.com'] }),
     )
+    const before = shareDeltas.length
     const result = await cli(
       'node',
       [
@@ -2727,7 +2754,174 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
       configured: ['one@example.com', 'two@example.com'],
       effective: ['one@example.com', 'two@example.com'],
       accessSource: 'own',
+      grants: [],
     })
+    expect(shareDeltas.slice(before)).toEqual([
+      {
+        add: ['one@example.com', 'two@example.com'],
+        remove: ['old@example.com'],
+        removeGrants: ['old@example.com'],
+      },
+    ])
+  })
+
+  it('reads current shares and grants without a delta', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'shareread001',
+      storedDocument('Read Shares.html', {
+        shares: ['reader@example.com'],
+        grants: [
+          { email: 'reader@example.com', canSave: true },
+          { email: 'local@example.com', canSave: false },
+        ],
+      }),
+    )
+    const before = shareDeltas.length
+
+    const result = await cli('node', ['share', 'shareread001', '--json'], {
+      home,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({
+      configured: ['reader@example.com'],
+      effective: ['reader@example.com'],
+      accessSource: 'own',
+      grants: [
+        { email: 'reader@example.com', canSave: true },
+        { email: 'local@example.com', canSave: false },
+      ],
+    })
+    expect(shareDeltas).toHaveLength(before)
+  })
+
+  it('maps saving flags in human, JSON, and quiet modes', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'sharestate01',
+      storedDocument('State Sharing.html', {
+        shares: ['reader@example.com'],
+      }),
+    )
+    const before = shareDeltas.length
+
+    const human = await cli(
+      'node',
+      ['share', 'sharestate01', '--add', 'saver@example.com', '--edit-state'],
+      { home },
+    )
+    expect(human.exitCode).toBe(0)
+    expect(human.stdout).toContain('reader@example.com: view')
+    expect(human.stdout).toContain('saver@example.com: view and save')
+
+    const json = await cli(
+      'node',
+      [
+        'share',
+        'sharestate01',
+        '--remove',
+        'saver@example.com',
+        '--edit-state',
+        '--json',
+      ],
+      { home },
+    )
+    expect(json.exitCode).toBe(0)
+    expect(JSON.parse(json.stdout)).toEqual({
+      configured: ['reader@example.com'],
+      effective: ['reader@example.com'],
+      accessSource: 'own',
+      grants: [{ email: 'saver@example.com', canSave: false }],
+    })
+
+    const quiet = await cli(
+      'node',
+      [
+        'share',
+        'sharestate01',
+        '--add',
+        'quiet@example.com',
+        '--edit-state',
+        '--quiet',
+      ],
+      { home },
+    )
+    expect(quiet).toEqual({ stdout: '', stderr: '', exitCode: 0 })
+
+    const removed = await cli(
+      'node',
+      ['share', 'sharestate01', '--remove', 'saver@example.com', '--quiet'],
+      { home },
+    )
+    expect(removed).toEqual({ stdout: '', stderr: '', exitCode: 0 })
+    expect(shareDeltas.slice(before)).toEqual([
+      { addSavers: ['saver@example.com'] },
+      { removeSavers: ['saver@example.com'] },
+      { addSavers: ['quiet@example.com'] },
+      {
+        remove: ['saver@example.com'],
+        removeGrants: ['saver@example.com'],
+      },
+    ])
+  })
+
+  it('checks deployment support before changing saving access', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('sharelegacy1', storedDocument('Legacy Share.html'))
+    const before = shareDeltas.length
+
+    const result = await cli(
+      'node',
+      [
+        'share',
+        'sharelegacy1',
+        '--add',
+        'saver@example.com',
+        '--edit-state',
+        '--api-url',
+        apiUrl,
+      ],
+      { home, env: { DOSSIER_API_KEY: 'ds_legacy' } },
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+    expect(shareDeltas).toHaveLength(before)
+  })
+
+  it('rejects --edit-state without an add or remove flag', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('shareusage01', storedDocument('Share Usage.html'))
+    const before = shareDeltas.length
+    const result = await cli(
+      'node',
+      ['share', 'shareusage01', '--edit-state'],
+      { home },
+    )
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toContain(
+      '--edit-state requires --add and/or --remove',
+    )
+    expect(shareDeltas).toHaveLength(before)
+  })
+
+  it('explains saving permissions in share help', async () => {
+    const help = await cli('node', ['share', '--help'])
+    expect(help.exitCode).toBe(0)
+    expect(help.stdout).toContain(
+      'Add view-only access, or view and save with --edit-state',
+    )
+    expect(help.stdout).toContain(
+      'Remove view and save, or only save with --edit-state',
+    )
+    expect(help.stdout).toContain('saving never grants publishing or sharing')
   })
 
   it('lists members and manages the workspace allowlist', async () => {

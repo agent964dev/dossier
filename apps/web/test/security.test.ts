@@ -563,6 +563,107 @@ describe('adversarial controls that must remain closed', () => {
     ).toBe(1)
   })
 
+  it('changes saved-values grants through the savers action, for an editor only', async () => {
+    const owner = await seedPrincipal(env, { suffix: 'security_savers_owner' })
+    const stranger = await seedPrincipal(env, {
+      suffix: 'security_savers_stranger',
+    })
+    const receipt = await publish(owner.token)
+    const documentId = receipt.document.id
+    const cookieFor = async (account: {
+      accountId: string
+      workspaceId: string
+    }) =>
+      (
+        await Effect.runPromise(
+          session.createSessionCookie({
+            accountId: account.accountId,
+            workspaceId: account.workspaceId,
+          }),
+        )
+      ).split(';')[0]
+    const ownerCookie = await cookieFor(owner)
+    const strangerCookie = await cookieFor(stranger)
+    const ownerToken = await Effect.runPromise(
+      issueCsrfToken(owner.accountId).pipe(Effect.provide(layer)),
+    )
+    const strangerToken = await Effect.runPromise(
+      issueCsrfToken(stranger.accountId).pipe(Effect.provide(layer)),
+    )
+    const act = (
+      cookie: string | undefined,
+      csrfToken: string,
+      data: Record<string, unknown>,
+      origin: string = ORIGIN,
+    ) => {
+      webContext.request = new Request(`${ORIGIN}/_serverFn/action`, {
+        method: 'POST',
+        headers: { ...(cookie ? { cookie } : {}), origin },
+      })
+      return documentAction({ data: { id: documentId, csrfToken, ...data } })
+    }
+
+    // The dashboard toggle turned on: one upsert, answered like the shares
+    // action so the panel can re-render from the same payload.
+    expect(
+      await act(ownerCookie, ownerToken, {
+        action: 'savers',
+        addSavers: [' Saver@Example.COM '],
+      }),
+    ).toMatchObject({
+      ok: true,
+      action: 'shares',
+      shares: { grants: [{ email: 'saver@example.com', canSave: true }] },
+    })
+
+    // Turned off again: the row survives, so the email keeps reading.
+    expect(
+      await act(ownerCookie, ownerToken, {
+        action: 'savers',
+        removeSavers: ['saver@example.com'],
+      }),
+    ).toMatchObject({
+      shares: { grants: [{ email: 'saver@example.com', canSave: false }] },
+    })
+
+    // An account that cannot even read the document cannot touch its grants.
+    expect(
+      await act(strangerCookie, strangerToken, {
+        action: 'savers',
+        addSavers: ['stranger@example.com'],
+      }),
+    ).toMatchObject({ ok: false, code: 'not_found' })
+
+    // The validator refuses a savers action that names nothing to change.
+    expect(() =>
+      act(ownerCookie, ownerToken, { action: 'savers' }),
+    ).toThrowError('Name at least one state grant to change.')
+
+    // And the CSRF guard still runs ahead of the service.
+    expect(
+      await act(
+        ownerCookie,
+        ownerToken,
+        { action: 'savers', removeGrants: ['saver@example.com'] },
+        'https://attacker.example',
+      ),
+    ).toMatchObject({ ok: false, code: 'csrf_rejected' })
+
+    expect(
+      await act(ownerCookie, ownerToken, {
+        action: 'savers',
+        removeGrants: ['saver@example.com'],
+      }),
+    ).toMatchObject({ ok: true, action: 'shares', shares: { grants: [] } })
+    expect(
+      await env.DB.prepare(
+        'SELECT COUNT(*) AS n FROM document_state_grants WHERE document_id = ?',
+      )
+        .bind(documentId)
+        .first<{ n: number }>(),
+    ).toMatchObject({ n: 0 })
+  })
+
   it('enforces streamed byte limits without trusting Content-Length', async () => {
     for (const declared of [undefined, '1', '-1', 'nonsense']) {
       const request = new Request(`${ORIGIN}/api/uploads`, {

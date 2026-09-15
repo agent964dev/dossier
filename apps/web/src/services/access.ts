@@ -93,6 +93,14 @@ export function accessCteSql(seedSql: string): string {
                               JOIN verified_emails email ON email.email = share.email
                              WHERE share.document_id = policy.id
                           )
+                          OR EXISTS (
+                            SELECT 1
+                              FROM document_state_grants g
+                              JOIN identities i ON i.email = g.email
+                             WHERE g.document_id = target.id
+                               AND i.account_id = ?1
+                               AND i.email_verified = 1
+                          )
                         )
                    THEN 1 ELSE 0 END AS can_read
         FROM ancestors target

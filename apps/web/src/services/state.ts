@@ -91,6 +91,10 @@ interface SavedFieldRow {
   readonly revision: number
 }
 
+interface GrantRow {
+  readonly can_save: number
+}
+
 interface SaveSnapshotRow {
   readonly name: string | null
   readonly type: FieldType | null
@@ -396,6 +400,26 @@ export const StateLive = Layer.effect(
           new PersistenceError({ operation: 'parse state manifest', cause }),
       })
 
+    const loadGrant = (documentId: string, accountId: string) =>
+      Effect.tryPromise({
+        try: () =>
+          db.raw
+            .prepare(
+              `SELECT grant_row.can_save
+                 FROM document_state_grants grant_row
+                 JOIN identities identity ON identity.email = grant_row.email
+                WHERE grant_row.document_id = ?
+                  AND identity.account_id = ?
+                  AND identity.email_verified = 1
+                ORDER BY grant_row.can_save DESC
+                LIMIT 1`,
+            )
+            .bind(documentId, accountId)
+            .first<GrantRow>(),
+        catch: (cause) =>
+          new PersistenceError({ operation: 'load state grant', cause }),
+      })
+
     const requirePinnedVersion = (documentId: string, version: number) =>
       Effect.gen(function* () {
         const row = yield* Effect.tryPromise({
@@ -532,6 +556,15 @@ export const StateLive = Layer.effect(
                                WHERE editor.workspace_id = d.workspace_id
                                  AND editor.account_id = account.id
                                  AND editor.role = 'admin'
+                            ) OR EXISTS (
+                              SELECT 1
+                                FROM document_state_grants grant_row
+                                JOIN identities identity
+                                  ON identity.email = grant_row.email
+                               WHERE grant_row.document_id = d.id
+                                 AND grant_row.can_save = 1
+                                 AND identity.account_id = account.id
+                                 AND identity.email_verified = 1
                             )
                           ) THEN 1 ELSE 0 END AS can_edit,
                           state.bytes
@@ -699,6 +732,10 @@ export const StateLive = Layer.effect(
             new PersistenceError({ operation: 'read document state', cause }),
         })
         const editor = decision?.editor === true
+        const grant =
+          actor.kind === 'account' && !editor
+            ? yield* loadGrant(documentId, actor.principal.accountId)
+            : null
         return yield* buildSnapshot(
           documentId,
           context.version_number,
@@ -706,8 +743,14 @@ export const StateLive = Layer.effect(
           context.updated_at,
           manifest,
           saved.results,
-          editor,
-          editor ? 'editor' : actor.kind === 'link' ? 'link' : 'reader',
+          editor || grant?.can_save === 1,
+          editor
+            ? 'editor'
+            : grant
+              ? 'granted'
+              : actor.kind === 'link'
+                ? 'link'
+                : 'reader',
         )
       })
 
@@ -723,7 +766,10 @@ export const StateLive = Layer.effect(
           documentId,
           actor.principal,
         )
-        if (!decision.editor) {
+        const grant = decision.editor
+          ? null
+          : yield* loadGrant(documentId, actor.principal.accountId)
+        if (!decision.editor && grant?.can_save !== 1) {
           return yield* Effect.fail(
             apiError('state_edit_required', 'State edit access is required.'),
           )
@@ -797,6 +843,15 @@ export const StateLive = Layer.effect(
                                 WHERE editor.workspace_id = d.workspace_id
                                   AND editor.account_id = actor.id
                                   AND editor.role = 'admin'
+                             ) OR EXISTS (
+                               SELECT 1
+                                 FROM document_state_grants grant_row
+                                 JOIN identities identity
+                                   ON identity.email = grant_row.email
+                                WHERE grant_row.document_id = d.id
+                                  AND grant_row.can_save = 1
+                                  AND identity.account_id = actor.id
+                                  AND identity.email_verified = 1
                              )
                            )
                       )
@@ -961,7 +1016,7 @@ export const StateLive = Layer.effect(
           manifest,
           savedRows,
           true,
-          'editor',
+          decision.editor ? 'editor' : 'granted',
         )
       })
 

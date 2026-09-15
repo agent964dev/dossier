@@ -441,6 +441,9 @@ export type DocumentPatch = typeof DocumentPatch.Type
 export const ShareDelta = Schema.Struct({
   add: Schema.optional(Schema.Array(Schema.String)),
   remove: Schema.optional(Schema.Array(Schema.String)),
+  addSavers: Schema.optional(Schema.Array(Schema.String)),
+  removeSavers: Schema.optional(Schema.Array(Schema.String)),
+  removeGrants: Schema.optional(Schema.Array(Schema.String)),
 })
 export type ShareDelta = typeof ShareDelta.Type
 
@@ -450,10 +453,17 @@ export const ShareReplacement = Schema.Struct({
 })
 export type ShareReplacement = typeof ShareReplacement.Type
 
+export const StateGrant = Schema.Struct({
+  email: Schema.String,
+  canSave: Schema.Boolean,
+})
+export type StateGrant = typeof StateGrant.Type
+
 export const SharesResponse = Schema.Struct({
   configured: Schema.Array(Schema.String),
   effective: Schema.Array(Schema.String),
   accessSource: AccessSource,
+  grants: Schema.Array(StateGrant),
 })
 export type SharesResponse = typeof SharesResponse.Type
 

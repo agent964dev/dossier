@@ -138,6 +138,25 @@ describe('argument normalization', () => {
       '--text',
       '7k2m9x1qz3ab',
     ])
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        'share',
+        '7k2m9x1qz3ab',
+        '--add',
+        'person@example.com',
+        '--edit-state',
+      ]).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      'share',
+      '--add',
+      'person@example.com',
+      '--edit-state',
+      '7k2m9x1qz3ab',
+    ])
   })
 
   it('normalizes options for nested workspace and asset commands', () => {

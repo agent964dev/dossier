@@ -624,6 +624,7 @@ export type DocumentActionName =
   | 'restore'
   | 'visibility'
   | 'shares'
+  | 'savers'
   | 'move'
 
 export type DocumentActionResult =
@@ -670,6 +671,9 @@ interface DocumentActionInput {
   readonly parentId?: string | null
   readonly add?: readonly string[]
   readonly remove?: readonly string[]
+  readonly addSavers?: readonly string[]
+  readonly removeSavers?: readonly string[]
+  readonly removeGrants?: readonly string[]
 }
 
 const ACTIONS = new Set<DocumentActionName>([
@@ -679,6 +683,7 @@ const ACTIONS = new Set<DocumentActionName>([
   'restore',
   'visibility',
   'shares',
+  'savers',
   'move',
 ])
 
@@ -765,8 +770,19 @@ export const documentAction = createServerFn({ method: 'POST' })
 
     const add = readEmails(value.add)
     const remove = readEmails(value.remove)
+    const addSavers = readEmails(value.addSavers)
+    const removeSavers = readEmails(value.removeSavers)
+    const removeGrants = readEmails(value.removeGrants)
     if (action === 'shares' && add === undefined && remove === undefined) {
       throw new Error('Name at least one email to add or remove.')
+    }
+    if (
+      action === 'savers' &&
+      addSavers === undefined &&
+      removeSavers === undefined &&
+      removeGrants === undefined
+    ) {
+      throw new Error('Name at least one state grant to change.')
     }
 
     return {
@@ -780,6 +796,9 @@ export const documentAction = createServerFn({ method: 'POST' })
       ...(parentId === undefined ? {} : { parentId }),
       ...(add === undefined ? {} : { add }),
       ...(remove === undefined ? {} : { remove }),
+      ...(addSavers === undefined ? {} : { addSavers }),
+      ...(removeSavers === undefined ? {} : { removeSavers }),
+      ...(removeGrants === undefined ? {} : { removeGrants }),
     }
   })
   .handler(async ({ data }): Promise<DocumentActionResult> => {
@@ -827,17 +846,31 @@ export const documentAction = createServerFn({ method: 'POST' })
               }
         }
 
-        if (data.action === 'shares') {
+        if (data.action === 'shares' || data.action === 'savers') {
           const shares = yield* Shares
           return {
             ok: true as const,
             action: 'shares' as const,
             shares: yield* shares.delta(
               data.id,
-              {
-                ...(data.add === undefined ? {} : { add: data.add }),
-                ...(data.remove === undefined ? {} : { remove: data.remove }),
-              },
+              data.action === 'shares'
+                ? {
+                    ...(data.add === undefined ? {} : { add: data.add }),
+                    ...(data.remove === undefined
+                      ? {}
+                      : { remove: data.remove }),
+                  }
+                : {
+                    ...(data.addSavers === undefined
+                      ? {}
+                      : { addSavers: data.addSavers }),
+                    ...(data.removeSavers === undefined
+                      ? {}
+                      : { removeSavers: data.removeSavers }),
+                    ...(data.removeGrants === undefined
+                      ? {}
+                      : { removeGrants: data.removeGrants }),
+                  },
               principal,
             ),
           }

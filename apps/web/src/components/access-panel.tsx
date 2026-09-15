@@ -4,7 +4,7 @@ import type {
   SharesResponse,
   Visibility,
 } from '@dossier/contracts'
-import { Mail, Plus, X } from 'lucide-react'
+import { Check, Mail, Plus, X } from 'lucide-react'
 
 import { VisibilityTag } from './document-list'
 import { StatusMessage } from './status-message'
@@ -86,6 +86,14 @@ export function AccessPanel({
   const inForce = shares.effective
   const strayConfigured = shares.configured.filter(
     (email) => !inForce.includes(email),
+  )
+  /**
+   * An invited email may also hold a saved-values grant. The two are separate
+   * powers on separate rows, so each list badges what the other one adds: the
+   * invite row says the email can save, the grant row says it is also invited.
+   */
+  const savers = new Set(
+    shares.grants.filter((grant) => grant.canSave).map((grant) => grant.email),
   )
   const ownBoundary = shares.accessSource === 'own'
   const versions = `${document.versionCount} retained ${
@@ -170,6 +178,32 @@ export function AccessPanel({
     })
     if (result === null) return
     setNote(`${email} no longer has access through an invite.`)
+  }
+
+  async function setSaver(email: string, canSave: boolean) {
+    setNote(null)
+    const result = await run(`saver:${email}`, {
+      id: document.id,
+      action: 'savers',
+      ...(canSave ? { addSavers: [email] } : { removeSavers: [email] }),
+    })
+    if (result === null) return
+    setNote(
+      canSave
+        ? `${email} can save this document's values.`
+        : `${email} can still read, but can no longer save values.`,
+    )
+  }
+
+  async function removeGrant(email: string) {
+    setNote(null)
+    const result = await run(`grant:${email}`, {
+      id: document.id,
+      action: 'savers',
+      removeGrants: [email],
+    })
+    if (result === null) return
+    setNote(`Removed the saved-values grant for ${email}.`)
   }
 
   const inviteForm = (
@@ -338,6 +372,11 @@ export function AccessPanel({
                     inherited
                   </Badge>
                 )}
+                {savers.has(email) ? (
+                  <Badge variant="success" className="shrink-0">
+                    can save
+                  </Badge>
+                ) : null}
                 {canEdit ? (
                   <Button
                     type="button"
@@ -385,6 +424,95 @@ export function AccessPanel({
             </details>
           )
         ) : null}
+      </div>
+
+      <div className="border-t border-border/70 pt-4">
+        <div className="flex items-center justify-between gap-3 pb-2">
+          <span className="text-micro-lg text-neutral-500">Saved values</span>
+          <span data-numeric className="text-micro-lg text-neutral-500">
+            {shares.grants.length}{' '}
+            {shares.grants.length === 1 ? 'grant' : 'grants'}
+          </span>
+        </div>
+        <p className="mb-2.5 text-xs leading-ui text-neutral-500">
+          A grant lets a signed-in person save values on this document alone. It
+          never reaches a child, and it never allows publishing or changing
+          access.
+        </p>
+
+        {shares.grants.length === 0 ? (
+          <p className="text-sm leading-ui text-neutral-500">
+            No grants. Only people who can edit this document can save its
+            values.
+          </p>
+        ) : (
+          <ul className="grid gap-1.5">
+            {shares.grants.map((grant) => (
+              <li
+                key={grant.email}
+                className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-neutral-950/50 py-1.5 pr-1 pl-2.5"
+              >
+                <Mail
+                  aria-hidden
+                  className="size-3.5 shrink-0 text-neutral-500"
+                />
+                {/* The email keeps a readable width: when the badge and the
+                    two controls stop fitting beside it, they wrap under it
+                    instead of squeezing the address into an ellipsis. */}
+                <span className="min-w-28 flex-1 truncate font-mono text-xs text-neutral-200">
+                  {grant.email}
+                </span>
+                {inForce.includes(grant.email) ? (
+                  <Badge variant="muted" className="shrink-0">
+                    invited
+                  </Badge>
+                ) : null}
+                {canEdit ? (
+                  <>
+                    {/* A toggle rather than a checkbox: the same pressed-state
+                        button the level picker uses, so one keyboard and one
+                        focus ring serve the whole panel. */}
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant={grant.canSave ? 'success' : 'outline'}
+                      aria-pressed={grant.canSave}
+                      aria-label={`Can save: ${grant.email}`}
+                      disabled={pending !== null}
+                      onClick={() => void setSaver(grant.email, !grant.canSave)}
+                    >
+                      {grant.canSave ? (
+                        <Check aria-hidden className="size-3" />
+                      ) : null}
+                      {pending === `saver:${grant.email}`
+                        ? 'Saving…'
+                        : 'Can save'}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      aria-label={`Remove the grant for ${grant.email}`}
+                      disabled={pending !== null}
+                      onClick={() => void removeGrant(grant.email)}
+                    >
+                      {pending === `grant:${grant.email}`
+                        ? 'Removing…'
+                        : 'Remove'}
+                    </Button>
+                  </>
+                ) : (
+                  <Badge
+                    variant={grant.canSave ? 'success' : 'outline'}
+                    className="shrink-0"
+                  >
+                    {grant.canSave ? 'can save' : 'read only'}
+                  </Badge>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {failure ? (

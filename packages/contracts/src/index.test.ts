@@ -10,6 +10,8 @@ import {
   HealthzResponse,
   PolicyResult,
   PolicyStats,
+  ShareDelta,
+  SharesResponse,
   StateResponse,
   StateSaveRequest,
   UploadRequest,
@@ -96,6 +98,30 @@ describe('shared contracts', () => {
         acceptStateChanges: true,
       }),
     ).toMatchObject({ stateful: true, acceptStateChanges: true })
+  })
+
+  it('decodes signed-in state grant share fields', () => {
+    expect(
+      Schema.decodeUnknownSync(ShareDelta)({
+        addSavers: ['saver@example.test'],
+        removeSavers: ['reader@example.test'],
+        removeGrants: ['removed@example.test'],
+      }),
+    ).toEqual({
+      addSavers: ['saver@example.test'],
+      removeSavers: ['reader@example.test'],
+      removeGrants: ['removed@example.test'],
+    })
+    expect(
+      Schema.decodeUnknownSync(SharesResponse)({
+        configured: [],
+        effective: [],
+        accessSource: 'own',
+        grants: [{ email: 'saver@example.test', canSave: true }],
+      }),
+    ).toMatchObject({
+      grants: [{ email: 'saver@example.test', canSave: true }],
+    })
   })
 
   it('decodes every state save error through the derived client', async () => {

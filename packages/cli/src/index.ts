@@ -19,6 +19,7 @@ import {
   type HealthzResponse,
   type Me,
   type PurgeReport,
+  type SharesResponse,
   type StateChange,
   type StateResponse,
   type UploadRequest,
@@ -153,6 +154,43 @@ function printValue(
     return
   }
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
+}
+
+function printShares(
+  shares: SharesResponse,
+  runtime: Pick<RuntimeConfig, 'json' | 'quiet'>,
+): void {
+  if (runtime.json) {
+    printJson(shares)
+    return
+  }
+  if (runtime.quiet) return
+
+  const canSave = new Set(
+    shares.grants.filter((grant) => grant.canSave).map((grant) => grant.email),
+  )
+  const emails = [
+    ...new Set([
+      ...shares.effective,
+      ...shares.grants.map((grant) => grant.email),
+    ]),
+  ].sort()
+  const permissions =
+    emails.length === 0
+      ? '  none\n'
+      : emails
+          .map(
+            (email) =>
+              `  ${email}: ${canSave.has(email) ? 'view and save' : 'view'}`,
+          )
+          .join('\n') + '\n'
+
+  process.stdout.write(
+    `Configured: ${shares.configured.join(', ') || 'none'}\n` +
+      `Effective: ${shares.effective.join(', ') || 'none'}\n` +
+      `Permissions:\n${permissions}` +
+      `Access source: ${shares.accessSource}\n`,
+  )
 }
 
 function objectValue(error: unknown, key: string): unknown {
@@ -1862,38 +1900,74 @@ const visibilityCommand = Command.make(
 const shareCommand = Command.make(
   'share',
   {
-    add: Options.text('add').pipe(Options.optional),
-    remove: Options.text('remove').pipe(Options.optional),
+    add: Options.text('add').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Add view-only access, or view and save with --edit-state',
+      ),
+    ),
+    remove: Options.text('remove').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Remove view and save, or only save with --edit-state',
+      ),
+    ),
+    editState: Options.boolean('edit-state').pipe(
+      Options.withDescription(
+        'Modify saving access: add grants it; remove keeps viewing',
+      ),
+    ),
     ref: Args.text({ name: 'id' }),
   },
-  ({ add, remove, ref }) =>
+  ({ add, editState, remove, ref }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
       const id = parseDocumentId(ref, runtime)
       const addEmails = parseEmails(Option.getOrUndefined(add))
       const removeEmails = parseEmails(Option.getOrUndefined(remove))
       if (addEmails === undefined && removeEmails === undefined) {
-        throw new CliError(
-          'share requires --add and/or --remove',
-          ExitCode.Usage,
+        if (editState) {
+          throw new CliError(
+            '--edit-state requires --add and/or --remove',
+            ExitCode.Usage,
+          )
+        }
+        await requireStateFeature(runtime)
+        const result = await apiCall(runtime, (client) =>
+          client.documents.sharesGet({ path: { id } }),
         )
+        printShares(result, runtime)
+        return
       }
+      if (editState) await requireStateFeature(runtime)
       const result = await apiCall(runtime, (client) =>
         client.documents.sharesDelta({
           path: { id },
-          payload: {
-            ...(addEmails === undefined ? {} : { add: addEmails }),
-            ...(removeEmails === undefined ? {} : { remove: removeEmails }),
-          },
+          payload: editState
+            ? {
+                ...(addEmails === undefined ? {} : { addSavers: addEmails }),
+                ...(removeEmails === undefined
+                  ? {}
+                  : { removeSavers: removeEmails }),
+              }
+            : {
+                ...(addEmails === undefined ? {} : { add: addEmails }),
+                ...(removeEmails === undefined
+                  ? {}
+                  : {
+                      remove: removeEmails,
+                      removeGrants: removeEmails,
+                    }),
+              },
         }),
       )
-      if (runtime.json) printJson(result)
-      else if (!runtime.quiet)
-        process.stdout.write(
-          `Configured: ${result.configured.join(', ') || 'none'}\nEffective: ${result.effective.join(', ') || 'none'}\nAccess source: ${result.accessSource}\n`,
-        )
+      printShares(result, runtime)
     }),
-).pipe(Command.withDescription('Add or remove document share emails'))
+).pipe(
+  Command.withDescription(
+    'Manage viewing and saving; saving never grants publishing or sharing',
+  ),
+)
 
 const trashCommand = Command.make('trash', {}, () =>
   withGlobals(async (globals) => {
@@ -2552,6 +2626,7 @@ const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
   upload: new Set(['--new', '--stateful', '--accept-state-changes']),
   diff: new Set(['--text']),
   list: new Set(['--all', '--tree', '--trash']),
+  share: new Set(['--edit-state']),
   delete: new Set(['--force']),
   update: new Set(['--check']),
   'admin purge': new Set(['--execute']),
