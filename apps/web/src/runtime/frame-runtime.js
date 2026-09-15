@@ -47,7 +47,10 @@
 
   /**
    * Tells the wrapper a field was edited. Throttled to one message per frame so
-   * a drag on a range input does not flood the bridge.
+   * a drag on a range input does not flood the bridge. The frame callback
+   * re-checks each pending name against the memory: the change event that a
+   * textarea fires on the blur that clicks Save can run after the rebase
+   * advanced the memory, and reporting it then would mark a saved value dirty.
    * @type {(name: string) => void}
    */
   const report = (name) => {
@@ -56,7 +59,7 @@
     reportScheduled = true
     window.requestAnimationFrame(() => {
       reportScheduled = false
-      const names = [...pending]
+      const names = dirtyNames().filter((dirtyName) => pending.has(dirtyName))
       pending.clear()
       if (names.length > 0) post({ type: 'changed', documentId, names })
     })

@@ -129,6 +129,12 @@
 
   const linkMode = document.body.dataset.mode === 'link'
   const editToken = linkMode ? window.location.hash.slice(1) : null
+  // The token is read once. A replacement edit link opened in this tab
+  // changes only the fragment, so the page reloads to bootstrap the new
+  // token. The other modes carry nothing in the fragment.
+  if (linkMode) {
+    window.addEventListener('hashchange', () => window.location.reload())
+  }
   /**
    * A link tab proves itself with the custom header alone, so it sends no
    * cookie and needs no CSRF token. Every other mode still rides the session.

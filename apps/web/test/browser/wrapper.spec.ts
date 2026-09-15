@@ -409,6 +409,18 @@ async function delaySaves(
 let saved: PublishedDocument
 let fixtures: PublishedDocument
 
+/**
+ * These cases can share a document without sharing drafts: each gets a new
+ * browser context. The custom-control case saves only comment, the keyboard
+ * case only notes, and the failure-layout case only summary. The other users
+ * of this fixture intercept every save and never change its persisted state.
+ *
+ * Keep conflicts, concurrency, revision-sensitive saves, republishing, and
+ * authority changes on fresh documents. Sharing these seven cases reduces
+ * the full suite from 32 uploads to 26, below the dev limit of 30 per minute.
+ */
+let sharedReview: PublishedDocument
+
 test.beforeAll(async () => {
   expect(apiKey, 'global setup must export DOSSIER_BROWSER_API_KEY').not.toBe(
     '',
@@ -427,6 +439,7 @@ test.beforeAll(async () => {
     documentId: saved.id,
   })
   fixtures = await publish(api, { html: scanFixtureDocument() })
+  sharedReview = await publish(api, { html: REVIEW_PAGE_HTML })
   await api.dispose()
 })
 
@@ -635,6 +648,46 @@ test('refuses a revoked edit link and issues a different one', async ({
   await expect(
     live.frameLocator('#dossier-frame').locator('#summary'),
   ).toHaveValue('Ship the wrapper')
+
+  await context.close()
+  await api.dispose()
+})
+
+test('reloads a revoked link when its replacement opens in the same tab', async ({
+  browser,
+}) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const review = await publish(api, {
+    html: REVIEW_PAGE_HTML,
+    visibility: 'private',
+  })
+  const revoked = await createEditLink(api, review.id)
+  await revokeEditLink(api, review.id)
+  const replacement = await createEditLink(api, review.id)
+  expect(replacement).not.toBe(revoked)
+
+  const context = await browser.newContext({
+    storageState: { cookies: [], origins: [] },
+  })
+  const page = await context.newPage()
+  await page.goto(revoked)
+  await expect(page.locator('#dossier-status')).toHaveText(
+    'This edit link was revoked',
+  )
+
+  // These URLs differ only by fragment. The hashchange reload must bootstrap
+  // the replacement token rather than leaving the old revoked state in place.
+  await page.goto(replacement)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(page.locator('#dossier-save')).toBeEnabled()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('Saved through the replacement link')
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+  expect((await readApiState(api, review.id)).summary?.value).toBe(
+    'Saved through the replacement link',
+  )
 
   await context.close()
   await api.dispose()
@@ -1042,6 +1095,147 @@ test('shows the conflict dialog for one field and keeps the draft', async ({
   await admin.context().close()
 })
 
+test('drops a stale blur report but keeps an in-flight edit dirty', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    type FrameReportProbe = {
+      hold: boolean
+      queued: FrameRequestCallback[]
+      trustedChanges: number
+      flush: () => Promise<number>
+    }
+    const target = window as typeof window & {
+      __dossierFrameReportProbe?: FrameReportProbe
+    }
+    const requestFrame = window.requestAnimationFrame.bind(window)
+    const probe: FrameReportProbe = {
+      hold: false,
+      queued: [],
+      trustedChanges: 0,
+      flush: () =>
+        new Promise((resolve) => {
+          probe.hold = false
+          const callbacks = probe.queued.splice(0)
+          if (callbacks.length === 0) {
+            resolve(0)
+            return
+          }
+          requestFrame((time) => {
+            for (const callback of callbacks) callback(time)
+            resolve(callbacks.length)
+          })
+        }),
+    }
+    target.__dossierFrameReportProbe = probe
+    window.requestAnimationFrame = (callback) => {
+      if (window === window.top || !probe.hold) return requestFrame(callback)
+      probe.queued.push(callback)
+      return -probe.queued.length
+    }
+    document.addEventListener(
+      'change',
+      (event) => {
+        if (event.isTrusted) probe.trustedChanges += 1
+      },
+      true,
+    )
+  })
+
+  const review = await publishReview()
+  let posts = 0
+  page.on('request', (request) => {
+    if (
+      request.method() === 'POST' &&
+      request.url().endsWith(`/d/${review.id}/state`)
+    ) {
+      posts += 1
+    }
+  })
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  const notes = frame.locator('#notes')
+  const status = page.locator('#dossier-status')
+  await notes.fill('Saved before the delayed report')
+  // The input report has reached the wrapper before the blur report is held.
+  await expect(status).toHaveText('Unsaved changes')
+  await notes.evaluate(() => {
+    const probe = (
+      window as typeof window & {
+        __dossierFrameReportProbe?: { hold: boolean }
+      }
+    ).__dossierFrameReportProbe
+    if (probe === undefined) throw new Error('frame report probe is missing')
+    probe.hold = true
+  })
+
+  // Clicking Save blurs the textarea. Its trusted change event queues another
+  // report, whose animation frame is released only after the rebase says Saved.
+  await page.locator('#dossier-save').click()
+  await expect(status).toHaveText(/^Saved · /)
+  expect(posts).toBe(1)
+  const report = await notes.evaluate(async () => {
+    const probe = (
+      window as typeof window & {
+        __dossierFrameReportProbe?: {
+          trustedChanges: number
+          flush: () => Promise<number>
+        }
+      }
+    ).__dossierFrameReportProbe
+    if (probe === undefined) throw new Error('frame report probe is missing')
+    return {
+      released: await probe.flush(),
+      trustedChanges: probe.trustedChanges,
+    }
+  })
+  expect(report.trustedChanges).toBeGreaterThan(0)
+  expect(report.released).toBeGreaterThan(0)
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  )
+  await expect(status).toHaveText(/^Saved · /)
+  expect(posts).toBe(1)
+
+  let releaseResponse: (() => void) | undefined
+  let responseReceived: (() => void) | undefined
+  const heldResponse = new Promise<void>((resolve) => {
+    releaseResponse = resolve
+  })
+  const received = new Promise<void>((resolve) => {
+    responseReceived = resolve
+  })
+  await page.route(`**/d/${review.id}/state`, async (route) => {
+    if (route.request().method() !== 'POST') return route.continue()
+    const response = await route.fetch()
+    responseReceived?.()
+    await heldResponse
+    await route.fulfill({ response })
+  })
+
+  await notes.fill('Submitted while saving')
+  await expect(status).toHaveText('Unsaved changes')
+  await page.locator('#dossier-save').click()
+  await received
+  await expect(status).toHaveText('Saving')
+  await notes.fill('Edited after the request left')
+  releaseResponse?.()
+
+  await expect(status).toHaveText('Unsaved changes')
+  await expect(notes).toHaveValue('Edited after the request left')
+  expect(posts).toBe(2)
+  const api = await apiRequest.newContext({ baseURL })
+  expect((await readApiState(api, review.id)).notes?.value).toBe(
+    'Submitted while saving',
+  )
+  await api.dispose()
+})
+
 test('keeps an edit made during a save unsaved without self-conflict', async ({
   page,
 }) => {
@@ -1309,7 +1503,7 @@ test('retries Review latest after its GET fails', async ({ page }) => {
 test('saves a custom control that never announces its edits', async ({
   page,
 }) => {
-  const review = await publishReview()
+  const review = sharedReview
   await page.goto(`/d/${review.id}`)
   await expect(page.locator('#dossier-overlay')).toBeHidden()
 
@@ -1333,7 +1527,7 @@ test('saves a custom control that never announces its edits', async ({
 })
 
 test('saves from the keyboard and announces the status', async ({ page }) => {
-  const review = await publishReview()
+  const review = sharedReview
   await page.goto(`/d/${review.id}`)
   await expect(page.locator('#dossier-overlay')).toBeHidden()
 
@@ -1376,7 +1570,7 @@ test('saves from the keyboard and announces the status', async ({ page }) => {
 test('names the current version and links to it when the HTML moved', async ({
   page,
 }) => {
-  const review = await publishReview()
+  const review = sharedReview
   await page.setViewportSize({ width: 390, height: 844 })
   await page.route(`**/d/${review.id}/state`, (route) =>
     route.request().method() === 'POST'
@@ -1458,7 +1652,7 @@ test('keeps the loaded HTML version after Review latest sees a republish', async
 test('keeps the draft copyable when the authority is gone', async ({
   browser,
 }) => {
-  const review = await publishReview()
+  const review = sharedReview
   const context = await browser.newContext({
     storageState: firstStorage,
     permissions: ['clipboard-read', 'clipboard-write'],
@@ -1510,7 +1704,7 @@ for (const clipboardFailure of ['missing', 'rejected'] as const) {
   test(`offers manual draft copy when the Clipboard API is ${clipboardFailure}`, async ({
     browser,
   }) => {
-    const review = await publishReview()
+    const review = sharedReview
     const context = await browser.newContext({ storageState: firstStorage })
     await context.addInitScript((failure) => {
       Object.defineProperty(navigator, 'clipboard', {
@@ -1578,7 +1772,7 @@ for (const clipboardFailure of ['missing', 'rejected'] as const) {
 test('keeps the save bar inside 390 px in every failure state', async ({
   page,
 }) => {
-  const review = await publishReview()
+  const review = sharedReview
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(`/d/${review.id}`)
   await expect(page.locator('#dossier-overlay')).toBeHidden()

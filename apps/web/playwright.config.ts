@@ -7,7 +7,8 @@ import { defineConfig, devices } from '@playwright/test'
  *
  * It never shares anything with a dev server the developer already has running:
  * its own port, and its own Miniflare state directory, so its D1 and R2 are
- * separate files.
+ * separate files. The local upload budget persists here too, so wait at least
+ * a minute between suite runs to avoid exhausting the dev upload limit.
  */
 const port = Number(process.env.PLAYWRIGHT_PORT) || 8790
 const persistPath =
