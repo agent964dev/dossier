@@ -660,23 +660,39 @@ async function apiCall<A, E>(
   }
 }
 
-const stateFeatureChecks = new Map<string, Promise<void>>()
+/**
+ * What the deployment says about saved values. A deployment that predates the
+ * feature reports no feature list at all, so its API knows nothing about
+ * grants. A current deployment lists the feature when it has a bound rate
+ * limiter, reports an empty list when the operator has switched saved values
+ * off, and accepts the grant fields on its share API either way.
+ */
+type StateSupport = 'available' | 'unavailable' | 'absent'
 
-async function requireStateFeature(runtime: RuntimeConfig): Promise<void> {
-  let check = stateFeatureChecks.get(runtime.apiOrigin)
+const stateSupportChecks = new Map<string, Promise<StateSupport>>()
+
+async function stateSupport(runtime: RuntimeConfig): Promise<StateSupport> {
+  let check = stateSupportChecks.get(runtime.apiOrigin)
   if (!check) {
     check = apiCall(runtime, (client) => client.system.healthz()).then(
-      (health) => {
-        if (!health.features?.includes('state')) {
-          throw new CliError(
-            'This Dossier deployment does not support saved values. Update the deployment.',
-          )
-        }
-      },
+      (health) =>
+        health.features === undefined
+          ? 'absent'
+          : health.features.includes('state')
+            ? 'available'
+            : 'unavailable',
     )
-    stateFeatureChecks.set(runtime.apiOrigin, check)
+    stateSupportChecks.set(runtime.apiOrigin, check)
   }
-  await check
+  return check
+}
+
+async function requireStateFeature(runtime: RuntimeConfig): Promise<void> {
+  if ((await stateSupport(runtime)) !== 'available') {
+    throw new CliError(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+  }
 }
 
 async function requireMe(
@@ -1086,7 +1102,11 @@ const globalOptions = {
 }
 
 const rootCommand = Command.make('dossier', globalOptions).pipe(
-  Command.withDescription('Publish and retrieve dossier documents'),
+  Command.withDescription(
+    'Publish, read, and manage Dossier documents. ' +
+      'Publish an HTML plan with shared saved values. ' +
+      'Collaborators edit, save, and return to the same document.',
+  ),
 )
 
 const authLogin = Command.make('login', {}, () =>
@@ -1211,27 +1231,61 @@ const whoamiCommand = Command.make('whoami', {}, () =>
 const uploadCommand = Command.make(
   'upload',
   {
-    parent: Options.text('parent').pipe(Options.optional),
-    kind: Options.text('kind').pipe(Options.optional),
+    parent: Options.text('parent').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Create beneath this document ID or URL, or use root. ' +
+          'Use dossier move to change the parent of an existing document.',
+      ),
+    ),
+    kind: Options.text('kind').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Set the document kind, such as plan, report, or checklist.',
+      ),
+    ),
     visibility: Options.choice('visibility', [
       'public',
       'team',
       'private',
       'inherit',
     ]).pipe(Options.optional),
-    share: Options.text('share').pipe(Options.optional),
-    description: Options.text('description').pipe(Options.optional),
-    newDocument: Options.boolean('new'),
+    share: Options.text('share').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Set the initial view-share list with comma-separated email addresses.',
+      ),
+    ),
+    description: Options.text('description').pipe(
+      Options.optional,
+      Options.withDescription('Set the document description.'),
+    ),
+    newDocument: Options.boolean('new').pipe(
+      Options.withDescription(
+        'Create a separate document with no copied values, grants, or edit link.',
+      ),
+    ),
     stateful: Options.boolean('stateful').pipe(
       Options.withDescription(
-        'Enable one shared set of saved values for marked controls',
+        'Enable one shared set of saved values for marked controls.',
       ),
     ),
     acceptStateChanges: Options.boolean('accept-state-changes').pipe(
-      Options.withDescription('Reset values affected by state schema changes'),
+      Options.withDescription(
+        'Accept a retype or removal of a saved field. ' +
+          'Retyped values reset to their new defaults and removed values ' +
+          'stay saved.',
+      ),
     ),
-    document: Options.text('doc').pipe(Options.optional),
-    file: Args.text({ name: 'file' }),
+    document: Options.text('doc').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Update this document ID instead of the mapped path.',
+      ),
+    ),
+    file: Args.text({ name: 'file' }).pipe(
+      Args.withDescription('Read one complete HTML document from this file.'),
+    ),
   },
   ({
     file,
@@ -1387,7 +1441,23 @@ const uploadCommand = Command.make(
       for (const warning of receipt.warnings)
         process.stderr.write(`Warning: ${warning}\n`)
     }),
-).pipe(Command.withDescription('Validate and upload an HTML document'))
+).pipe(
+  Command.withDescription(
+    'Validate and upload one complete HTML document. ' +
+      '--stateful enables one shared set of saved values for controls ' +
+      'marked with data-state. The document manager can save immediately, ' +
+      'publishing never makes the document anonymously editable, and ' +
+      'visibility stays a separate choice. ' +
+      'Human output keeps the existing lines and adds State and Last saved ' +
+      'for a saved-values document. --json adds stateful, stateRevision, ' +
+      'and stateUpdatedAt, and --quiet prints only the URL. ' +
+      'Use the same file path or --doc <id> to update an existing document. ' +
+      'A later upload of the same document keeps its saved values, its ' +
+      'enabled state, its grants, and its edit link, and --new starts a ' +
+      'separate document with authored defaults. A retype or removal of a ' +
+      'saved field fails until you pass --accept-state-changes.',
+  ),
+)
 
 function printState(response: StateResponse, runtime: RuntimeConfig): void {
   if (runtime.json) {
@@ -1492,9 +1562,13 @@ async function saveState(
   }
 }
 
+const stateDocumentRef = Args.text({ name: 'ref' }).pipe(
+  Args.withDescription('Use a document ID, id@n, or a Dossier URL.'),
+)
+
 const stateGetCommand = Command.make(
   'get',
-  { ref: Args.text({ name: 'ref' }) },
+  { ref: stateDocumentRef },
   ({ ref }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
@@ -1517,23 +1591,34 @@ const stateGetCommand = Command.make(
       }
       printState(response, runtime)
     }),
-).pipe(Command.withDescription('Read current saved values and revision'))
+).pipe(
+  Command.withDescription(
+    'Read the current saved values of one document. ' +
+      'Human output prints the values, the revision, and the last saved ' +
+      'time. --json prints one snapshot with documentId, version, revision, ' +
+      'updatedAt, data, and fields, where fields carries each value with ' +
+      'its revision and type. --quiet prints nothing on success. ' +
+      'Anyone who can read the document can read its values, and reading ' +
+      'never changes values or permissions. An ordinary document fails ' +
+      'with "Saved values are not enabled for this document".',
+  ),
+)
 
 const stateSetCommand = Command.make(
   'set',
   {
     data: Options.text('data').pipe(
       Options.withDescription(
-        'Path to a JSON file mapping saved-value names to values',
+        'Read the changes from this JSON file of saved-value names to values.',
       ),
     ),
     revision: Options.integer('revision').pipe(
       Options.optional,
       Options.withDescription(
-        'Baseline from an earlier read when the changes were prepared from it',
+        'Pass the revision of the read you prepared the changes from.',
       ),
     ),
-    ref: Args.text({ name: 'ref' }),
+    ref: stateDocumentRef,
   },
   ({ data, revision, ref }) =>
     withGlobals(async (globals) => {
@@ -1552,7 +1637,17 @@ const stateSetCommand = Command.make(
     }),
 ).pipe(
   Command.withDescription(
-    'Save values from JSON. Without --revision, the read-first baseline only guards against saves racing this command; pass --revision from an earlier read when changes were prepared from it.',
+    'Save values from a JSON object of field names to values. ' +
+      'Human output prints the new revision and the last saved time, ' +
+      '--json prints the saved snapshot with documentId, version, revision, ' +
+      'updatedAt, data, and fields, and --quiet prints only the new ' +
+      'revision. Saving requires document management authority or an ' +
+      '--edit-state grant, and saving never grants publishing or sharing. ' +
+      'Always pass --revision from the read you prepared the changes ' +
+      'from, so a field that anyone saved after that read fails with a ' +
+      'conflict. Without --revision, the CLI reads first and ' +
+      'uses that read as the baseline, which only guards against saves ' +
+      'racing this command.',
   ),
 )
 
@@ -1585,7 +1680,7 @@ function printEditLink(
 
 const stateLinkCreateCommand = Command.make(
   'create',
-  { ref: Args.text({ name: 'ref' }) },
+  { ref: stateDocumentRef },
   ({ ref }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
@@ -1596,11 +1691,20 @@ const stateLinkCreateCommand = Command.make(
       )
       printEditLink(response, runtime, true)
     }),
-).pipe(Command.withDescription('Create or return the active bearer edit link'))
+).pipe(
+  Command.withDescription(
+    'Create the bearer edit link, or return the existing active link ' +
+      'instead of replacing it. Anyone with it can read and change saved ' +
+      'values without signing in and can forward it. Only document ' +
+      'managers can create it. Human output prints a one-line warning and ' +
+      'then the URL, --json prints documentId, active, and editUrl, and ' +
+      '--quiet prints only the URL.',
+  ),
+)
 
 const stateLinkGetCommand = Command.make(
   'get',
-  { ref: Args.text({ name: 'ref' }) },
+  { ref: stateDocumentRef },
   ({ ref }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
@@ -1611,11 +1715,19 @@ const stateLinkGetCommand = Command.make(
       )
       printEditLink(response, runtime, false)
     }),
-).pipe(Command.withDescription('Show the active bearer edit link, if any'))
+).pipe(
+  Command.withDescription(
+    'Show the active bearer edit link without creating or rotating one. ' +
+      'Only document managers can read it. Human output prints the URL, ' +
+      'or "No active edit link" when none exists. --json prints ' +
+      'documentId, active, and editUrl, with active false and editUrl ' +
+      'null when none exists. --quiet prints the URL or nothing.',
+  ),
+)
 
 const stateLinkRevokeCommand = Command.make(
   'revoke',
-  { ref: Args.text({ name: 'ref' }) },
+  { ref: stateDocumentRef },
   ({ ref }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
@@ -1632,12 +1744,27 @@ const stateLinkRevokeCommand = Command.make(
       }
     }),
 ).pipe(
-  Command.withDescription('Revoke the bearer edit link and stop its access'),
+  Command.withDescription(
+    'Revoke the bearer edit link so it stops opening or saving the ' +
+      'document from the next request, including from a tab that is ' +
+      'already open. Only document managers can revoke it, and signed-in ' +
+      'grants remain unchanged. Human output prints "Edit link revoked", ' +
+      'or "No edit link to revoke" when none was active. --json prints ' +
+      'documentId and revoked. --quiet prints nothing.',
+  ),
 )
 
 const stateLinkCommand = Command.make('link').pipe(
   Command.withDescription(
-    'Manage a bearer edit link. Anyone with it can read and change saved values and forward it; revoking it stops access.',
+    'Manage one bearer edit link for a document. Anyone with it can read ' +
+      'and change saved values without signing in and can forward it, so ' +
+      'revoking it stops access for every holder, including a tab that is ' +
+      'already open. Only document managers create, show, or revoke it. ' +
+      'Human output prints the link URL, a warning on create, and the ' +
+      'revocation result. With --json, create and get print documentId, ' +
+      'active, and editUrl, and revoke prints documentId and revoked. ' +
+      'With --quiet, create and get print only the URL and revoke prints ' +
+      'nothing.',
   ),
   Command.withSubcommands([
     stateLinkCreateCommand,
@@ -1647,7 +1774,16 @@ const stateLinkCommand = Command.make('link').pipe(
 )
 
 const stateCommand = Command.make('state').pipe(
-  Command.withDescription('Read and save shared saved values'),
+  Command.withDescription(
+    'Read and save one shared set of saved values. Human output prints ' +
+      'the values, the revision, and the last saved time. --json prints ' +
+      'one JSON snapshot with documentId, version, revision, updatedAt, ' +
+      'data, and fields. With --quiet, get prints nothing and set prints ' +
+      'only the new revision. Anyone who can read the document can read ' +
+      'its values. Document managers and collaborators with an ' +
+      '--edit-state grant can save, and saving never grants publishing or ' +
+      'sharing.',
+  ),
   Command.withSubcommands([stateGetCommand, stateSetCommand, stateLinkCommand]),
 )
 
@@ -1659,7 +1795,12 @@ const fetchCommand = Command.make(
       Options.withAlias('o'),
       Options.optional,
     ),
-    ref: Args.text({ name: 'ref' }),
+    ref: Args.text({ name: 'ref' }).pipe(
+      Args.withDescription(
+        'Use a document ID, id@n, or a Dossier URL. ' +
+          'A pinned reference selects that HTML version.',
+      ),
+    ),
   },
   ({ ref, version, output }) =>
     withGlobals(async (globals) => {
@@ -1994,21 +2135,23 @@ const shareCommand = Command.make(
     add: Options.text('add').pipe(
       Options.optional,
       Options.withDescription(
-        'Add view-only access, or view and save with --edit-state',
+        'Grant viewing, or viewing and saving with --edit-state.',
       ),
     ),
     remove: Options.text('remove').pipe(
       Options.optional,
       Options.withDescription(
-        'Remove view and save, or only save with --edit-state',
+        'Drop viewing and saving, or only saving with --edit-state.',
       ),
     ),
     editState: Options.boolean('edit-state').pipe(
       Options.withDescription(
-        'Modify saving access: add grants it; remove keeps viewing',
+        'With --add, grant saving. With --remove, drop saving and keep viewing.',
       ),
     ),
-    ref: Args.text({ name: 'id' }),
+    ref: Args.text({ name: 'id' }).pipe(
+      Args.withDescription('Use a document ID, id@n, or a Dossier URL.'),
+    ),
   },
   ({ add, editState, remove, ref }) =>
     withGlobals(async (globals) => {
@@ -2023,7 +2166,6 @@ const shareCommand = Command.make(
             ExitCode.Usage,
           )
         }
-        await requireStateFeature(runtime)
         const result = await apiCall(runtime, (client) =>
           client.documents.sharesGet({ path: { id } }),
         )
@@ -2031,6 +2173,14 @@ const shareCommand = Command.make(
         return
       }
       if (editState) await requireStateFeature(runtime)
+      // A deployment that predates saved values rejects the grant fields, so a
+      // plain removal omits them there. A current deployment accepts them even
+      // when it cannot offer saved values. The removal must delete the grant
+      // row or the person keeps saving.
+      const removeGrants =
+        !editState &&
+        removeEmails !== undefined &&
+        (await stateSupport(runtime)) !== 'absent'
       const result = await apiCall(runtime, (client) =>
         client.documents.sharesDelta({
           path: { id },
@@ -2047,7 +2197,7 @@ const shareCommand = Command.make(
                   ? {}
                   : {
                       remove: removeEmails,
-                      removeGrants: removeEmails,
+                      ...(removeGrants ? { removeGrants: removeEmails } : {}),
                     }),
               },
         }),
@@ -2056,7 +2206,16 @@ const shareCommand = Command.make(
     }),
 ).pipe(
   Command.withDescription(
-    'Manage viewing and saving; saving never grants publishing or sharing',
+    'Manage who can view a document and who can save its values. ' +
+      '--add grants viewing, and --add with --edit-state grants view and ' +
+      'save. --remove with --edit-state drops saving and keeps viewing, ' +
+      'and --remove without --edit-state drops view and save. ' +
+      'Human output lists each person as view or view and save, --json ' +
+      "prints the shares with grants and each grant's canSave, and " +
+      '--quiet prints nothing on success. The person must complete ' +
+      "Dossier sign-in under the deployment's rules, a grant never " +
+      'changes workspace membership, and saving never grants publishing ' +
+      'or sharing.',
   ),
 )
 
@@ -2874,6 +3033,19 @@ function prefixedCliConsole(
 ): EffectConsole.Console {
   return {
     ...base,
+    // @effect/cli 0.77.1 commandDescriptor.ts:382,392 repeats ancestors in
+    // depth-3 help. Fix only generated help rows, preserving their alignment.
+    log: (...args: ReadonlyArray<unknown>) =>
+      base.log(
+        ...args.map((arg) =>
+          typeof arg === 'string' && arg.includes('COMMANDS')
+            ? arg.replace(
+                /^(  - state )state (link (?:create|get|revoke) <ref>)( +)/gm,
+                '$1$2$3      ',
+              )
+            : arg,
+        ),
+      ),
     error: (...args: ReadonlyArray<unknown>) =>
       Effect.sync(() => {
         process.stderr.write(`dossier: ${args.map(String).join(' ')}\n`)

@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
-import { promisify } from 'node:util'
+import { promisify, stripVTControlCharacters } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ShareDelta, StateChange, StateGrant } from '@dossier/contracts'
 import { scanStateFields, type FieldType } from '@dossier/policy'
@@ -75,6 +75,7 @@ const idempotencyKeys: string[] = []
 const stateSchemaRequestHashes: string[] = []
 const listQueries: Array<{ scope: string | null; parent: string | null }> = []
 const shareDeltas: ShareDelta[] = []
+let shareRequests = 0
 let nextId = 1
 let retryFailureSeen = false
 let redirectWasFollowed = false
@@ -82,6 +83,8 @@ let uploadRequests = 0
 let healthRequests = 0
 let assetRequests = 0
 let lastDiffQuery = ''
+const legacyRequests: string[] = []
+const unavailableRequests: string[] = []
 const stateGetRequests: string[] = []
 const stateSetRequests: Array<{
   readonly id: string
@@ -319,7 +322,11 @@ function authorSummaries(ids: readonly string[]) {
 }
 
 function authenticated(request: IncomingMessage): boolean {
-  return request.headers.authorization === 'Bearer ds_integration'
+  return (
+    request.headers.authorization === 'Bearer ds_integration' ||
+    request.headers.authorization === 'Bearer ds_legacy' ||
+    request.headers.authorization === 'Bearer ds_unavailable'
+  )
 }
 
 function assetUrls(slug: string, ext: 'css' | 'woff2', version: number) {
@@ -334,6 +341,21 @@ beforeAll(async () => {
 
   server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (request.headers.authorization === 'Bearer ds_legacy') {
+      legacyRequests.push(`${request.method} ${url.pathname}`)
+    }
+    if (request.headers.authorization === 'Bearer ds_unavailable') {
+      unavailableRequests.push(`${request.method} ${url.pathname}`)
+    }
+    // A deployment that predates saved values omits the three state fields
+    // from every document it returns. The legacy key sees that shape.
+    const documentJson = (payload: unknown) =>
+      JSON.stringify(payload, (key, item: unknown) =>
+        request.headers.authorization === 'Bearer ds_legacy' &&
+        ['stateful', 'stateRevision', 'stateUpdatedAt'].includes(key)
+          ? undefined
+          : item,
+      )
     if (url.pathname === '/@agent964%2Fdossier/latest') {
       response.setHeader('content-type', 'application/json')
       response.end(JSON.stringify({ version: nextVersion }))
@@ -343,6 +365,9 @@ beforeAll(async () => {
     if (url.pathname === '/api/healthz') {
       healthRequests += 1
       response.setHeader('content-type', 'application/json')
+      // ds_legacy is a deployment that predates saved values and reports no
+      // feature list. ds_unavailable is a current deployment whose state
+      // limiter is missing, so it reports an empty list.
       response.end(
         JSON.stringify({
           ok: true,
@@ -350,7 +375,9 @@ beforeAll(async () => {
           version: '0.0.0',
           ...(request.headers.authorization === 'Bearer ds_legacy'
             ? {}
-            : { features: ['state'] }),
+            : request.headers.authorization === 'Bearer ds_unavailable'
+              ? { features: [] }
+              : { features: ['state'] }),
         }),
       )
       return
@@ -659,7 +686,7 @@ beforeAll(async () => {
       const document = documentDto(id, stored)
       response.statusCode = previous ? 200 : 201
       response.end(
-        JSON.stringify({
+        documentJson({
           ok: true,
           document,
           versionNumber: stored.version,
@@ -1030,7 +1057,11 @@ beforeAll(async () => {
       )
     if (documentApi) {
       response.setHeader('content-type', 'application/json')
-      if (!authenticated(request)) {
+      const legacyShares =
+        documentApi[2] === 'shares' &&
+        request.headers.authorization === 'Bearer ds_legacy'
+      if (documentApi[2] === 'shares') shareRequests += 1
+      if (!authenticated(request) && !legacyShares) {
         response.statusCode = 401
         response.end(JSON.stringify({ ok: false, code: 'unauthenticated' }))
         return
@@ -1045,7 +1076,7 @@ beforeAll(async () => {
       }
       if (request.method === 'GET' && action === undefined) {
         response.end(
-          JSON.stringify({
+          documentJson({
             ok: true,
             document: documentDto(id, stored),
             versions: [],
@@ -1063,7 +1094,7 @@ beforeAll(async () => {
           parentId = parent.parentId
         }
         response.end(
-          JSON.stringify({
+          documentJson({
             breadcrumb,
             document: readerDto(id, stored),
             siblings: [...documents]
@@ -1103,7 +1134,7 @@ beforeAll(async () => {
         }
         stored.revision += 1
         response.end(
-          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+          documentJson({ ok: true, document: documentDto(id, stored) }),
         )
         return
       }
@@ -1113,7 +1144,7 @@ beforeAll(async () => {
             configured: stored.shares,
             effective: stored.shares,
             accessSource: 'own',
-            grants: stored.grants,
+            ...(legacyShares ? {} : { grants: stored.grants }),
           }),
         )
         return
@@ -1121,6 +1152,22 @@ beforeAll(async () => {
       if (action === 'shares' && request.method === 'POST') {
         const payload = await bodyJson(request)
         shareDeltas.push(payload as ShareDelta)
+        if (
+          legacyShares &&
+          ['removeGrants', 'addSavers', 'removeSavers'].some(
+            (key) => key in payload,
+          )
+        ) {
+          response.statusCode = 400
+          response.end(
+            JSON.stringify({
+              ok: false,
+              code: 'bad_request',
+              message: 'The request body does not match the API schema.',
+            }),
+          )
+          return
+        }
         const shares = new Set(stored.shares)
         const grants = new Map(
           stored.grants.map((grant) => [grant.email, grant.canSave]),
@@ -1154,7 +1201,7 @@ beforeAll(async () => {
             configured: stored.shares,
             effective: stored.shares,
             accessSource: 'own',
-            grants: stored.grants,
+            ...(legacyShares ? {} : { grants: stored.grants }),
           }),
         )
         return
@@ -1202,20 +1249,20 @@ beforeAll(async () => {
           }
         }
         response.end(
-          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+          documentJson({ ok: true, document: documentDto(id, stored) }),
         )
         return
       }
       if (request.method === 'POST' && action === 'disable') {
         await bodyJson(request)
         response.end(
-          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+          documentJson({ ok: true, document: documentDto(id, stored) }),
         )
         return
       }
       if (request.method === 'POST' && action === 'enable') {
         response.end(
-          JSON.stringify({ ok: true, document: documentDto(id, stored) }),
+          documentJson({ ok: true, document: documentDto(id, stored) }),
         )
         return
       }
@@ -1245,7 +1292,7 @@ beforeAll(async () => {
       const page = all.slice(offset, offset + pageSize)
       const nextOffset = offset + page.length
       response.end(
-        JSON.stringify({
+        documentJson({
           ok: true,
           documents: page,
           nextCursor: nextOffset < all.length ? String(nextOffset) : null,
@@ -1338,6 +1385,1786 @@ async function authenticate(home: string, runtime: 'node' | 'bun' = 'node') {
   )
   expect(result).toMatchObject({ stderr: '', exitCode: 0 })
 }
+
+// Phase 8 acceptance comes from PRD 5.1, 5.10, A17 and TDD 03, not the
+// existing prose. Keep this fixture verbatim when rewriting the skill.
+const savedValuesPromise =
+  'Publish an HTML plan with shared saved values. ' +
+  'Collaborators edit, save, and return to the same document.'
+const launchPlanExample = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Launch plan</title>
+</head>
+<body>
+  <h1>Launch plan</h1>
+  <label>Objective <input data-state="objective" value="Launch the new website"></label>
+  <label><input type="checkbox" data-state="approved"> Design approved</label>
+  <label>Notes <textarea data-state="notes"></textarea></label>
+</body>
+</html>`
+const deploymentCompatibilityMessage =
+  'This Dossier deployment does not support saved values. ' +
+  'Update the deployment.'
+
+// These are executable example lines, not a second command parser. The skill
+// acceptance below requires the same spellings, and the journey substitutes
+// only the example filenames, document ID, and revision returned by the CLI.
+const savedValuesJourney = {
+  publish: 'dossier upload plan.html --kind plan --stateful',
+  publishJson: 'dossier upload plan.html --kind plan --stateful --json',
+  grant: 'dossier share <id> --add person@example.com --edit-state',
+  inspectGrants: 'dossier share <id> --json',
+  createLink: 'dossier state link create <id>',
+  getLink: 'dossier state link get <id>',
+  getLinkJson: 'dossier state link get <id> --json',
+  revokeLink: 'dossier state link revoke <id>',
+  read: 'dossier state get <id>',
+  readJson: 'dossier state get <id> --json',
+  save: 'dossier state set <id> --data values.json --revision <revision>',
+  republish: 'dossier upload plan.html',
+  republishById: 'dossier upload revised-plan.html --doc <id>',
+  newDocument: 'dossier upload plan.html --kind plan --stateful --new',
+} as const
+
+function normalizedHelp(stdout: string): string {
+  return stripVTControlCharacters(stdout).replace(
+    /^dossier \S+$/m,
+    'dossier <version>',
+  )
+}
+
+function proseText(source: string): string {
+  return source.replace(/[`*]/g, '').replace(/\s+/g, ' ').trim()
+}
+
+type HelpRequirement = readonly [meaning: string, pattern: RegExp]
+
+// Output-mode checks belong in DESCRIPTION. Merely showing the global
+// --json/--quiet options does not explain a command's actual output.
+async function savedValuesHelp(
+  command: readonly string[],
+  requirements: readonly HelpRequirement[],
+): Promise<string> {
+  const result = await cli('node', [...command, '--help'])
+  expect(result, `dossier ${command.join(' ')} --help runs`).toMatchObject({
+    exitCode: 0,
+    stderr: '',
+  })
+  const help = normalizedHelp(result.stdout)
+  const description = proseText(
+    help.split('\nDESCRIPTION\n')[1]?.split(/\n(?:ARGUMENTS|OPTIONS)\n/)[0] ??
+      '',
+  )
+  for (const [meaning, pattern] of requirements) {
+    expect.soft(description, meaning).toMatch(pattern)
+  }
+  return help
+}
+
+describe('phase 8 help acceptance', () => {
+  it('root help carries the PRD one-line saved-values promise', async () => {
+    const help = await cli('node', ['--help'])
+    expect(help).toMatchObject({ exitCode: 0, stderr: '' })
+    expect(proseText(normalizedHelp(help.stdout))).toContain(savedValuesPromise)
+  })
+
+  it('root help spells executable state link paths without a repeated state', async () => {
+    const help = await cli('node', ['--help'])
+    expect(help).toMatchObject({ exitCode: 0, stderr: '' })
+    const text = normalizedHelp(help.stdout)
+    for (const operation of ['create', 'get', 'revoke']) {
+      expect.soft(text).toMatch(new RegExp(`- state link ${operation} `))
+    }
+    expect(text).not.toMatch(/- state state link /)
+  })
+
+  it.each([
+    'state get',
+    'state set',
+    'state link create',
+    'state link get',
+    'state link revoke',
+  ])('%s help explains the document reference argument', async (command) => {
+    const result = await cli('node', [...command.split(' '), '--help'])
+    expect(result).toMatchObject({ exitCode: 0, stderr: '' })
+    const argumentsText = proseText(
+      normalizedHelp(result.stdout)
+        .split('\nARGUMENTS\n')[1]
+        ?.split('\nOPTIONS\n')[0] ?? '',
+    )
+    expect(argumentsText).toMatch(/<ref>.*document ID.*id@n.*Dossier URL/i)
+  })
+
+  it('fetch help explains the document reference and pinned versions', async () => {
+    const result = await cli('node', ['fetch', '--help'])
+    expect(result).toMatchObject({ exitCode: 0, stderr: '' })
+    const help = normalizedHelp(result.stdout)
+    const argumentsText = proseText(
+      help.split('\nARGUMENTS\n')[1]?.split('\nOPTIONS\n')[0] ?? '',
+    )
+    expect(argumentsText).toMatch(
+      /<ref>.*document ID.*id@n.*Dossier URL.*pinned.*version/i,
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ fetch [--version integer] [(-o, --output text)] <ref>
+
+      DESCRIPTION
+
+      Fetch a document without changing its bytes
+
+      ARGUMENTS
+
+      <ref>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL. A pinned reference selects that HTML version.
+
+      OPTIONS
+
+      --version integer
+
+        An integer.
+
+        This setting is optional.
+
+      (-o, --output text)
+
+        A user-defined piece of text.
+
+        This setting is optional.
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('state help explains the shared-value commands, output modes, and authority', async () => {
+    const help = await savedValuesHelp(
+      ['state'],
+      [
+        [
+          'effect: read and save one shared set',
+          /read.*save.*(?:one shared set|shared saved values)/i,
+        ],
+        [
+          'human output: values, revision and last saved',
+          /human.*values.*revision.*last saved/i,
+        ],
+        [
+          'JSON output: state snapshot',
+          /--json.*(?:snapshot|documentId.*revision.*data)/i,
+        ],
+        [
+          'quiet output: get is silent and set prints the revision',
+          /--quiet.*get.*(?:silent|nothing|no output).*set.*revision/i,
+        ],
+        ['read permission', /(?:anyone|readers?).*(?:read|view).*values/i],
+        [
+          'save permission',
+          /(?:manag\w*|edit-state).*(?:save|writ)|(?:save|writ).*(?:manag\w*|edit-state)/i,
+        ],
+        [
+          'saving is not publishing or sharing',
+          /(?:not|never|no).*(?:publish|replac\w* HTML).*shar/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ state
+
+      DESCRIPTION
+
+      Read and save one shared set of saved values. Human output prints the values, the revision, and the last saved time. --json prints one JSON snapshot with documentId, version, revision, updatedAt, data, and fields. With --quiet, get prints nothing and set prints only the new revision. Anyone who can read the document can read its values. Document managers and collaborators with an --edit-state grant can save, and saving never grants publishing or sharing.
+
+      OPTIONS
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      COMMANDS
+
+        - get <ref>                                   Read the current saved values of one document. Human output prints the values, the revision, and the last saved time. --json prints one snapshot with documentId, version, revision, updatedAt, data, and fields, where fields carries each value with its revision and type. --quiet prints nothing on success. Anyone who can read the document can read its values, and reading never changes values or permissions. An ordinary document fails with "Saved values are not enabled for this document".
+
+        - set --data text [--revision integer] <ref>  Save values from a JSON object of field names to values. Human output prints the new revision and the last saved time, --json prints the saved snapshot with documentId, version, revision, updatedAt, data, and fields, and --quiet prints only the new revision. Saving requires document management authority or an --edit-state grant, and saving never grants publishing or sharing. Always pass --revision from the read you prepared the changes from, so a field that anyone saved after that read fails with a conflict. Without --revision, the CLI reads first and uses that read as the baseline, which only guards against saves racing this command.
+
+        - link                                        Manage one bearer edit link for a document. Anyone with it can read and change saved values without signing in and can forward it, so revoking it stops access for every holder, including a tab that is already open. Only document managers create, show, or revoke it. Human output prints the link URL, a warning on create, and the revocation result. With --json, create and get print documentId, active, and editUrl, and revoke prints documentId and revoked. With --quiet, create and get print only the URL and revoke prints nothing.
+
+        - link create <ref>                           Create the bearer edit link, or return the existing active link instead of replacing it. Anyone with it can read and change saved values without signing in and can forward it. Only document managers can create it. Human output prints a one-line warning and then the URL, --json prints documentId, active, and editUrl, and --quiet prints only the URL.
+
+        - link get <ref>                              Show the active bearer edit link without creating or rotating one. Only document managers can read it. Human output prints the URL, or "No active edit link" when none exists. --json prints documentId, active, and editUrl, with active false and editUrl null when none exists. --quiet prints the URL or nothing.
+
+        - link revoke <ref>                           Revoke the bearer edit link so it stops opening or saving the document from the next request, including from a tab that is already open. Only document managers can revoke it, and signed-in grants remain unchanged. Human output prints "Edit link revoked", or "No edit link to revoke" when none was active. --json prints documentId and revoked. --quiet prints nothing.
+
+      "
+    `)
+  })
+
+  it('state get help explains readable values, the JSON snapshot, silence, and read access', async () => {
+    const help = await savedValuesHelp(
+      ['state', 'get'],
+      [
+        [
+          'effect: read current saved values',
+          /read.*(?:current )?saved values/i,
+        ],
+        [
+          'human output: values, revision and last saved',
+          /human.*values.*revision.*last saved/i,
+        ],
+        ['JSON identifies the document', /--json.*documentId/i],
+        [
+          'JSON includes revision and timestamp',
+          /--json.*revision.*updatedAt/i,
+        ],
+        ['JSON includes data, version and field revisions', /--json.*data/i],
+        [
+          'JSON includes HTML version and per-field metadata',
+          /--json.*version.*fields/i,
+        ],
+        [
+          'quiet success is silent, not a URL or revision',
+          /--quiet.*(?:silent|nothing|no output)/i,
+        ],
+        [
+          'read access is enough',
+          /(?:anyone|readers?).*(?:read|view).*values/i,
+        ],
+        [
+          'reading neither saves nor changes permissions',
+          /(?:does not|never|no).*(?:chang\w*|grant\w*).*(?:access|permission)/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ get <ref>
+
+      DESCRIPTION
+
+      Read the current saved values of one document. Human output prints the values, the revision, and the last saved time. --json prints one snapshot with documentId, version, revision, updatedAt, data, and fields, where fields carries each value with its revision and type. --quiet prints nothing on success. Anyone who can read the document can read its values, and reading never changes values or permissions. An ordinary document fails with "Saved values are not enabled for this document".
+
+      ARGUMENTS
+
+      <ref>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL.
+
+      OPTIONS
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('state set help explains saved output, permission, and the omitted-revision race guard', async () => {
+    const help = await savedValuesHelp(
+      ['state', 'set'],
+      [
+        ['effect: save the JSON values', /save.*(?:JSON|values)/i],
+        [
+          'human output: revision and last saved',
+          /human.*revision.*last saved/i,
+        ],
+        [
+          'JSON returns the saved state snapshot',
+          /--json.*(?:snapshot|documentId.*revision.*data)/i,
+        ],
+        ['quiet success prints the new revision', /--quiet.*revision/i],
+        [
+          'save requires manage or edit-state authority',
+          /(?:requir\w*|only).*(?:manag\w*).*(?:edit-state|saving grant)/i,
+        ],
+        [
+          'saving does not grant publishing or sharing',
+          /(?:not|never|no).*(?:publish|replac\w* HTML).*shar/i,
+        ],
+        [
+          'omitting revision guards only racing saves',
+          /without --revision.*only guards against saves racing this command/i,
+        ],
+        [
+          'prepared changes carry the earlier read revision',
+          /pass --revision from the read you prepared the changes from/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ set --data text [--revision integer] <ref>
+
+      DESCRIPTION
+
+      Save values from a JSON object of field names to values. Human output prints the new revision and the last saved time, --json prints the saved snapshot with documentId, version, revision, updatedAt, data, and fields, and --quiet prints only the new revision. Saving requires document management authority or an --edit-state grant, and saving never grants publishing or sharing. Always pass --revision from the read you prepared the changes from, so a field that anyone saved after that read fails with a conflict. Without --revision, the CLI reads first and uses that read as the baseline, which only guards against saves racing this command.
+
+      ARGUMENTS
+
+      <ref>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL.
+
+      OPTIONS
+
+      --data text
+
+        A user-defined piece of text.
+
+        Read the changes from this JSON file of saved-value names to values.
+
+      --revision integer
+
+        An integer.
+
+        Pass the revision of the read you prepared the changes from.
+
+        This setting is optional.
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('state link help explains bearer access and each output mode', async () => {
+    const help = await savedValuesHelp(
+      ['state', 'link'],
+      [
+        [
+          'effect: manage one bearer edit link',
+          /(?:manag\w*|create).*bearer edit link/i,
+        ],
+        [
+          'human output: URL, warning and revocation result',
+          /human.*(?:URL|link).*warn.*revok/i,
+        ],
+        ['JSON create/get output', /--json.*documentId.*active.*editUrl/i],
+        ['JSON revoke output', /--json.*revoked/i],
+        [
+          'quiet create/get returns URL, revoke is silent',
+          /--quiet.*URL.*revoke.*(?:silent|nothing|no output)/i,
+        ],
+        [
+          'only document managers manage links',
+          /(?:requir\w*|only).*(?:manag\w*)/i,
+        ],
+        [
+          'bearer can read and change values',
+          /anyone.*read and change.*values/i,
+        ],
+        [
+          'link can be forwarded and revocation stops access',
+          /forward.*revok.*(?:stop|access)/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ link
+
+      DESCRIPTION
+
+      Manage one bearer edit link for a document. Anyone with it can read and change saved values without signing in and can forward it, so revoking it stops access for every holder, including a tab that is already open. Only document managers create, show, or revoke it. Human output prints the link URL, a warning on create, and the revocation result. With --json, create and get print documentId, active, and editUrl, and revoke prints documentId and revoked. With --quiet, create and get print only the URL and revoke prints nothing.
+
+      OPTIONS
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      COMMANDS
+
+        - create <ref>  Create the bearer edit link, or return the existing active link instead of replacing it. Anyone with it can read and change saved values without signing in and can forward it. Only document managers can create it. Human output prints a one-line warning and then the URL, --json prints documentId, active, and editUrl, and --quiet prints only the URL.
+
+        - get <ref>     Show the active bearer edit link without creating or rotating one. Only document managers can read it. Human output prints the URL, or "No active edit link" when none exists. --json prints documentId, active, and editUrl, with active false and editUrl null when none exists. --quiet prints the URL or nothing.
+
+        - revoke <ref>  Revoke the bearer edit link so it stops opening or saving the document from the next request, including from a tab that is already open. Only document managers can revoke it, and signed-in grants remain unchanged. Human output prints "Edit link revoked", or "No edit link to revoke" when none was active. --json prints documentId and revoked. --quiet prints nothing.
+
+      "
+    `)
+  })
+
+  it('state link create help explains reuse, warning, JSON, quiet URL, and bearer permissions', async () => {
+    const help = await savedValuesHelp(
+      ['state', 'link', 'create'],
+      [
+        [
+          'effect: create or return the existing active link',
+          /create.*(?:return|reus\w*|existing).*link/i,
+        ],
+        ['human output: warning and URL', /human.*warn.*URL/i],
+        ['JSON output shape', /--json.*documentId.*active.*editUrl/i],
+        [
+          'quiet output: URL only',
+          /--quiet.*(?:only.*URL|URL.*(?:only|alone))/i,
+        ],
+        [
+          'management permission is required',
+          /(?:requir\w*|only).*(?:manag\w*)/i,
+        ],
+        [
+          'bearer may read and change saved values',
+          /anyone.*read and change.*values/i,
+        ],
+        [
+          'anonymous access, no sign-in',
+          /(?:no sign-in|without sign\w* in|without an account)/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ create <ref>
+
+      DESCRIPTION
+
+      Create the bearer edit link, or return the existing active link instead of replacing it. Anyone with it can read and change saved values without signing in and can forward it. Only document managers can create it. Human output prints a one-line warning and then the URL, --json prints documentId, active, and editUrl, and --quiet prints only the URL.
+
+      ARGUMENTS
+
+      <ref>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL.
+
+      OPTIONS
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('state link get help explains absent links, JSON, quiet output, and manager-only reading', async () => {
+    const help = await savedValuesHelp(
+      ['state', 'link', 'get'],
+      [
+        [
+          'effect: get the active link without creating one',
+          /(?:show|return|read|get).*active.*link/i,
+        ],
+        [
+          'human output: URL or no active link',
+          /human.*URL.*(?:no active|none)/i,
+        ],
+        ['JSON output shape', /--json.*documentId.*active.*editUrl/i],
+        ['absent JSON link is false and null', /false.*null/i],
+        [
+          'quiet output: URL or silence',
+          /--quiet.*URL.*(?:silent|nothing|no output)/i,
+        ],
+        [
+          'only document managers can retrieve the link',
+          /(?:requir\w*|only).*manag\w*/i,
+        ],
+        [
+          'get does not create or rotate a link',
+          /(?:does not|without|never).*(?:creat\w*|rotat\w*)/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ get <ref>
+
+      DESCRIPTION
+
+      Show the active bearer edit link without creating or rotating one. Only document managers can read it. Human output prints the URL, or "No active edit link" when none exists. --json prints documentId, active, and editUrl, with active false and editUrl null when none exists. --quiet prints the URL or nothing.
+
+      ARGUMENTS
+
+      <ref>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL.
+
+      OPTIONS
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('state link revoke help explains revocation, absent links, JSON, silence, and other grants', async () => {
+    const help = await savedValuesHelp(
+      ['state', 'link', 'revoke'],
+      [
+        ['effect: revoke bearer access', /revoke.*(?:bearer|edit link)/i],
+        [
+          'human output: success or nothing to revoke',
+          /human.*revok.*(?:nothing|no .*link|none)/i,
+        ],
+        [
+          'JSON output identifies the document and revocation',
+          /--json.*documentId.*revoked/i,
+        ],
+        ['quiet success is silent', /--quiet.*(?:silent|nothing|no output)/i],
+        ['management permission is required', /(?:requir\w*|only).*manag\w*/i],
+        [
+          'revocation stops link access including open tabs',
+          /(?:open tabs|open pages|already open)/i,
+        ],
+        [
+          'revocation leaves signed-in grants alone',
+          /(?:other|signed-in).*grants?.*(?:keep|remain|unchanged|unaffected)|(?:does not|without).*chang.*grants?/i,
+        ],
+      ],
+    )
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ revoke <ref>
+
+      DESCRIPTION
+
+      Revoke the bearer edit link so it stops opening or saving the document from the next request, including from a tab that is already open. Only document managers can revoke it, and signed-in grants remain unchanged. Human output prints "Edit link revoked", or "No edit link to revoke" when none was active. --json prints documentId and revoked. --quiet prints nothing.
+
+      ARGUMENTS
+
+      <ref>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL.
+
+      OPTIONS
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('upload help explains enabled state, output modes, preserved values, and separate visibility', async () => {
+    const help = await savedValuesHelp(
+      ['upload'],
+      [
+        [
+          'effect: publish HTML with opt-in shared values',
+          /(?:upload|publish).*HTML.*--stateful.*shared/i,
+        ],
+        [
+          'human output includes state and last saved',
+          /human.*State.*Last saved/i,
+        ],
+        [
+          'JSON adds stateful, revision and timestamp',
+          /--json.*stateful.*stateRevision.*stateUpdatedAt/i,
+        ],
+        [
+          'quiet output stays URL only',
+          /--quiet.*(?:only.*URL|URL.*(?:only|alone))/i,
+        ],
+        [
+          'plain republish preserves values',
+          /(?:republish|later upload|re-upload).*keep.*values/i,
+        ],
+        [
+          'republish by path or explicit ID',
+          /same file path.*--doc <id>.*(?:update|republish).*document/i,
+        ],
+        ['new creates separate defaults', /--new.*(?:fresh|default|separate)/i],
+        ['manager can save immediately', /manag\w*.*save/i],
+        [
+          'visibility does not become anonymous editing',
+          /(?:not|never|no).*anonym.*edit|anonym.*edit.*(?:not|never)/i,
+        ],
+        [
+          'visibility stays separate',
+          /visibility.*(?:separate|unchanged)|(?:separate|unchanged).*visibility/i,
+        ],
+      ],
+    )
+    const argumentsText = proseText(
+      help.split('\nARGUMENTS\n')[1]?.split('\nOPTIONS\n')[0] ?? '',
+    )
+    expect.soft(argumentsText).toMatch(/<file>.*read.*complete HTML.*file/i)
+    const options = proseText(help.split('\nOPTIONS\n')[1] ?? '')
+    for (const [meaning, pattern] of [
+      [
+        'share accepts a comma-separated initial view-share list',
+        /--share text.*initial view-share list.*comma-separated email addresses/i,
+      ],
+      [
+        'description sets the document description',
+        /--description text.*set the document description/i,
+      ],
+      [
+        'doc updates the explicit ID instead of the mapped path',
+        /--doc text.*Update this document ID instead of the mapped path/i,
+      ],
+      [
+        'new creates a separate document without copying saved access',
+        /--new.*Create a separate document.*no copied values, grants, or edit link/i,
+      ],
+      [
+        'parent chooses a document or root and never moves an existing one',
+        /--parent text.*Create beneath this document ID or URL, or use root.*dossier move/i,
+      ],
+      [
+        'kind labels the document',
+        /--kind text.*Set the document kind.*plan.*report.*checklist/i,
+      ],
+    ] as const) {
+      expect.soft(options, meaning).toMatch(pattern)
+    }
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ upload [--parent text] [--kind text] [--visibility public | team | private | inherit] [--share text] [--description text] [--new] [--stateful] [--accept-state-changes] [--doc text] <file>
+
+      DESCRIPTION
+
+      Validate and upload one complete HTML document. --stateful enables one shared set of saved values for controls marked with data-state. The document manager can save immediately, publishing never makes the document anonymously editable, and visibility stays a separate choice. Human output keeps the existing lines and adds State and Last saved for a saved-values document. --json adds stateful, stateRevision, and stateUpdatedAt, and --quiet prints only the URL. Use the same file path or --doc <id> to update an existing document. A later upload of the same document keeps its saved values, its enabled state, its grants, and its edit link, and --new starts a separate document with authored defaults. A retype or removal of a saved field fails until you pass --accept-state-changes.
+
+      ARGUMENTS
+
+      <file>
+
+        A user-defined piece of text.
+
+        Read one complete HTML document from this file.
+
+      OPTIONS
+
+      --parent text
+
+        A user-defined piece of text.
+
+        Create beneath this document ID or URL, or use root. Use dossier move to change the parent of an existing document.
+
+        This setting is optional.
+
+      --kind text
+
+        A user-defined piece of text.
+
+        Set the document kind, such as plan, report, or checklist.
+
+        This setting is optional.
+
+      --visibility public | team | private | inherit
+
+        One of the following: public, team, private, inherit
+
+        This setting is optional.
+
+      --share text
+
+        A user-defined piece of text.
+
+        Set the initial view-share list with comma-separated email addresses.
+
+        This setting is optional.
+
+      --description text
+
+        A user-defined piece of text.
+
+        Set the document description.
+
+        This setting is optional.
+
+      --new
+
+        A true or false value.
+
+        Create a separate document with no copied values, grants, or edit link.
+
+        This setting is optional.
+
+      --stateful
+
+        A true or false value.
+
+        Enable one shared set of saved values for marked controls.
+
+        This setting is optional.
+
+      --accept-state-changes
+
+        A true or false value.
+
+        Accept a retype or removal of a saved field. Retyped values reset to their new defaults and removed values stay saved.
+
+        This setting is optional.
+
+      --doc text
+
+        A user-defined piece of text.
+
+        Update this document ID instead of the mapped path.
+
+        This setting is optional.
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+
+  it('share help explains view/save output, grants JSON, silence, and document-local permission effects', async () => {
+    const help = await savedValuesHelp(
+      ['share'],
+      [
+        ['effect: manage viewing and saving', /manag\w*.*view.*sav/i],
+        [
+          'add with edit-state grants view and save',
+          /--add.*--edit-state.*view and save|view and save.*--add.*--edit-state/i,
+        ],
+        [
+          'remove with edit-state keeps viewing',
+          /--remove.*--edit-state.*(?:keep\w* view|view.*remain)/i,
+        ],
+        [
+          'plain remove drops both permissions',
+          /(?:plain|without --edit-state).*--remove.*(?:view and save|both)|--remove.*without --edit-state.*(?:view and save|both)/i,
+        ],
+        ['human output says who can view and save', /human.*view.*save/i],
+        [
+          'JSON has grants and canSave, not a savers field',
+          /--json.*grants.*canSave/i,
+        ],
+        ['quiet success is silent', /--quiet.*(?:silent|nothing|no output)/i],
+        [
+          'saving never grants publishing or sharing',
+          /saving never grants publishing or sharing/i,
+        ],
+        [
+          'grants do not change workspace membership',
+          /(?:not|never|no).*chang\w*.*workspace membership/i,
+        ],
+        [
+          'sign-in must satisfy deployment rules',
+          /sign.in.*(?:rules|allowlist|deployment)/i,
+        ],
+      ],
+    )
+    const argumentsText = proseText(
+      help.split('\nARGUMENTS\n')[1]?.split('\nOPTIONS\n')[0] ?? '',
+    )
+    expect.soft(argumentsText).toMatch(/<id>.*document ID.*id@n.*Dossier URL/i)
+    expect(help).toMatchInlineSnapshot(`
+      "dossier
+
+      dossier <version>
+
+      USAGE
+
+      $ share [--add text] [--remove text] [--edit-state] <id>
+
+      DESCRIPTION
+
+      Manage who can view a document and who can save its values. --add grants viewing, and --add with --edit-state grants view and save. --remove with --edit-state drops saving and keeps viewing, and --remove without --edit-state drops view and save. Human output lists each person as view or view and save, --json prints the shares with grants and each grant's canSave, and --quiet prints nothing on success. The person must complete Dossier sign-in under the deployment's rules, a grant never changes workspace membership, and saving never grants publishing or sharing.
+
+      ARGUMENTS
+
+      <id>
+
+        A user-defined piece of text.
+
+        Use a document ID, id@n, or a Dossier URL.
+
+      OPTIONS
+
+      --add text
+
+        A user-defined piece of text.
+
+        Grant viewing, or viewing and saving with --edit-state.
+
+        This setting is optional.
+
+      --remove text
+
+        A user-defined piece of text.
+
+        Drop viewing and saving, or only saving with --edit-state.
+
+        This setting is optional.
+
+      --edit-state
+
+        A true or false value.
+
+        With --add, grant saving. With --remove, drop saving and keep viewing.
+
+        This setting is optional.
+
+      --completions sh | bash | fish | zsh
+
+        One of the following: sh, bash, fish, zsh
+
+        Generate a completion script for a specific shell.
+
+        This setting is optional.
+
+      --log-level all | trace | debug | info | warning | error | fatal | none
+
+        One of the following: all, trace, debug, info, warning, error, fatal, none
+
+        Sets the minimum log level for a command.
+
+        This setting is optional.
+
+      (-h, --help)
+
+        A true or false value.
+
+        Show the help documentation for a command.
+
+        This setting is optional.
+
+      --wizard
+
+        A true or false value.
+
+        Start wizard mode for a command.
+
+        This setting is optional.
+
+      --version
+
+        A true or false value.
+
+        Show the version of the application.
+
+        This setting is optional.
+
+      "
+    `)
+  })
+})
+
+describe('phase 8 documented journey', () => {
+  it('publishes the PRD plan, grants saving, manages a link, reads and saves, then republishes or starts fresh', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    await writeFile(join(home, 'plan.html'), launchPlanExample)
+    const defaults = {
+      objective: 'Launch the new website',
+      approved: false,
+      notes: '',
+    }
+    const saved = { ...defaults, approved: true, notes: 'Use revised designs.' }
+    await writeFile(join(home, 'values.json'), JSON.stringify(saved))
+
+    async function run(
+      command: string,
+      id = '',
+      revision = 0,
+    ): Promise<string> {
+      const substitutions: Record<string, string> = {
+        'plan.html': join(home, 'plan.html'),
+        'revised-plan.html': join(home, 'revised-plan.html'),
+        'values.json': join(home, 'values.json'),
+        '<id>': id,
+        '<revision>': String(revision),
+      }
+      const args = command
+        .split(' ')
+        .slice(1)
+        .map((arg) => substitutions[arg] ?? arg)
+      const result = await cli('node', args, { home })
+      expect(result, command).toMatchObject({ exitCode: 0, stderr: '' })
+      return result.stdout
+    }
+
+    function uploadId(output: string): string {
+      expect(output).toMatch(/^ID: [a-z0-9]{12}$/m)
+      return /^ID: ([a-z0-9]{12})$/m.exec(output)![1]!
+    }
+
+    const published = await run(savedValuesJourney.publish)
+    const id = uploadId(published)
+    expect(published).toContain(`URL: ${apiUrl}/d/${id}\n`)
+    expect(published).toContain(
+      'State: enabled, one shared set of saved values\n',
+    )
+    expect(published).toContain('Last saved: never\n')
+    expect(published).not.toContain('/edit#')
+    const receipt = JSON.parse(await run(savedValuesJourney.publishJson))
+    expect(receipt).toMatchObject({
+      id,
+      stateful: true,
+      stateRevision: 0,
+      stateUpdatedAt: null,
+      versionNumber: 2,
+    })
+    expect(receipt).not.toHaveProperty('editUrl')
+
+    expect(await run(savedValuesJourney.grant, id)).toContain(
+      'person@example.com: view and save\n',
+    )
+    // Contracts expose grants[].canSave. The TDD's older `savers` noun is
+    // not the shipped JSON API and must not enter the skill.
+    const permissions = {
+      configured: [],
+      effective: [],
+      accessSource: 'own',
+      grants: [{ email: 'person@example.com', canSave: true }],
+    }
+    expect(JSON.parse(await run(savedValuesJourney.inspectGrants, id))).toEqual(
+      permissions,
+    )
+
+    const created = await run(savedValuesJourney.createLink, id)
+    const warning =
+      'Anyone with this link can read and change the saved values and can forward it.'
+    const link = created.trimEnd().split('\n').at(-1)!
+    expect(created).toBe(`${warning}\n${link}\n`)
+    expect(link).toMatch(new RegExp(`^${apiUrl}/d/${id}/edit#.+$`))
+    expect(await run(savedValuesJourney.getLink, id)).toBe(`${link}\n`)
+    expect(await run(savedValuesJourney.createLink, id)).toBe(created)
+    expect(JSON.parse(await run(savedValuesJourney.getLinkJson, id))).toEqual({
+      documentId: id,
+      active: true,
+      editUrl: link,
+    })
+
+    const beforeSave = JSON.parse(await run(savedValuesJourney.readJson, id))
+    expect(beforeSave).toEqual({
+      documentId: id,
+      version: 2,
+      revision: 0,
+      updatedAt: null,
+      data: defaults,
+      fields: {
+        objective: { value: defaults.objective, revision: 0, type: 'text' },
+        approved: { value: false, revision: 0, type: 'checkbox' },
+        notes: { value: '', revision: 0, type: 'textarea' },
+      },
+    })
+    expect(await run(savedValuesJourney.read, id)).toBe(
+      `Values:\n${JSON.stringify(defaults, null, 2)}\nRevision: 0\nLast saved: never\n`,
+    )
+    expect(await run(savedValuesJourney.save, id, beforeSave.revision)).toBe(
+      'Revision: 1\nLast saved: 2026-09-14T09:01:00Z\n',
+    )
+    const afterSave = JSON.parse(await run(savedValuesJourney.readJson, id))
+    expect(afterSave).toMatchObject({
+      documentId: id,
+      version: 2,
+      revision: 1,
+      updatedAt: '2026-09-14T09:01:00Z',
+      data: saved,
+    })
+    for (const name of Object.keys(saved)) {
+      expect(afterSave.fields[name]).toMatchObject({ revision: 1 })
+    }
+
+    // A real changed HTML upload, not an identical retry, must retain state.
+    await writeFile(
+      join(home, 'plan.html'),
+      launchPlanExample.replace(
+        '<h1>Launch plan</h1>',
+        '<h1>Revised launch plan</h1>',
+      ),
+    )
+    const republished = await run(savedValuesJourney.republish)
+    expect(uploadId(republished)).toBe(id)
+    expect(republished).toContain('Updated\n')
+    expect(republished).toContain(
+      'State: enabled, one shared set of saved values\n',
+    )
+    expect(republished).toContain('Last saved: 2026-09-14T09:01:00Z\n')
+    expect(JSON.parse(await run(savedValuesJourney.readJson, id))).toEqual({
+      ...afterSave,
+      version: 3,
+    })
+    expect(await run(savedValuesJourney.getLink, id)).toBe(`${link}\n`)
+    expect(JSON.parse(await run(savedValuesJourney.inspectGrants, id))).toEqual(
+      permissions,
+    )
+
+    // The by-ID republish carries a second, distinct HTML change, so the test
+    // proves an update by ID and not a re-upload of identical bytes.
+    const revisedPlan = launchPlanExample.replace(
+      '<h1>Launch plan</h1>',
+      '<h1>Launch plan, revised</h1>',
+    )
+    expect(revisedPlan).not.toBe(launchPlanExample)
+    expect(revisedPlan).not.toBe(documents.get(id)?.html.toString('utf8'))
+    await writeFile(join(home, 'revised-plan.html'), revisedPlan)
+    expect(uploadId(await run(savedValuesJourney.republishById, id))).toBe(id)
+    expect(documents.get(id)?.html.toString('utf8')).toBe(revisedPlan)
+    expect(JSON.parse(await run(savedValuesJourney.readJson, id))).toEqual({
+      ...afterSave,
+      version: 4,
+    })
+    expect(await run(savedValuesJourney.getLink, id)).toBe(`${link}\n`)
+    expect(JSON.parse(await run(savedValuesJourney.inspectGrants, id))).toEqual(
+      permissions,
+    )
+
+    const fresh = await run(savedValuesJourney.newDocument)
+    const freshId = uploadId(fresh)
+    expect(freshId).not.toBe(id)
+    expect(fresh).toContain('State: enabled, one shared set of saved values\n')
+    expect(fresh).toContain('Last saved: never\n')
+    expect(JSON.parse(await run(savedValuesJourney.readJson, freshId))).toEqual(
+      {
+        ...beforeSave,
+        documentId: freshId,
+        version: 1,
+      },
+    )
+    expect(
+      JSON.parse(await run(savedValuesJourney.getLinkJson, freshId)),
+    ).toEqual({
+      documentId: freshId,
+      active: false,
+      editUrl: null,
+    })
+    expect(
+      JSON.parse(await run(savedValuesJourney.inspectGrants, freshId)),
+    ).toEqual({
+      ...permissions,
+      grants: [],
+    })
+    expect(JSON.parse(await run(savedValuesJourney.readJson, id))).toEqual({
+      ...afterSave,
+      version: 4,
+    })
+
+    expect(await run(savedValuesJourney.revokeLink, id)).toBe(
+      'Edit link revoked\n',
+    )
+    expect(await run(savedValuesJourney.getLink, id)).toBe(
+      'No active edit link\n',
+    )
+    expect(JSON.parse(await run(savedValuesJourney.getLinkJson, id))).toEqual({
+      documentId: id,
+      active: false,
+      editUrl: null,
+    })
+    expect(await run(savedValuesJourney.revokeLink, id)).toBe(
+      'No edit link to revoke\n',
+    )
+    expect(JSON.parse(await run(savedValuesJourney.inspectGrants, id))).toEqual(
+      permissions,
+    )
+    const replacement = await run(savedValuesJourney.createLink, id)
+    expect(replacement).toContain(`${warning}\n`)
+    expect(replacement).not.toBe(created)
+    expect(await run(savedValuesJourney.getLink, id)).toBe(
+      `${replacement.trimEnd().split('\n').at(-1)}\n`,
+    )
+  }, 60_000)
+})
+
+describe('phase 8 compatibility acceptance', () => {
+  // `state link` itself only displays help. Exercise every operation instead
+  // of expecting a help group to contact the deployment (TDD 03).
+  const commands = [
+    ['upload', 'plan.html', '--kind', 'plan', '--stateful'],
+    ['state', 'get', 'compatstate1'],
+    ['state', 'set', 'compatstate1', '--data', 'values.json'],
+    ['state', 'link', 'create', 'compatstate1'],
+    ['state', 'link', 'get', 'compatstate1'],
+    ['state', 'link', 'revoke', 'compatstate1'],
+    ['share', 'compatstate1', '--add', 'person@example.com', '--edit-state'],
+    ['share', 'compatstate1', '--remove', 'person@example.com', '--edit-state'],
+  ]
+  for (const [healthResponse, key, requests] of [
+    ['legacy', 'ds_legacy', legacyRequests],
+    ['current-but-unavailable', 'ds_unavailable', unavailableRequests],
+  ] as const) {
+    for (const command of commands) {
+      it(`${command.join(' ')} refuses a ${healthResponse} health response before any operation`, async () => {
+        const home = await temporaryHome()
+        await writeFile(join(home, 'plan.html'), launchPlanExample)
+        await writeFile(join(home, 'values.json'), '{"approved":true}')
+        const args = command.map((arg) =>
+          arg === 'plan.html' || arg === 'values.json' ? join(home, arg) : arg,
+        )
+        const before = requests.length
+        const result = await cli('node', [...args, '--api-url', apiUrl], {
+          home,
+          env: { DOSSIER_API_KEY: key },
+        })
+        expect(result).toEqual({
+          exitCode: 1,
+          stdout: '',
+          stderr: `dossier: ${deploymentCompatibilityMessage}\n`,
+        })
+        // Log before authentication/routing, so even a rejected write attempt
+        // fails this check. Unchanged maps alone would be a false positive.
+        expect(requests.slice(before)).toEqual(['GET /api/healthz'])
+      })
+    }
+  }
+})
+
+describe('phase 8 packaged guidance acceptance', () => {
+  const skillFile = join(packageDirectory, 'skills/dossier/SKILL.md')
+  const rootDirectory = join(packageDirectory, '../..')
+
+  it('the skill contains the PRD promise and complete 5.1 HTML example verbatim', async () => {
+    const skill = await readFile(skillFile, 'utf8')
+    expect.soft(proseText(skill)).toContain(savedValuesPromise)
+    expect(skill).toContain(launchPlanExample)
+  })
+
+  it('the skill documents every command spelling executed by the journey', async () => {
+    const skill = await readFile(skillFile, 'utf8')
+    const commands = [
+      ...skill.matchAll(/```(?:sh|bash|shell|text)?\n([\s\S]*?)```/g),
+    ]
+      .flatMap((block) => block[1]!.split('\n'))
+      .map((line) => line.split(/\s+#/)[0]!.trim())
+    for (const command of Object.values(savedValuesJourney)) {
+      expect.soft(commands, command).toContain(command)
+    }
+  })
+
+  it('the skill identifies the edit-link fragment and explains safe log redaction', async () => {
+    const skill = proseText(await readFile(skillFile, 'utf8'))
+    expect.soft(skill).toContain('/d/<id>/edit#<token>')
+    expect.soft(skill).toMatch(/fragment after # holds the bearer token/i)
+    expect
+      .soft(skill)
+      .toMatch(/redact the entire non-null editUrl value before displaying/i)
+    expect
+      .soft(skill)
+      .toMatch(/do not rely on a query-parameter pattern to hide it/i)
+  })
+
+  it('the skill explains stable names, defaults, preserved removals, and confirmed retypes', async () => {
+    const skill = proseText(await readFile(skillFile, 'utf8'))
+    const rules: readonly HelpRequirement[] = [
+      [
+        'field names are identity',
+        /(?:name|data-state).*(?:identity|stable|same name)/i,
+      ],
+      [
+        'label and layout edits keep values',
+        /(?:label|layout|order).*keep.*values/i,
+      ],
+      ['new fields use authored defaults', /new fields?.*defaults?/i],
+      [
+        'saved false and empty values survive',
+        /(?:false|unchecked).*(?:empty|cleared)|(?:empty|cleared).*false/i,
+      ],
+      [
+        'removing does not erase, re-adding restores',
+        /remov.*(?:keep|retain|preserv|not erase).*re.add.*restor/i,
+      ],
+      [
+        'rename and retype need deliberate confirmation',
+        /(?:renam\w*|retyp\w*|chang\w*.*type).*--accept-state-changes/i,
+      ],
+      [
+        'accepted retypes reset to authored defaults',
+        /retyp\w*.*reset.*default|reset.*retyp\w*.*default/i,
+      ],
+      [
+        'plain reupload keeps grants and edit link',
+        /(?:republish|re-upload|upload).*keep.*(?:grants|access).*edit link/i,
+      ],
+      [
+        'new documents copy neither grants nor link',
+        /--new.*(?:no|not|without|nothing).*(?:grants|access).*link/i,
+      ],
+    ]
+    for (const [meaning, pattern] of rules) {
+      expect.soft(skill, meaning).toMatch(pattern)
+    }
+  })
+
+  it('the skill explains one shared set, explicit Save, and the custom-control contract', async () => {
+    const skill = await readFile(skillFile, 'utf8')
+    const text = proseText(skill)
+    expect.soft(text).toMatch(/one shared set of (?:saved )?values/i)
+    expect.soft(text).toMatch(/(?:press|click|choose).*Save|explicit.*Save/i)
+    expect
+      .soft(text)
+      .toMatch(/(?:other|open).*tabs?.*reload|reload.*(?:other|open).*tabs?/i)
+    expect
+      .soft(text)
+      .toMatch(
+        /(?:not|no|never).*(?:per-visitor|separate response|individual submission)/i,
+      )
+    for (const token of [
+      'data-state-default',
+      'window.dossierState.register',
+      'read:',
+      'write:',
+    ]) {
+      expect.soft(skill, `custom controls: ${token}`).toContain(token)
+    }
+  })
+
+  it('the skill distinguishes an outdated deployment from an outdated CLI and gives next steps', async () => {
+    const skill = proseText(await readFile(skillFile, 'utf8'))
+    expect.soft(skill).toContain(deploymentCompatibilityMessage)
+    expect
+      .soft(skill)
+      .toMatch(
+        /(?:deployment|server).*(?:older|out of date|outdated|does not support)/i,
+      )
+    expect.soft(skill).toContain('dossier update --check')
+    expect
+      .soft(skill)
+      .toMatch(
+        /(?:missing|unknown|unrecognized).*command|command.*(?:missing|unknown|unrecognized)/i,
+      )
+    expect
+      .soft(skill)
+      .toMatch(
+        /(?:do not|never|don't).*(?:drop|omit|remove|without).*--stateful/i,
+      )
+  })
+
+  it('the skill explains unavailable saved values and checks configuration before an update', async () => {
+    const skill = await readFile(skillFile, 'utf8')
+    const compatibility = proseText(skill.split('### Compatibility\n')[1] ?? '')
+    expect
+      .soft(compatibility, 'health reports availability, not age')
+      .toMatch(/does not advertise saved-values availability/i)
+    expect
+      .soft(compatibility, 'a current deployment can lack its limiter')
+      .toMatch(/current deployment.*STATE_RATE_LIMITER.*missing/i)
+    expect
+      .soft(compatibility, 'check configuration before updating or redeploying')
+      .toMatch(
+        /check.*\/api\/healthz.*STATE_RATE_LIMITER.*configuration before updating or redeploying/i,
+      )
+    expect
+      .soft(compatibility, 'restore a missing binding')
+      .toMatch(/restore a missing binding/i)
+    expect
+      .soft(compatibility, 'confirm availability before retrying')
+      .toMatch(/confirm that health advertises state, then retry/i)
+  })
+
+  it('the README carries the same promise and lists the saved-values command tree', async () => {
+    const readme = await readFile(join(packageDirectory, 'README.md'), 'utf8')
+    expect.soft(proseText(readme)).toContain(savedValuesPromise)
+    for (const token of [
+      'state get',
+      'state set',
+      'state link create',
+      'state link get',
+      'state link revoke',
+      '--stateful',
+      '--edit-state',
+    ]) {
+      expect.soft(readme, token).toContain(token)
+    }
+  })
+
+  it('CI pack smoke verifies the shipped skill as well as the README', async () => {
+    const workflow = await readFile(
+      join(rootDirectory, '.github/workflows/ci.yml'),
+      'utf8',
+    )
+    const smoke =
+      workflow
+        .split('- name: Pack and smoke test CLI')[1]
+        ?.split('\n  browser:')[0] ?? ''
+    expect(smoke).toContain('npm pack')
+    expect(smoke).toMatch(
+      /test -s .*node_modules\/@agent964\/dossier\/README\.md/,
+    )
+    expect(smoke).toMatch(
+      /test -s .*node_modules\/@agent964\/dossier\/skills\/dossier\/SKILL\.md/,
+    )
+    expect(packageJson.files).toContain('skills')
+    expect(packageJson.exports['./skills/dossier/SKILL.md']).toBe(
+      './skills/dossier/SKILL.md',
+    )
+  })
+
+  it('the global flag table keeps two Markdown cells per row', async () => {
+    const reference = await readFile(join(rootDirectory, 'docs/CLI.md'), 'utf8')
+    const section = reference.split('## Global flags')[1]?.split('###')[0] ?? ''
+    const rows = section.split('\n').filter((line) => line.startsWith('|'))
+    expect(rows.length).toBeGreaterThan(2)
+    expect.soft(rows.some((row) => row.includes('--completions'))).toBe(true)
+    expect.soft(rows.some((row) => row.includes('--log-level'))).toBe(true)
+    for (const row of rows) {
+      expect.soft(row.split(/(?<!\\)\|/), row).toHaveLength(4)
+    }
+  })
+
+  it('CLI reference documents state commands, upload/share flags, and state error exit codes', async () => {
+    const reference = await readFile(join(rootDirectory, 'docs/CLI.md'), 'utf8')
+    for (const token of [
+      'dossier state get',
+      'dossier state set',
+      'dossier state link create',
+      'dossier state link get',
+      'dossier state link revoke',
+      '--stateful',
+      '--accept-state-changes',
+      '--edit-state',
+      'state_not_enabled',
+      'state_conflict',
+      'state_schema_change',
+      'state_version_changed',
+      'state_type_mismatch',
+      'state_edit_required',
+      'state_too_large',
+      'state_unavailable',
+      'link_revoked',
+      'rate_limited',
+    ]) {
+      expect.soft(reference, token).toContain(token)
+    }
+    expect
+      .soft(proseText(reference))
+      .toMatch(/state_.*(?:exit(?: code)? 1|code 1)/i)
+  })
+
+  it('architecture names the wrapper, frame ticket, State service, and actual four tables', async () => {
+    const architecture = await readFile(
+      join(rootDirectory, 'docs/ARCHITECTURE.md'),
+      'utf8',
+    )
+    for (const token of [
+      'wrapper',
+      'frame',
+      'ticket',
+      'State',
+      'document_state',
+      'document_state_fields',
+      'document_state_grants',
+      'document_edit_links',
+    ]) {
+      expect.soft(architecture, token).toContain(token)
+    }
+  })
+
+  it('architecture distinguishes view-share materialization from grant-only deltas', async () => {
+    const architecture = proseText(
+      await readFile(join(rootDirectory, 'docs/ARCHITECTURE.md'), 'utf8'),
+    )
+    expect(architecture).toContain(
+      'Only a view-share delta with nonempty add or remove entries ' +
+        'materializes inherited access.',
+    )
+    expect(architecture).toContain(
+      'Grant-only deltas (addSavers, removeSavers, or removeGrants) leave ' +
+        'visibility and inherited view shares unchanged.',
+    )
+  })
+
+  it('runbook explains the state secret, limiter, and fail-closed 503', async () => {
+    const runbook = await readFile(
+      join(rootDirectory, 'docs/RUNBOOK.md'),
+      'utf8',
+    )
+    for (const token of [
+      'LINK_SECRET',
+      'STATE_RATE_LIMITER',
+      '503',
+      'state_unavailable',
+    ]) {
+      expect.soft(runbook, token).toContain(token)
+    }
+    expect
+      .soft(proseText(runbook))
+      .toMatch(
+        /(?:missing|absent|unavailable).*(?:binding|limiter|secret)|(?:binding|limiter|secret).*(?:missing|absent|unavailable)/i,
+      )
+  })
+})
 
 describe('built CLI', () => {
   it('runs under Node and Bun', async () => {
@@ -2182,13 +4009,13 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     const help = await cli('node', ['state', 'set', '--help'])
     expect(help.exitCode).toBe(0)
     expect(help.stdout).toContain(
-      'Path to a JSON file mapping saved-value names to values',
+      'Read the changes from this JSON file of saved-value names to values.',
     )
     expect(help.stdout).toContain(
       'only guards against saves racing this command',
     )
     expect(help.stdout).toContain(
-      'pass --revision from an earlier read when changes were prepared from it',
+      'pass --revision from the read you prepared the changes from',
     )
   })
 
@@ -2584,6 +4411,170 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     expect(legacyLink.stderr).toContain(
       'This Dossier deployment does not support saved values. Update the deployment.',
     )
+  })
+
+  it('keeps ordinary commands working against a legacy deployment', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    const options = { home, env: { DOSSIER_API_KEY: 'ds_legacy' } }
+    const id = 'legacydoc001'
+    documents.set(id, storedDocument('Legacy.html'))
+
+    const listed = await cli('node', ['list', '--json'], options)
+    expect(listed).toMatchObject({ exitCode: 0, stderr: '' })
+    expect(JSON.parse(listed.stdout)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id,
+          stateful: false,
+          stateRevision: null,
+          stateUpdatedAt: null,
+        }),
+      ]),
+    )
+
+    const tree = await cli('node', ['tree', id], options)
+    expect(tree).toMatchObject({ exitCode: 0, stderr: '' })
+    expect(tree.stdout).toContain('Legacy')
+
+    const file = join(home, 'legacy-ordinary.html')
+    await writeFile(file, statefulHtml('Legacy ordinary upload'), 'utf8')
+    const uploaded = await cli(
+      'node',
+      ['upload', file, '--new', '--json'],
+      options,
+    )
+    expect(uploaded).toMatchObject({ exitCode: 0, stderr: '' })
+    expect(JSON.parse(uploaded.stdout)).toMatchObject({
+      created: true,
+      stateful: false,
+    })
+
+    const beforeUploads = uploadRequests
+    const stateful = await cli(
+      'node',
+      ['upload', file, '--stateful', '--new', '--json'],
+      options,
+    )
+    expect(stateful.exitCode).toBe(1)
+    expect(stateful.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+    expect(uploadRequests).toBe(beforeUploads)
+  })
+
+  it('keeps view-only sharing working against a legacy deployment', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set('sharelegacy2', storedDocument('Legacy View Sharing.html'))
+    const options = { home, env: { DOSSIER_API_KEY: 'ds_legacy' } }
+    const beforeDeltas = shareDeltas.length
+    const beforeRequests = shareRequests
+    const beforeHealth = healthRequests
+    const viewOnlyOutput =
+      'Configured: reader@example.com\n' +
+      'Effective: reader@example.com\n' +
+      'Permissions:\n  reader@example.com: view\n' +
+      'Access source: own\n'
+
+    const added = await cli(
+      'node',
+      ['share', 'sharelegacy2', '--add', 'reader@example.com'],
+      options,
+    )
+    expect(added).toEqual({
+      stdout: viewOnlyOutput,
+      stderr: '',
+      exitCode: 0,
+    })
+    expect(healthRequests).toBe(beforeHealth)
+
+    const read = await cli('node', ['share', 'sharelegacy2'], options)
+    expect(read).toEqual({
+      stdout: viewOnlyOutput,
+      stderr: '',
+      exitCode: 0,
+    })
+    expect(healthRequests).toBe(beforeHealth)
+
+    const removed = await cli(
+      'node',
+      ['share', 'sharelegacy2', '--remove', 'reader@example.com'],
+      options,
+    )
+    expect(removed).toEqual({
+      stdout:
+        'Configured: none\nEffective: none\n' +
+        'Permissions:\n  none\nAccess source: own\n',
+      stderr: '',
+      exitCode: 0,
+    })
+    expect(healthRequests).toBe(beforeHealth + 1)
+    expect(shareDeltas.slice(beforeDeltas)).toEqual([
+      { add: ['reader@example.com'] },
+      { remove: ['reader@example.com'] },
+    ])
+    expect(shareRequests).toBe(beforeRequests + 3)
+
+    const edit = await cli(
+      'node',
+      ['share', 'sharelegacy2', '--add', 'x', '--edit-state'],
+      options,
+    )
+    expect(edit.exitCode).toBe(1)
+    expect(edit.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+    expect(healthRequests).toBe(beforeHealth + 2)
+    expect(shareRequests).toBe(beforeRequests + 3)
+    expect(shareDeltas).toHaveLength(beforeDeltas + 2)
+  })
+
+  it('still removes the saving grant when a current deployment has saved values switched off', async () => {
+    const home = await temporaryHome()
+    await authenticate(home)
+    documents.set(
+      'shareunavail',
+      storedDocument('Unavailable Sharing.html', {
+        stateful: true,
+        stateRevision: 0,
+        shares: ['person@example.com'],
+        grants: [{ email: 'person@example.com', canSave: true }],
+      }),
+    )
+    const options = { home, env: { DOSSIER_API_KEY: 'ds_unavailable' } }
+    const beforeDeltas = shareDeltas.length
+
+    const removed = await cli(
+      'node',
+      ['share', 'shareunavail', '--remove', 'person@example.com'],
+      options,
+    )
+    expect(removed).toEqual({
+      stdout:
+        'Configured: none\nEffective: none\n' +
+        'Permissions:\n  none\nAccess source: own\n',
+      stderr: '',
+      exitCode: 0,
+    })
+    expect(shareDeltas.slice(beforeDeltas)).toEqual([
+      {
+        remove: ['person@example.com'],
+        removeGrants: ['person@example.com'],
+      },
+    ])
+    expect(documents.get('shareunavail')?.grants).toEqual([])
+
+    const edit = await cli(
+      'node',
+      ['share', 'shareunavail', '--add', 'person@example.com', '--edit-state'],
+      options,
+    )
+    expect(edit.exitCode).toBe(1)
+    expect(edit.stderr).toContain(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
+    expect(shareDeltas).toHaveLength(beforeDeltas + 1)
   })
 
   it('creates then updates through the origin-account-path mapping', async () => {
@@ -3165,10 +5156,10 @@ node "$DOSSIER_TEST_UPDATE_MANIFEST"
     const help = await cli('node', ['share', '--help'])
     expect(help.exitCode).toBe(0)
     expect(help.stdout).toContain(
-      'Add view-only access, or view and save with --edit-state',
+      'Grant viewing, or viewing and saving with --edit-state.',
     )
     expect(help.stdout).toContain(
-      'Remove view and save, or only save with --edit-state',
+      'Drop viewing and saving, or only saving with --edit-state.',
     )
     expect(help.stdout).toContain('saving never grants publishing or sharing')
   })
