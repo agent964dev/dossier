@@ -4,6 +4,9 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ApiError,
+  DocumentEditor,
+  DocumentGetResponse,
+  DocumentListResponse,
   DocumentReader,
   DossierApi,
   EditLinkResponse,
@@ -15,7 +18,9 @@ import {
   SharesResponse,
   StateResponse,
   StateSaveRequest,
+  TreeResponse,
   UploadRequest,
+  UploadResponse,
 } from './index'
 
 describe('shared contracts', () => {
@@ -94,15 +99,16 @@ describe('shared contracts', () => {
       revision: 0,
       type: 'text',
     })
-    expect(Schema.decodeUnknownSync(DocumentReader.fields.stateful)(true)).toBe(
-      true,
-    )
+    const stateFields = {
+      stateful: true,
+      stateRevision: 0,
+      stateUpdatedAt: null,
+    }
     expect(
-      Schema.decodeUnknownSync(DocumentReader.fields.stateRevision)(null),
-    ).toBeNull()
-    expect(
-      Schema.decodeUnknownSync(DocumentReader.fields.stateUpdatedAt)(null),
-    ).toBeNull()
+      Schema.decodeUnknownSync(
+        DocumentReader.pick('stateful', 'stateRevision', 'stateUpdatedAt'),
+      )(stateFields),
+    ).toEqual(stateFields)
     expect(
       Schema.decodeUnknownSync(UploadRequest)({
         html: '<!doctype html><title>stateful</title>',
@@ -110,6 +116,89 @@ describe('shared contracts', () => {
         acceptStateChanges: true,
       }),
     ).toMatchObject({ stateful: true, acceptStateChanges: true })
+  })
+
+  it('defaults legacy document state fields and still encodes them', () => {
+    const legacyReader = {
+      id: 'abcdefghijkl',
+      title: 'Legacy document',
+      description: null,
+      kind: null,
+      parentId: null,
+      effectiveVisibility: 'team',
+      workspaceSlug: 'test',
+      authorAccountId: 'acct_test',
+      authorName: 'Test User',
+      latestVersionNumber: 1,
+      disabled: false,
+      url: 'https://dossier.test/d/abcdefghijkl',
+      rawUrl: 'https://dossier.test/d/abcdefghijkl/raw',
+      hubUrl: 'https://dossier.test/d/abcdefghijkl/tree',
+      createdAt: '2026-09-12T00:00:00.000Z',
+      updatedAt: '2026-09-12T00:00:00.000Z',
+    } satisfies typeof DocumentReader.Encoded
+    const legacyEditor = {
+      ...legacyReader,
+      visibility: 'team',
+      accessSource: 'own',
+      versionCount: 1,
+      revision: 1,
+      deletionBatchId: null,
+      deletionRootTitle: null,
+      deletedAt: null,
+      deletedBy: null,
+      disabledAt: null,
+    } satisfies typeof DocumentEditor.Encoded
+    const defaults = {
+      stateful: false,
+      stateRevision: null,
+      stateUpdatedAt: null,
+    }
+    const reader = Schema.decodeUnknownSync(DocumentReader)(legacyReader)
+    const editor = Schema.decodeUnknownSync(DocumentEditor)(legacyEditor)
+    expect(reader).toEqual({ ...legacyReader, ...defaults })
+    expect(editor).toEqual({ ...legacyEditor, ...defaults })
+    expect(Schema.encodeSync(DocumentReader)(reader)).toEqual(reader)
+    expect(Schema.encodeSync(DocumentEditor)(editor)).toEqual(editor)
+    expect(
+      Schema.decodeUnknownSync(DocumentListResponse)({
+        ok: true,
+        documents: [legacyReader, legacyEditor],
+        nextCursor: null,
+      }),
+    ).toMatchObject({ documents: [reader, editor] })
+    expect(
+      Schema.decodeUnknownSync(DocumentGetResponse)({
+        ok: true,
+        document: legacyEditor,
+        versions: [],
+      }),
+    ).toMatchObject({ document: editor })
+    expect(
+      Schema.decodeUnknownSync(TreeResponse)({
+        breadcrumb: [legacyReader],
+        document: legacyReader,
+        siblings: [legacyReader],
+        children: [legacyReader],
+      }),
+    ).toEqual({
+      breadcrumb: [reader],
+      document: reader,
+      siblings: [reader],
+      children: [reader],
+    })
+    const receipt = Schema.decodeUnknownSync(UploadResponse)({
+      ok: true,
+      document: legacyEditor,
+      versionNumber: 1,
+      versionUrl: `${legacyReader.url}/v/1`,
+      warnings: [],
+      draftId: legacyReader.id,
+      publicUrl: legacyReader.url,
+      rawUrl: legacyReader.rawUrl,
+    })
+    expect(receipt.document).toEqual(editor)
+    expect(Schema.encodeSync(UploadResponse)(receipt)).toEqual(receipt)
   })
 
   it('decodes signed-in state grant share fields', () => {
@@ -134,6 +223,17 @@ describe('shared contracts', () => {
     ).toMatchObject({
       grants: [{ email: 'saver@example.test', canSave: true }],
     })
+  })
+
+  it('defaults legacy share responses to no grants and still encodes them', () => {
+    const legacy = {
+      configured: ['reader@example.test'],
+      effective: ['reader@example.test'],
+      accessSource: 'own',
+    } satisfies typeof SharesResponse.Encoded
+    const decoded = Schema.decodeUnknownSync(SharesResponse)(legacy)
+    expect(decoded).toEqual({ ...legacy, grants: [] })
+    expect(Schema.encodeSync(SharesResponse)(decoded)).toEqual(decoded)
   })
 
   it('decodes every state save error through the derived client', async () => {

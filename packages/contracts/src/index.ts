@@ -123,9 +123,13 @@ export const DocumentReader = Schema.Struct({
   authorAccountId: Schema.String,
   authorName: Schema.String,
   latestVersionNumber: Schema.Number,
-  stateful: Schema.Boolean,
-  stateRevision: Schema.NullOr(Schema.Number),
-  stateUpdatedAt: Schema.NullOr(Schema.String),
+  stateful: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  stateRevision: Schema.optionalWith(Schema.NullOr(Schema.Number), {
+    default: () => null,
+  }),
+  stateUpdatedAt: Schema.optionalWith(Schema.NullOr(Schema.String), {
+    default: () => null,
+  }),
   disabled: Schema.Boolean,
   url: Schema.String,
   rawUrl: Schema.String,
@@ -476,7 +480,11 @@ export const SharesResponse = Schema.Struct({
   configured: Schema.Array(Schema.String),
   effective: Schema.Array(Schema.String),
   accessSource: AccessSource,
-  grants: Schema.Array(StateGrant),
+  // A deployment without saved values omits grants. The CLI decodes it as
+  // an empty list so view-only sharing keeps working there.
+  grants: Schema.optionalWith(Schema.Array(StateGrant), {
+    default: () => [],
+  }),
 })
 export type SharesResponse = typeof SharesResponse.Type
 
