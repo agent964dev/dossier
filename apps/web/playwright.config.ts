@@ -43,6 +43,7 @@ export default defineConfig({
     env: {
       DOSSIER_DEV_PORT: String(port),
       DOSSIER_PERSIST_PATH: persistPath,
+      PUBLIC_BASE_URL: baseURL,
     },
   },
 })

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { renderWrapperPage } from '../src/api/wrapper'
 import frameRuntime from '../src/runtime/frame-runtime.js?raw'
+import { issueCsrfToken } from '../src/server/csrf'
 import worker from '../src/worker'
 import {
   Principal,
@@ -47,6 +48,7 @@ interface SurfaceBody {
   readonly frameTicket: string
   readonly frameVersion: number
   readonly frameHasRuntime: boolean
+  readonly csrfToken?: string
 }
 
 async function setup(suffix: string): Promise<Setup> {
@@ -187,7 +189,9 @@ describe('saved-values browser surface', () => {
       key: 'surface-wrapper-ordinary',
     })
 
-    const wrapped = await request(`/d/${stateful.document.id}`)
+    const wrapped = await request(`/d/${stateful.document.id}`, {
+      headers: { cookie: owner.cookie },
+    })
     const wrapperHtml = await wrapped.text()
     expect(wrapped.status).toBe(200)
     expect(wrapped.headers.get('content-security-policy')).toContain(
@@ -199,8 +203,13 @@ describe('saved-values browser surface', () => {
     expect(wrapperHtml).toContain('id="dossier-bootstrap"')
     expect(wrapperHtml).toContain('id="dossier-frame"')
     expect(wrapperHtml).toContain('sandbox="allow-scripts allow-popups"')
-    expect(wrapperHtml).toContain('Read only')
-    expect(wrapperHtml).toContain('disabled>Save</button>')
+    expect(wrapperHtml).toContain('>Save</p>')
+    expect(wrapperHtml).toContain('id="dossier-save" type="button">Save')
+    expect(wrapperHtml).toContain('id="dossier-save-retry"')
+    expect(wrapperHtml).toContain('id="dossier-copy-draft"')
+    expect(wrapperHtml).toContain('This plan changed while you were editing')
+    expect(wrapperHtml).toContain('Keep editing this draft')
+    expect(wrapperHtml).toContain('Review latest saved version')
 
     const pinnedCurrent = await request(`/d/${stateful.document.id}/v/1`)
     const pinnedCurrentHtml = await pinnedCurrent.text()
@@ -300,9 +309,216 @@ describe('saved-values browser surface', () => {
 
     const post = await request(`/d/${published.document.id}/state`, {
       method: 'POST',
+      headers: {
+        origin: 'https://dossier.test',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        version: 1,
+        changes: [{ name: 'name', value: 'Grace', base: 0 }],
+      }),
     })
-    expect(post.status).toBe(405)
-    expect(post.headers.get('allow')).toBe('GET')
+    expect(post.status).toBe(403)
+    expect(await post.json()).toMatchObject({
+      ok: false,
+      code: 'state_edit_required',
+    })
+  })
+
+  it('saves with a cookie and account-bound CSRF token', async () => {
+    const owner = await setup('surface_save')
+    const published = await publish(owner, {
+      html: statefulHtml('Browser save'),
+      stateful: true,
+      visibility: 'public',
+      key: 'surface-save',
+    })
+    const { body: initial } = await surface(published.document.id, {
+      headers: { cookie: owner.cookie },
+    })
+    expect(initial.csrfToken).toBeTypeOf('string')
+
+    const wrapper = await request(`/d/${published.document.id}`, {
+      headers: { cookie: owner.cookie },
+    })
+    const wrapperHtml = await wrapper.text()
+    const bootstrapText =
+      /<script type="application\/json" id="dossier-bootstrap">([\s\S]*?)<\/script>/.exec(
+        wrapperHtml,
+      )?.[1]
+    expect(bootstrapText).toBeDefined()
+    const bootstrap = JSON.parse(bootstrapText!) as {
+      csrfToken: string
+      snapshot: { canSave: boolean }
+    }
+    expect(bootstrap.csrfToken).toBeTypeOf('string')
+    expect(bootstrap.snapshot.canSave).toBe(true)
+
+    const response = await request(`/d/${published.document.id}/state`, {
+      method: 'POST',
+      headers: {
+        cookie: owner.cookie,
+        origin: 'https://dossier.test',
+        'content-type': 'application/json',
+        'x-dossier-csrf': bootstrap.csrfToken,
+      },
+      body: JSON.stringify({
+        version: initial.version,
+        changes: [{ name: 'name', value: 'Grace', base: 0 }],
+      }),
+    })
+    expect(response.status, await response.clone().text()).toBe(200)
+    expect(await response.json()).toMatchObject({
+      documentId: published.document.id,
+      version: initial.version,
+      revision: 1,
+      fields: {
+        name: { value: 'Grace', revision: 1, type: 'text' },
+      },
+      canSave: true,
+    })
+  })
+
+  it('rejects missing, foreign-origin, and foreign-account CSRF proofs', async () => {
+    const owner = await setup('surface_csrf_owner')
+    const other = await setup('surface_csrf_other')
+    const published = await publish(owner, {
+      html: statefulHtml('CSRF save'),
+      stateful: true,
+      visibility: 'public',
+      key: 'surface-csrf',
+    })
+    const ownerToken = await run(
+      issueCsrfToken(owner.accountId).pipe(Effect.provide(layer)),
+    )
+    const otherToken = await run(
+      issueCsrfToken(other.accountId).pipe(Effect.provide(layer)),
+    )
+    const payload = JSON.stringify({
+      version: 1,
+      changes: [{ name: 'name', value: 'Mallory', base: 0 }],
+    })
+    const attempts = [
+      {
+        origin: 'https://dossier.test',
+        token: undefined,
+      },
+      {
+        origin: 'https://attacker.example',
+        token: ownerToken,
+      },
+      {
+        origin: 'https://dossier.test',
+        token: otherToken,
+      },
+    ] as const
+
+    for (const attempt of attempts) {
+      const response = await request(`/d/${published.document.id}/state`, {
+        method: 'POST',
+        headers: {
+          cookie: owner.cookie,
+          origin: attempt.origin,
+          'content-type': 'application/json',
+          ...(attempt.token === undefined
+            ? {}
+            : { 'x-dossier-csrf': attempt.token }),
+        },
+        body: payload,
+      })
+      expect(response.status).toBe(403)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        code: 'state_edit_required',
+      })
+    }
+  })
+
+  it('passes a state conflict through the API error envelope', async () => {
+    const owner = await setup('surface_conflict')
+    const published = await publish(owner, {
+      html: statefulHtml('Conflict save'),
+      stateful: true,
+      visibility: 'public',
+      key: 'surface-conflict',
+    })
+    const token = await run(
+      issueCsrfToken(owner.accountId).pipe(Effect.provide(layer)),
+    )
+    const save = (value: string) =>
+      request(`/d/${published.document.id}/state`, {
+        method: 'POST',
+        headers: {
+          cookie: owner.cookie,
+          origin: 'https://dossier.test',
+          'content-type': 'application/json',
+          'x-dossier-csrf': token,
+        },
+        body: JSON.stringify({
+          version: 1,
+          changes: [{ name: 'name', value, base: 0 }],
+        }),
+      })
+
+    const first = await save('Grace')
+    expect(first.status, await first.clone().text()).toBe(200)
+    const conflict = await save('Katherine')
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toMatchObject({
+      ok: false,
+      code: 'state_conflict',
+      details: {
+        fields: [{ name: 'name', revision: 1, value: 'Grace' }],
+      },
+    })
+  })
+
+  it('rate limits browser saves by document and account', async () => {
+    const owner = await setup('surface_rate_limit')
+    const published = await publish(owner, {
+      html: statefulHtml('Rate limited save'),
+      stateful: true,
+      visibility: 'public',
+      key: 'surface-rate-limit',
+    })
+    const token = await run(
+      issueCsrfToken(owner.accountId).pipe(Effect.provide(layer)),
+    )
+    const original = env.STATE_RATE_LIMITER
+    const keys: string[] = []
+    env.STATE_RATE_LIMITER = {
+      limit: async ({ key }) => {
+        keys.push(key)
+        return { success: false }
+      },
+    }
+
+    try {
+      const response = await request(`/d/${published.document.id}/state`, {
+        method: 'POST',
+        headers: {
+          cookie: owner.cookie,
+          origin: 'https://dossier.test',
+          'content-type': 'application/json',
+          'x-dossier-csrf': token,
+        },
+        body: JSON.stringify({
+          version: 1,
+          changes: [{ name: 'name', value: 'Grace', base: 0 }],
+        }),
+      })
+      expect(response.status).toBe(429)
+      expect(response.headers.get('retry-after')).toBe('60')
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        code: 'rate_limited',
+      })
+      expect(keys).toEqual([
+        `document:${published.document.id}:account:${owner.accountId}`,
+      ])
+    } finally {
+      env.STATE_RATE_LIMITER = original
+    }
   })
 
   it('answers 404 for expired, wrong-document, and wrong-version tickets', async () => {

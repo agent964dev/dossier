@@ -1,4 +1,5 @@
-import { Effect } from 'effect'
+import { StateChange } from '@dossier/contracts'
+import { Effect, Schema } from 'effect'
 
 import {
   Access,
@@ -6,13 +7,24 @@ import {
   DossierError,
   PersistenceError,
   Principal,
+  Session,
   SessionError,
   State,
+  WorkerEnv,
   apiError,
   errorResponse,
   type StateActor,
   type StateSnapshot,
 } from '../services'
+import { issueCsrfToken, verifyCsrf } from '../server/csrf'
+import { positiveInteger, readBoundedBody, stateRateLimiter } from './request'
+
+const StateSurfaceSaveRequest = Schema.Struct({
+  version: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  changes: Schema.Array(StateChange),
+})
+
+type StateSurfaceSaveRequest = typeof StateSurfaceSaveRequest.Type
 
 interface StateSurfaceRow {
   readonly title: string
@@ -28,6 +40,7 @@ export interface StateSurfaceData {
   readonly frameVersion: number
   readonly frameHasRuntime: boolean
   readonly title: string
+  readonly csrfToken?: string
 }
 
 function methodNotAllowed(): Response {
@@ -35,12 +48,12 @@ function methodNotAllowed(): Response {
     JSON.stringify({
       ok: false,
       code: 'method_not_allowed',
-      message: 'Use GET for this saved-values surface.',
+      message: 'Use GET or POST for this saved-values surface.',
     }),
     {
       status: 405,
       headers: {
-        allow: 'GET',
+        allow: 'GET, POST',
         'cache-control': 'no-store',
         'content-type': 'application/json; charset=utf-8',
         'x-content-type-options': 'nosniff',
@@ -59,6 +72,33 @@ function jsonResponse(body: unknown): Response {
   })
 }
 
+function malformedInput(): DossierError {
+  return apiError(
+    'policy_rejected',
+    'The request body does not match the API schema.',
+  )
+}
+
+function resolveActor(
+  request: Request,
+): Effect.Effect<StateActor, DossierError | PersistenceError, Principal> {
+  return Effect.gen(function* () {
+    const principals = yield* Principal
+    const principalResult = yield* principals
+      .resolveSession(request)
+      .pipe(Effect.either)
+    if (
+      principalResult._tag === 'Left' &&
+      principalResult.left instanceof PersistenceError
+    ) {
+      return yield* Effect.fail(principalResult.left)
+    }
+    return principalResult._tag === 'Right'
+      ? { kind: 'account', principal: principalResult.right }
+      : { kind: 'public' }
+  })
+}
+
 function pinnedVersion(
   request: Request,
 ): Effect.Effect<number | undefined, DossierError> {
@@ -73,6 +113,79 @@ function pinnedVersion(
     : Effect.fail(apiError('not_found', 'Document version not found.'))
 }
 
+function decodeSaveRequest(
+  request: Request,
+): Effect.Effect<StateSurfaceSaveRequest, DossierError, WorkerEnv> {
+  return Effect.gen(function* () {
+    const contentType = request.headers.get('content-type')?.toLowerCase() ?? ''
+    if (!contentType.startsWith('application/json')) {
+      return yield* Effect.fail(malformedInput())
+    }
+
+    const env = yield* WorkerEnv
+    const maxBytes = positiveInteger(env.MAX_REQUEST_BYTES, 'MAX_REQUEST_BYTES')
+    const body = yield* Effect.tryPromise({
+      try: () => readBoundedBody(request, maxBytes),
+      catch: malformedInput,
+    })
+    if (body === null) {
+      return yield* Effect.fail(
+        apiError(
+          'body_too_large',
+          `Request body exceeds the ${maxBytes} byte limit.`,
+        ),
+      )
+    }
+
+    const decoded = yield* Effect.try({
+      try: () => JSON.parse(new TextDecoder().decode(body)) as unknown,
+      catch: malformedInput,
+    })
+    return yield* Schema.decodeUnknown(StateSurfaceSaveRequest, {
+      onExcessProperty: 'error',
+    })(decoded).pipe(Effect.mapError(malformedInput))
+  })
+}
+
+function checkStateRateLimit(
+  documentId: string,
+  accountId: string,
+): Effect.Effect<void, DossierError, WorkerEnv> {
+  return Effect.gen(function* () {
+    const env = yield* WorkerEnv
+    const limiter = stateRateLimiter(env)
+    if (limiter === undefined) {
+      return yield* Effect.fail(
+        apiError(
+          'state_unavailable',
+          'Saved values are temporarily unavailable.',
+        ),
+      )
+    }
+
+    const outcome = yield* Effect.tryPromise({
+      try: () =>
+        limiter.limit({
+          key: `document:${documentId}:account:${accountId}`,
+        }),
+      catch: () =>
+        apiError(
+          'state_unavailable',
+          'Saved values are temporarily unavailable.',
+        ),
+    })
+    if (!outcome.success) {
+      return yield* Effect.fail(
+        new DossierError({
+          code: 'rate_limited',
+          message: 'State rate limit exceeded.',
+          retryAfter: 60,
+        }),
+      )
+    }
+  })
+}
+
 export function loadStateSurface(
   request: Request,
   documentId: string,
@@ -80,24 +193,11 @@ export function loadStateSurface(
 ): Effect.Effect<
   StateSurfaceData,
   DossierError | PersistenceError | SessionError,
-  Access | Db | Principal | State
+  Access | Db | Principal | Session | State
 > {
   return Effect.gen(function* () {
     const version = requestedVersion
-    const principals = yield* Principal
-    const principalResult = yield* principals
-      .resolveSession(request)
-      .pipe(Effect.either)
-    if (
-      principalResult._tag === 'Left' &&
-      principalResult.left instanceof PersistenceError
-    ) {
-      return yield* Effect.fail(principalResult.left)
-    }
-    const actor: StateActor =
-      principalResult._tag === 'Right'
-        ? { kind: 'account', principal: principalResult.right }
-        : { kind: 'public' }
+    const actor = yield* resolveActor(request)
 
     const state = yield* State
     const snapshot = yield* state.read(documentId, actor, version)
@@ -139,6 +239,10 @@ export function loadStateSurface(
       row.version_number,
       actor,
     )
+    const csrfToken =
+      actor.kind === 'account'
+        ? yield* issueCsrfToken(actor.principal.accountId)
+        : undefined
     return {
       mode: actor.kind === 'account' ? 'account' : 'public',
       snapshot,
@@ -146,7 +250,65 @@ export function loadStateSurface(
       frameVersion: row.version_number,
       frameHasRuntime: row.state_fields_json !== null,
       title: row.title,
+      ...(csrfToken === undefined ? {} : { csrfToken }),
     }
+  })
+}
+
+function getStateSurface(
+  request: Request,
+  documentId: string,
+): Effect.Effect<
+  Response,
+  DossierError | PersistenceError | SessionError,
+  Access | Db | Principal | Session | State
+> {
+  return pinnedVersion(request).pipe(
+    Effect.flatMap((version) => loadStateSurface(request, documentId, version)),
+    Effect.map((surface) =>
+      jsonResponse({
+        ...surface.snapshot,
+        frameTicket: surface.frameTicket,
+        frameVersion: surface.frameVersion,
+        frameHasRuntime: surface.frameHasRuntime,
+        ...(surface.csrfToken === undefined
+          ? {}
+          : { csrfToken: surface.csrfToken }),
+      }),
+    ),
+  )
+}
+
+function postStateSurface(
+  request: Request,
+  documentId: string,
+): Effect.Effect<
+  Response,
+  DossierError | PersistenceError,
+  Principal | Session | State | WorkerEnv
+> {
+  return Effect.gen(function* () {
+    const actor = yield* resolveActor(request)
+    if (actor.kind !== 'account') {
+      return yield* Effect.fail(
+        apiError('state_edit_required', 'State edit access is required.'),
+      )
+    }
+
+    yield* verifyCsrf({
+      request,
+      token: request.headers.get('x-dossier-csrf'),
+      accountId: actor.principal.accountId,
+    }).pipe(
+      Effect.mapError(() =>
+        apiError('state_edit_required', 'State edit access is required.'),
+      ),
+    )
+    yield* checkStateRateLimit(documentId, actor.principal.accountId)
+    const payload = yield* decodeSaveRequest(request)
+    const state = yield* State
+    const snapshot = yield* state.save(documentId, actor, payload)
+    return jsonResponse(snapshot)
   })
 }
 
@@ -156,22 +318,23 @@ export function handleStateSurface(
 ): Effect.Effect<
   Response,
   PersistenceError | SessionError,
-  Access | Db | Principal | State
+  Access | Db | Principal | Session | State | WorkerEnv
 > {
-  if (request.method !== 'GET') return Effect.succeed(methodNotAllowed())
-  return pinnedVersion(request).pipe(
-    Effect.flatMap((version) => loadStateSurface(request, documentId, version)),
-    Effect.map((surface) =>
-      jsonResponse({
-        ...surface.snapshot,
-        frameTicket: surface.frameTicket,
-        frameVersion: surface.frameVersion,
-        frameHasRuntime: surface.frameHasRuntime,
-      }),
-    ),
-    Effect.catchIf(
-      (error): error is DossierError => error instanceof DossierError,
-      (error) => Effect.succeed(errorResponse(error)),
-    ),
-  )
+  if (request.method === 'GET') {
+    return getStateSurface(request, documentId).pipe(
+      Effect.catchIf(
+        (error): error is DossierError => error instanceof DossierError,
+        (error) => Effect.succeed(errorResponse(error)),
+      ),
+    )
+  }
+  if (request.method === 'POST') {
+    return postStateSurface(request, documentId).pipe(
+      Effect.catchIf(
+        (error): error is DossierError => error instanceof DossierError,
+        (error) => Effect.succeed(errorResponse(error)),
+      ),
+    )
+  }
+  return Effect.succeed(methodNotAllowed())
 }

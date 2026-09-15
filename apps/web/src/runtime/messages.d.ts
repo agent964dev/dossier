@@ -57,7 +57,22 @@ interface DossierCollectMessage {
   readonly documentId: string
 }
 
-type DossierWrapperMessage = DossierApplyMessage | DossierCollectMessage
+/**
+ * wrapper -> frame: one round trip after a save or after "Review latest saved
+ * version". `acknowledge` holds the raw values this tab just wrote, keyed by
+ * name; `apply` holds the snapshot to write into every other field.
+ */
+interface DossierRebaseMessage {
+  readonly type: 'rebase'
+  readonly documentId: string
+  readonly acknowledge: Readonly<Record<string, unknown>>
+  readonly apply: Readonly<Record<string, DossierFieldValue>>
+}
+
+type DossierWrapperMessage =
+  | DossierApplyMessage
+  | DossierCollectMessage
+  | DossierRebaseMessage
 
 /** frame -> wrapper: the DOM is scanned and author scripts have run. */
 interface DossierReadyMessage {
@@ -88,6 +103,19 @@ interface DossierValuesMessage {
   readonly type: 'values'
   readonly documentId: string
   readonly fields: Readonly<Record<string, unknown>>
+  /** Fields whose registered reader failed or returned a non-JSON value. */
+  readonly failed: readonly string[]
+}
+
+/**
+ * frame -> wrapper: the answer to rebase. `applied` is what the runtime wrote,
+ * `stillDirty` is every field whose value still differs from the memory.
+ */
+interface DossierRebasedMessage {
+  readonly type: 'rebased'
+  readonly documentId: string
+  readonly applied: readonly string[]
+  readonly stillDirty: readonly string[]
 }
 
 type DossierFrameMessage =
@@ -95,6 +123,7 @@ type DossierFrameMessage =
   | DossierAppliedMessage
   | DossierChangedMessage
   | DossierValuesMessage
+  | DossierRebasedMessage
 
 /** One field of the snapshot the State service reads. */
 interface DossierFieldSnapshot {
@@ -128,6 +157,8 @@ interface DossierStateSurface extends DossierSnapshot {
   readonly frameTicket: string
   readonly frameVersion: number
   readonly frameHasRuntime: boolean
+  /** Present for a signed-in viewer; the wrapper sends it on every POST. */
+  readonly csrfToken?: string
 }
 
 interface Window {

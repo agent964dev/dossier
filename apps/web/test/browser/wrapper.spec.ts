@@ -1,13 +1,43 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { scanStateFields } from '@dossier/policy'
 import {
   expect,
   request as apiRequest,
   test,
   type APIRequestContext,
+  type Browser,
+  type Page,
 } from '@playwright/test'
 
 const baseURL = process.env.DOSSIER_BROWSER_BASE_URL ?? 'http://localhost:8790'
 const apiKey = process.env.DOSSIER_BROWSER_API_KEY ?? ''
+const authDirectory = path.join(import.meta.dirname, '.auth')
+/** The document's author, and the workspace admin seeded beside it. */
+const firstStorage = path.join(authDirectory, 'session.json')
+const secondStorage =
+  process.env.DOSSIER_BROWSER_SECOND_STORAGE ??
+  path.join(authDirectory, 'second.json')
+
+/**
+ * The phase 5 fixture: two text fields, three checkboxes, and three custom
+ * controls registered from script. "comment" never calls the notify() its
+ * registration could hook, which is the A16 case.
+ */
+const REVIEW_PAGE_HTML = readFileSync(
+  path.join(import.meta.dirname, 'fixtures', 'review-page.html'),
+  'utf8',
+)
+
+const REVIEW_PAGE_RETYPE_HTML = REVIEW_PAGE_HTML.replace(
+  `    <input
+      type="text"
+      id="summary"
+      data-state="summary"
+      value="Ship the wrapper"
+    />`,
+  `    <textarea id="summary" data-state="summary">Ship newer HTML</textarea>`,
+)
 
 /**
  * The document the first spec reads. It carries one field of every shape the
@@ -247,7 +277,11 @@ interface PublishedDocument {
 
 async function publish(
   api: APIRequestContext,
-  input: { readonly html: string; readonly documentId?: string },
+  input: {
+    readonly html: string
+    readonly documentId?: string
+    readonly acceptStateChanges?: boolean
+  },
 ): Promise<PublishedDocument> {
   const response = await api.post('/api/uploads', {
     headers: { authorization: `Bearer ${apiKey}` },
@@ -259,6 +293,9 @@ async function publish(
       ...(input.documentId === undefined
         ? {}
         : { documentId: input.documentId }),
+      ...(input.acceptStateChanges === undefined
+        ? {}
+        : { acceptStateChanges: input.acceptStateChanges }),
     },
   })
   // A new document answers 201, a new version of an existing one answers 200.
@@ -270,18 +307,37 @@ async function publish(
   return { id: body.document.id, version: body.versionNumber }
 }
 
+interface StateSurface {
+  readonly revision: number
+  readonly frameTicket: string
+  readonly fields: Readonly<
+    Record<string, { readonly value: unknown; readonly revision: number }>
+  >
+}
+
+async function readSurface(
+  api: APIRequestContext,
+  documentId: string,
+): Promise<StateSurface> {
+  const response = await api.get(`/d/${documentId}/state`)
+  expect(response.status(), await response.text()).toBe(200)
+  return (await response.json()) as StateSurface
+}
+
+/** A CLI-shaped save, based on whatever revision each field is at right now. */
 async function save(
   api: APIRequestContext,
   documentId: string,
   values: Readonly<Record<string, unknown>>,
 ): Promise<void> {
+  const surface = await readSurface(api, documentId)
   const response = await api.put(`/api/documents/${documentId}/state`, {
     headers: { authorization: `Bearer ${apiKey}` },
     data: {
       changes: Object.entries(values).map(([name, value]) => ({
         name,
         value,
-        base: 0,
+        base: surface.fields[name]?.revision ?? 0,
       })),
     },
   })
@@ -292,10 +348,61 @@ async function frameTicket(
   api: APIRequestContext,
   documentId: string,
 ): Promise<string> {
-  const response = await api.get(`/d/${documentId}/state`)
-  expect(response.status(), await response.text()).toBe(200)
-  const body = (await response.json()) as { readonly frameTicket: string }
-  return body.frameTicket
+  return (await readSurface(api, documentId)).frameTicket
+}
+
+/** A review page of its own per test, so no two specs share saved values. */
+async function publishReview(): Promise<PublishedDocument> {
+  const api = await apiRequest.newContext({ baseURL })
+  try {
+    return await publish(api, { html: REVIEW_PAGE_HTML })
+  } finally {
+    await api.dispose()
+  }
+}
+
+/** A loaded wrapper page on `documentId`, signed in as `storage`. */
+async function openReview(
+  browser: Browser,
+  documentId: string,
+  storage: string = firstStorage,
+): Promise<Page> {
+  const context = await browser.newContext({ storageState: storage })
+  const page = await context.newPage()
+  await page.goto(`${baseURL}/d/${documentId}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  return page
+}
+
+async function expectStatusFits(page: Page): Promise<void> {
+  const layout = await page.locator('#dossier-status').evaluate((status) => ({
+    clientWidth: status.clientWidth,
+    scrollWidth: status.scrollWidth,
+    right: status.getBoundingClientRect().right,
+    linksInside: [...status.querySelectorAll('a')].every(
+      (link) => link.getBoundingClientRect().right <= innerWidth,
+    ),
+  }))
+  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth)
+  expect(layout.right).toBeLessThanOrEqual(390)
+  expect(layout.linksInside).toBe(true)
+}
+
+/** Holds every POST open for `delayMs` and reports when one has left. */
+async function delaySaves(
+  page: Page,
+  documentId: string,
+  delayMs: number,
+): Promise<() => number> {
+  let posted = 0
+  await page.route(`**/d/${documentId}/state`, async (route) => {
+    if (route.request().method() !== 'POST') return route.continue()
+    posted += 1
+    const response = await route.fetch()
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    await route.fulfill({ response })
+  })
+  return () => posted
 }
 
 let saved: PublishedDocument
@@ -327,10 +434,11 @@ test('fills marked inputs and a registered custom field from a CLI save', async 
 }) => {
   await page.goto(`/d/${saved.id}`)
 
-  // The seeded session cookie reached the Worker, so this is the account mode.
+  // The seeded session cookie reached the Worker, so this is the account mode,
+  // and the account that published the document may save it.
   await expect(page.locator('body')).toHaveAttribute('data-mode', 'account')
-  await expect(page.locator('#dossier-status')).toHaveText('Read only')
-  await expect(page.locator('#dossier-save')).toBeDisabled()
+  await expect(page.locator('#dossier-status')).toHaveText('Save')
+  await expect(page.locator('#dossier-save')).toBeEnabled()
   await expect(page.locator('#dossier-overlay')).toBeHidden()
 
   const frame = page.frameLocator('#dossier-frame')
@@ -471,7 +579,7 @@ test('rejects state controls whose values Chromium sanitizes by input type', asy
   expect(sanitized.every((input) => input.value !== input.attribute)).toBe(true)
 })
 
-test('keeps the read-only status legible without horizontal overflow', async ({
+test('keeps the status legible at 390 px without horizontal overflow', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 })
@@ -487,6 +595,7 @@ test('keeps the read-only status legible without horizontal overflow', async ({
   }))
   expect(layout.fontSize).toBeGreaterThanOrEqual(12)
   expect(layout.contentWidth).toBeLessThanOrEqual(layout.viewportWidth)
+  await expectStatusFits(page)
 })
 
 test('scanned defaults equal what Chromium reports for every fixture', async ({
@@ -534,4 +643,777 @@ test('scanned defaults equal what Chromium reports for every fixture', async ({
   )
 
   expect(actual).toEqual(expected)
+})
+
+test('edits, saves, and reopens on the saved values', async ({ page }) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const status = page.locator('#dossier-status')
+  await expect(status).toHaveText('Save')
+  await expect(page.locator('#dossier-save')).toBeEnabled()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('Ship on Friday')
+  await frame.locator('[data-state="accessibility"]').check()
+  await frame.locator('#approve-button').click()
+  await expect(status).toHaveText('Unsaved changes')
+
+  await page.locator('#dossier-save').click()
+  await expect(status).toHaveText(/^Saved · \d{1,2}:\d{2}/)
+
+  // A new load of the same page, which is what the next person gets (A03).
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(frame.locator('#summary')).toHaveValue('Ship on Friday')
+  await expect(frame.locator('[data-state="accessibility"]')).toBeChecked()
+  await expect(frame.locator('#approve-state')).toHaveText('approved')
+  await expect(status).toHaveText('Save')
+})
+
+test('keeps a cleared field and an unchecked box cleared', async ({ page }) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('')
+  await frame.locator('#notes').fill('')
+  await frame.locator('[data-state="security"]').uncheck()
+
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+
+  // The author's defaults are a non-empty summary, non-empty notes, and a
+  // ticked security box. None of them may come back (A08).
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(frame.locator('#summary')).toHaveValue('')
+  await expect(frame.locator('#notes')).toHaveValue('')
+  await expect(frame.locator('[data-state="security"]')).not.toBeChecked()
+})
+
+test('lets two people tick different boxes and shows both to each of them', async ({
+  browser,
+}) => {
+  const review = await publishReview()
+  const author = await openReview(browser, review.id)
+  const admin = await openReview(browser, review.id, secondStorage)
+  const authorFrame = author.frameLocator('#dossier-frame')
+  const adminFrame = admin.frameLocator('#dossier-frame')
+
+  // The second account is a workspace admin, not the author, and may save.
+  await expect(admin.locator('#dossier-save')).toBeEnabled()
+
+  await authorFrame.locator('[data-state="accessibility"]').check()
+  await author.locator('#dossier-save').click()
+  await expect(author.locator('#dossier-status')).toHaveText(/^Saved · /)
+
+  // The admin loaded before that save and still succeeds: the fields are
+  // disjoint, so nothing it touched moved past its baseline (A09, D2).
+  await adminFrame.locator('[data-state="performance"]').check()
+  await admin.locator('#dossier-save').click()
+  await expect(admin.locator('#dossier-status')).toHaveText(/^Saved · /)
+  await expect(adminFrame.locator('[data-state="performance"]')).toBeChecked()
+  await expect(adminFrame.locator('[data-state="accessibility"]')).toBeChecked()
+
+  // The author's own next save brings the admin's tick down beside its own.
+  await Promise.all([
+    author.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.url().endsWith(`/d/${review.id}/state`) &&
+        response.status() === 200,
+    ),
+    author.locator('#dossier-save').click(),
+  ])
+  await expect(authorFrame.locator('[data-state="performance"]')).toBeChecked()
+  await expect(
+    authorFrame.locator('[data-state="accessibility"]'),
+  ).toBeChecked()
+
+  await author.context().close()
+  await admin.context().close()
+})
+
+test('shows the conflict dialog for one field and keeps the draft', async ({
+  browser,
+}) => {
+  const review = await publishReview()
+  const author = await openReview(browser, review.id)
+  const admin = await openReview(browser, review.id, secondStorage)
+  const authorFrame = author.frameLocator('#dossier-frame')
+  const adminFrame = admin.frameLocator('#dossier-frame')
+
+  await adminFrame.locator('#summary').fill('Ship on Friday')
+  await adminFrame.locator('#notes').fill('Checked by the second reviewer')
+  await admin.locator('#dossier-save').click()
+  await expect(admin.locator('#dossier-status')).toHaveText(/^Saved · /)
+
+  await authorFrame.locator('#summary').fill('Ship next month')
+  await author.locator('#dossier-save').click()
+
+  const dialog = author.locator('#dossier-conflict')
+  await expect(dialog).toBeVisible()
+  await expect(author.locator('#dossier-conflict-title')).toHaveText(
+    'This plan changed while you were editing',
+  )
+  await expect(author.locator('#dossier-conflict-body')).toHaveText(
+    'Your changes are not saved. Keep or copy your draft before loading the latest saved version.',
+  )
+  const fields = author.locator('#dossier-conflict-fields')
+  await expect(fields).toContainText('summary')
+  await expect(fields).toContainText('Ship on Friday')
+  await expect(author.locator('#dossier-conflict-keep')).toBeFocused()
+  await expect(author.locator('#dossier-status')).not.toContainText('Saved')
+
+  // The modal keeps the keyboard inside itself: tabbing cycles through its own
+  // controls and never reaches one behind it, and the page behind is inert.
+  const trail: string[] = []
+  for (let step = 0; step < 4; step += 1) {
+    await author.keyboard.press('Tab')
+    trail.push(
+      await author.evaluate(() => {
+        const open = document.getElementById('dossier-conflict')
+        const active = document.activeElement
+        if (active === null || active === document.body) return 'browser'
+        return open?.contains(active) === true ? 'dialog' : `#${active.id}`
+      }),
+    )
+  }
+  expect(trail).toContain('dialog')
+  expect(trail.filter((where) => where.startsWith('#'))).toEqual([])
+  await author.evaluate(() => document.getElementById('dossier-save')?.focus())
+  await expect(author.locator('#dossier-save')).not.toBeFocused()
+
+  await author.locator('#dossier-conflict-keep').click()
+  await expect(dialog).toBeHidden()
+  await expect(author.locator('#dossier-save')).toBeFocused()
+  await expect(author.locator('#dossier-status')).toHaveText('Unsaved changes')
+  await expect(authorFrame.locator('#summary')).toHaveValue('Ship next month')
+
+  // Review latest: every clean field takes the other person's values and the
+  // draft stays on screen beside them.
+  await author.locator('#dossier-save').click()
+  await expect(dialog).toBeVisible()
+  await author.locator('#dossier-conflict-review').click()
+  await expect(dialog).toBeHidden()
+  await expect(authorFrame.locator('#notes')).toHaveValue(
+    'Checked by the second reviewer',
+  )
+  await expect(authorFrame.locator('#summary')).toHaveValue('Ship next month')
+  await expect(author.locator('#dossier-status')).toHaveText('Unsaved changes')
+
+  await author.context().close()
+  await admin.context().close()
+})
+
+test('keeps an edit made during a save unsaved without self-conflict', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  const posted = await delaySaves(page, review.id, 1200)
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  const status = page.locator('#dossier-status')
+  await frame.locator('#summary').fill('First edit')
+  await page.locator('#dossier-save').click()
+  await expect(status).toHaveText('Saving')
+  await expect.poll(posted).toBe(1)
+
+  // The request is already away, carrying "First edit".
+  await frame.locator('#summary').fill('Second edit')
+  await expect(status).toHaveText('Saving')
+
+  await expect(status).toHaveText('Unsaved changes')
+  await expect(frame.locator('#summary')).toHaveValue('Second edit')
+
+  // The next save carries the person's own newer value at the revision their
+  // own save just wrote, so it never conflicts with itself.
+  await page.locator('#dossier-save').click()
+  await expect(status).toHaveText(/^Saved · /)
+  await expect(page.locator('#dossier-conflict')).toBeHidden()
+  expect(posted()).toBe(2)
+
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(frame.locator('#summary')).toHaveValue('Second edit')
+})
+
+test('keeps a silently edited custom field at its baseline and conflicts', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  // Someone else saves the comment after this page loaded.
+  const api = await apiRequest.newContext({ baseURL })
+  await save(api, review.id, { comment: 'from the CLI' })
+  await api.dispose()
+
+  const posted = await delaySaves(page, review.id, 1200)
+  const frame = page.frameLocator('#dossier-frame')
+  const status = page.locator('#dossier-status')
+  await frame.locator('#summary').fill('Ship on Friday')
+  await page.locator('#dossier-save').click()
+  await expect.poll(posted).toBe(1)
+
+  // A custom control with no onChange, edited after collect had already run.
+  // Nothing announces it, so only the frame's memory knows.
+  await frame.locator('#comment-input').fill('mine')
+
+  // The runtime reports it as still dirty, which is the only reason the bar
+  // knows not to say Saved.
+  await expect(status).toHaveText('Unsaved changes')
+  await expect(frame.locator('#comment-input')).toHaveValue('mine')
+
+  // The comment was never submitted and never applied, so it kept the baseline
+  // this page loaded, and saving it now conflicts with the save in between.
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-conflict')).toBeVisible()
+  const fields = page.locator('#dossier-conflict-fields')
+  await expect(fields).toContainText('comment')
+  await expect(fields).toContainText('from the CLI')
+  await expect(frame.locator('#comment-input')).toHaveValue('mine')
+})
+
+test('marks a silently edited custom field unsaved after a conflict', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const api = await apiRequest.newContext({ baseURL })
+  await save(api, review.id, { comment: 'from the CLI' })
+  await api.dispose()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#comment-input').fill('mine')
+  await expect(page.locator('#dossier-status')).toHaveText('Save')
+  await page.locator('#dossier-save').click()
+
+  const dialog = page.locator('#dossier-conflict')
+  await expect(dialog).toBeVisible()
+  await expect(page.locator('#dossier-status')).toHaveText('Unsaved changes')
+  await page.locator('#dossier-conflict-keep').click()
+  await expect(dialog).toBeHidden()
+  await expect(page.locator('#dossier-status')).toHaveText('Unsaved changes')
+  await expect(frame.locator('#comment-input')).toHaveValue('mine')
+})
+
+test('fails the whole collection when a custom field reader throws', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  let posts = 0
+  await page.route(`**/d/${review.id}/state`, (route) => {
+    if (route.request().method() === 'POST') posts += 1
+    return route.continue()
+  })
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('Readable draft')
+  await frame.locator('#comment-input').fill('Unreadable draft')
+  await frame.locator('body').evaluate(() => {
+    const fixture = window as unknown as Window & {
+      reviewFixture: { setCommentReadFailure(failed: boolean): void }
+    }
+    fixture.reviewFixture.setCommentReadFailure(true)
+  })
+
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toHaveText('Could not save')
+  await expect(page.locator('#dossier-save-retry')).toBeVisible()
+  expect(posts).toBe(0)
+  await expect(frame.locator('#summary')).toHaveValue('Readable draft')
+  await expect(frame.locator('#comment-input')).toHaveValue('Unreadable draft')
+
+  await frame.locator('body').evaluate(() => {
+    const fixture = window as unknown as Window & {
+      reviewFixture: { setCommentReadFailure(failed: boolean): void }
+    }
+    fixture.reviewFixture.setCommentReadFailure(false)
+  })
+  await page.locator('#dossier-save-retry').click()
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+  expect(posts).toBe(1)
+
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(frame.locator('#summary')).toHaveValue('Readable draft')
+  await expect(frame.locator('#comment-input')).toHaveValue('Unreadable draft')
+})
+
+test('edits, saves, and reloads a field named __proto__', async ({ page }) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const special = await publish(api, {
+    html: `<!doctype html><html lang="en"><head><title>Special field</title></head><body>
+      <label>Special <input data-state="__proto__" value="authored"></label>
+    </body></html>`,
+  })
+  await api.dispose()
+
+  await page.goto(`/d/${special.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  const field = page
+    .frameLocator('#dossier-frame')
+    .locator('[data-state="__proto__"]')
+  await field.fill('saved safely')
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+
+  const stateApi = await apiRequest.newContext({ baseURL })
+  const surface = await readSurface(stateApi, special.id)
+  await stateApi.dispose()
+  expect(Object.hasOwn(surface.fields, '__proto__')).toBe(true)
+  expect(surface.fields.__proto__?.value).toBe('saved safely')
+
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(field).toHaveValue('saved safely')
+})
+
+test('serializes Review latest with Save so an older GET cannot roll back a save', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const api = await apiRequest.newContext({ baseURL })
+  await save(api, review.id, { summary: 'Saved by someone else' })
+  await api.dispose()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('My conflicting draft')
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-conflict')).toBeVisible()
+
+  let releaseReview = () => {}
+  const reviewGate = new Promise<void>((resolve) => {
+    releaseReview = resolve
+  })
+  let reviewGets = 0
+  let laterPosts = 0
+  await page.route(`**/d/${review.id}/state`, async (route) => {
+    if (route.request().method() === 'GET') {
+      const response = await route.fetch()
+      reviewGets += 1
+      await reviewGate
+      await route.fulfill({ response })
+      return
+    }
+    laterPosts += 1
+    await route.continue()
+  })
+
+  await page.locator('#dossier-conflict-review').click()
+  await expect.poll(() => reviewGets).toBe(1)
+  await frame.locator('#summary').fill('Ship the wrapper')
+  await frame.locator('#notes').fill('Saved after reviewing')
+  await page.locator('#dossier-save').click()
+  expect(laterPosts).toBe(0)
+
+  releaseReview()
+  await expect(frame.locator('#summary')).toHaveValue('Saved by someone else')
+  await expect(frame.locator('#notes')).toHaveValue('Saved after reviewing')
+  await expect(page.locator('#dossier-status')).toHaveText('Unsaved changes')
+
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+  expect(laterPosts).toBe(1)
+})
+
+test('retries Review latest after its GET fails', async ({ page }) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const api = await apiRequest.newContext({ baseURL })
+  await save(api, review.id, {
+    summary: 'Saved by someone else',
+    notes: 'Latest saved notes',
+  })
+  await api.dispose()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('My conflicting draft')
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-conflict')).toBeVisible()
+
+  await page.route(`**/d/${review.id}/state`, (route) =>
+    route.request().method() === 'GET'
+      ? route.abort('failed')
+      : route.continue(),
+  )
+  await page.locator('#dossier-conflict-review').click()
+  await expect(page.locator('#dossier-status')).toHaveText('Could not save')
+  const retryLatest = page.locator('#dossier-save-retry')
+  await expect(retryLatest).toBeVisible()
+  await expect(page.locator('#dossier-conflict')).toBeHidden()
+
+  await page.unroute(`**/d/${review.id}/state`)
+  const loaded = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'GET' &&
+      response.url().endsWith(`/d/${review.id}/state`),
+  )
+  await retryLatest.click()
+  await loaded
+  await expect(frame.locator('#summary')).toHaveValue('My conflicting draft')
+  await expect(frame.locator('#notes')).toHaveValue('Latest saved notes')
+  await expect(page.locator('#dossier-status')).toHaveText('Unsaved changes')
+  await expect(page.locator('#dossier-conflict')).toBeHidden()
+})
+
+test('saves a custom control that never announces its edits', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  const status = page.locator('#dossier-status')
+  await frame.locator('#comment-input').fill('No onChange here')
+  // Nothing was announced, so the bar still reads Save (A16).
+  await expect(status).toHaveText('Save')
+
+  await page.locator('#dossier-save').click()
+  await expect(status).toHaveText(/^Saved · /)
+
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(frame.locator('#comment-input')).toHaveValue('No onChange here')
+  await expect(frame.locator('#comment-state')).toHaveText('No onChange here')
+
+  // The registration beside it does hook onChange, and that one is immediate.
+  await frame.locator('#reject-button').click()
+  await expect(status).toHaveText('Unsaved changes')
+})
+
+test('saves from the keyboard and announces the status', async ({ page }) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const status = page.locator('#dossier-status')
+  await expect(status).toHaveAttribute('aria-live', 'polite')
+
+  // Save is the first thing the Tab key reaches.
+  await page.keyboard.press('Tab')
+  const button = page.locator('#dossier-save')
+  await expect(button).toBeFocused()
+  expect(
+    await page.evaluate(() =>
+      document.getElementById('dossier-save')?.matches(':focus-visible'),
+    ),
+  ).toBe(true)
+
+  await page.evaluate(() => {
+    const statusLine = document.getElementById('dossier-status')!
+    document.body.dataset.statusMutations = '0'
+    new MutationObserver(() => {
+      const count = Number(document.body.dataset.statusMutations ?? 0)
+      document.body.dataset.statusMutations = String(count + 1)
+    }).observe(statusLine, { childList: true })
+  })
+  await page.frameLocator('#dossier-frame').locator('#notes').focus()
+  await page.keyboard.type(' and one more line', { delay: 20 })
+  await expect(status).toHaveText('Unsaved changes')
+  await expect(page.locator('body')).toHaveAttribute(
+    'data-status-mutations',
+    '1',
+  )
+
+  await button.focus()
+  await page.keyboard.press('Enter')
+  await expect(status).toHaveText(/^Saved · /)
+  // Disabling the button mid-save would have thrown the focus away.
+  await expect(button).toBeFocused()
+})
+
+test('names the current version and links to it when the HTML moved', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route(`**/d/${review.id}/state`, (route) =>
+    route.request().method() === 'POST'
+      ? route.fulfill({
+          status: 409,
+          contentType: 'application/json; charset=utf-8',
+          body: JSON.stringify({
+            ok: false,
+            code: 'state_version_changed',
+            message: 'The document version changed after this page loaded.',
+            details: { currentVersion: 4 },
+          }),
+        })
+      : route.continue(),
+  )
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('Kept draft')
+  await page.locator('#dossier-save').click()
+
+  const status = page.locator('#dossier-status')
+  await expect(status).toContainText('Unsaved changes')
+  const link = status.locator('a')
+  await expect(link).toHaveText('version 4 is current')
+  await expect(link).toHaveAttribute('href', `/d/${review.id}`)
+  await expect(link).toHaveAttribute('target', '_blank')
+  await expect(link).toHaveAttribute('rel', 'noopener')
+  await expect(page.locator('#dossier-copy-draft')).toBeVisible()
+  await expect(frame.locator('#summary')).toHaveValue('Kept draft')
+  await expect(status).not.toContainText('Saved')
+  await expectStatusFits(page)
+})
+
+test('keeps the loaded HTML version after Review latest sees a republish', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const api = await apiRequest.newContext({ baseURL })
+  await save(api, review.id, { notes: 'Saved by someone else' })
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#notes').fill('Draft from the old HTML')
+  await page.locator('#dossier-save').click()
+  await expect(page.locator('#dossier-conflict')).toBeVisible()
+
+  const current = await publish(api, {
+    html: REVIEW_PAGE_RETYPE_HTML,
+    documentId: review.id,
+    acceptStateChanges: true,
+  })
+  await api.dispose()
+  expect(current.version).toBeGreaterThan(review.version)
+
+  await page.locator('#dossier-conflict-review').click()
+  const status = page.locator('#dossier-status')
+  await expect(status).toContainText(`version ${current.version} is current`)
+  await expect(frame.locator('#summary')).toHaveCount(1)
+  await expect(frame.locator('#summary')).toHaveAttribute('type', 'text')
+  await expect(frame.locator('#notes')).toHaveValue('Draft from the old HTML')
+  await expect(page.locator('#dossier-copy-draft')).toBeVisible()
+
+  const request = page.waitForRequest(
+    (candidate) =>
+      candidate.method() === 'POST' &&
+      candidate.url().endsWith(`/d/${review.id}/state`),
+  )
+  await page.locator('#dossier-save').click()
+  const payload = (await request).postDataJSON() as { version: number }
+  expect(payload.version).toBe(review.version)
+  await expect(status).toContainText(`version ${current.version} is current`)
+  await expect(frame.locator('#notes')).toHaveValue('Draft from the old HTML')
+})
+
+test('keeps the draft copyable when the authority is gone', async ({
+  browser,
+}) => {
+  const review = await publishReview()
+  const context = await browser.newContext({
+    storageState: firstStorage,
+    permissions: ['clipboard-read', 'clipboard-write'],
+  })
+  const page = await context.newPage()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route(`**/d/${review.id}/state`, (route) =>
+    route.request().method() === 'POST'
+      ? route.fulfill({
+          status: 410,
+          contentType: 'application/json; charset=utf-8',
+          body: JSON.stringify({
+            ok: false,
+            code: 'state_edit_required',
+            message: 'State edit access is required.',
+          }),
+        })
+      : route.continue(),
+  )
+  await page.goto(`${baseURL}/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const frame = page.frameLocator('#dossier-frame')
+  await frame.locator('#summary').fill('Kept draft')
+  await frame.locator('#comment-input').fill('and the silent one')
+  await page.locator('#dossier-save').click()
+
+  await expect(page.locator('#dossier-status')).toHaveText(
+    'Could not save · saving is no longer allowed',
+  )
+  await expect(page.locator('#dossier-save')).toBeDisabled()
+  await expect(frame.locator('#summary')).toHaveValue('Kept draft')
+  await expectStatusFits(page)
+
+  const copy = page.locator('#dossier-copy-draft')
+  await expect(copy).toBeVisible()
+  await copy.click()
+  await expect(copy).toHaveText('Draft copied')
+  const clipboard = await page.evaluate(() => navigator.clipboard.readText())
+  expect(JSON.parse(clipboard)).toMatchObject({
+    summary: 'Kept draft',
+    comment: 'and the silent one',
+  })
+
+  await context.close()
+})
+
+for (const clipboardFailure of ['missing', 'rejected'] as const) {
+  test(`offers manual draft copy when the Clipboard API is ${clipboardFailure}`, async ({
+    browser,
+  }) => {
+    const review = await publishReview()
+    const context = await browser.newContext({ storageState: firstStorage })
+    await context.addInitScript((failure) => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value:
+          failure === 'missing'
+            ? undefined
+            : {
+                writeText: () =>
+                  Promise.reject(new DOMException('Denied', 'NotAllowedError')),
+              },
+      })
+    }, clipboardFailure)
+    const page = await context.newPage()
+    await page.route(`**/d/${review.id}/state`, (route) =>
+      route.request().method() === 'POST'
+        ? route.fulfill({
+            status: 410,
+            contentType: 'application/json; charset=utf-8',
+            body: JSON.stringify({
+              ok: false,
+              code: 'state_edit_required',
+              message: 'State edit access is required.',
+            }),
+          })
+        : route.continue(),
+    )
+    await page.goto(`${baseURL}/d/${review.id}`)
+    await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+    const frame = page.frameLocator('#dossier-frame')
+    await frame.locator('#summary').fill('Draft for manual copy')
+    await frame.locator('#comment-input').fill('Silent draft too')
+    await page.locator('#dossier-save').click()
+    const copy = page.locator('#dossier-copy-draft')
+    await copy.click()
+
+    const fallback = page.locator('#dossier-copy-fallback')
+    await expect(fallback).toBeVisible()
+    await expect(copy).toHaveText('Copy manually')
+    const text = page.locator('#dossier-copy-fallback-text')
+    await expect(text).toBeFocused()
+    const draft = JSON.parse(await text.inputValue()) as Record<string, unknown>
+    expect(draft).toMatchObject({
+      summary: 'Draft for manual copy',
+      comment: 'Silent draft too',
+    })
+    expect(
+      await text.evaluate((area) => {
+        const textarea = area as HTMLTextAreaElement
+        return (
+          textarea.selectionStart === 0 &&
+          textarea.selectionEnd === textarea.value.length
+        )
+      }),
+    ).toBe(true)
+
+    await page.locator('#dossier-copy-fallback-close').click()
+    await expect(fallback).toBeHidden()
+    await expect(copy).toBeFocused()
+    await context.close()
+  })
+}
+
+test('keeps the save bar inside 390 px in every failure state', async ({
+  page,
+}) => {
+  const review = await publishReview()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+
+  const layout = () =>
+    page.evaluate(() => {
+      const line = document.getElementById('dossier-status')
+      const button = document.getElementById('dossier-save')
+      return {
+        viewport: document.documentElement.clientWidth,
+        content: document.documentElement.scrollWidth,
+        fontSize: Number.parseFloat(getComputedStyle(line!).fontSize),
+        statusWidth: line!.clientWidth,
+        statusScrollWidth: line!.scrollWidth,
+        saveHeight: button!.getBoundingClientRect().height,
+        saveRight: button!.getBoundingClientRect().right,
+      }
+    })
+
+  const status = page.locator('#dossier-status')
+  const frame = page.frameLocator('#dossier-frame')
+  await frame
+    .locator('#summary')
+    .fill('A summary long enough to push a narrow bar sideways if it could')
+  await expect(status).toHaveText('Unsaved changes')
+  let measured = await layout()
+  expect(measured.content).toBeLessThanOrEqual(measured.viewport)
+  expect(measured.fontSize).toBeGreaterThanOrEqual(12)
+  // A touch target, and fully on screen.
+  expect(measured.saveHeight).toBeGreaterThanOrEqual(40)
+  expect(measured.saveRight).toBeLessThanOrEqual(measured.viewport)
+
+  // Could not save, with Retry beside Save (A10, A15).
+  await page.route(`**/d/${review.id}/state`, (route) =>
+    route.request().method() === 'POST'
+      ? route.abort('failed')
+      : route.continue(),
+  )
+  await page.locator('#dossier-save').click()
+  await expect(status).toHaveText('Could not save')
+  await expect(page.locator('#dossier-save-retry')).toBeVisible()
+  await expect(frame.locator('#summary')).toHaveValue(
+    'A summary long enough to push a narrow bar sideways if it could',
+  )
+  measured = await layout()
+  expect(measured.content).toBeLessThanOrEqual(measured.viewport)
+  expect(measured.statusScrollWidth).toBeLessThanOrEqual(measured.statusWidth)
+  expect(measured.saveRight).toBeLessThanOrEqual(measured.viewport)
+
+  // Retry moves focus to Save before hiding itself, then uses the same path.
+  await page.unroute(`**/d/${review.id}/state`)
+  const saveRetry = page.locator('#dossier-save-retry')
+  await saveRetry.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('#dossier-save')).toBeFocused()
+  await expect(status).toHaveText(/^Saved · /)
+  await expect(saveRetry).toBeHidden()
+  await expect(page.locator('#dossier-save')).toBeFocused()
+
+  // The conflict dialog has to fit too.
+  const dialog = page.locator('#dossier-conflict')
+  await page.evaluate(() => {
+    const list = document.getElementById('dossier-conflict-fields')
+    list?.removeAttribute('hidden')
+    const open = document.getElementById('dossier-conflict')
+    ;(open as HTMLDialogElement).showModal()
+  })
+  await expect(dialog).toBeVisible()
+  measured = await layout()
+  expect(measured.content).toBeLessThanOrEqual(measured.viewport)
 })

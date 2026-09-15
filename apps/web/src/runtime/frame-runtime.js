@@ -32,8 +32,13 @@
   let reportScheduled = false
 
   /** @type {(value: unknown) => string} */
-  const serialize = (value) =>
-    JSON.stringify(value === undefined ? null : value)
+  const serialize = (value) => {
+    const serialized = JSON.stringify(value === undefined ? null : value)
+    if (serialized === undefined) {
+      throw new TypeError('the field value is not JSON serializable')
+    }
+    return serialized
+  }
 
   /** @type {(message: DossierFrameMessage) => void} */
   const post = (message) => {
@@ -289,68 +294,131 @@
     post({ type: 'ready', documentId, fields: summary, unregistered })
   }
 
-  /** @type {(name: string, entry: DossierFieldValue) => void} */
+  /**
+   * Writes one field and says whether it took. The answer is what rebase
+   * reports back as `applied`.
+   * @type {(name: string, entry: DossierFieldValue) => boolean}
+   */
   const applyField = (name, entry) => {
     const field = fields.get(name)
     // A field this document does not declare, or declares with another type,
     // never reaches the DOM. Its value stays in the snapshot for the CLI.
-    if (field === undefined || field.type !== entry.type) return
+    if (field === undefined || field.type !== entry.type) return false
     if (memory.has(name)) {
       try {
-        if (serialize(field.read()) !== memory.get(name)) return
+        if (serialize(field.read()) !== memory.get(name)) return false
       } catch (error) {
         console.error(`dossier: read failed for "${name}".`, error)
-        return
+        return false
       }
     }
     try {
       field.write(entry.value)
     } catch (error) {
       console.error(`dossier: write failed for "${name}".`, error)
-      return
+      return false
     }
     memory.set(name, serialize(entry.value))
+    return true
   }
 
-  /** @type {(incoming: unknown) => void} */
-  const apply = (incoming) => {
+  /**
+   * The well-formed entries of an apply, in writing order: marked controls
+   * first, then registered custom fields, so a control that renders from
+   * another field sees the final values.
+   * @type {(incoming: unknown) => [string, DossierFieldValue][]}
+   */
+  const writable = (incoming) => {
     const entries =
       typeof incoming === 'object' && incoming !== null
         ? Object.entries(incoming)
         : []
     /** @type {[string, DossierFieldValue][]} */
-    const valid = []
+    const marked = []
+    /** @type {[string, DossierFieldValue][]} */
+    const custom = []
     for (const [name, entry] of entries) {
       if (typeof entry !== 'object' || entry === null) continue
       const value = /** @type {DossierFieldValue} */ (entry)
       if (typeof value.type !== 'string') continue
-      valid.push([name, value])
+      if (value.type === 'json') custom.push([name, value])
+      else marked.push([name, value])
     }
-    // Marked controls first, then registered custom fields, so a control that
-    // renders from another field sees the final values.
-    for (const [name, entry] of valid) {
-      if (entry.type !== 'json') applyField(name, entry)
+    return [...marked, ...custom]
+  }
+
+  /** Every field whose value differs from the memory, and only those. */
+  const dirtyNames = () => {
+    /** @type {string[]} */
+    const names = []
+    for (const [name, field] of fields) {
+      try {
+        if (serialize(field.read()) !== memory.get(name)) names.push(name)
+      } catch (error) {
+        console.error(`dossier: read failed for "${name}".`, error)
+        names.push(name)
+      }
     }
-    for (const [name, entry] of valid) {
-      if (entry.type === 'json') applyField(name, entry)
-    }
+    return names
+  }
+
+  /** @type {(incoming: unknown) => void} */
+  const apply = (incoming) => {
+    for (const [name, entry] of writable(incoming)) applyField(name, entry)
     document.dispatchEvent(new CustomEvent('dossier:state-applied'))
     post({ type: 'applied', documentId })
   }
 
-  /** Every field whose value differs from the memory, and only those. */
+  /**
+   * The answer to collect. The wrapper never says which fields to look at: it
+   * asks for all of them and the memory decides what changed, which is why a
+   * custom control that never calls notify() still saves.
+   */
   const collect = () => {
-    /** @type {Record<string, unknown>} */
-    const values = {}
+    const values = /** @type {Record<string, unknown>} */ (Object.create(null))
+    /** @type {string[]} */
+    const failed = []
     for (const [name, field] of fields) {
       try {
         const value = field.read()
         if (serialize(value) !== memory.get(name)) values[name] = value
       } catch (error) {
         console.error(`dossier: read failed for "${name}".`, error)
+        failed.push(name)
       }
     }
-    post({ type: 'values', documentId, fields: values })
+    post({ type: 'values', documentId, fields: values, failed })
+  }
+
+  /**
+   * The one round trip after a save or after "Review latest saved version".
+   * Acknowledged names take the value this tab just wrote, so a person who
+   * keeps typing during their own save does not later conflict with their own
+   * write. Every other field is written only while it still matches the
+   * memory, which is how an edit nobody announced survives a rebase.
+   * @type {(incoming: Partial<DossierRebaseMessage>) => void}
+   */
+  const rebase = (incoming) => {
+    /** @type {Set<string>} */
+    const acknowledged = new Set()
+    const acknowledge = incoming.acknowledge
+    if (typeof acknowledge === 'object' && acknowledge !== null) {
+      for (const [name, value] of Object.entries(acknowledge)) {
+        acknowledged.add(name)
+        memory.set(name, serialize(value))
+      }
+    }
+
+    /** @type {string[]} */
+    const applied = []
+    for (const [name, entry] of writable(incoming.apply)) {
+      if (acknowledged.has(name)) continue
+      if (applyField(name, entry)) applied.push(name)
+    }
+
+    const stillDirty = dirtyNames()
+    document.dispatchEvent(new CustomEvent('dossier:state-applied'))
+    post({ type: 'rebased', documentId, applied, stillDirty })
   }
 
   window.addEventListener('message', (event) => {
@@ -363,6 +431,8 @@
       apply(/** @type {Partial<DossierApplyMessage>} */ (message).fields)
     } else if (message.type === 'collect') {
       collect()
+    } else if (message.type === 'rebase') {
+      rebase(/** @type {Partial<DossierRebaseMessage>} */ (message))
     }
   })
 

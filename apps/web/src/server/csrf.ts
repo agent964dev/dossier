@@ -34,9 +34,13 @@ export function issueCsrfToken(
 }
 
 /**
- * The origins a state-changing request may legitimately come from: the
- * deployment's own public origin, plus the origin the request was actually
- * addressed to (so a preview URL or `localhost:8787` works without config).
+ * The origins a state-changing request may legitimately come from, and the
+ * origins allowed to frame a served document: the deployment's own public
+ * origin, plus the origin the request was actually addressed to, so a preview
+ * URL or a second local port works without configuration.
+ *
+ * Adding the request's own origin costs nothing: a cross-site post carries the
+ * attacker's origin, which matches neither entry.
  */
 export function allowedOrigins(
   publicBaseUrl: string,
@@ -59,14 +63,28 @@ export interface CsrfCheck {
   readonly accountId: string
 }
 
+function requestOrigin(request: Request): string | null {
+  const origin = request.headers.get('origin')
+  if (origin !== null) return origin
+
+  const referer = request.headers.get('referer')
+  if (referer === null) return null
+  try {
+    return new URL(referer).origin
+  } catch {
+    return null
+  }
+}
+
 /**
- * Both halves of the section 6 rule, in one place: an `Origin` header that
- * matches this deployment, and a signed token bound to the signed-in account.
+ * Both halves of the section 6 rule, in one place: an `Origin` header (or the
+ * Referer origin when Origin is absent) that matches an origin this deployment
+ * answers on, and a signed token bound to the signed-in account.
  *
- * The Origin check alone stops a cross-site form post (browsers always send
- * `Origin` on POST); the token additionally stops a same-origin gadget — an
- * open redirect, a reflected page — from driving a mutation on the reader's
- * behalf. Requests that fail either half never reach a service.
+ * The origin check alone stops a cross-site form post; the token additionally
+ * stops a same-origin gadget — an open redirect, a reflected page — from
+ * driving a mutation on the reader's behalf. Requests that fail either half
+ * never reach a service.
  */
 export function verifyCsrf({
   request,
@@ -77,7 +95,7 @@ export function verifyCsrf({
     const env = yield* WorkerEnv
     const session = yield* Session
 
-    const origin = request.headers.get('origin')
+    const origin = requestOrigin(request)
     if (origin === null) {
       return yield* Effect.fail(
         new CsrfRejected({

@@ -284,6 +284,9 @@ export async function handleServingRequest(
             hasRuntime: surface.frameHasRuntime,
             title: surface.title,
             pinned: version !== undefined,
+            ...(surface.csrfToken === undefined
+              ? {}
+              : { csrfToken: surface.csrfToken }),
           })
           return request.method === 'HEAD'
             ? new Response(null, {

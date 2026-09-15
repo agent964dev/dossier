@@ -5,7 +5,15 @@ import path from 'node:path'
 import type { FullConfig } from '@playwright/test'
 
 const webRoot = path.join(import.meta.dirname, '..', '..')
+const authDirectory = path.join(import.meta.dirname, '.auth')
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+
+/**
+ * The second person in the two-page scenarios. It is a workspace admin rather
+ * than the document's author, so the specs also prove that saving follows the
+ * editor predicate and not ownership.
+ */
+const SECOND_ACCOUNT_ID = 'acct_browser_second'
 
 /**
  * The secrets the browser job needs. They come from `.dev.vars`, the same file
@@ -96,30 +104,97 @@ function sessionCookieName(publicBaseUrl: string): string {
   }
 }
 
+function persistPath(): string {
+  return process.env.DOSSIER_PERSIST_PATH ?? '.wrangler/state-browser'
+}
+
+function wrangler(args: readonly string[]): void {
+  execFileSync('bunx', ['wrangler', ...args], {
+    cwd: webRoot,
+    // A non-interactive wrangler applies pending migrations without asking.
+    env: { ...process.env, CI: '1' },
+    stdio: 'pipe',
+  })
+}
+
 function applyMigrations(): void {
-  const persistPath =
-    process.env.DOSSIER_PERSIST_PATH ?? '.wrangler/state-browser'
-  execFileSync(
-    'bunx',
-    [
-      'wrangler',
-      'd1',
-      'migrations',
-      'apply',
-      'DB',
-      '--local',
-      '--persist-to',
-      persistPath,
-      '--env',
-      'dev',
-    ],
-    {
-      cwd: webRoot,
-      // A non-interactive wrangler applies pending migrations without asking.
-      env: { ...process.env, CI: '1' },
-      stdio: 'pipe',
-    },
+  wrangler([
+    'd1',
+    'migrations',
+    'apply',
+    'DB',
+    '--local',
+    '--persist-to',
+    persistPath(),
+    '--env',
+    'dev',
+  ])
+}
+
+/**
+ * A second signed-in person for the competing-save scenarios. There is no
+ * sign-in surface to drive from a test, so the rows the session cookie stands
+ * for are written straight into the local D1 file.
+ */
+function seedSecondAccount(workspaceId: string): void {
+  const now = new Date().toISOString()
+  const statements = [
+    `INSERT OR IGNORE INTO accounts
+       (id, name, kind, deployment_admin, disabled_at, created_at, updated_at)
+     VALUES ('${SECOND_ACCOUNT_ID}', 'Second reviewer', 'user', 0, NULL,
+             '${now}', '${now}');`,
+    `INSERT OR IGNORE INTO memberships (workspace_id, account_id, role, created_at)
+     VALUES ('${workspaceId}', '${SECOND_ACCOUNT_ID}', 'admin', '${now}');`,
+  ].join('\n')
+  const file = path.join(authDirectory, 'second-account.sql')
+  writeFileSync(file, statements)
+  wrangler([
+    'd1',
+    'execute',
+    'DB',
+    '--local',
+    '--persist-to',
+    persistPath(),
+    '--env',
+    'dev',
+    '--file',
+    file,
+  ])
+}
+
+/** Playwright's storageState for one seeded account. */
+function writeStorageState(
+  file: string,
+  input: {
+    readonly baseURL: string
+    readonly cookieName: string
+    readonly token: string
+  },
+): string {
+  const target = path.join(authDirectory, file)
+  writeFileSync(
+    target,
+    JSON.stringify(
+      {
+        cookies: [
+          {
+            name: input.cookieName,
+            value: input.token,
+            domain: new URL(input.baseURL).hostname,
+            path: '/',
+            expires: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
+            httpOnly: true,
+            secure: false,
+            sameSite: 'Lax' as const,
+          },
+        ],
+        origins: [],
+      },
+      null,
+      2,
+    ),
   )
+  return target
 }
 
 async function waitForServer(baseURL: string): Promise<void> {
@@ -161,33 +236,29 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     readonly bootstrapAccountId: string
   }
 
-  const token = sessionToken(vars.sessionSecret, {
-    accountId: seeded.bootstrapAccountId,
-    workspaceId: seeded.workspaceId,
-  })
-  const storageState = {
-    cookies: [
-      {
-        name: sessionCookieName(vars.publicBaseUrl),
-        value: token,
-        domain: new URL(baseURL).hostname,
-        path: '/',
-        expires: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
-        httpOnly: true,
-        secure: false,
-        sameSite: 'Lax' as const,
-      },
-    ],
-    origins: [],
-  }
-  const authDirectory = path.join(import.meta.dirname, '.auth')
+  const cookieName = sessionCookieName(vars.publicBaseUrl)
   mkdirSync(authDirectory, { recursive: true })
-  writeFileSync(
-    path.join(authDirectory, 'session.json'),
-    JSON.stringify(storageState, null, 2),
-  )
+  writeStorageState('session.json', {
+    baseURL,
+    cookieName,
+    token: sessionToken(vars.sessionSecret, {
+      accountId: seeded.bootstrapAccountId,
+      workspaceId: seeded.workspaceId,
+    }),
+  })
+
+  seedSecondAccount(seeded.workspaceId)
+  const secondStorageState = writeStorageState('second.json', {
+    baseURL,
+    cookieName,
+    token: sessionToken(vars.sessionSecret, {
+      accountId: SECOND_ACCOUNT_ID,
+      workspaceId: seeded.workspaceId,
+    }),
+  })
 
   // The specs publish their own fixtures through the API with this key.
   process.env.DOSSIER_BROWSER_API_KEY = vars.bootstrapApiKey
   process.env.DOSSIER_BROWSER_BASE_URL = baseURL
+  process.env.DOSSIER_BROWSER_SECOND_STORAGE = secondStorageState
 }

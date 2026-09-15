@@ -9,6 +9,7 @@ export interface WrapperPageOptions {
   readonly hasRuntime: boolean
   readonly title: string
   readonly pinned?: boolean
+  readonly csrfToken?: string
   readonly nonce?: string
 }
 
@@ -95,7 +96,7 @@ body {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "identity save" "status save";
+  grid-template-areas: "identity save" "status status";
   align-items: center;
   gap: 0.125rem 0.75rem;
   padding: 0.75rem clamp(0.875rem, 3vw, 1.5rem);
@@ -143,17 +144,26 @@ h1 {
   grid-area: status;
   min-width: 0;
   margin: 0 0 0 1.875rem;
-  overflow: hidden;
   color: var(--ink-label);
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem;
   line-height: 1.4;
   letter-spacing: 0.08em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+.status a {
+  color: var(--brand-soft);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.actions {
+  grid-area: save;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }
 .save {
-  grid-area: save;
   min-width: 4.75rem;
   height: 2.5rem;
   padding: 0 1rem;
@@ -163,7 +173,30 @@ h1 {
   color: var(--ink-muted);
   font: 600 0.875rem/1 "Geist", ui-sans-serif, system-ui, sans-serif;
 }
+.save:not(:disabled) {
+  border-color: color-mix(in oklab, var(--brand) 48%, var(--line));
+  background: color-mix(in oklab, var(--brand) 14%, var(--surface));
+  color: var(--brand-soft);
+  cursor: pointer;
+}
+.save:not(:disabled):hover {
+  background: color-mix(in oklab, var(--brand) 22%, var(--surface));
+}
 .save:disabled { cursor: not-allowed; opacity: 0.72; }
+.action-secondary {
+  min-height: 2.5rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-soft);
+  font: 600 0.8125rem/1 "Geist", ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+.action-secondary:hover {
+  border-color: color-mix(in oklab, var(--brand) 38%, var(--line));
+  background: color-mix(in oklab, var(--brand) 8%, transparent);
+}
 .stage {
   position: relative;
   z-index: 1;
@@ -222,10 +255,86 @@ h1 {
   cursor: pointer;
 }
 .retry:hover { background: color-mix(in oklab, var(--brand) 8%, transparent); }
-.retry:focus-visible, .save:focus-visible {
+.conflict {
+  width: min(calc(100% - 2rem), 32rem);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) + 0.25rem);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 1.5rem 4rem oklch(0% 0 0 / 45%);
+}
+.conflict::backdrop {
+  background: oklch(5% 0.015 232 / 78%);
+  backdrop-filter: blur(3px);
+}
+.conflict-content { padding: clamp(1.25rem, 5vw, 1.75rem); }
+.conflict-title {
+  margin: 0;
+  font-family: "Clash Display", ui-sans-serif, sans-serif;
+  font-size: clamp(1.25rem, 5vw, 1.5rem);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+.conflict-body {
+  margin: 0.75rem 0 0;
+  color: var(--ink-label);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+.conflict-fields {
+  margin: 1rem 0 0;
+  padding-left: 1.25rem;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font: 0.8125rem/1.5 "Geist Mono", ui-monospace, monospace;
+}
+.conflict-fields b { color: var(--ink); font-weight: 600; }
+.conflict-actions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 0.625rem;
+  margin-top: 1.5rem;
+}
+.dialog-button {
+  min-height: 2.75rem;
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-soft);
+  font: 600 0.875rem/1.2 "Geist", ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+.dialog-button-primary {
+  border-color: color-mix(in oklab, var(--brand) 48%, var(--line));
+  background: color-mix(in oklab, var(--brand) 14%, var(--surface));
+  color: var(--brand-soft);
+}
+.dialog-button:hover {
+  background: color-mix(in oklab, var(--brand) 9%, var(--surface));
+}
+.copy-fallback-text {
+  width: 100%;
+  min-height: 12rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--canvas);
+  color: var(--ink-soft);
+  font: 0.75rem/1.5 "Geist Mono", ui-monospace, monospace;
+}
+.retry:focus-visible,
+.save:focus-visible,
+.action-secondary:focus-visible,
+.dialog-button:focus-visible,
+.status a:focus-visible {
   outline: 3px solid color-mix(in oklab, var(--brand) 50%, transparent);
   outline-offset: 2px;
 }
+[hidden] { display: none !important; }
 @keyframes turn { to { transform: rotate(360deg); } }
 @media (min-width: 40rem) {
   .chrome {
@@ -233,7 +342,8 @@ h1 {
     grid-template-areas: "identity status save";
     min-height: 4.25rem;
   }
-  .status { margin: 0; text-align: right; }
+  .status { margin: 0; text-align: right; white-space: nowrap; }
+  .conflict-actions { flex-direction: row; justify-content: flex-end; }
 }
 @media (prefers-reduced-motion: reduce) {
   .loader { animation-duration: 1.8s; }
@@ -244,11 +354,14 @@ export function renderWrapperPage(options: WrapperPageOptions): Response {
   const nonce = options.nonce ?? createNonce()
   const snapshot = options.snapshot
   const pinned = options.pinned ?? options.version !== snapshot.version
+  const canSave = options.hasRuntime && !pinned && snapshot.canSave
   const status = !options.hasRuntime
     ? 'Published before saved values'
     : pinned
       ? 'Older version, read only'
-      : 'Read only'
+      : canSave
+        ? 'Save'
+        : 'Read only'
   const framePath = pinned
     ? `/d/${snapshot.documentId}/v/${options.version}/frame`
     : `/d/${snapshot.documentId}/frame`
@@ -258,6 +371,9 @@ export function renderWrapperPage(options: WrapperPageOptions): Response {
     frameTicket: options.ticket,
     frameVersion: options.version,
     frameHasRuntime: options.hasRuntime,
+    ...(options.mode === 'account' && options.csrfToken
+      ? { csrfToken: options.csrfToken }
+      : {}),
   })
   const overlayHidden = options.hasRuntime ? '' : ' hidden'
   const frameConcealed = options.hasRuntime ? ' inert aria-hidden="true"' : ''
@@ -280,7 +396,11 @@ export function renderWrapperPage(options: WrapperPageOptions): Response {
     <h1>${escapeHtml(options.title)}</h1>
   </div>
   <p class="status" id="dossier-status" aria-live="polite">${status}</p>
-  <button class="save" id="dossier-save" type="button" disabled>Save</button>
+  <div class="actions">
+    <button class="action-secondary" id="dossier-save-retry" type="button" hidden>Retry</button>
+    <button class="action-secondary" id="dossier-copy-draft" type="button" hidden>Copy draft</button>
+    <button class="save" id="dossier-save" type="button"${canSave ? '' : ' disabled'}>Save</button>
+  </div>
 </header>
 <main class="stage">
   <iframe class="frame" id="dossier-frame" title="${escapeHtml(options.title)}" src="${escapeHtml(frameSrc)}" sandbox="allow-scripts allow-popups"${frameConcealed}></iframe>
@@ -295,6 +415,27 @@ export function renderWrapperPage(options: WrapperPageOptions): Response {
     </div>
   </div>
 </main>
+<dialog class="conflict" id="dossier-conflict" aria-labelledby="dossier-conflict-title" aria-describedby="dossier-conflict-body">
+  <div class="conflict-content">
+    <h2 class="conflict-title" id="dossier-conflict-title">This plan changed while you were editing</h2>
+    <p class="conflict-body" id="dossier-conflict-body">Your changes are not saved. Keep or copy your draft before loading the latest saved version.</p>
+    <ul class="conflict-fields" id="dossier-conflict-fields" hidden></ul>
+    <div class="conflict-actions">
+      <button class="dialog-button" id="dossier-conflict-keep" type="button">Keep editing this draft</button>
+      <button class="dialog-button dialog-button-primary" id="dossier-conflict-review" type="button">Review latest saved version</button>
+    </div>
+  </div>
+</dialog>
+<dialog class="conflict" id="dossier-copy-fallback" aria-labelledby="dossier-copy-fallback-title" aria-describedby="dossier-copy-fallback-body">
+  <div class="conflict-content">
+    <h2 class="conflict-title" id="dossier-copy-fallback-title">Copy this draft manually</h2>
+    <p class="conflict-body" id="dossier-copy-fallback-body">Clipboard access is unavailable. Copy the draft JSON below before leaving this page.</p>
+    <textarea class="copy-fallback-text" id="dossier-copy-fallback-text" readonly spellcheck="false"></textarea>
+    <div class="conflict-actions">
+      <button class="dialog-button dialog-button-primary" id="dossier-copy-fallback-close" type="button">Close</button>
+    </div>
+  </div>
+</dialog>
 <script type="application/json" id="dossier-bootstrap">${bootstrap}</script>
 <script nonce="${nonce}">${wrapperRuntime}</script>
 </body>
