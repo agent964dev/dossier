@@ -62,7 +62,7 @@ CLI code, README, license, and packaged skills/assets. Unchanged payloads such a
 web-only or test-only edits do not require a CLI release. A Bun compiler version
 change also requires a bump because it changes the CLI build toolchain. A version decrease fails.
 When the version already increases, the normal build and package smoke gates
-still run. PR comparison uses the PR base/head; main comparison uses the push's
+still run. PR comparison uses the base and the tested synthetic merge SHA; main comparison uses the push's
 before/SHA, covering a push that contains several commits.
 
 After successful production verification, the npm job reads the public package
@@ -489,8 +489,9 @@ Only the owner performs these steps, in this order. Every CLI command below pins
    For an emergency direct rollback, first disable `release-cli.yml` in Actions,
    allow any active migration/deploy to finish, and cancel pending releases. Verify
    the selected Worker is compatible with the current D1 schema. After the manual
-   operation below, merge a forward recovery/revert PR, re-enable the workflow,
-   and rerun that new SHA. Never use an old workflow rerun as a rollback, or delete
+   operation below, prepare a forward recovery/revert PR, re-enable the workflow,
+   then merge that PR so its push triggers a new release. A commit merged while
+   the workflow is disabled has no release run to rerun. Never use an old workflow rerun as a rollback, or delete
    deployment history to bypass its fence.
 
    ```sh

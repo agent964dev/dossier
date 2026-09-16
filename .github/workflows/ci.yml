@@ -50,7 +50,7 @@ jobs:
         run: node scripts/release/cli-version.mjs
         env:
           RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          RELEASE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RELEASE_HEAD_SHA: ${{ github.sha }}
 
       - name: Lint
         run: bun run lint

@@ -348,6 +348,10 @@ test('workflow graph isolates PR credentials and blocks publish behind productio
   const release = parse('.github/workflows/release-cli.yml')
   assert.deepEqual(Object.keys(ci.on).sort(), ['pull_request', 'workflow_call'])
   assert.deepEqual(ci.permissions, { contents: 'read' })
+  const versionGate = ci.jobs.checks.steps.find(
+    (step) => step.run === 'node scripts/release/cli-version.mjs',
+  )
+  assert.equal(versionGate.env.RELEASE_HEAD_SHA, '${{ github.sha }}')
   for (const job of Object.values(ci.jobs)) {
     assert.equal(job.environment, undefined)
     assert.equal(job.permissions, undefined)
