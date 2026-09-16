@@ -36,7 +36,7 @@ vi.mock('@tanstack/react-start', () => ({
         return this
       },
       handler(next: (context: { data: unknown }) => Promise<unknown>) {
-        return (options?: { data?: unknown }) =>
+        return async (options?: { data?: unknown }) =>
           next({ data: validate(options?.data) })
       },
     }
@@ -635,9 +635,9 @@ describe('adversarial controls that must remain closed', () => {
     ).toMatchObject({ ok: false, code: 'not_found' })
 
     // The validator refuses a savers action that names nothing to change.
-    expect(() =>
+    await expect(
       act(ownerCookie, ownerToken, { action: 'savers' }),
-    ).toThrowError('Name at least one state grant to change.')
+    ).rejects.toThrowError('Name at least one state grant to change.')
 
     // And the CSRF guard still runs ahead of the service.
     expect(

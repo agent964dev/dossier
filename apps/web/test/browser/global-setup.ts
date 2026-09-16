@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { createHmac } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { parseEnv } from 'node:util'
 import type { FullConfig } from '@playwright/test'
 
 const webRoot = path.join(import.meta.dirname, '..', '..')
@@ -35,22 +36,14 @@ interface DevVars {
   readonly publicBaseUrl: string
 }
 
-function parseDevVars(): Record<string, string> {
-  const vars: Record<string, string> = {}
+function parseDevVars(): Record<string, string | undefined> {
   let contents = ''
   try {
     contents = readFileSync(path.join(webRoot, '.dev.vars'), 'utf8')
   } catch {
-    return vars
+    return {}
   }
-  for (const line of contents.split('\n')) {
-    const trimmed = line.trim()
-    if (trimmed.length === 0 || trimmed.startsWith('#')) continue
-    const equals = trimmed.indexOf('=')
-    if (equals < 0) continue
-    vars[trimmed.slice(0, equals).trim()] = trimmed.slice(equals + 1).trim()
-  }
-  return vars
+  return parseEnv(contents)
 }
 
 function devVars(): DevVars {

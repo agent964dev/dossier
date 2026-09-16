@@ -18,6 +18,13 @@
   const route = FRAME_ROUTE.exec(window.location.pathname)
   const documentId = route === null ? '' : route[1]
   const parentWindow = window.parent
+  // A port belongs to this document, unlike contentWindow, which survives
+  // navigation. Create it before author code and transfer its peer on ready.
+  const bridge = new MessageChannel()
+  const frameTicket = new URLSearchParams(window.location.search).get('t')
+  window.addEventListener('pagehide', () => bridge.port1.close(), {
+    once: true,
+  })
 
   /** @type {Map<string, DossierRuntimeField>} */
   const fields = new Map()
@@ -42,7 +49,7 @@
 
   /** @type {(message: DossierFrameMessage) => void} */
   const post = (message) => {
-    parentWindow.postMessage(message, '*')
+    bridge.port1.postMessage(message)
   }
 
   /**
@@ -294,7 +301,11 @@
       listen(name, elements)
     }
 
-    post({ type: 'ready', documentId, fields: summary, unregistered })
+    parentWindow.postMessage(
+      { type: 'ready', documentId, fields: summary, unregistered, frameTicket },
+      '*',
+      [bridge.port2],
+    )
   }
 
   /**
@@ -321,7 +332,14 @@
       console.error(`dossier: write failed for "${name}".`, error)
       return false
     }
-    memory.set(name, serialize(entry.value))
+    try {
+      // Native controls can normalize saved values (for example, a removed
+      // select option). That is not a user edit and must not be saved back.
+      memory.set(name, serialize(field.read()))
+    } catch (error) {
+      console.error(`dossier: read failed for "${name}".`, error)
+      memory.set(name, serialize(entry.value))
+    }
     return true
   }
 
@@ -424,8 +442,7 @@
     post({ type: 'rebased', documentId, applied, stillDirty })
   }
 
-  window.addEventListener('message', (event) => {
-    if (event.source !== parentWindow) return
+  bridge.port1.addEventListener('message', (event) => {
     const data = event.data
     if (typeof data !== 'object' || data === null) return
     const message = /** @type {Partial<DossierWrapperMessage>} */ (data)
@@ -438,6 +455,7 @@
       rebase(/** @type {Partial<DossierRebaseMessage>} */ (message))
     }
   })
+  bridge.port1.start()
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => scan(), { once: true })

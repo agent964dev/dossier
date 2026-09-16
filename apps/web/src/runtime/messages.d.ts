@@ -78,6 +78,8 @@ type DossierWrapperMessage =
 interface DossierReadyMessage {
   readonly type: 'ready'
   readonly documentId: string
+  /** Binds the transferred port to the wrapper's authorized frame load. */
+  readonly frameTicket: string
   readonly fields: readonly {
     readonly name: string
     readonly type: DossierFieldType

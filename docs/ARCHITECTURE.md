@@ -157,7 +157,11 @@ A frame ticket lasts 60 seconds and binds the document, workspace, version, and
 viewer. The frame route verifies the ticket, checks current document access or
 link revocation, and then reads the matching R2 object. The ticket gives the
 frame no API credential. The sandbox CSP keeps `connect-src 'none'`, while the
-frame runtime and wrapper runtime exchange field messages with `postMessage`.
+frame runtime and wrapper runtime exchange field messages over a `MessageChannel`.
+The frame transfers a port in its ready message, authenticated by the frame
+ticket. Saved values travel only over that document's port, so navigating the
+iframe cannot deliver later snapshots to the replacement document. Retrying
+closes the old port before acquiring a fresh frame ticket and connection.
 The frame runtime applies saved values to marked controls and supports custom
 controls through `window.dossierState.register`. The wrapper alone sends state
 requests.

@@ -248,6 +248,9 @@
 
   if (!('snapshot' in bootstrap)) return
   let snapshot = bootstrap.snapshot
+  let expectedFrameTicket = bootstrap.frameTicket
+  /** A channel to the loaded document, never to its later navigation. @type {MessagePort | null} */
+  let bridge = null
   let loadedFrameVersion = bootstrap.frameVersion
   const documentId = snapshot.documentId
   const pinned = PINNED_PATH.test(window.location.pathname)
@@ -355,7 +358,7 @@
    */
   const ask = (message, answer) =>
     new Promise((resolve, reject) => {
-      const target = frame.contentWindow
+      const target = bridge
       if (target === null) {
         reject(new Error('the document frame is gone'))
         return
@@ -370,7 +373,7 @@
         }, ANSWER_TIMEOUT_MS),
       }
       waiting.push(waiter)
-      target.postMessage(message, '*')
+      target.postMessage(message, [])
     })
 
   /**
@@ -822,20 +825,18 @@
     for (const [name, field] of Object.entries(snapshot.fields ?? {})) {
       values[name] = { value: field.value, type: field.type }
     }
-    frame.contentWindow?.postMessage(
+    bridge?.postMessage(
       /** @type {DossierApplyMessage} */ ({
         type: 'apply',
         documentId,
         fields: values,
       }),
-      '*',
+      [],
     )
   }
 
-  window.addEventListener('message', (event) => {
-    const source = frame.contentWindow
-    if (source === null || event.source !== source) return
-    const data = event.data
+  /** @type {(data: unknown) => void} */
+  const receive = (data) => {
     if (typeof data !== 'object' || data === null) return
     const message = /** @type {Partial<DossierFrameMessage>} */ (data)
     if (message.documentId !== documentId) return
@@ -886,9 +887,34 @@
       applied = true
       showDocument()
     }
+  }
+
+  window.addEventListener('message', (event) => {
+    if (bridge !== null || expectedFrameTicket === '') return
+    const source = frame.contentWindow
+    if (source === null || event.source !== source) return
+    const data = event.data
+    if (typeof data !== 'object' || data === null) return
+    const message = /** @type {Partial<DossierReadyMessage>} */ (data)
+    // A navigated document shares contentWindow and the opaque sandbox origin.
+    // It cannot establish a channel just by guessing the public document ID.
+    if (
+      message.type !== 'ready' ||
+      message.documentId !== documentId ||
+      message.frameTicket !== expectedFrameTicket ||
+      event.ports.length !== 1
+    )
+      return
+    bridge = event.ports[0]
+    bridge.addEventListener('message', (answer) => receive(answer.data))
+    bridge.start()
+    receive(message)
   })
 
   retry.addEventListener('click', async () => {
+    bridge?.close()
+    bridge = null
+    expectedFrameTicket = ''
     ready = false
     applied = false
     retry.disabled = true
@@ -922,6 +948,7 @@
       }
 
       snapshot = /** @type {DossierSnapshot} */ (surface)
+      expectedFrameTicket = surface.frameTicket
       loadedFrameVersion = surface.frameVersion
       // The frame is rebuilt from scratch, so its memory and this tab's
       // acknowledged pairs both start again from the snapshot it will apply.

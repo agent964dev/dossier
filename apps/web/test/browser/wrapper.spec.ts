@@ -39,6 +39,12 @@ const REVIEW_PAGE_RETYPE_HTML = REVIEW_PAGE_HTML.replace(
   `    <textarea id="summary" data-state="summary">Ship newer HTML</textarea>`,
 )
 
+if (REVIEW_PAGE_RETYPE_HTML === REVIEW_PAGE_HTML) {
+  throw new Error(
+    'The review-page summary input was not replaced with a textarea.',
+  )
+}
+
 /**
  * The document the first spec reads. It carries one field of every shape the
  * wrapper has to fill in: a text input, a checkbox, a textarea, and a custom
@@ -474,6 +480,162 @@ interface EditLink {
   readonly editUrl: string | null
 }
 
+test('loads saved script-like text without swallowing the wrapper runtime', async ({
+  page,
+}) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const review = await publishReview()
+  const hostile = '<!--<script>'
+  await save(api, review.id, { summary: hostile })
+  await page.goto(`/d/${review.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(
+    page.frameLocator('#dossier-frame').locator('#summary'),
+  ).toHaveValue(hostile)
+  await expect(page.locator('#dossier-save')).toBeEnabled()
+  await api.dispose()
+})
+
+test('does not save native normalization as a user edit', async ({ page }) => {
+  const api = await apiRequest.newContext({ baseURL })
+  const doc = await publish(api, {
+    html: `<!doctype html><html><head><title>Choices</title></head><body>
+    <select data-state="choice"><option value="known">Known</option></select>
+    <select data-state="many" multiple><option value="known">Known</option></select>
+    <input type="radio" data-state="radio" value="known">
+    <input type="date" data-state="day">
+    <input data-state="note" value="original">
+  </body></html>`,
+  })
+  await save(api, doc.id, {
+    choice: 'removed',
+    many: ['removed', 'known'],
+    radio: 'removed',
+    day: 'invalid',
+  })
+  await page.goto(`/d/${doc.id}`)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  const frame = page.frameLocator('#dossier-frame')
+  await expect(frame.locator('[data-state="choice"]')).toHaveValue('')
+  await expect(frame.locator('[data-state="many"]')).toHaveValues(['known'])
+  await expect(frame.locator('[data-state="radio"]')).not.toBeChecked()
+  await expect(frame.locator('[data-state="day"]')).toHaveValue('')
+  await frame.locator('[data-state="note"]').fill('edited')
+  const posted = page.waitForRequest(
+    (request) =>
+      request.method() === 'POST' &&
+      request.url().endsWith(`/d/${doc.id}/state`),
+  )
+  await page.locator('#dossier-save').click()
+  expect((await posted).postDataJSON().changes).toEqual([
+    { name: 'note', value: 'edited', base: 0 },
+  ])
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+  // The unedited controls stay clean after the returned snapshot is rebased.
+  const unchanged = page.waitForRequest(
+    (request) =>
+      request.method() === 'POST' &&
+      request.url().endsWith(`/d/${doc.id}/state`),
+  )
+  await page.locator('#dossier-save').click()
+  expect((await unchanged).postDataJSON().changes).toEqual([])
+  await expect(page.locator('#dossier-status')).toHaveText(/^Saved · /)
+  const persisted = await readApiState(api, doc.id)
+  expect(persisted.choice?.value).toBe('removed')
+  expect(persisted.many?.value).toEqual(['removed', 'known'])
+  await api.dispose()
+})
+
+test('does not send saved values to another document after frame navigation', async ({
+  page,
+}) => {
+  // frame-src 'self' blocks external origins, but another author's document
+  // on Dossier is an allowed target. It must not inherit the original bridge.
+  const replacementUrl = `${baseURL}/d/abc123abc123`
+  // Capture both the old window protocol and any attempted replacement port.
+  // The replacement document knows the public ID, but has no frame ticket.
+  await page.route(replacementUrl, (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><script>
+      window.received = [];
+      const record = event => window.received.push(event.data);
+      window.addEventListener('message', record);
+      const channel = new MessageChannel();
+      channel.port1.onmessage = record;
+      parent.postMessage({type:'ready', documentId:'${saved.id}', frameTicket:'forged', unregistered:[]}, '*', [channel.port2]);
+    </script><p id="replacement-document">Other document</p>`,
+    }),
+  )
+  // Navigation before the first ready message must not establish a bridge.
+  await page.route(`**/d/${saved.id}/frame?*`, (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><script>location.replace('${replacementUrl}')</script>`,
+    }),
+  )
+  await page.goto(`/d/${saved.id}`)
+  await expect(page.locator('#dossier-overlay-error')).toBeVisible({
+    timeout: 10_000,
+  })
+  let replacement = page
+    .frames()
+    .find((frame) => frame.url() === replacementUrl)!
+  expect(replacement).toBeDefined()
+  expect(
+    await replacement.evaluate(
+      () => (window as unknown as { received: unknown[] }).received,
+    ),
+  ).toEqual([])
+
+  await page.unroute(`**/d/${saved.id}/frame?*`)
+  await page.reload()
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await page
+    .frameLocator('#dossier-frame')
+    .locator('[data-state="objective"]')
+    .fill('Local draft')
+
+  let releaseSave: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    releaseSave = resolve
+  })
+  let posted = false
+  // Use a synthetic successful response; this shared fixture stays unchanged.
+  const surface = await (await page.request.get(`/d/${saved.id}/state`)).json()
+  await page.route(`**/d/${saved.id}/state`, async (route) => {
+    if (route.request().method() !== 'POST') return route.continue()
+    posted = true
+    await held
+    await route.fulfill({
+      json: { ...surface, revision: surface.revision + 1 },
+    })
+  })
+  await page.locator('#dossier-save').click()
+  await expect.poll(() => posted).toBe(true)
+  const original = page
+    .frames()
+    .find((frame) => new URL(frame.url()).pathname.endsWith('/frame'))!
+  await original.evaluate((url) => {
+    window.location.href = url
+  }, replacementUrl)
+  await expect(
+    page.frameLocator('#dossier-frame').locator('#replacement-document'),
+  ).toHaveText('Other document')
+  replacement = page.frames().find((frame) => frame.url() === replacementUrl)!
+  releaseSave()
+  // Wait for the attempted rebase's timeout: merely checking immediately after
+  // navigation would miss values delivered by the outstanding save response.
+  await expect(page.locator('#dossier-status')).toHaveText('Could not save', {
+    timeout: 10_000,
+  })
+  expect(
+    await replacement.evaluate(
+      () => (window as unknown as { received: unknown[] }).received,
+    ),
+  ).toEqual([])
+})
+
 /**
  * The Worker derives the URL from PUBLIC_BASE_URL, which in local development
  * is the normal dev origin rather than this suite's isolated port. Keep the
@@ -764,20 +926,15 @@ test('keeps a silent frame inaccessible and retries with a fresh ticket', async 
 }) => {
   let frameTicketSeen: string | null = null
   let refreshRequests = 0
-  await page.route(`**/d/${saved.id}/state`, async (route) => {
+  await page.route(`**/d/${saved.id}/state`, (route) => {
     refreshRequests += 1
-    const response = await route.fetch()
-    const surface = (await response.json()) as Record<string, unknown>
-    await route.fulfill({
-      response,
-      contentType: 'application/json; charset=utf-8',
-      body: JSON.stringify({ ...surface, frameTicket: 'fresh-ticket' }),
-    })
+    return route.continue()
   })
   // A frame that loads but carries no runtime: the wrapper waits five seconds
   // and then offers a retry rather than showing the author's defaults.
   await page.route('**/frame?*', (route) => {
     frameTicketSeen = new URL(route.request().url()).searchParams.get('t')
+    if (refreshRequests > 0) return route.continue()
     return route.fulfill({
       status: 200,
       contentType: 'text/html; charset=utf-8',
@@ -804,14 +961,15 @@ test('keeps a silent frame inaccessible and retries with a fresh ticket', async 
   await expect(page.locator('#dossier-retry')).toBeFocused()
   const initialTicket = frameTicketSeen
   expect(initialTicket).not.toBeNull()
-  expect(initialTicket).not.toBe('fresh-ticket')
 
   await page.locator('#dossier-retry').click()
-  await expect(loading).toBeVisible()
-  await expect(page.locator('#dossier-overlay-error')).toBeHidden()
-  await expect(frame).toHaveAttribute('inert', '')
   await expect.poll(() => refreshRequests).toBe(1)
-  await expect.poll(() => frameTicketSeen).toBe('fresh-ticket')
+  await expect.poll(() => frameTicketSeen).not.toBe(initialTicket)
+  await expect(page.locator('#dossier-overlay')).toBeHidden()
+  await expect(page.locator('#dossier-save')).toBeEnabled()
+  await expect(
+    page.frameLocator('#dossier-frame').locator('[data-state="objective"]'),
+  ).toHaveValue('Ship in October')
 })
 
 test('reads a pinned version as an older version', async ({ page }) => {
@@ -905,7 +1063,16 @@ test('scanned defaults equal what Chromium reports for every fixture', async ({
   // The frame runtime answers a collect with every field whose value differs
   // from its memory. Nothing has been applied here, so that is every field,
   // read straight out of Chromium.
+  await page.addInitScript(() => {
+    window.addEventListener('message', (event) => {
+      if (event.source === window && event.data?.type === 'ready') {
+        ;(window as unknown as { testPort: MessagePort }).testPort =
+          event.ports[0]!
+      }
+    })
+  })
   await page.goto(`/d/${fixtures.id}/frame?t=${encodeURIComponent(ticket)}`)
+  await page.waitForFunction(() => 'testPort' in window)
   const actual = await page.evaluate(
     (documentId) =>
       new Promise((resolve, reject) => {
@@ -913,7 +1080,8 @@ test('scanned defaults equal what Chromium reports for every fixture', async ({
           () => reject(new Error('the frame runtime never answered collect')),
           10_000,
         )
-        window.addEventListener('message', (event) => {
+        const port = (window as unknown as { testPort: MessagePort }).testPort
+        port.addEventListener('message', (event) => {
           const data = event.data as {
             type?: string
             documentId?: string
@@ -922,8 +1090,10 @@ test('scanned defaults equal what Chromium reports for every fixture', async ({
           if (data?.type !== 'values' || data.documentId !== documentId) return
           clearTimeout(timer)
           resolve(data.fields)
+          port.close()
         })
-        window.postMessage({ type: 'collect', documentId }, '*')
+        port.start()
+        port.postMessage({ type: 'collect', documentId })
       }),
     fixtures.id,
   )

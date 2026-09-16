@@ -45,7 +45,7 @@ function createNonce(): string {
 
 function bootstrapJson(value: unknown): string {
   return JSON.stringify(value)
-    .replace(/<\/script/gi, (closing) => `<\\/${closing.slice(2)}`)
+    .replaceAll('<', '\\u003c')
     .replaceAll('\u2028', '\\u2028')
     .replaceAll('\u2029', '\\u2029')
 }

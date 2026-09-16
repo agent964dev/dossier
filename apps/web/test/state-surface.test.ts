@@ -133,7 +133,8 @@ async function surface(
 
 describe('saved-values browser surface', () => {
   it('escapes bootstrap JSON and wrapper text without changing values', async () => {
-    const hostile = '</ScRiPt><script>window.bad = true</script>\u2028\u2029'
+    const hostile =
+      '<!--<script></ScRiPt><script>window.bad = true</script>\u2028\u2029'
     const response = renderWrapperPage({
       mode: 'public',
       snapshot: {
@@ -160,7 +161,7 @@ describe('saved-values browser surface', () => {
       )
 
     expect(match).not.toBeNull()
-    expect(match![1]).not.toMatch(/<\/script/i)
+    expect(match![1]).not.toContain('<')
     expect(match![1]).toContain('\\u2028')
     expect(match![1]).toContain('\\u2029')
     const bootstrap = JSON.parse(match![1]!) as {
