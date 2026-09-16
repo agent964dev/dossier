@@ -18,8 +18,7 @@
   "vars": {
     "PUBLIC_BASE_URL": "https://dossier.agent964.com",
     "SEED_WORKSPACE": "agent964:agent964.com",
-    // Set the real value with the SEED_ADMIN_EMAIL secret.
-    "SEED_ADMIN_EMAIL": "admin@example.com",
+    // SEED_ADMIN_EMAIL is a Worker secret; never shadow it with a plain-text var.
     "STYLE_HOST_ALLOWLIST": "fonts.googleapis.com,fonts.gstatic.com",
     "EMBED_HOST_ALLOWLIST": "",
     "SCRIPT_HOST_ALLOWLIST": "",

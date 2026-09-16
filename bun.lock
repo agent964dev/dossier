@@ -52,7 +52,7 @@
     },
     "packages/cli": {
       "name": "@agent964/dossier",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "bin": {
         "dossier": "dist/index.js",
       },

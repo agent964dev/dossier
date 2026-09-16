@@ -14,7 +14,8 @@
     "lint": "oxlint --ignore-path .gitignore --max-warnings 0 .",
     "lint:fix": "oxlint --ignore-path .gitignore --fix .",
     "format": "oxfmt --write .",
-    "format:check": "oxfmt --check ."
+    "format:check": "oxfmt --check .",
+    "test:release": "node --test scripts/release/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "26.5.1",

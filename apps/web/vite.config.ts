@@ -7,7 +7,7 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 /**
- * Short git commit of the build, reported by /api/healthz so operators can
+ * Git commit of the build (full SHA in production CI), reported by /api/healthz so operators can
  * compare the deployed Worker with the repository. Falls back to "unknown"
  * outside a git checkout (for example a source tarball).
  */
