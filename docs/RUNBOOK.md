@@ -20,7 +20,12 @@ Worker/assets, then verifies `/api/healthz`. Health must return HTTP 200,
 capability listed in `scripts/release/production.json` at that revision (currently
 `state`). It tries at most 12 times, with a 10-second request timeout and 5 seconds
 between attempts. Wrangler automatic resource provisioning is explicitly disabled with
-`--no-x-provision`; a missing resource must fail instead of being recreated.
+`--no-x-provision`; missing D1 databases and R2 buckets must fail instead of
+being recreated. This flag disables Wrangler's resource-creation path, not
+Worker binding configuration. Rate-limit bindings are declared directly in
+`ratelimits`, using account-unique integer namespace IDs chosen in the config;
+they do not need a separate create command. See Cloudflare's
+[rate-limit binding setup](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/#get-started).
 A failed migration, deployment, or smoke check fails the run
 and blocks npm publication. Health proves build identity and advertised bindings;
 it is not an authenticated end-to-end saved-values or database-integrity test.
