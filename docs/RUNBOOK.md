@@ -19,7 +19,9 @@ Worker/assets, then verifies `/api/healthz`. Health must return HTTP 200,
 `ok: true`, `service: "dossier"`, that exact full SHA as `version`, and every
 capability listed in `scripts/release/production.json` at that revision (currently
 `state`). It tries at most 12 times, with a 10-second request timeout and 5 seconds
-between attempts. A failed migration, deployment, or smoke check fails the run
+between attempts. Wrangler automatic resource provisioning is explicitly disabled with
+`--no-x-provision`; a missing resource must fail instead of being recreated.
+A failed migration, deployment, or smoke check fails the run
 and blocks npm publication. Health proves build identity and advertised bindings;
 it is not an authenticated end-to-end saved-values or database-integrity test.
 
@@ -175,6 +177,7 @@ queue semantics](https://docs.github.com/en/actions/how-tos/write-workflows/choo
 [Cloudflare Vite environments](https://developers.cloudflare.com/workers/vite-plugin/reference/cloudflare-environments/),
 [Cloudflare GitHub Actions authentication](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/),
 [disconnecting Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/#disconnecting-builds),
+[disabling resource provisioning](https://developers.cloudflare.com/changelog/post/2025-10-24-automatic-resource-provisioning/),
 and [D1 migration tracking](https://developers.cloudflare.com/d1/reference/migrations/).
 
 ### Upgrade an existing deployment for saved values

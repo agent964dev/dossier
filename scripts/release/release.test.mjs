@@ -258,6 +258,8 @@ test('migration failure stops deployment; deploy failure never reverses migratio
     const failedDeploy = run(0, 23)
     assert.equal(failedDeploy.status, 23)
     assert.equal(failedDeploy.calls.length, 2)
+    for (const call of failedDeploy.calls)
+      assert.match(call, /--no-x-provision/)
     assert.match(
       failedDeploy.calls[1],
       /deploy --config dist\/server\/wrangler.json/,

@@ -5,5 +5,5 @@ set -euo pipefail
 # the source config's production database; deployment uses Vite's output.
 unset CLOUDFLARE_ENV
 cd apps/web
-bunx --no-install wrangler d1 migrations apply dossier-production --remote --config wrangler.jsonc
-bunx --no-install wrangler deploy --config dist/server/wrangler.json
+bunx --no-install wrangler d1 migrations apply dossier-production --remote --config wrangler.jsonc --no-x-provision
+bunx --no-install wrangler deploy --config dist/server/wrangler.json --no-x-provision
