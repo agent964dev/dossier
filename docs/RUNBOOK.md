@@ -566,28 +566,11 @@ Archived documents become eligible for permanent removal 30 days after
 archiving. The `PURGE_RETENTION_DAYS` var in `apps/web/wrangler.jsonc` sets
 that window. Both environments run the purge once a week (Sunday
 03:17 UTC) from the `triggers` block in that file, and an operator can run it at
-any time with `dossier admin purge`. Steps 1 and 2 are one-time prerequisites,
-step 3 is read-only, step 5 is a manual removal, and step 6 confirms that the
+any time with `dossier admin purge`. Steps 1 and 2 verify the active release
+before each purge, step 3 is read-only, step 5 is a manual removal, and step 6 confirms that the
 deployment runs the weekly schedule.
 
-1. **Confirm migration 0003 on the production database.**
-
-   Production migrations belong to the automatic release coordinator. Check the
-   successful release log for `0003_skinny_pet_avengers.sql` or the message that
-   no migrations remain. From that exact tested revision, list pending migrations
-   without changing production:
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler d1 migrations list dossier-production --remote --config wrangler.jsonc
-   ```
-
-   If migration 0003 is still pending, merge the compatible revision to `main`
-   and let the coordinator apply it before deploying the code. Do not apply it
-   through an independent terminal command. Record the release URL and migration
-   statuses before running a purge.
-
-2. **Confirm the deployed Worker and the operator CLI support the purge.**
+1. **Confirm the deployed Worker and the operator CLI support the purge.**
 
    The Worker reports its build's git commit as `version` in its health
    response. In Cloudflare, identify the active `dossier` Worker version and
@@ -601,7 +584,8 @@ deployment runs the weekly schedule.
    ```sh
    cd /path/to/dossier
    RELEASE_RUN_ID='replace-with-the-matching-run-id'
-   gh run view "$RELEASE_RUN_ID" --repo agent964dev/dossier --json headSha --jq .headSha
+   PURGE_RELEASE_SHA=$(gh run view "$RELEASE_RUN_ID" --repo agent964dev/dossier --json headSha --jq .headSha)
+   printf '%s\n' "$PURGE_RELEASE_SHA"
    curl --fail-with-body --silent https://dossier.agent964.com/api/healthz
    printf '\n'
    dossier --version
@@ -609,11 +593,48 @@ deployment runs the weekly schedule.
    ```
 
    Confirm that the health `version` matches the full release commit that
-   `gh run view` prints.
+   `gh run view` returns.
    That commit must be at or after the 0.2.0 merge (`2af0932`). Confirm that
    `dossier --version` prints 0.2.0 or newer and the help synopsis lists
    `--execute` and `--retention-days`. Report the release URL, Worker version ID,
    expected and observed commits, CLI version, and help synopsis.
+
+   Prepare a separate worktree at that SHA for the migration check. Stop if any
+   command fails; do not reuse or modify an existing checkout. If this worktree
+   path already exists, choose a new unused path. This keeps local
+   Wrangler configuration and migration files aligned with the verified release.
+
+   ```sh
+   cd /path/to/dossier
+   git fetch origin "$PURGE_RELEASE_SHA"
+   PURGE_RELEASE_WORKTREE="$(pwd)/../dossier-purge-$PURGE_RELEASE_SHA"
+   git worktree add --detach "$PURGE_RELEASE_WORKTREE" "$PURGE_RELEASE_SHA"
+   cd "$PURGE_RELEASE_WORKTREE"
+   bun install --frozen-lockfile
+   ```
+
+   The `dossier` commands use the installed operator CLI whose version and help
+   were checked above; they do not load code from the current source directory.
+   Steps 3 and 5 read the existing bootstrap-key file in the original checkout.
+   Do not copy that secret into this worktree. Keep these shell variables for
+   the following migration check.
+
+2. **Confirm migration 0003 on the production database.**
+
+   Production migrations belong to the automatic release coordinator. Check the
+   successful release log for `0003_skinny_pet_avengers.sql` or the message that
+   no migrations remain. From that exact tested revision, list pending migrations
+   without changing production:
+
+   ```sh
+   cd "$PURGE_RELEASE_WORKTREE/apps/web"
+   env -u CLOUDFLARE_ENV bunx --no-install wrangler d1 migrations list dossier-production --remote --config wrangler.jsonc
+   ```
+
+   If migration 0003 is still pending, merge the compatible revision to `main`
+   and let the coordinator apply it before deploying the code. Do not apply it
+   through an independent terminal command. Record the release URL and migration
+   statuses before running a purge.
 
 3. **Run a dry run.**
 
