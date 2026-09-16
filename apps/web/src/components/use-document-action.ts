@@ -12,6 +12,8 @@ export interface ActionFailure {
   readonly message: string
 }
 
+type ActionSuccess = Extract<DocumentActionResult, { readonly ok: true }>
+
 export interface ActionInput {
   readonly id: string
   readonly action: DocumentActionName
@@ -33,7 +35,7 @@ export function useDocumentAction(csrfToken: string) {
     label: string,
     input: ActionInput,
     { refresh = true }: { refresh?: boolean } = {},
-  ): Promise<DocumentActionResult | null> {
+  ): Promise<ActionSuccess | null> {
     setPending(label)
     setFailure(null)
     let result: DocumentActionResult
@@ -57,7 +59,7 @@ export function useDocumentAction(csrfToken: string) {
     }
     if (refresh) await router.invalidate()
     setPending(null)
-    return result
+    return result as ActionSuccess
   }
 
   return { pending, failure, setFailure, run }

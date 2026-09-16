@@ -1,0 +1,1544 @@
+import { DossierApi } from '@dossier/contracts'
+import { FetchHttpClient, HttpApiClient } from '@effect/platform'
+import { env as workerEnv } from 'cloudflare:workers'
+import { Effect } from 'effect'
+import { describe, expect, it, vi } from 'vitest'
+
+import worker from '../src/worker'
+import {
+  Principal,
+  Publish,
+  Shares,
+  State,
+  apiError,
+  errorResponse,
+  makeDb,
+  type PrincipalIdentity,
+} from '../src/services'
+import { makeCoreLayer, seedPrincipal, testEnv } from './core-helpers'
+
+const env = testEnv(workerEnv)
+const layer = makeCoreLayer(env)
+
+function run<A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> {
+  return Effect.runPromise(
+    effect.pipe(Effect.provide(layer)) as Effect.Effect<A, E, never>,
+  )
+}
+
+async function setup(
+  suffix: string,
+  email?: string,
+): Promise<{
+  readonly principal: PrincipalIdentity
+  readonly token: string
+}> {
+  const seeded = await seedPrincipal(env, {
+    suffix,
+    ...(email === undefined ? {} : { email }),
+  })
+  const principal = await run(
+    Effect.gen(function* () {
+      return yield* (yield* Principal).resolve(
+        new Request('https://dossier.test/api/uploads', {
+          headers: { authorization: `Bearer ${seeded.token}` },
+        }),
+      )
+    }),
+  )
+  return { principal, token: seeded.token }
+}
+
+function statefulHtml(title: string): string {
+  return `<!doctype html><html><head><title>${title}</title></head><body>
+    <input data-state="objective" value="Launch the new website">
+    <input data-state="approved" type="checkbox">
+    <textarea data-state="notes">Initial notes</textarea>
+  </body></html>`
+}
+
+describe('State', () => {
+  it('rejects reads for an ordinary document', async () => {
+    const { principal, token } = await setup('state_not_enabled')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: '<!doctype html><title>Ordinary</title><p>content</p>',
+            idempotencyKey: 'state-not-enabled',
+          },
+          principal,
+        )
+      }),
+    )
+
+    const result = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .read(published.document.id, { kind: 'account', principal })
+          .pipe(Effect.either)
+      }),
+    )
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'state_not_enabled', status: 409 },
+    })
+
+    const response = await worker.fetch(
+      new Request(
+        `https://dossier.test/api/documents/${published.document.id}/state`,
+        { headers: { authorization: `Bearer ${token}` } },
+      ) as Parameters<typeof worker.fetch>[0],
+      env,
+    )
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: 'state_not_enabled',
+    })
+  })
+
+  it('returns authored defaults at revision zero', async () => {
+    const { principal } = await setup('state_defaults')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('State defaults'),
+            stateful: true,
+            idempotencyKey: 'state-defaults',
+          },
+          principal,
+        )
+      }),
+    )
+
+    const snapshot = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal,
+        })
+      }),
+    )
+    expect(snapshot).toEqual({
+      documentId: published.document.id,
+      version: 1,
+      revision: 0,
+      updatedAt: null,
+      fields: {
+        objective: {
+          value: 'Launch the new website',
+          revision: 0,
+          type: 'text',
+        },
+        approved: { value: false, revision: 0, type: 'checkbox' },
+        notes: { value: 'Initial notes', revision: 0, type: 'textarea' },
+      },
+      canSave: true,
+      viewer: 'editor',
+    })
+  })
+
+  it('normalizes text input newlines the way the browser does', async () => {
+    const { principal } = await setup('state_text_newlines')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: `<!doctype html><html><head><title>Text newlines</title></head><body>
+              <input data-state="title" value="first
+second">
+            </body></html>`,
+            stateful: true,
+            idempotencyKey: 'state-text-newlines',
+          },
+          principal,
+        )
+      }),
+    )
+
+    const initial = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal,
+        })
+      }),
+    )
+    expect(initial.fields.title?.value).toBe('firstsecond')
+
+    const saved = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).save(
+          published.document.id,
+          { kind: 'account', principal },
+          { changes: [{ name: 'title', value: 'saved\r\nvalue', base: 0 }] },
+        )
+      }),
+    )
+    expect(saved.fields.title?.value).toBe('savedvalue')
+  })
+
+  it('includes saved fields absent from the current manifest', async () => {
+    const { principal, token } = await setup('state_orphan')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('Orphaned state'),
+            stateful: true,
+            idempotencyKey: 'state-orphan',
+          },
+          principal,
+        )
+      }),
+    )
+    const updatedAt = '2026-09-14T09:15:00.000Z'
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE document_state
+            SET revision = 4, updated_at = ?
+          WHERE document_id = ?`,
+      ).bind(updatedAt, published.document.id),
+      env.DB.prepare(
+        `INSERT INTO document_state_fields
+           (document_id, name, type, value_json, revision, updated_by,
+            updated_at)
+         VALUES (?, 'removed', 'text', ?, 4, 'account:test', ?)`,
+      ).bind(published.document.id, JSON.stringify('keep me'), updatedAt),
+    ])
+
+    const snapshot = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal,
+        })
+      }),
+    )
+    expect(snapshot.fields.removed).toEqual({
+      value: 'keep me',
+      revision: 4,
+      type: 'text',
+    })
+
+    const response = await worker.fetch(
+      new Request(
+        `https://dossier.test/api/documents/${published.document.id}/state`,
+        { headers: { authorization: `Bearer ${token}` } },
+      ) as Parameters<typeof worker.fetch>[0],
+      env,
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      revision: 4,
+      updatedAt,
+      data: { removed: 'keep me' },
+      fields: {
+        removed: { value: 'keep me', revision: 4, type: 'text' },
+      },
+    })
+  })
+
+  it('preserves a __proto__ field through state reads and HTTP', async () => {
+    const { principal, token } = await setup('state_proto')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: `<!doctype html><html><head><title>Special name</title></head><body>
+              <input data-state="__proto__" value="keep me">
+            </body></html>`,
+            stateful: true,
+            idempotencyKey: 'state-proto',
+          },
+          principal,
+        )
+      }),
+    )
+
+    const snapshot = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal,
+        })
+      }),
+    )
+    expect(Object.hasOwn(snapshot.fields, '__proto__')).toBe(true)
+    expect(snapshot.fields.__proto__).toEqual({
+      value: 'keep me',
+      revision: 0,
+      type: 'text',
+    })
+
+    const response = await worker.fetch(
+      new Request(
+        `https://dossier.test/api/documents/${published.document.id}/state`,
+        { headers: { authorization: `Bearer ${token}` } },
+      ) as Parameters<typeof worker.fetch>[0],
+      env,
+    )
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      data: Record<string, unknown>
+      fields: Record<string, unknown>
+    }
+    expect(Object.hasOwn(body.data, '__proto__')).toBe(true)
+    expect(body.data.__proto__).toBe('keep me')
+    expect(Object.hasOwn(body.fields, '__proto__')).toBe(true)
+  })
+
+  it('serves the StateResponse data and per-field revisions', async () => {
+    const { principal, token } = await setup('state_api')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('State API'),
+            stateful: true,
+            visibility: 'public',
+            idempotencyKey: 'state-api',
+          },
+          principal,
+        )
+      }),
+    )
+
+    const publicSnapshot = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'public',
+        })
+      }),
+    )
+    expect(publicSnapshot).toMatchObject({ canSave: false, viewer: 'reader' })
+
+    const response = await worker.fetch(
+      new Request(
+        `https://dossier.test/api/documents/${published.document.id}/state`,
+        { headers: { authorization: `Bearer ${token}` } },
+      ) as Parameters<typeof worker.fetch>[0],
+      env,
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      documentId: published.document.id,
+      version: 1,
+      revision: 0,
+      updatedAt: null,
+      data: {
+        objective: 'Launch the new website',
+        approved: false,
+        notes: 'Initial notes',
+      },
+      fields: {
+        objective: {
+          value: 'Launch the new website',
+          revision: 0,
+          type: 'text',
+        },
+        approved: { value: false, revision: 0, type: 'checkbox' },
+        notes: { value: 'Initial notes', revision: 0, type: 'textarea' },
+      },
+    })
+  })
+})
+
+async function publishState(
+  principal: PrincipalIdentity,
+  suffix: string,
+  html = statefulHtml(suffix),
+  visibility?: 'public' | 'team' | 'private',
+) {
+  return run(
+    Effect.gen(function* () {
+      return yield* (yield* Publish).publish(
+        {
+          html,
+          stateful: true,
+          idempotencyKey: `state-save-${suffix}`,
+          ...(visibility === undefined ? {} : { visibility }),
+        },
+        principal,
+      )
+    }),
+  )
+}
+
+function saveState(
+  documentId: string,
+  principal: PrincipalIdentity,
+  changes: readonly { name: string; value: unknown; base: number }[],
+  version?: number,
+) {
+  return run(
+    Effect.gen(function* () {
+      return yield* (yield* State)
+        .save(
+          documentId,
+          { kind: 'account', principal },
+          { changes, ...(version === undefined ? {} : { version }) },
+        )
+        .pipe(Effect.either)
+    }),
+  )
+}
+
+async function stateRequest(
+  path: string,
+  token: string,
+  environment: Cloudflare.Env,
+  options: { readonly method?: string; readonly body?: unknown } = {},
+): Promise<Response> {
+  const headers = new Headers({ authorization: `Bearer ${token}` })
+  const body =
+    options.body === undefined ? undefined : JSON.stringify(options.body)
+  if (body !== undefined) headers.set('content-type', 'application/json')
+  return worker.fetch(
+    new Request(`https://dossier.test${path}`, {
+      method: options.method ?? 'GET',
+      headers,
+      body,
+    }) as Parameters<typeof worker.fetch>[0],
+    environment,
+  )
+}
+
+describe('State edit links', () => {
+  it('derives one active link and rejects its old generation everywhere', async () => {
+    const owner = await setup('state_link_owner')
+    const published = await publishState(
+      owner.principal,
+      'state-link-owner',
+      statefulHtml('Private link target'),
+      'private',
+    )
+    const other = await publishState(
+      owner.principal,
+      'state-link-other',
+      statefulHtml('Other private target'),
+      'private',
+    )
+
+    const result = await run(
+      Effect.gen(function* () {
+        const state = yield* State
+        const first = yield* state.links.create(
+          published.document.id,
+          owner.principal,
+        )
+        const second = yield* state.links.create(
+          published.document.id,
+          owner.principal,
+        )
+        const fetched = yield* state.links.get(
+          published.document.id,
+          owner.principal,
+        )
+        const token = new URL(first.editUrl!).hash.slice(1)
+        const actor = yield* state.resolveEditToken(
+          published.document.id,
+          token,
+        )
+        const snapshot = yield* state.read(published.document.id, actor)
+        const ticket = yield* state.issueFrameTicket(
+          published.document.id,
+          owner.principal.workspaceId,
+          snapshot.version,
+          actor,
+        )
+        const claims = yield* state.verifyFrameTicket(ticket)
+        const wrongDocument = yield* state
+          .resolveEditToken(other.document.id, token)
+          .pipe(Effect.either)
+
+        const revoked = yield* state.links.revoke(
+          published.document.id,
+          owner.principal,
+        )
+        const replacement = yield* state.links.create(
+          published.document.id,
+          owner.principal,
+        )
+        const oldGet = yield* state
+          .resolveEditToken(published.document.id, token)
+          .pipe(Effect.either)
+        const oldFrame = yield* state
+          .resolveFrameViewer(claims)
+          .pipe(Effect.either)
+        const oldSave = yield* state
+          .save(published.document.id, actor, {
+            version: snapshot.version,
+            changes: [{ name: 'approved', value: true, base: 0 }],
+          })
+          .pipe(Effect.either)
+        return {
+          first,
+          second,
+          fetched,
+          snapshot,
+          wrongDocument,
+          revoked,
+          replacement,
+          oldGet,
+          oldFrame,
+          oldSave,
+        }
+      }),
+    )
+
+    expect(result.second).toEqual(result.first)
+    expect(result.fetched).toEqual(result.first)
+    expect(result.snapshot).toMatchObject({
+      documentId: published.document.id,
+      viewer: 'link',
+      canSave: true,
+    })
+    expect(result.wrongDocument).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'link_revoked', status: 410 },
+    })
+    expect(result.revoked).toEqual({ revoked: true })
+    expect(result.replacement.active).toBe(true)
+    expect(result.replacement.editUrl).not.toBe(result.first.editUrl)
+    for (const refused of [result.oldGet, result.oldFrame, result.oldSave]) {
+      expect(refused).toMatchObject({
+        _tag: 'Left',
+        left: { code: 'link_revoked', status: 410 },
+      })
+    }
+
+    const row = await env.DB.prepare(
+      `SELECT generation, revoked_at FROM document_edit_links
+        WHERE document_id = ?`,
+    )
+      .bind(published.document.id)
+      .first<{ generation: number; revoked_at: string | null }>()
+    expect(row).toEqual({ generation: 2, revoked_at: null })
+  })
+
+  it('serves create, get, and revoke through the Bearer API', async () => {
+    const owner = await setup('state_link_api')
+    const published = await publishState(
+      owner.principal,
+      'state-link-api',
+      statefulHtml('Link API'),
+      'private',
+    )
+    const path = `/api/documents/${published.document.id}/state/link`
+
+    const create = await stateRequest(path, owner.token, env, {
+      method: 'POST',
+    })
+    expect(create.status, await create.clone().text()).toBe(200)
+    const created = (await create.json()) as {
+      documentId: string
+      active: boolean
+      editUrl: string
+    }
+    expect(created).toMatchObject({
+      documentId: published.document.id,
+      active: true,
+    })
+    expect(created.editUrl).toContain(`/d/${published.document.id}/edit#`)
+
+    const get = await stateRequest(path, owner.token, env)
+    expect(await get.json()).toEqual(created)
+
+    const revoke = await stateRequest(path, owner.token, env, {
+      method: 'DELETE',
+    })
+    expect(await revoke.json()).toEqual({
+      documentId: published.document.id,
+      revoked: true,
+    })
+
+    const absent = await stateRequest(path, owner.token, env)
+    expect(await absent.json()).toEqual({
+      documentId: published.document.id,
+      active: false,
+      editUrl: null,
+    })
+  })
+
+  it('requires saved values on every edit-link management endpoint', async () => {
+    const owner = await setup('state_link_not_enabled')
+    const published = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: '<!doctype html><title>Ordinary link target</title>',
+            idempotencyKey: 'state-link-not-enabled',
+          },
+          owner.principal,
+        )
+      }),
+    )
+    const path = `/api/documents/${published.document.id}/state/link`
+
+    for (const method of ['POST', 'GET', 'DELETE'] as const) {
+      const response = await stateRequest(path, owner.token, env, { method })
+      expect(response.status, method).toBe(409)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        code: 'state_not_enabled',
+      })
+    }
+  })
+
+  it('withholds and preserves edit links after author membership is removed', async () => {
+    const owner = await setup('state_link_removed_author')
+    const published = await publishState(
+      owner.principal,
+      'state-link-removed-author',
+      statefulHtml('Removed author link'),
+      'private',
+    )
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* State).links.create(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+    await env.DB.prepare(
+      'DELETE FROM memberships WHERE workspace_id = ? AND account_id = ?',
+    )
+      .bind(owner.principal.workspaceId, owner.principal.accountId)
+      .run()
+
+    const path = `/api/documents/${published.document.id}/state/link`
+    for (const method of ['POST', 'GET', 'DELETE'] as const) {
+      const response = await stateRequest(path, owner.token, env, { method })
+      expect(response.status, method).toBe(403)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        code: 'publisher_required',
+      })
+    }
+
+    const status = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).links.status(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+    expect(status).toEqual({ active: true })
+  })
+
+  it('checks membership again inside edit-link mutation batches', async () => {
+    const owner = await setup('state_link_membership_race')
+    const published = await publishState(
+      owner.principal,
+      'state-link-membership-race',
+    )
+    const actualDb = makeDb(env.DB)
+    const removeMembership = () =>
+      env.DB.prepare(
+        'DELETE FROM memberships WHERE workspace_id = ? AND account_id = ?',
+      )
+        .bind(owner.principal.workspaceId, owner.principal.accountId)
+        .run()
+
+    let createRaced = false
+    const createLayer = makeCoreLayer(env, {
+      db: {
+        ...actualDb,
+        batch: (statements) =>
+          Effect.gen(function* () {
+            if (!createRaced) {
+              createRaced = true
+              yield* Effect.promise(removeMembership)
+            }
+            return yield* actualDb.batch(statements)
+          }),
+      },
+    })
+    const createResult = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* State).links
+          .create(published.document.id, owner.principal)
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(createLayer)),
+    )
+    expect(createRaced).toBe(true)
+    expect(createResult).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'conflict', status: 409 },
+    })
+    expect(
+      await env.DB.prepare(
+        'SELECT generation FROM document_edit_links WHERE document_id = ?',
+      )
+        .bind(published.document.id)
+        .first(),
+    ).toBeNull()
+
+    await env.DB.prepare(
+      `INSERT INTO memberships (workspace_id, account_id, role, created_at)
+       VALUES (?, ?, 'member', ?)`,
+    )
+      .bind(
+        owner.principal.workspaceId,
+        owner.principal.accountId,
+        new Date().toISOString(),
+      )
+      .run()
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* State).links.create(
+          published.document.id,
+          owner.principal,
+        )
+      }),
+    )
+
+    let revokeRaced = false
+    const revokeLayer = makeCoreLayer(env, {
+      db: {
+        ...actualDb,
+        batch: (statements) =>
+          Effect.gen(function* () {
+            if (!revokeRaced) {
+              revokeRaced = true
+              yield* Effect.promise(removeMembership)
+            }
+            return yield* actualDb.batch(statements)
+          }),
+      },
+    })
+    const revokeResult = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* State).links
+          .revoke(published.document.id, owner.principal)
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(revokeLayer)),
+    )
+    expect(revokeRaced).toBe(true)
+    expect(revokeResult).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'conflict', status: 409 },
+    })
+    expect(
+      await env.DB.prepare(
+        'SELECT revoked_at FROM document_edit_links WHERE document_id = ?',
+      )
+        .bind(published.document.id)
+        .first<{ revoked_at: string | null }>(),
+    ).toEqual({ revoked_at: null })
+  })
+})
+
+describe('State saves', () => {
+  it('lets a verified grant save, then keeps reading after save is removed', async () => {
+    const owner = await setup('state_grant_owner')
+    const saver = await setup('state_grant_saver', 'saver@state-grant.test')
+    const reader = await setup('state_grant_reader', 'reader@state-grant.test')
+    const published = await publishState(
+      owner.principal,
+      'state-grant',
+      statefulHtml('State grant'),
+      'private',
+    )
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          published.document.id,
+          {
+            add: ['reader@state-grant.test'],
+            addSavers: [' Saver@State-Grant.Test '],
+          },
+          owner.principal,
+        )
+      }),
+    )
+
+    const granted = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal: saver.principal,
+        })
+      }),
+    )
+    expect(granted).toMatchObject({ viewer: 'granted', canSave: true })
+
+    const saved = await saveState(published.document.id, saver.principal, [
+      { name: 'approved', value: true, base: 0 },
+    ])
+    expect(saved).toMatchObject({
+      _tag: 'Right',
+      right: {
+        viewer: 'granted',
+        canSave: true,
+        fields: { approved: { value: true, revision: 1 } },
+      },
+    })
+
+    const viewOnly = await stateRequest(
+      `/api/documents/${published.document.id}/state`,
+      reader.token,
+      env,
+      {
+        method: 'PUT',
+        body: {
+          changes: [{ name: 'notes', value: 'No', base: 0 }],
+        },
+      },
+    )
+    expect(viewOnly.status).toBe(403)
+    expect(await viewOnly.json()).toMatchObject({
+      code: 'state_edit_required',
+    })
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          published.document.id,
+          { removeSavers: ['SAVER@STATE-GRANT.TEST'] },
+          owner.principal,
+        )
+      }),
+    )
+
+    const stillReadable = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(published.document.id, {
+          kind: 'account',
+          principal: saver.principal,
+        })
+      }),
+    )
+    expect(stillReadable).toMatchObject({
+      viewer: 'granted',
+      canSave: false,
+      fields: { approved: { value: true } },
+    })
+    const stopped = await saveState(published.document.id, saver.principal, [
+      { name: 'notes', value: 'Stopped', base: 0 },
+    ])
+    expect(stopped).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'state_edit_required', status: 403 },
+    })
+  })
+
+  it('removes a local grant without materializing inherited access', async () => {
+    const owner = await setup('state_remove_grant_owner')
+    const parent = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: '<!doctype html><title>Grant parent</title>',
+            visibility: 'private',
+            shares: ['inherited@state-grant.test'],
+            idempotencyKey: 'state-remove-grant-parent',
+          },
+          owner.principal,
+        )
+      }),
+    )
+    const child = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('Grant child'),
+            stateful: true,
+            parentId: parent.document.id,
+            idempotencyKey: 'state-remove-grant-child',
+          },
+          owner.principal,
+        )
+      }),
+    )
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          child.document.id,
+          { addSavers: ['local@state-grant.test'] },
+          owner.principal,
+        )
+        yield* (yield* Shares).delta(
+          child.document.id,
+          { removeGrants: ['LOCAL@STATE-GRANT.TEST'] },
+          owner.principal,
+        )
+      }),
+    )
+
+    const row = await env.DB.prepare(
+      `SELECT visibility,
+              (SELECT COUNT(*) FROM document_shares share
+                WHERE share.document_id = documents.id) AS shares
+         FROM documents WHERE id = ?`,
+    )
+      .bind(child.document.id)
+      .first<{ visibility: string | null; shares: number }>()
+    expect(row).toEqual({ visibility: null, shares: 0 })
+
+    const response = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Shares).get(child.document.id, owner.principal)
+      }),
+    )
+    expect(response).toEqual({
+      configured: [],
+      effective: ['inherited@state-grant.test'],
+      accessSource: 'inherited',
+      grants: [],
+    })
+  })
+
+  it('does not turn a saver into an editor or workspace member', async () => {
+    const owner = await setup('state_saver_scope_owner')
+    const saver = await setup(
+      'state_saver_scope_saver',
+      'saver@state-scope.test',
+    )
+    const target = await publishState(
+      owner.principal,
+      'state-saver-scope',
+      statefulHtml('State saver scope'),
+      'team',
+    )
+    const child = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: statefulHtml('Private saver child'),
+            stateful: true,
+            parentId: target.document.id,
+            visibility: 'private',
+            idempotencyKey: 'state-saver-private-child',
+          },
+          owner.principal,
+        )
+      }),
+    )
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          target.document.id,
+          { addSavers: ['saver@state-scope.test'] },
+          owner.principal,
+        )
+      }),
+    )
+
+    const membership = await env.DB.prepare(
+      `SELECT 1 AS found FROM memberships
+        WHERE workspace_id = ? AND account_id = ?`,
+    )
+      .bind(owner.principal.workspaceId, saver.principal.accountId)
+      .first<{ found: number }>()
+    expect(membership).toBeNull()
+
+    const republish = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish)
+          .publish(
+            {
+              html: statefulHtml('Saver cannot publish'),
+              stateful: true,
+              documentId: target.document.id,
+              idempotencyKey: 'state-saver-cannot-publish',
+            },
+            saver.principal,
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(republish).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'editor_required', status: 403 },
+    })
+
+    const sharing = await run(
+      Effect.gen(function* () {
+        return yield* (yield* Shares)
+          .delta(
+            target.document.id,
+            { add: ['no@state-scope.test'] },
+            saver.principal,
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(sharing).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'publisher_required', status: 403 },
+    })
+
+    const privateChild = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .read(child.document.id, {
+            kind: 'account',
+            principal: saver.principal,
+          })
+          .pipe(Effect.either)
+      }),
+    )
+    expect(privateChild).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'not_found', status: 404 },
+    })
+  })
+
+  it('allows disjoint saves and reports the moved field for a stale base', async () => {
+    const { principal } = await setup('state_conflicts')
+    const published = await publishState(principal, 'state-conflicts')
+
+    const objective = await saveState(published.document.id, principal, [
+      { name: 'objective', value: 'Ship it', base: 0 },
+    ])
+    expect(objective).toMatchObject({
+      _tag: 'Right',
+      right: {
+        revision: 1,
+        fields: { objective: { value: 'Ship it', revision: 1 } },
+      },
+    })
+
+    const approved = await saveState(published.document.id, principal, [
+      { name: 'approved', value: true, base: 0 },
+    ])
+    expect(approved).toMatchObject({
+      _tag: 'Right',
+      right: {
+        revision: 2,
+        fields: {
+          objective: { value: 'Ship it', revision: 1 },
+          approved: { value: true, revision: 2 },
+        },
+      },
+    })
+
+    const stale = await saveState(published.document.id, principal, [
+      { name: 'objective', value: 'Overwrite it', base: 0 },
+    ])
+    expect(stale).toMatchObject({
+      _tag: 'Left',
+      left: {
+        code: 'state_conflict',
+        status: 409,
+        details: {
+          fields: [{ name: 'objective', revision: 1, value: 'Ship it' }],
+        },
+      },
+    })
+  })
+
+  it('reports a stale browser version before validating values', async () => {
+    const { principal } = await setup('state_version_changed')
+    const published = await publishState(principal, 'state-version-changed')
+
+    const result = await saveState(
+      published.document.id,
+      principal,
+      [{ name: 'objective', value: false, base: 0 }],
+      0,
+    )
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: {
+        code: 'state_version_changed',
+        status: 409,
+        details: { currentVersion: 1 },
+      },
+    })
+  })
+
+  it('reports a version change when a publish races a CLI save', async () => {
+    const { principal } = await setup('state_publish_race')
+    const published = await publishState(principal, 'state-publish-race')
+    const actualDb = makeDb(env.DB)
+    let publishRaced = false
+    const racingLayer = makeCoreLayer(env, {
+      db: {
+        ...actualDb,
+        batch: (statements) =>
+          Effect.gen(function* () {
+            if (!publishRaced) {
+              publishRaced = true
+              yield* Effect.promise(() =>
+                run(
+                  Effect.gen(function* () {
+                    return yield* (yield* Publish).publish(
+                      {
+                        html: statefulHtml('Published during state save'),
+                        stateful: true,
+                        documentId: published.document.id,
+                        idempotencyKey: 'state-publish-race-version-two',
+                      },
+                      principal,
+                    )
+                  }),
+                ),
+              )
+            }
+            return yield* actualDb.batch(statements)
+          }),
+      },
+    })
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .save(
+            published.document.id,
+            { kind: 'account', principal },
+            {
+              changes: [{ name: 'objective', value: 'CLI draft', base: 0 }],
+            },
+          )
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(racingLayer)),
+    )
+
+    expect(publishRaced).toBe(true)
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: {
+        code: 'state_version_changed',
+        status: 409,
+        details: { currentVersion: 2 },
+      },
+    })
+    const stateRow = await env.DB.prepare(
+      'SELECT revision FROM document_state WHERE document_id = ?',
+    )
+      .bind(published.document.id)
+      .first<{ revision: number }>()
+    expect(stateRow?.revision).toBe(0)
+  })
+
+  it('validates field names, types, and the serialized 64 KiB cap', async () => {
+    const { principal } = await setup('state_type_limits')
+    const published = await publishState(principal, 'state-type-limits')
+
+    const wrongType = await saveState(published.document.id, principal, [
+      { name: 'approved', value: 'yes', base: 0 },
+      { name: 'missing', value: true, base: 0 },
+    ])
+    expect(wrongType).toMatchObject({
+      _tag: 'Left',
+      left: {
+        code: 'state_type_mismatch',
+        status: 422,
+        details: { fields: ['approved', 'missing'] },
+      },
+    })
+
+    const tooLarge = await saveState(published.document.id, principal, [
+      { name: 'notes', value: 'x'.repeat(64 * 1024), base: 0 },
+    ])
+    expect(tooLarge).toMatchObject({
+      _tag: 'Left',
+      left: {
+        code: 'state_type_mismatch',
+        status: 422,
+        details: { fields: ['notes'] },
+      },
+    })
+  })
+
+  it('saves 200 fields through one JSON parameter', async () => {
+    const { principal } = await setup('state_200_fields')
+    const controls = Array.from(
+      { length: 200 },
+      (_, index) => `<input data-state="field_${index}" value="">`,
+    ).join('')
+    const published = await publishState(
+      principal,
+      'state-200-fields',
+      `<!doctype html><html><head><title>Many fields</title></head><body>${controls}</body></html>`,
+    )
+    const result = await saveState(
+      published.document.id,
+      principal,
+      Array.from({ length: 200 }, (_, index) => ({
+        name: `field_${index}`,
+        value: `value ${index}`,
+        base: 0,
+      })),
+    )
+
+    expect(result._tag).toBe('Right')
+    if (result._tag === 'Right') {
+      expect(Object.keys(result.right.fields)).toHaveLength(200)
+      expect(result.right.fields.field_199).toEqual({
+        value: 'value 199',
+        revision: 1,
+        type: 'text',
+      })
+    }
+  })
+
+  it('rejects a save that would exceed the 256 KiB document total', async () => {
+    const { principal } = await setup('state_total_limit')
+    const controls = Array.from(
+      { length: 5 },
+      (_, index) => `<textarea data-state="field_${index}"></textarea>`,
+    ).join('')
+    const published = await publishState(
+      principal,
+      'state-total-limit',
+      `<!doctype html><html><head><title>Total cap</title></head><body>${controls}</body></html>`,
+    )
+    const result = await saveState(
+      published.document.id,
+      principal,
+      Array.from({ length: 5 }, (_, index) => ({
+        name: `field_${index}`,
+        value: 'x'.repeat(60_000),
+        base: 0,
+      })),
+    )
+
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: {
+        code: 'state_too_large',
+        status: 413,
+        details: { limit: 256 * 1024 },
+      },
+    })
+    if (result._tag === 'Left' && 'details' in result.left) {
+      expect((result.left.details as { bytes: number }).bytes).toBeGreaterThan(
+        256 * 1024,
+      )
+    }
+  })
+
+  it('re-checks account, document, and editor authority at save time', async () => {
+    const owner = await setup('state_authority_owner')
+    const published = await publishState(
+      owner.principal,
+      'state-authority',
+      statefulHtml('State authority'),
+      'public',
+    )
+
+    await env.DB.prepare('UPDATE accounts SET disabled_at = ? WHERE id = ?')
+      .bind('2026-09-14T12:00:00.000Z', owner.principal.accountId)
+      .run()
+    const disabledAccount = await saveState(
+      published.document.id,
+      owner.principal,
+      [{ name: 'approved', value: true, base: 0 }],
+    )
+    expect(disabledAccount).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'state_edit_required', status: 403 },
+    })
+
+    const outsider = await setup('state_authority_outsider')
+    const nonEditor = await saveState(
+      published.document.id,
+      outsider.principal,
+      [{ name: 'approved', value: true, base: 0 }],
+    )
+    expect(nonEditor).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'state_edit_required', status: 403 },
+    })
+
+    const publicActor = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .save(
+            published.document.id,
+            { kind: 'public' },
+            { changes: [{ name: 'approved', value: true, base: 0 }] },
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(publicActor).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'state_edit_required', status: 403 },
+    })
+
+    const stateRow = await env.DB.prepare(
+      'SELECT revision FROM document_state WHERE document_id = ?',
+    )
+      .bind(published.document.id)
+      .first<{ revision: number }>()
+    expect(stateRow?.revision).toBe(0)
+  })
+
+  it.each([
+    ['archived', 'deleted_at'],
+    ['disabled', 'disabled_at'],
+  ] as const)('refuses an %s document', async (suffix, column) => {
+    const { principal } = await setup(`state_${suffix}_document`)
+    const published = await publishState(principal, `state-${suffix}-document`)
+    await env.DB.prepare(`UPDATE documents SET ${column} = ? WHERE id = ?`)
+      .bind('2026-09-14T12:00:00.000Z', published.document.id)
+      .run()
+
+    const result = await saveState(published.document.id, principal, [
+      { name: 'approved', value: true, base: 0 },
+    ])
+    expect(result).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'not_found', status: 404 },
+    })
+  })
+
+  it('writes the state_saved event and returns the full snapshot', async () => {
+    const { principal, token } = await setup('state_event')
+    const published = await publishState(principal, 'state-event')
+    const response = await stateRequest(
+      `/api/documents/${published.document.id}/state`,
+      token,
+      env,
+      {
+        method: 'PUT',
+        body: {
+          changes: [{ name: 'notes', value: 'Ready', base: 0 }],
+        },
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      documentId: published.document.id,
+      version: 1,
+      revision: 1,
+      data: {
+        objective: 'Launch the new website',
+        approved: false,
+        notes: 'Ready',
+      },
+      fields: {
+        objective: { revision: 0, type: 'text' },
+        approved: { revision: 0, type: 'checkbox' },
+        notes: { value: 'Ready', revision: 1, type: 'textarea' },
+      },
+    })
+
+    const event = await env.DB.prepare(
+      `SELECT document_version_id, account_id, api_key_id, metadata_json
+         FROM upload_events
+        WHERE document_id = ? AND event_type = 'state_saved'`,
+    )
+      .bind(published.document.id)
+      .first<{
+        document_version_id: string
+        account_id: string
+        api_key_id: string
+        metadata_json: string
+      }>()
+    expect(event).toMatchObject({
+      account_id: principal.accountId,
+      api_key_id: principal.apiKeyId,
+    })
+    expect(JSON.parse(event?.metadata_json ?? 'null')).toEqual({
+      names: ['notes'],
+      actorKind: 'account',
+    })
+  })
+
+  it('shares one 60-request limiter key between reads and writes', async () => {
+    const { principal, token } = await setup('state_rate_limit')
+    const published = await publishState(principal, 'state-rate-limit')
+    let calls = 0
+    const keys = new Set<string>()
+    const limitedEnv = {
+      ...env,
+      STATE_RATE_LIMITER: {
+        limit: async ({ key }: RateLimitOptions) => {
+          calls += 1
+          keys.add(key)
+          return { success: calls <= 60 }
+        },
+      },
+    } as Cloudflare.Env
+    const path = `/api/documents/${published.document.id}/state`
+
+    for (let index = 0; index < 59; index += 1) {
+      const response = await stateRequest(path, token, limitedEnv)
+      expect(response.status).toBe(200)
+    }
+    const write = await stateRequest(path, token, limitedEnv, {
+      method: 'PUT',
+      body: { changes: [{ name: 'approved', value: true, base: 0 }] },
+    })
+    expect(write.status).toBe(200)
+
+    const limited = await stateRequest(path, token, limitedEnv)
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('retry-after')).toBe('60')
+    expect(await limited.json()).toMatchObject({
+      ok: false,
+      code: 'rate_limited',
+    })
+    expect(calls).toBe(61)
+    expect([...keys]).toEqual([
+      `document:${published.document.id}:account:${principal.accountId}`,
+    ])
+  })
+
+  it('gates alternate state routes after framework matching', async () => {
+    const { principal, token } = await setup('state_route_gate')
+    const published = await publishState(principal, 'state-route-gate')
+    const id = published.document.id
+    const path = `/api/documents/${id}/state`
+    const encodedId = `%${id.charCodeAt(0).toString(16)}${id.slice(1)}`
+    const requests: readonly {
+      readonly path: string
+      readonly options?: {
+        readonly method?: string
+        readonly body?: unknown
+      }
+    }[] = [
+      { path },
+      {
+        path: `/api/documents/${encodedId}/state`,
+        options: {
+          method: 'PUT',
+          body: { changes: [{ name: 'approved', value: true, base: 0 }] },
+        },
+      },
+      { path: `${path}/` },
+      { path: `/api/documents//${id}//state` },
+      { path, options: { method: 'HEAD' } },
+    ]
+    const keys: string[] = []
+    const rejecting = {
+      ...env,
+      STATE_RATE_LIMITER: {
+        limit: async ({ key }: RateLimitOptions) => {
+          keys.push(key)
+          return { success: false }
+        },
+      },
+    } as Cloudflare.Env
+
+    for (const request of requests) {
+      const response = await stateRequest(
+        request.path,
+        token,
+        rejecting,
+        request.options,
+      )
+      expect(response.status, request.path).toBe(429)
+    }
+    expect(keys).toEqual(
+      requests.map(() => `document:${id}:account:${principal.accountId}`),
+    )
+
+    const production = {
+      ...env,
+      PUBLIC_BASE_URL: 'https://dossier.agent964.com',
+    } as Partial<Cloudflare.Env>
+    delete production.STATE_RATE_LIMITER
+    for (const request of requests) {
+      const response = await stateRequest(
+        request.path,
+        token,
+        production as Cloudflare.Env,
+        request.options,
+      )
+      expect(response.status, request.path).toBe(503)
+    }
+
+    const stateRow = await env.DB.prepare(
+      'SELECT revision FROM document_state WHERE document_id = ?',
+    )
+      .bind(id)
+      .first<{ revision: number }>()
+    expect(stateRow?.revision).toBe(0)
+  })
+
+  it('fails closed without the production state limiter and hides health', async () => {
+    const { principal, token } = await setup('state_missing_limiter')
+    const published = await publishState(principal, 'state-missing-limiter')
+    const production = {
+      ...env,
+      PUBLIC_BASE_URL: 'https://dossier.agent964.com',
+    } as Partial<Cloudflare.Env>
+    delete production.STATE_RATE_LIMITER
+
+    const response = await stateRequest(
+      `/api/documents/${published.document.id}/state`,
+      token,
+      production as Cloudflare.Env,
+    )
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: 'state_unavailable',
+    })
+
+    const health = await worker.fetch(
+      new Request('https://dossier.test/api/healthz') as Parameters<
+        typeof worker.fetch
+      >[0],
+      production as Cloudflare.Env,
+    )
+    expect(health.status).toBe(200)
+    expect(await health.json()).toMatchObject({ features: [] })
+  })
+
+  it('decodes real state error envelopes through the derived client', async () => {
+    const responses = [
+      errorResponse(
+        apiError('state_conflict', 'A saved value moved.', {
+          fields: [{ name: 'approved', revision: 3, value: true }],
+        }),
+      ),
+      errorResponse(
+        apiError('state_unavailable', 'Saved values are unavailable.'),
+      ),
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => responses.shift()!.clone()),
+    )
+
+    try {
+      const client = await Effect.runPromise(
+        HttpApiClient.make(DossierApi, {
+          baseUrl: 'https://dossier.test',
+        }).pipe(Effect.provide(FetchHttpClient.layer)),
+      )
+      const conflict = await Effect.runPromise(
+        Effect.flip(
+          client.state.set({
+            path: { id: 'abcdefghijkl' },
+            payload: { changes: [] },
+          }),
+        ),
+      )
+      expect(conflict).toEqual({
+        ok: false,
+        code: 'state_conflict',
+        message: 'A saved value moved.',
+        details: {
+          fields: [{ name: 'approved', revision: 3, value: true }],
+        },
+      })
+
+      const unavailable = await Effect.runPromise(
+        Effect.flip(client.state.get({ path: { id: 'abcdefghijkl' } })),
+      )
+      expect(unavailable).toEqual({
+        ok: false,
+        code: 'state_unavailable',
+        message: 'Saved values are unavailable.',
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

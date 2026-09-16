@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations(
@@ -26,6 +26,9 @@ export default defineConfig(async () => {
       }),
     ],
     test: {
+      // The Playwright suite lives under test/browser and runs in Chromium
+      // through `bun run test:browser`, not in the workerd pool.
+      exclude: [...configDefaults.exclude, 'test/browser/**'],
       setupFiles: ['./test/apply-migrations.ts'],
       // workerd plus D1 migrations per file is slow on shared CI runners.
       testTimeout: 30_000,

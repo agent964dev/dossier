@@ -4,8 +4,9 @@ import type {
   SharesResponse,
   Visibility,
 } from '@dossier/contracts'
-import { Mail, Plus, X } from 'lucide-react'
+import { Check, Mail, Plus, X } from 'lucide-react'
 
+import { CopyField } from './copy-field'
 import { VisibilityTag } from './document-list'
 import { StatusMessage } from './status-message'
 import { Badge } from './ui/badge'
@@ -64,15 +65,173 @@ function splitEmails(value: string): string[] {
     .filter((entry) => entry.length > 0)
 }
 
+/**
+ * One anonymous edit link per stateful document. The token lives only in the
+ * URL a create answers with, so the card shows that URL once and afterwards
+ * offers Copy link, which creates again and gets the same one back.
+ */
+function EditLinkCard({
+  documentId,
+  active,
+  canEdit,
+  pending,
+  run,
+  setNote,
+}: {
+  documentId: string
+  active: boolean
+  canEdit: boolean
+  pending: string | null
+  run: ReturnType<typeof useDocumentAction>['run']
+  setNote: (note: string | null) => void
+}) {
+  const [linkActive, setLinkActive] = useState(active)
+  const [editUrl, setEditUrl] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState(false)
+
+  async function createLink(copy: boolean) {
+    setNote(null)
+    setConfirmRevoke(false)
+    const result = await run(
+      'link:create',
+      { id: documentId, action: 'link_create' },
+      { refresh: false },
+    )
+    if (result === null || result.action !== 'link') return
+    setLinkActive(result.link.active)
+    setEditUrl(result.link.editUrl)
+    if (result.link.editUrl === null) return
+
+    if (copy) {
+      try {
+        await navigator.clipboard.writeText(result.link.editUrl)
+        setNote('Edit link copied.')
+        return
+      } catch {
+        setNote('The active edit link is shown below so you can copy it.')
+        return
+      }
+    }
+    setNote('Edit link created. Copy it before leaving this page.')
+  }
+
+  async function revokeLink() {
+    setNote(null)
+    const result = await run(
+      'link:revoke',
+      { id: documentId, action: 'link_revoke' },
+      { refresh: false },
+    )
+    if (result === null || result.action !== 'link') return
+    setLinkActive(false)
+    setEditUrl(null)
+    setConfirmRevoke(false)
+    setNote(
+      'Edit link revoked. Open tabs will be refused on their next request.',
+    )
+  }
+
+  return (
+    <div className="border-t border-border/70 pt-4">
+      <div className="flex items-center justify-between gap-3 pb-2">
+        <span className="text-micro-lg text-neutral-500">Edit link</span>
+        <Badge variant={linkActive ? 'success' : 'muted'}>
+          {linkActive ? 'active' : 'none'}
+        </Badge>
+      </div>
+      <p className="text-xs leading-ui text-neutral-500">
+        Anyone with the link can read and change values and can forward it.
+      </p>
+
+      {editUrl ? (
+        <div className="mt-3">
+          <CopyField value={editUrl} label="Copy the edit link" />
+        </div>
+      ) : null}
+
+      {canEdit ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {linkActive ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={pending !== null}
+                onClick={() => void createLink(true)}
+              >
+                {pending === 'link:create' ? 'Copying…' : 'Copy link'}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={pending !== null}
+                onClick={() => setConfirmRevoke(true)}
+              >
+                Revoke
+              </Button>
+            </>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending !== null}
+              onClick={() => void createLink(false)}
+            >
+              {pending === 'link:create' ? 'Creating…' : 'Create link'}
+            </Button>
+          )}
+        </div>
+      ) : null}
+
+      {confirmRevoke ? (
+        <div
+          role="alert"
+          className="mt-3 rounded-lg border border-warning-400/35 bg-warning-400/[0.07] px-3 py-3"
+        >
+          <p className="text-sm leading-ui text-warning-100">
+            Revoke this link? Open tabs will lose access on their next load or
+            save.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="warn"
+              disabled={pending !== null}
+              onClick={() => void revokeLink()}
+            >
+              {pending === 'link:revoke' ? 'Revoking…' : 'Revoke link'}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={pending !== null}
+              onClick={() => setConfirmRevoke(false)}
+            >
+              Keep link
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function AccessPanel({
   document,
   shares,
+  editLink,
   csrfToken,
   workspaceSlug,
   canEdit,
 }: {
   document: DocumentEditor
   shares: SharesResponse
+  editLink: { readonly active: boolean }
   csrfToken: string
   workspaceSlug: string
   canEdit: boolean
@@ -86,6 +245,14 @@ export function AccessPanel({
   const inForce = shares.effective
   const strayConfigured = shares.configured.filter(
     (email) => !inForce.includes(email),
+  )
+  /**
+   * An invited email may also hold a saved-values grant. The two are separate
+   * powers on separate rows, so each list badges what the other one adds: the
+   * invite row says the email can save, the grant row says it is also invited.
+   */
+  const savers = new Set(
+    shares.grants.filter((grant) => grant.canSave).map((grant) => grant.email),
   )
   const ownBoundary = shares.accessSource === 'own'
   const versions = `${document.versionCount} retained ${
@@ -170,6 +337,32 @@ export function AccessPanel({
     })
     if (result === null) return
     setNote(`${email} no longer has access through an invite.`)
+  }
+
+  async function setSaver(email: string, canSave: boolean) {
+    setNote(null)
+    const result = await run(`saver:${email}`, {
+      id: document.id,
+      action: 'savers',
+      ...(canSave ? { addSavers: [email] } : { removeSavers: [email] }),
+    })
+    if (result === null) return
+    setNote(
+      canSave
+        ? `${email} can save this document's values.`
+        : `${email} can still read, but can no longer save values.`,
+    )
+  }
+
+  async function removeGrant(email: string) {
+    setNote(null)
+    const result = await run(`grant:${email}`, {
+      id: document.id,
+      action: 'savers',
+      removeGrants: [email],
+    })
+    if (result === null) return
+    setNote(`Removed the saved-values grant for ${email}.`)
   }
 
   const inviteForm = (
@@ -338,6 +531,11 @@ export function AccessPanel({
                     inherited
                   </Badge>
                 )}
+                {savers.has(email) ? (
+                  <Badge variant="success" className="shrink-0">
+                    can save
+                  </Badge>
+                ) : null}
                 {canEdit ? (
                   <Button
                     type="button"
@@ -386,6 +584,106 @@ export function AccessPanel({
           )
         ) : null}
       </div>
+
+      <div className="border-t border-border/70 pt-4">
+        <div className="flex items-center justify-between gap-3 pb-2">
+          <span className="text-micro-lg text-neutral-500">Saved values</span>
+          <span data-numeric className="text-micro-lg text-neutral-500">
+            {shares.grants.length}{' '}
+            {shares.grants.length === 1 ? 'grant' : 'grants'}
+          </span>
+        </div>
+        <p className="mb-2.5 text-xs leading-ui text-neutral-500">
+          A grant lets a signed-in person save values on this document alone. It
+          never reaches a child, and it never allows publishing or changing
+          access.
+        </p>
+
+        {shares.grants.length === 0 ? (
+          <p className="text-sm leading-ui text-neutral-500">
+            No grants. Only people who can edit this document can save its
+            values.
+          </p>
+        ) : (
+          <ul className="grid gap-1.5">
+            {shares.grants.map((grant) => (
+              <li
+                key={grant.email}
+                className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-neutral-950/50 py-1.5 pr-1 pl-2.5"
+              >
+                <Mail
+                  aria-hidden
+                  className="size-3.5 shrink-0 text-neutral-500"
+                />
+                {/* The email keeps a readable width: when the badge and the
+                    two controls stop fitting beside it, they wrap under it
+                    instead of squeezing the address into an ellipsis. */}
+                <span className="min-w-28 flex-1 truncate font-mono text-xs text-neutral-200">
+                  {grant.email}
+                </span>
+                {inForce.includes(grant.email) ? (
+                  <Badge variant="muted" className="shrink-0">
+                    invited
+                  </Badge>
+                ) : null}
+                {canEdit ? (
+                  <>
+                    {/* A toggle rather than a checkbox: the same pressed-state
+                        button the level picker uses, so one keyboard and one
+                        focus ring serve the whole panel. */}
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant={grant.canSave ? 'success' : 'outline'}
+                      aria-pressed={grant.canSave}
+                      aria-label={`Can save: ${grant.email}`}
+                      disabled={pending !== null}
+                      onClick={() => void setSaver(grant.email, !grant.canSave)}
+                    >
+                      {grant.canSave ? (
+                        <Check aria-hidden className="size-3" />
+                      ) : null}
+                      {pending === `saver:${grant.email}`
+                        ? 'Saving…'
+                        : 'Can save'}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      aria-label={`Remove the grant for ${grant.email}`}
+                      disabled={pending !== null}
+                      onClick={() => void removeGrant(grant.email)}
+                    >
+                      {pending === `grant:${grant.email}`
+                        ? 'Removing…'
+                        : 'Remove'}
+                    </Button>
+                  </>
+                ) : (
+                  <Badge
+                    variant={grant.canSave ? 'success' : 'outline'}
+                    className="shrink-0"
+                  >
+                    {grant.canSave ? 'can save' : 'read only'}
+                  </Badge>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {document.stateful ? (
+        <EditLinkCard
+          documentId={document.id}
+          active={editLink.active}
+          canEdit={canEdit}
+          pending={pending}
+          run={run}
+          setNote={setNote}
+        />
+      ) : null}
 
       {failure ? (
         <StatusMessage tone="error">

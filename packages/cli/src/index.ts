@@ -10,6 +10,7 @@ import {
   AssetPushResponse,
   DiffResponse as DiffResponseSchema,
   DossierApi,
+  type EditLinkResponse,
   isDocumentEditor,
   PurgeReport as PurgeReportSchema,
   type DiffResponse as DiffResponseType,
@@ -19,10 +20,17 @@ import {
   type HealthzResponse,
   type Me,
   type PurgeReport,
+  type SharesResponse,
+  type StateChange,
+  type StateResponse,
   type UploadRequest,
   type UploadResponse,
 } from '@dossier/contracts'
-import { validateCssStatic, validateHtmlStatic } from '@dossier/policy'
+import {
+  scanStateFields,
+  validateCssStatic,
+  validateHtmlStatic,
+} from '@dossier/policy'
 import {
   FetchHttpClient,
   HttpApiClient,
@@ -121,13 +129,16 @@ async function runtimeConfig(globals: GlobalOptions): Promise<RuntimeConfig> {
   }
 }
 
-function printJson(value: unknown): void {
+function jsonText(value: unknown, space?: number): string | undefined {
   // JSON.stringify escapes C0; also escape DEL/C1 to neutralize terminal controls.
-  const json = JSON.stringify(value)?.replace(
+  return JSON.stringify(value, null, space)?.replace(
     /[\u007f-\u009f]/g,
     (control) => `\\u${control.charCodeAt(0).toString(16).padStart(4, '0')}`,
   )
-  process.stdout.write(`${json}\n`)
+}
+
+function printJson(value: unknown): void {
+  process.stdout.write(`${jsonText(value)}\n`)
 }
 
 function printValue(
@@ -146,6 +157,43 @@ function printValue(
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
 }
 
+function printShares(
+  shares: SharesResponse,
+  runtime: Pick<RuntimeConfig, 'json' | 'quiet'>,
+): void {
+  if (runtime.json) {
+    printJson(shares)
+    return
+  }
+  if (runtime.quiet) return
+
+  const canSave = new Set(
+    shares.grants.filter((grant) => grant.canSave).map((grant) => grant.email),
+  )
+  const emails = [
+    ...new Set([
+      ...shares.effective,
+      ...shares.grants.map((grant) => grant.email),
+    ]),
+  ].sort()
+  const permissions =
+    emails.length === 0
+      ? '  none\n'
+      : emails
+          .map(
+            (email) =>
+              `  ${email}: ${canSave.has(email) ? 'view and save' : 'view'}`,
+          )
+          .join('\n') + '\n'
+
+  process.stdout.write(
+    `Configured: ${shares.configured.join(', ') || 'none'}\n` +
+      `Effective: ${shares.effective.join(', ') || 'none'}\n` +
+      `Permissions:\n${permissions}` +
+      `Access source: ${shares.accessSource}\n`,
+  )
+}
+
 function objectValue(error: unknown, key: string): unknown {
   return typeof error === 'object' && error !== null && key in error
     ? (error as Record<string, unknown>)[key]
@@ -161,19 +209,128 @@ function errorStatus(error: unknown): number | undefined {
   return undefined
 }
 
+function apiErrorValue(error: unknown): Record<string, unknown> | undefined {
+  if (error instanceof CliError) return apiErrorValue(error.details)
+  const candidate = record(error)
+  if (!candidate) return undefined
+  const body = record(candidate.body)
+  if (typeof body?.code === 'string') return body
+  if (typeof candidate.code === 'string') return candidate
+  return undefined
+}
+
 function errorCode(error: unknown): string | undefined {
-  const code = objectValue(error, 'code')
-  if (typeof code === 'string') return code
-  if (error instanceof CliError) return errorCode(error.details)
+  const code = apiErrorValue(error)?.code
+  return typeof code === 'string' ? code : undefined
+}
+
+function stateErrorMessage(error: unknown): string | undefined {
+  const value = apiErrorValue(error)
+  const code = value?.code
+  const details = record(value?.details)
+  if (code === 'state_conflict') {
+    const fields = details?.fields
+    if (!Array.isArray(fields)) return undefined
+    const lines = fields.flatMap((rawField) => {
+      const field = record(rawField)
+      if (
+        typeof field?.name !== 'string' ||
+        typeof field.revision !== 'number' ||
+        !Object.hasOwn(field, 'value')
+      ) {
+        return []
+      }
+      return [
+        `${field.name}: ${jsonText(field.value) ?? 'null'} (revision ${field.revision})`,
+      ]
+    })
+    if (lines.length === 0) return undefined
+    return `${lines.join('\n')}\nRead the latest saved values, then re-run the command.`
+  }
+  if (code === 'state_schema_change') {
+    const retyped = details?.retyped
+    const orphaned = details?.orphaned
+    if (!Array.isArray(retyped) || !Array.isArray(orphaned)) return undefined
+    const retypedLines = retyped.flatMap((rawField) => {
+      const field = record(rawField)
+      if (
+        typeof field?.name !== 'string' ||
+        typeof field.from !== 'string' ||
+        typeof field.to !== 'string'
+      ) {
+        return []
+      }
+      return [`  ${field.name}: ${field.from} -> ${field.to}`]
+    })
+    const orphanedNames = orphaned
+      .filter((name): name is string => typeof name === 'string')
+      .map((name) => `  ${name}`)
+    const sections = [
+      ...(retypedLines.length > 0
+        ? [`Retyped saved values:\n${retypedLines.join('\n')}`]
+        : []),
+      ...(orphanedNames.length > 0
+        ? [
+            `Removed from the document (saved values kept):\n${orphanedNames.join('\n')}`,
+          ]
+        : []),
+    ]
+    if (sections.length === 0) return undefined
+    const outcomes = [
+      ...(retypedLines.length > 0
+        ? ['Retyped values reset to their new defaults.']
+        : []),
+      ...(orphanedNames.length > 0 ? ['Removed values stay saved.'] : []),
+    ]
+    return [
+      ...sections,
+      'Re-run with --accept-state-changes to accept these schema changes.',
+      outcomes.join(' '),
+    ].join('\n')
+  }
+  if (code === 'state_type_mismatch') {
+    const fields = details?.fields
+    if (!Array.isArray(fields)) return undefined
+    const names = fields.filter(
+      (field): field is string => typeof field === 'string',
+    )
+    return `Values do not match the current types for: ${names.join(', ') || '(unknown)'}`
+  }
+  if (code === 'state_too_large') {
+    const bytes = details?.bytes
+    const limit = details?.limit
+    if (typeof bytes !== 'number' || typeof limit !== 'number') return undefined
+    return `Saved values use ${bytes} bytes; the limit is ${limit} bytes.`
+  }
   return undefined
 }
 
 function errorMessage(error: unknown): string {
-  const message = objectValue(error, 'message')
-  if (typeof message === 'string' && message.trim() !== '') return message
+  const stateMessage = stateErrorMessage(error)
+  if (stateMessage !== undefined) return stateMessage
+  const value = apiErrorValue(error)
+  const message = value?.message ?? objectValue(error, 'message')
   const code = errorCode(error)
-  if (code) return code.replaceAll('_', ' ')
-  return error instanceof Error ? error.message : String(error)
+  const base =
+    typeof message === 'string' && message.trim() !== ''
+      ? message
+      : code
+        ? code.replaceAll('_', ' ')
+        : error instanceof Error
+          ? error.message
+          : String(error)
+  const body = objectValue(error, 'body')
+  const details = objectValue(error, 'details') ?? objectValue(body, 'details')
+  const rawErrors = objectValue(details, 'errors')
+  const detailErrors = Array.isArray(rawErrors)
+    ? rawErrors.filter(
+        (detail): detail is string =>
+          typeof detail === 'string' && detail.trim() !== '',
+      )
+    : []
+  return detailErrors.length === 0
+    ? base
+    : `${base}\n${detailErrors.map((detail) => `  - ${detail}`).join('\n')}`
 }
 
 function asCliError(error: unknown): CliError {
@@ -209,9 +366,43 @@ async function readStdin(): Promise<string> {
   return value
 }
 
+function validateUpload(
+  absolutePath: string,
+  html: string,
+  publicOrigin: string,
+  stateful = false,
+): void {
+  const result = validateHtmlStatic(html, {
+    publicOrigin,
+    ...(stateful ? { stateful: true } : {}),
+  })
+  if (!result.ok) {
+    throw new CliError(
+      formatPolicyRejection(
+        absolutePath,
+        result.errors,
+        'Document did not pass the static policy.',
+      ),
+    )
+  }
+  if (stateful) {
+    const stateScan = scanStateFields(html)
+    if (!stateScan.ok) {
+      throw new CliError(
+        formatPolicyRejection(
+          absolutePath,
+          stateScan.errors,
+          'HTML failed the saved-values field policy.',
+        ),
+      )
+    }
+  }
+}
+
 async function readUpload(
   file: string,
   publicOrigin: string,
+  stateful = false,
 ): Promise<{ absolutePath: string; html: string }> {
   const absolutePath = resolve(file)
   let html: string
@@ -223,16 +414,7 @@ async function readUpload(
     )
   }
 
-  const result = validateHtmlStatic(html, { publicOrigin })
-  if (!result.ok) {
-    throw new CliError(
-      formatPolicyRejection(
-        absolutePath,
-        result.errors,
-        'Document did not pass the static policy.',
-      ),
-    )
-  }
+  validateUpload(absolutePath, html, publicOrigin, stateful)
   return { absolutePath, html }
 }
 
@@ -475,6 +657,41 @@ async function apiCall<A, E>(
     return outcome.right
   } catch (error) {
     throw asCliError(error)
+  }
+}
+
+/**
+ * What the deployment says about saved values. A deployment that predates the
+ * feature reports no feature list at all, so its API knows nothing about
+ * grants. A current deployment lists the feature when it has a bound rate
+ * limiter, reports an empty list when the operator has switched saved values
+ * off, and accepts the grant fields on its share API either way.
+ */
+type StateSupport = 'available' | 'unavailable' | 'absent'
+
+const stateSupportChecks = new Map<string, Promise<StateSupport>>()
+
+async function stateSupport(runtime: RuntimeConfig): Promise<StateSupport> {
+  let check = stateSupportChecks.get(runtime.apiOrigin)
+  if (!check) {
+    check = apiCall(runtime, (client) => client.system.healthz()).then(
+      (health) =>
+        health.features === undefined
+          ? 'absent'
+          : health.features.includes('state')
+            ? 'available'
+            : 'unavailable',
+    )
+    stateSupportChecks.set(runtime.apiOrigin, check)
+  }
+  return check
+}
+
+async function requireStateFeature(runtime: RuntimeConfig): Promise<void> {
+  if ((await stateSupport(runtime)) !== 'available') {
+    throw new CliError(
+      'This Dossier deployment does not support saved values. Update the deployment.',
+    )
   }
 }
 
@@ -885,7 +1102,11 @@ const globalOptions = {
 }
 
 const rootCommand = Command.make('dossier', globalOptions).pipe(
-  Command.withDescription('Publish and retrieve dossier documents'),
+  Command.withDescription(
+    'Publish, read, and manage Dossier documents. ' +
+      'Publish an HTML plan with shared saved values. ' +
+      'Collaborators edit, save, and return to the same document.',
+  ),
 )
 
 const authLogin = Command.make('login', {}, () =>
@@ -1010,19 +1231,61 @@ const whoamiCommand = Command.make('whoami', {}, () =>
 const uploadCommand = Command.make(
   'upload',
   {
-    parent: Options.text('parent').pipe(Options.optional),
-    kind: Options.text('kind').pipe(Options.optional),
+    parent: Options.text('parent').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Create beneath this document ID or URL, or use root. ' +
+          'Use dossier move to change the parent of an existing document.',
+      ),
+    ),
+    kind: Options.text('kind').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Set the document kind, such as plan, report, or checklist.',
+      ),
+    ),
     visibility: Options.choice('visibility', [
       'public',
       'team',
       'private',
       'inherit',
     ]).pipe(Options.optional),
-    share: Options.text('share').pipe(Options.optional),
-    description: Options.text('description').pipe(Options.optional),
-    newDocument: Options.boolean('new'),
-    document: Options.text('doc').pipe(Options.optional),
-    file: Args.text({ name: 'file' }),
+    share: Options.text('share').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Set the initial view-share list with comma-separated email addresses.',
+      ),
+    ),
+    description: Options.text('description').pipe(
+      Options.optional,
+      Options.withDescription('Set the document description.'),
+    ),
+    newDocument: Options.boolean('new').pipe(
+      Options.withDescription(
+        'Create a separate document with no copied values, grants, or edit link.',
+      ),
+    ),
+    stateful: Options.boolean('stateful').pipe(
+      Options.withDescription(
+        'Enable one shared set of saved values for marked controls.',
+      ),
+    ),
+    acceptStateChanges: Options.boolean('accept-state-changes').pipe(
+      Options.withDescription(
+        'Accept a retype or removal of a saved field. ' +
+          'Retyped values reset to their new defaults and removed values ' +
+          'stay saved.',
+      ),
+    ),
+    document: Options.text('doc').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Update this document ID instead of the mapped path.',
+      ),
+    ),
+    file: Args.text({ name: 'file' }).pipe(
+      Args.withDescription('Read one complete HTML document from this file.'),
+    ),
   },
   ({
     file,
@@ -1032,6 +1295,8 @@ const uploadCommand = Command.make(
     share,
     description,
     newDocument,
+    stateful,
+    acceptStateChanges,
     document,
   }) =>
     withGlobals(async (globals) => {
@@ -1042,7 +1307,12 @@ const uploadCommand = Command.make(
           ExitCode.Usage,
         )
       }
-      const { absolutePath, html } = await readUpload(file, runtime.apiUrl)
+      const { absolutePath, html } = await readUpload(
+        file,
+        runtime.apiUrl,
+        stateful,
+      )
+      if (stateful) await requireStateFeature(runtime)
       const me = await requireMe(runtime)
       const documents = await readDocuments(runtime.paths)
       const known = documents[runtime.apiOrigin]?.[me.accountId]?.[absolutePath]
@@ -1051,11 +1321,19 @@ const uploadCommand = Command.make(
         known && typeof known.documentId === 'string'
           ? known.documentId
           : undefined
+      const usesMapping =
+        !newDocument &&
+        explicitDocument === undefined &&
+        mappedDocument !== undefined
       const target = newDocument
         ? undefined
         : explicitDocument
           ? parseDocumentId(explicitDocument, runtime)
           : mappedDocument
+      if (usesMapping && known?.stateful === true && !stateful) {
+        validateUpload(absolutePath, html, runtime.apiUrl, true)
+        await requireStateFeature(runtime)
+      }
       const parentValue = Option.getOrUndefined(parent)
       const requestedParent = parentValue
         ? parentValue === 'root'
@@ -1076,6 +1354,8 @@ const uploadCommand = Command.make(
         metadata: collectMetadata(dirname(absolutePath)),
         ...(target ? { documentId: target } : {}),
         ...(uploadParent !== undefined ? { parentId: uploadParent } : {}),
+        ...(stateful ? { stateful: true } : {}),
+        ...(acceptStateChanges ? { acceptStateChanges: true } : {}),
         ...(Option.isSome(kind) ? { kind: Option.getOrUndefined(kind)! } : {}),
         ...(visibilityValue
           ? {
@@ -1125,6 +1405,7 @@ const uploadCommand = Command.make(
         documentId: receipt.document.id,
         url: receipt.document.url,
         rawUrl: receipt.document.rawUrl,
+        stateful: receipt.document.stateful,
         updatedAt: new Date().toISOString(),
       }
       await mutateDocuments((state) => {
@@ -1139,6 +1420,7 @@ const uploadCommand = Command.make(
           versionNumber: receipt.versionNumber,
           created,
           warnings: receipt.warnings,
+          resetStateFields: receipt.resetStateFields ?? [],
         })
         return
       }
@@ -1147,12 +1429,363 @@ const uploadCommand = Command.make(
         return
       }
       process.stdout.write(
-        `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nParent: ${receipt.document.parentId ?? 'root'}\nVisibility: ${configuredVisibility(receipt.document)}\n`,
+        `${created ? 'Created' : 'Updated'}\nURL: ${receipt.document.url}\nRaw: ${receipt.document.rawUrl}\nHub: ${receipt.document.hubUrl}\nID: ${receipt.document.id}\nVersion: ${receipt.versionNumber}\nParent: ${receipt.document.parentId ?? 'root'}\nVisibility: ${configuredVisibility(receipt.document)}\n${receipt.document.stateful ? `State: enabled, one shared set of saved values\nLast saved: ${receipt.document.stateUpdatedAt ?? 'never'}\n` : ''}`,
       )
+      if (receipt.resetStateFields && receipt.resetStateFields.length > 0) {
+        process.stdout.write(
+          `Reset saved values:\n${receipt.resetStateFields
+            .map((name) => `  - ${name}`)
+            .join('\n')}\n`,
+        )
+      }
       for (const warning of receipt.warnings)
         process.stderr.write(`Warning: ${warning}\n`)
     }),
-).pipe(Command.withDescription('Validate and upload an HTML document'))
+).pipe(
+  Command.withDescription(
+    'Validate and upload one complete HTML document. ' +
+      '--stateful enables one shared set of saved values for controls ' +
+      'marked with data-state. The document manager can save immediately, ' +
+      'publishing never makes the document anonymously editable, and ' +
+      'visibility stays a separate choice. ' +
+      'Human output keeps the existing lines and adds State and Last saved ' +
+      'for a saved-values document. --json adds stateful, stateRevision, ' +
+      'and stateUpdatedAt, and --quiet prints only the URL. ' +
+      'Use the same file path or --doc <id> to update an existing document. ' +
+      'A later upload of the same document keeps its saved values, its ' +
+      'enabled state, its grants, and its edit link, and --new starts a ' +
+      'separate document with authored defaults. A retype or removal of a ' +
+      'saved field fails until you pass --accept-state-changes.',
+  ),
+)
+
+function printState(response: StateResponse, runtime: RuntimeConfig): void {
+  if (runtime.json) {
+    printJson(response)
+    return
+  }
+  if (runtime.quiet) return
+  process.stdout.write(
+    `Values:\n${jsonText(response.data, 2) ?? '{}'}\nRevision: ${response.revision}\nLast saved: ${response.updatedAt ?? 'never'}\n`,
+  )
+}
+
+function printStateSaved(
+  response: StateResponse,
+  runtime: RuntimeConfig,
+): void {
+  if (runtime.json) {
+    printJson(response)
+    return
+  }
+  if (runtime.quiet) {
+    process.stdout.write(`${response.revision}\n`)
+    return
+  }
+  process.stdout.write(
+    `Revision: ${response.revision}\nLast saved: ${response.updatedAt ?? 'never'}\n`,
+  )
+}
+
+async function readStateValues(
+  file: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  const absolutePath = resolve(file)
+  let source: string
+  try {
+    source = await readFile(absolutePath, 'utf8')
+  } catch (error) {
+    throw new CliError(
+      `cannot read ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    throw new CliError(
+      `${absolutePath} must contain a JSON object of saved-value names to values`,
+      ExitCode.Usage,
+    )
+  }
+  const values = record(value)
+  if (!values) {
+    throw new CliError(
+      `${absolutePath} must contain a JSON object of saved-value names to values`,
+      ExitCode.Usage,
+    )
+  }
+  return values
+}
+
+function stateChanges(
+  values: Readonly<Record<string, unknown>>,
+  baseline: number | StateResponse,
+): StateChange[] {
+  return Object.entries(values).map(([name, value]) => ({
+    name,
+    value,
+    base:
+      typeof baseline === 'number'
+        ? baseline
+        : (baseline.fields[name]?.revision ?? 0),
+  }))
+}
+
+async function saveState(
+  runtime: RuntimeConfig,
+  id: string,
+  values: Readonly<Record<string, unknown>>,
+  revision?: number,
+): Promise<StateResponse> {
+  if (revision !== undefined) {
+    const changes = stateChanges(values, revision)
+    return apiCall(runtime, (client) =>
+      client.state.set({ path: { id }, payload: { changes } }),
+    )
+  }
+
+  const snapshot = await apiCall(runtime, (client) =>
+    client.state.get({ path: { id } }),
+  )
+  const changes = stateChanges(values, snapshot)
+  try {
+    return await apiCall(runtime, (client) =>
+      client.state.set({ path: { id }, payload: { changes } }),
+    )
+  } catch (error) {
+    if (errorCode(error) !== 'state_version_changed') throw error
+    return apiCall(runtime, (client) =>
+      client.state.set({ path: { id }, payload: { changes } }),
+    )
+  }
+}
+
+const stateDocumentRef = Args.text({ name: 'ref' }).pipe(
+  Args.withDescription('Use a document ID, id@n, or a Dossier URL.'),
+)
+
+const stateGetCommand = Command.make(
+  'get',
+  { ref: stateDocumentRef },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      let response: StateResponse
+      try {
+        response = await apiCall(runtime, (client) =>
+          client.state.get({ path: { id } }),
+        )
+      } catch (error) {
+        if (errorCode(error) === 'state_not_enabled') {
+          throw new CliError(
+            'Saved values are not enabled for this document',
+            ExitCode.Failure,
+            error,
+          )
+        }
+        throw error
+      }
+      printState(response, runtime)
+    }),
+).pipe(
+  Command.withDescription(
+    'Read the current saved values of one document. ' +
+      'Human output prints the values, the revision, and the last saved ' +
+      'time. --json prints one snapshot with documentId, version, revision, ' +
+      'updatedAt, data, and fields, where fields carries each value with ' +
+      'its revision and type. --quiet prints nothing on success. ' +
+      'Anyone who can read the document can read its values, and reading ' +
+      'never changes values or permissions. An ordinary document fails ' +
+      'with "Saved values are not enabled for this document".',
+  ),
+)
+
+const stateSetCommand = Command.make(
+  'set',
+  {
+    data: Options.text('data').pipe(
+      Options.withDescription(
+        'Read the changes from this JSON file of saved-value names to values.',
+      ),
+    ),
+    revision: Options.integer('revision').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Pass the revision of the read you prepared the changes from.',
+      ),
+    ),
+    ref: stateDocumentRef,
+  },
+  ({ data, revision, ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const baseline = Option.getOrUndefined(revision)
+      if (baseline !== undefined && baseline < 0) {
+        throw new CliError(
+          '--revision must be a non-negative integer',
+          ExitCode.Usage,
+        )
+      }
+      const values = await readStateValues(data)
+      printStateSaved(await saveState(runtime, id, values, baseline), runtime)
+    }),
+).pipe(
+  Command.withDescription(
+    'Save values from a JSON object of field names to values. ' +
+      'Human output prints the new revision and the last saved time, ' +
+      '--json prints the saved snapshot with documentId, version, revision, ' +
+      'updatedAt, data, and fields, and --quiet prints only the new ' +
+      'revision. Saving requires document management authority or an ' +
+      '--edit-state grant, and saving never grants publishing or sharing. ' +
+      'Always pass --revision from the read you prepared the changes ' +
+      'from, so a field that anyone saved after that read fails with a ' +
+      'conflict. Without --revision, the CLI reads first and ' +
+      'uses that read as the baseline, which only guards against saves ' +
+      'racing this command.',
+  ),
+)
+
+const EDIT_LINK_WARNING =
+  'Anyone with this link can read and change the saved values and can forward it.'
+
+function printEditLink(
+  response: EditLinkResponse,
+  runtime: RuntimeConfig,
+  warn: boolean,
+): void {
+  if (runtime.json) {
+    printJson(response)
+    return
+  }
+  if (!response.active || response.editUrl === null) {
+    if (!runtime.quiet) process.stdout.write('No active edit link\n')
+    return
+  }
+  if (runtime.quiet) {
+    process.stdout.write(`${response.editUrl}\n`)
+    return
+  }
+  process.stdout.write(
+    warn
+      ? `${EDIT_LINK_WARNING}\n${response.editUrl}\n`
+      : `${response.editUrl}\n`,
+  )
+}
+
+const stateLinkCreateCommand = Command.make(
+  'create',
+  { ref: stateDocumentRef },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const response = await apiCall(runtime, (client) =>
+        client.state.linkCreate({ path: { id } }),
+      )
+      printEditLink(response, runtime, true)
+    }),
+).pipe(
+  Command.withDescription(
+    'Create the bearer edit link, or return the existing active link ' +
+      'instead of replacing it. Anyone with it can read and change saved ' +
+      'values without signing in and can forward it. Only document ' +
+      'managers can create it. Human output prints a one-line warning and ' +
+      'then the URL, --json prints documentId, active, and editUrl, and ' +
+      '--quiet prints only the URL.',
+  ),
+)
+
+const stateLinkGetCommand = Command.make(
+  'get',
+  { ref: stateDocumentRef },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const response = await apiCall(runtime, (client) =>
+        client.state.linkGet({ path: { id } }),
+      )
+      printEditLink(response, runtime, false)
+    }),
+).pipe(
+  Command.withDescription(
+    'Show the active bearer edit link without creating or rotating one. ' +
+      'Only document managers can read it. Human output prints the URL, ' +
+      'or "No active edit link" when none exists. --json prints ' +
+      'documentId, active, and editUrl, with active false and editUrl ' +
+      'null when none exists. --quiet prints the URL or nothing.',
+  ),
+)
+
+const stateLinkRevokeCommand = Command.make(
+  'revoke',
+  { ref: stateDocumentRef },
+  ({ ref }) =>
+    withGlobals(async (globals) => {
+      const runtime = await runtimeConfig(globals)
+      await requireStateFeature(runtime)
+      const id = parseDocumentId(ref, runtime)
+      const response = await apiCall(runtime, (client) =>
+        client.state.linkRevoke({ path: { id } }),
+      )
+      if (runtime.json) printJson(response)
+      else if (!runtime.quiet) {
+        process.stdout.write(
+          response.revoked ? 'Edit link revoked\n' : 'No edit link to revoke\n',
+        )
+      }
+    }),
+).pipe(
+  Command.withDescription(
+    'Revoke the bearer edit link so it stops opening or saving the ' +
+      'document from the next request, including from a tab that is ' +
+      'already open. Only document managers can revoke it, and signed-in ' +
+      'grants remain unchanged. Human output prints "Edit link revoked", ' +
+      'or "No edit link to revoke" when none was active. --json prints ' +
+      'documentId and revoked. --quiet prints nothing.',
+  ),
+)
+
+const stateLinkCommand = Command.make('link').pipe(
+  Command.withDescription(
+    'Manage one bearer edit link for a document. Anyone with it can read ' +
+      'and change saved values without signing in and can forward it, so ' +
+      'revoking it stops access for every holder, including a tab that is ' +
+      'already open. Only document managers create, show, or revoke it. ' +
+      'Human output prints the link URL, a warning on create, and the ' +
+      'revocation result. With --json, create and get print documentId, ' +
+      'active, and editUrl, and revoke prints documentId and revoked. ' +
+      'With --quiet, create and get print only the URL and revoke prints ' +
+      'nothing.',
+  ),
+  Command.withSubcommands([
+    stateLinkCreateCommand,
+    stateLinkGetCommand,
+    stateLinkRevokeCommand,
+  ]),
+)
+
+const stateCommand = Command.make('state').pipe(
+  Command.withDescription(
+    'Read and save one shared set of saved values. Human output prints ' +
+      'the values, the revision, and the last saved time. --json prints ' +
+      'one JSON snapshot with documentId, version, revision, updatedAt, ' +
+      'data, and fields. With --quiet, get prints nothing and set prints ' +
+      'only the new revision. Anyone who can read the document can read ' +
+      'its values. Document managers and collaborators with an ' +
+      '--edit-state grant can save, and saving never grants publishing or ' +
+      'sharing.',
+  ),
+  Command.withSubcommands([stateGetCommand, stateSetCommand, stateLinkCommand]),
+)
 
 const fetchCommand = Command.make(
   'fetch',
@@ -1162,7 +1795,12 @@ const fetchCommand = Command.make(
       Options.withAlias('o'),
       Options.optional,
     ),
-    ref: Args.text({ name: 'ref' }),
+    ref: Args.text({ name: 'ref' }).pipe(
+      Args.withDescription(
+        'Use a document ID, id@n, or a Dossier URL. ' +
+          'A pinned reference selects that HTML version.',
+      ),
+    ),
   },
   ({ ref, version, output }) =>
     withGlobals(async (globals) => {
@@ -1494,38 +2132,92 @@ const visibilityCommand = Command.make(
 const shareCommand = Command.make(
   'share',
   {
-    add: Options.text('add').pipe(Options.optional),
-    remove: Options.text('remove').pipe(Options.optional),
-    ref: Args.text({ name: 'id' }),
+    add: Options.text('add').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Grant viewing, or viewing and saving with --edit-state.',
+      ),
+    ),
+    remove: Options.text('remove').pipe(
+      Options.optional,
+      Options.withDescription(
+        'Drop viewing and saving, or only saving with --edit-state.',
+      ),
+    ),
+    editState: Options.boolean('edit-state').pipe(
+      Options.withDescription(
+        'With --add, grant saving. With --remove, drop saving and keep viewing.',
+      ),
+    ),
+    ref: Args.text({ name: 'id' }).pipe(
+      Args.withDescription('Use a document ID, id@n, or a Dossier URL.'),
+    ),
   },
-  ({ add, remove, ref }) =>
+  ({ add, editState, remove, ref }) =>
     withGlobals(async (globals) => {
       const runtime = await runtimeConfig(globals)
       const id = parseDocumentId(ref, runtime)
       const addEmails = parseEmails(Option.getOrUndefined(add))
       const removeEmails = parseEmails(Option.getOrUndefined(remove))
       if (addEmails === undefined && removeEmails === undefined) {
-        throw new CliError(
-          'share requires --add and/or --remove',
-          ExitCode.Usage,
+        if (editState) {
+          throw new CliError(
+            '--edit-state requires --add and/or --remove',
+            ExitCode.Usage,
+          )
+        }
+        const result = await apiCall(runtime, (client) =>
+          client.documents.sharesGet({ path: { id } }),
         )
+        printShares(result, runtime)
+        return
       }
+      if (editState) await requireStateFeature(runtime)
+      // A deployment that predates saved values rejects the grant fields, so a
+      // plain removal omits them there. A current deployment accepts them even
+      // when it cannot offer saved values. The removal must delete the grant
+      // row or the person keeps saving.
+      const removeGrants =
+        !editState &&
+        removeEmails !== undefined &&
+        (await stateSupport(runtime)) !== 'absent'
       const result = await apiCall(runtime, (client) =>
         client.documents.sharesDelta({
           path: { id },
-          payload: {
-            ...(addEmails === undefined ? {} : { add: addEmails }),
-            ...(removeEmails === undefined ? {} : { remove: removeEmails }),
-          },
+          payload: editState
+            ? {
+                ...(addEmails === undefined ? {} : { addSavers: addEmails }),
+                ...(removeEmails === undefined
+                  ? {}
+                  : { removeSavers: removeEmails }),
+              }
+            : {
+                ...(addEmails === undefined ? {} : { add: addEmails }),
+                ...(removeEmails === undefined
+                  ? {}
+                  : {
+                      remove: removeEmails,
+                      ...(removeGrants ? { removeGrants: removeEmails } : {}),
+                    }),
+              },
         }),
       )
-      if (runtime.json) printJson(result)
-      else if (!runtime.quiet)
-        process.stdout.write(
-          `Configured: ${result.configured.join(', ') || 'none'}\nEffective: ${result.effective.join(', ') || 'none'}\nAccess source: ${result.accessSource}\n`,
-        )
+      printShares(result, runtime)
     }),
-).pipe(Command.withDescription('Add or remove document share emails'))
+).pipe(
+  Command.withDescription(
+    'Manage who can view a document and who can save its values. ' +
+      '--add grants viewing, and --add with --edit-state grants view and ' +
+      'save. --remove with --edit-state drops saving and keeps viewing, ' +
+      'and --remove without --edit-state drops view and save. ' +
+      'Human output lists each person as view or view and save, --json ' +
+      "prints the shares with grants and each grant's canSave, and " +
+      '--quiet prints nothing on success. The person must complete ' +
+      "Dossier sign-in under the deployment's rules, a grant never " +
+      'changes workspace membership, and saving never grants publishing ' +
+      'or sharing.',
+  ),
+)
 
 const trashCommand = Command.make('trash', {}, () =>
   withGlobals(async (globals) => {
@@ -2103,6 +2795,7 @@ const dossierCommand = rootCommand.pipe(
     authCommand,
     whoamiCommand,
     uploadCommand,
+    stateCommand,
     fetchCommand,
     diffCommand,
     listCommand,
@@ -2142,11 +2835,24 @@ interface NormalizedArguments {
   readonly health: boolean
 }
 
-const nestedCommands: Readonly<Record<string, ReadonlySet<string>>> = {
-  auth: new Set(['login', 'set', 'logout']),
-  assets: new Set(['push', 'list', 'delete']),
-  workspace: new Set(['members', 'allow', 'disallow', 'promote', 'remove']),
-  admin: new Set(['purge']),
+type CommandTree = { readonly [name: string]: CommandTree | true }
+
+const commandTree: CommandTree = {
+  auth: { login: true, set: true, logout: true },
+  assets: { push: true, list: true, delete: true },
+  workspace: {
+    members: true,
+    allow: true,
+    disallow: true,
+    promote: true,
+    remove: true,
+  },
+  admin: { purge: true },
+  state: {
+    get: true,
+    set: true,
+    link: { create: true, get: true, revoke: true },
+  },
 }
 
 const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
@@ -2167,12 +2873,14 @@ const valuedOptions: Readonly<Record<string, ReadonlySet<string>>> = {
   'assets push': new Set(['--slug']),
   'workspace allow': new Set(['--role']),
   'admin purge': new Set(['--retention-days']),
+  'state set': new Set(['--data', '--revision']),
 }
 
 const booleanOptions: Readonly<Record<string, ReadonlySet<string>>> = {
-  upload: new Set(['--new']),
+  upload: new Set(['--new', '--stateful', '--accept-state-changes']),
   diff: new Set(['--text']),
   list: new Set(['--all', '--tree', '--trash']),
+  share: new Set(['--edit-state']),
   delete: new Set(['--force']),
   update: new Set(['--check']),
   'admin purge': new Set(['--execute']),
@@ -2182,8 +2890,12 @@ function isGlobalBoolean(argument: string): boolean {
   return argument === '--json' || argument === '--quiet' || argument === '-q'
 }
 
-function detectCommand(rest: readonly string[]): string {
-  let root: string | undefined
+export function detectCommand(
+  rest: readonly string[],
+  tree: CommandTree = commandTree,
+): string {
+  const path: string[] = []
+  let branch = tree
   for (let index = 0; index < rest.length; index += 1) {
     const argument = rest[index]!
     if (argument === '--') break
@@ -2195,20 +2907,21 @@ function detectCommand(rest: readonly string[]): string {
       continue
     }
     if (argument.startsWith('-')) continue
-    if (!root) {
-      root = argument
-      if (!nestedCommands[root]) return root
-      continue
-    }
-    if (nestedCommands[root]?.has(argument)) return `${root} ${argument}`
-    return root
+
+    const next = branch[argument]
+    if (path.length === 0 && next === undefined) return argument
+    if (next === undefined) break
+    path.push(argument)
+    if (next === true) break
+    branch = next
   }
-  return root ?? ''
+  return path.join(' ')
 }
 
 function extractGlobals(
   rest: readonly string[],
   commandName: string,
+  optionValues = valuedOptions,
 ): {
   readonly globals: string[]
   readonly command: string[]
@@ -2216,7 +2929,7 @@ function extractGlobals(
 } {
   const globals: string[] = []
   const command: string[] = []
-  const valued = valuedOptions[commandName]
+  const valued = optionValues[commandName]
   let json = false
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -2257,12 +2970,14 @@ function extractGlobals(
 function optionsBeforeArguments(
   command: readonly string[],
   commandName: string,
+  optionValues = valuedOptions,
+  optionBooleans = booleanOptions,
 ): string[] {
-  const prefixLength = commandName.includes(' ') ? 2 : commandName ? 1 : 0
+  const prefixLength = commandName ? commandName.split(' ').length : 0
   const commandPrefix = command.slice(0, prefixLength)
   const commandArguments = command.slice(prefixLength)
-  const valued = valuedOptions[commandName]
-  const boolean = booleanOptions[commandName]
+  const valued = optionValues[commandName]
+  const boolean = optionBooleans[commandName]
   if (!valued && !boolean) return [...command]
 
   const options: string[] = []
@@ -2292,12 +3007,20 @@ function optionsBeforeArguments(
 
 export function normalizeGlobalOptions(
   argv: readonly string[],
+  tree: CommandTree = commandTree,
+  optionValues = valuedOptions,
+  optionBooleans = booleanOptions,
 ): NormalizedArguments {
   const prefix = argv.slice(0, 2)
   const rest = argv.slice(2)
-  const commandName = detectCommand(rest)
-  const extracted = extractGlobals(rest, commandName)
-  const orderedCommand = optionsBeforeArguments(extracted.command, commandName)
+  const commandName = detectCommand(rest, tree)
+  const extracted = extractGlobals(rest, commandName, optionValues)
+  const orderedCommand = optionsBeforeArguments(
+    extracted.command,
+    commandName,
+    optionValues,
+    optionBooleans,
+  )
   return {
     args: [...prefix, ...extracted.globals, ...orderedCommand],
     json: extracted.json,
@@ -2310,6 +3033,19 @@ function prefixedCliConsole(
 ): EffectConsole.Console {
   return {
     ...base,
+    // @effect/cli 0.77.1 commandDescriptor.ts:382,392 repeats ancestors in
+    // depth-3 help. Fix only generated help rows, preserving their alignment.
+    log: (...args: ReadonlyArray<unknown>) =>
+      base.log(
+        ...args.map((arg) =>
+          typeof arg === 'string' && arg.includes('COMMANDS')
+            ? arg.replace(
+                /^(  - state )state (link (?:create|get|revoke) <ref>)( +)/gm,
+                '$1$2$3      ',
+              )
+            : arg,
+        ),
+      ),
     error: (...args: ReadonlyArray<unknown>) =>
       Effect.sync(() => {
         process.stderr.write(`dossier: ${args.map(String).join(' ')}\n`)
@@ -2342,7 +3078,12 @@ export async function runCli(
             const cliError = asCliError(error)
             process.stderr.write(`dossier: ${cliError.message}\n`)
             if (normalized.json) {
-              printJson({ ok: false, error: cliError.message, exitCode: code })
+              const value = apiErrorValue(cliError)
+              printJson(
+                typeof value?.code === 'string'
+                  ? { ...value, exitCode: code }
+                  : { ok: false, error: cliError.message, exitCode: code },
+              )
             }
           } else if (normalized.json) {
             printJson({

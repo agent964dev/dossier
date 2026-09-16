@@ -5,6 +5,7 @@ interface __BaseEnv_Env {
 	OBJECTS: R2Bucket;
 	DB: D1Database;
 	UPLOAD_RATE_LIMITER: RateLimit;
+	STATE_RATE_LIMITER: RateLimit;
 	ASSETS: Fetcher;
 	PUBLIC_BASE_URL: "https://dossier-dev.tech964.workers.dev" | "https://dossier.agent964.com";
 	SEED_WORKSPACE: "agent964:agent964.com";
@@ -26,6 +27,7 @@ declare namespace Cloudflare {
 		OBJECTS: R2Bucket;
 		DB: D1Database;
 		UPLOAD_RATE_LIMITER: RateLimit;
+	STATE_RATE_LIMITER: RateLimit;
 		ASSETS: Fetcher;
 		PUBLIC_BASE_URL: "https://dossier-dev.tech964.workers.dev";
 		SEED_WORKSPACE: "agent964:agent964.com";

@@ -9,6 +9,7 @@ import {
   positiveInteger,
   readBoundedBody,
   requestWithBody,
+  stateFeatureAvailable,
 } from './request'
 
 export { WorkerEnv } from '../services/env'
@@ -37,11 +38,12 @@ export const SystemLive = HttpApiBuilder.group(
     handlers
       .handle('healthz', () =>
         Effect.gen(function* () {
-          yield* WorkerEnv
+          const env = yield* WorkerEnv
           return {
             ok: true as const,
             service: 'dossier' as const,
             version: buildVersion(),
+            features: stateFeatureAvailable(env) ? ['state'] : [],
           }
         }),
       )

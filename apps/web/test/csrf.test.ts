@@ -44,6 +44,19 @@ describe('web CSRF guard', () => {
     ).toBeNull()
   })
 
+  it('accepts a same-origin Referer when Origin is absent', async () => {
+    const token = await run(
+      issueCsrfToken('account_csrf').pipe(Effect.provide(layer)),
+    )
+    expect(
+      await check(
+        post({ referer: `${ORIGIN}/dashboard/documents/one` }),
+        token,
+        'account_csrf',
+      ),
+    ).toBeNull()
+  })
+
   it('accepts the origin the request was addressed to, so previews work', async () => {
     const token = await run(
       issueCsrfToken('account_csrf').pipe(Effect.provide(layer)),
@@ -55,7 +68,20 @@ describe('web CSRF guard', () => {
     expect(await check(request, token, 'account_csrf')).toBeNull()
   })
 
-  it('rejects a request with no Origin header', async () => {
+  it('rejects a Referer from another site when Origin is absent', async () => {
+    const token = await run(
+      issueCsrfToken('account_csrf').pipe(Effect.provide(layer)),
+    )
+    expect(
+      await check(
+        post({ referer: 'https://evil.example/landing' }),
+        token,
+        'account_csrf',
+      ),
+    ).toBe('origin_mismatch')
+  })
+
+  it('rejects a request with no Origin or Referer header', async () => {
     const token = await run(
       issueCsrfToken('account_csrf').pipe(Effect.provide(layer)),
     )

@@ -9,15 +9,18 @@ import {
 } from './css'
 import type { CssPolicyOptions } from './css'
 import type { PolicyResult } from './schema'
+import { statefulHtmlErrors } from './state'
 
 export interface HtmlPolicyOptions extends CssPolicyOptions {
   maxBytes: number
   embedHostAllowlist: string[]
   scriptHostAllowlist: string[]
+  stateful?: boolean
 }
 
 export interface StaticHtmlPolicyOptions {
   publicOrigin?: string
+  stateful?: boolean
 }
 
 const STATIC_PUBLIC_ORIGIN = 'https://dossier.invalid'
@@ -50,24 +53,45 @@ export function validateHtml(
   html: string,
   options: HtmlPolicyOptions,
 ): PolicyResult {
-  return validateHtmlWithMode(html, options, true)
+  return appendStatefulErrors(
+    validateHtmlWithMode(html, options, true),
+    html,
+    options.stateful,
+  )
 }
 
 export function validateHtmlStatic(
   html: string,
   options: StaticHtmlPolicyOptions = {},
 ): PolicyResult {
-  return validateHtmlWithMode(
+  return appendStatefulErrors(
+    validateHtmlWithMode(
+      html,
+      {
+        maxBytes: Number.MAX_SAFE_INTEGER,
+        publicOrigin: options.publicOrigin ?? STATIC_PUBLIC_ORIGIN,
+        styleHostAllowlist: [],
+        embedHostAllowlist: [],
+        scriptHostAllowlist: [],
+      },
+      false,
+    ),
     html,
-    {
-      maxBytes: Number.MAX_SAFE_INTEGER,
-      publicOrigin: options.publicOrigin ?? STATIC_PUBLIC_ORIGIN,
-      styleHostAllowlist: [],
-      embedHostAllowlist: [],
-      scriptHostAllowlist: [],
-    },
-    false,
+    options.stateful,
   )
+}
+
+function appendStatefulErrors(
+  result: PolicyResult,
+  html: string,
+  stateful: boolean | undefined,
+): PolicyResult {
+  if (!stateful) return result
+  const statefulErrors = statefulHtmlErrors(html)
+  if (statefulErrors.length === 0) return result
+
+  const errors = [...result.errors, ...statefulErrors]
+  return { ...result, ok: false, errors: [...new Set(errors)] }
 }
 
 function validateHtmlWithMode(

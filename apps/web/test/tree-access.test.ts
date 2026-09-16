@@ -10,6 +10,7 @@ import {
   Publish,
   Serving,
   Shares,
+  State,
   Tree,
   type PrincipalIdentity,
 } from '../src/services'
@@ -203,6 +204,88 @@ describe('phase two tree and access', () => {
         (await access(children[visibility].document.id, owner)).accessSource,
       ).toBe('inherited')
     }
+  })
+
+  it('keeps a parent state grant local to that document', async () => {
+    const ownerSeed = await seedPrincipal(env, {
+      suffix: 'grant_parent_owner',
+    })
+    const owner = await resolve(ownerSeed.token)
+    const saver = await actor('grant_parent_saver', undefined, undefined, {
+      value: 'saver@grant-parent.test',
+      verified: true,
+    })
+    const parent = await publish(owner, 'Granted parent', {
+      visibility: 'private',
+    })
+    const child = await publish(owner, 'Private child of granted parent', {
+      parentId: parent.document.id,
+    })
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          parent.document.id,
+          { addSavers: ['saver@grant-parent.test'] },
+          owner,
+        )
+      }),
+    )
+
+    expect((await access(parent.document.id, saver.principal)).canRead).toBe(
+      true,
+    )
+    expect((await access(child.document.id, saver.principal)).canRead).toBe(
+      false,
+    )
+  })
+
+  it('requires a verified identity for a local state grant', async () => {
+    const ownerSeed = await seedPrincipal(env, {
+      suffix: 'grant_unverified_owner',
+    })
+    const owner = await resolve(ownerSeed.token)
+    const unverified = await actor(
+      'grant_unverified_actor',
+      undefined,
+      undefined,
+      { value: 'saver@grant-unverified.test', verified: false },
+    )
+    const document = await publish(owner, 'Unverified grant', {
+      html: `<!doctype html><html><head><title>Unverified grant</title></head>
+        <body><input data-state="notes" value="Initial"></body></html>`,
+      visibility: 'private',
+      stateful: true,
+    })
+
+    await run(
+      Effect.gen(function* () {
+        yield* (yield* Shares).delta(
+          document.document.id,
+          { addSavers: ['saver@grant-unverified.test'] },
+          owner,
+        )
+      }),
+    )
+
+    expect(
+      (await access(document.document.id, unverified.principal)).canRead,
+    ).toBe(false)
+    const save = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .save(
+            document.document.id,
+            { kind: 'account', principal: unverified.principal },
+            { changes: [] },
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(save).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'not_found', status: 404 },
+    })
   })
 
   it('treats a public child under a hidden parent as a virtual root without leaking ancestors', async () => {

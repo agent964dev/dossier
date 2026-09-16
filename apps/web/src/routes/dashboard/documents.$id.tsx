@@ -62,6 +62,7 @@ function DocumentDetailPage() {
     childCount,
     archivePreview,
     restorable,
+    editLink,
   } = Route.useLoaderData()
   const router = useRouter()
   const { pending, failure, run } = useDocumentAction(viewer.csrfToken)
@@ -228,6 +229,7 @@ function DocumentDetailPage() {
             <AccessPanel
               document={document}
               shares={shares}
+              editLink={editLink}
               csrfToken={viewer.csrfToken}
               workspaceSlug={viewer.workspaceSlug}
               canEdit={canEdit}

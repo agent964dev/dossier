@@ -17,6 +17,7 @@ import {
   Principal,
   Publish,
   Purge,
+  State,
   StorageError,
   type DbService,
   type PrincipalIdentity,
@@ -61,7 +62,11 @@ function html(title: string, version: number): string {
 
 async function archive(
   suffix: string,
-  options: { readonly versions?: number; readonly createdAt?: string } = {},
+  options: {
+    readonly versions?: number
+    readonly createdAt?: string
+    readonly stateful?: boolean
+  } = {},
 ) {
   const { principal, token } = await principalFor(suffix)
   const first = await run(
@@ -96,6 +101,32 @@ async function archive(
       }),
     )
   }
+  if (options.stateful === true) {
+    await run(
+      Effect.gen(function* () {
+        return yield* (yield* Publish).publish(
+          {
+            html: `<!doctype html><html><head><title>State ${suffix}</title></head><body>
+              <textarea data-state="notes">Initial</textarea>
+            </body></html>`,
+            documentId: first.document.id,
+            stateful: true,
+            idempotencyKey: `${suffix}-stateful`,
+          },
+          principal,
+        )
+      }),
+    )
+    await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).save(
+          first.document.id,
+          { kind: 'account', principal },
+          { changes: [{ name: 'notes', value: 'Saved', base: 0 }] },
+        )
+      }),
+    )
+  }
   const keys = await env.DB.prepare(
     `SELECT object_key FROM document_versions
       WHERE document_id = ? ORDER BY id`,
@@ -119,6 +150,51 @@ async function archive(
     batchId: deleted.batchId,
     keys: keys.results.map((row) => row.object_key),
   }
+}
+
+async function createStateful(suffix: string) {
+  const { principal, token } = await principalFor(suffix)
+  const published = await run(
+    Effect.gen(function* () {
+      return yield* (yield* Publish).publish(
+        {
+          html: `<!doctype html><html><head><title>State ${suffix}</title></head><body>
+            <textarea data-state="notes">Initial</textarea>
+          </body></html>`,
+          stateful: true,
+          idempotencyKey: `${suffix}-stateful`,
+        },
+        principal,
+      )
+    }),
+  )
+  await run(
+    Effect.gen(function* () {
+      return yield* (yield* State).save(
+        published.document.id,
+        { kind: 'account', principal },
+        { changes: [{ name: 'notes', value: 'Saved', base: 0 }] },
+      )
+    }),
+  )
+  return { principal, token, documentId: published.document.id }
+}
+
+async function archiveDocument(
+  documentId: string,
+  principal: PrincipalIdentity,
+) {
+  const deleted = await run(
+    Effect.gen(function* () {
+      return yield* (yield* Documents).delete(documentId, principal)
+    }),
+  )
+  await env.DB.prepare(
+    'UPDATE deletion_batches SET created_at = ? WHERE id = ?',
+  )
+    .bind(OLD, deleted.batchId)
+    .run()
+  return deleted.batchId
 }
 
 function purge(dryRun: boolean, now = NOW, provided = layer) {
@@ -490,6 +566,136 @@ describe('Purge', () => {
     expect(await env.OBJECTS.head(archived.keys[0]!)).toBeNull()
   })
 
+  it('deletes all saved-state rows before the purged document', async () => {
+    const stateful = await createStateful('purge_state_rows')
+    const createdAt = '2026-09-14T08:00:00.000Z'
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO document_state_grants
+           (document_id, email, can_save, created_by_account_id, created_at)
+         VALUES (?, 'editor@example.com', 1, ?, ?)`,
+      ).bind(stateful.documentId, stateful.principal.accountId, createdAt),
+      env.DB.prepare(
+        `INSERT INTO document_edit_links
+           (document_id, generation, created_by_account_id, created_at,
+            revoked_at)
+         VALUES (?, 1, ?, ?, NULL)`,
+      ).bind(stateful.documentId, stateful.principal.accountId, createdAt),
+    ])
+    await archiveDocument(stateful.documentId, stateful.principal)
+
+    await purge(false)
+
+    expect(
+      await env.DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM document_state_fields
+             WHERE document_id = ?1) AS fields,
+           (SELECT COUNT(*) FROM document_state_grants
+             WHERE document_id = ?1) AS grants,
+           (SELECT COUNT(*) FROM document_edit_links
+             WHERE document_id = ?1) AS links,
+           (SELECT COUNT(*) FROM document_state
+             WHERE document_id = ?1) AS state,
+           (SELECT COUNT(*) FROM document_versions
+             WHERE document_id = ?1) AS versions,
+           (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents`,
+      )
+        .bind(stateful.documentId)
+        .first(),
+    ).toEqual({
+      fields: 0,
+      grants: 0,
+      links: 0,
+      state: 0,
+      versions: 0,
+      documents: 0,
+    })
+  })
+
+  it('keeps values unavailable while archived and restores them unchanged', async () => {
+    const stateful = await createStateful('purge_state_restore')
+    const revokedAt = '2026-09-14T09:00:00.000Z'
+    await env.DB.prepare(
+      `INSERT INTO document_edit_links
+         (document_id, generation, created_by_account_id, created_at,
+          revoked_at)
+       VALUES (?, 2, ?, ?, ?)`,
+    )
+      .bind(
+        stateful.documentId,
+        stateful.principal.accountId,
+        revokedAt,
+        revokedAt,
+      )
+      .run()
+    const batchId = await archiveDocument(
+      stateful.documentId,
+      stateful.principal,
+    )
+
+    const archivedSave = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State)
+          .save(
+            stateful.documentId,
+            { kind: 'account', principal: stateful.principal },
+            { changes: [{ name: 'notes', value: 'Blocked', base: 1 }] },
+          )
+          .pipe(Effect.either)
+      }),
+    )
+    expect(archivedSave).toMatchObject({
+      _tag: 'Left',
+      left: { code: 'not_found' },
+    })
+
+    await run(
+      Effect.gen(function* () {
+        return yield* (yield* Documents).restore(
+          stateful.documentId,
+          batchId,
+          stateful.principal,
+        )
+      }),
+    )
+    const restored = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).read(stateful.documentId, {
+          kind: 'account',
+          principal: stateful.principal,
+        })
+      }),
+    )
+    expect(restored.fields.notes).toEqual({
+      value: 'Saved',
+      revision: 1,
+      type: 'textarea',
+    })
+
+    const savedAgain = await run(
+      Effect.gen(function* () {
+        return yield* (yield* State).save(
+          stateful.documentId,
+          { kind: 'account', principal: stateful.principal },
+          { changes: [{ name: 'notes', value: 'Restored save', base: 1 }] },
+        )
+      }),
+    )
+    expect(savedAgain.fields.notes).toMatchObject({
+      value: 'Restored save',
+      revision: 2,
+    })
+    expect(
+      await env.DB.prepare(
+        `SELECT generation, revoked_at FROM document_edit_links
+          WHERE document_id = ?`,
+      )
+        .bind(stateful.documentId)
+        .first(),
+    ).toEqual({ generation: 2, revoked_at: revokedAt })
+  })
+
   it('defaults the admin endpoint to dry-run for deployment admins', async () => {
     const archived = await archive('purge_admin', {
       createdAt: '2020-01-01T00:00:00.000Z',
@@ -674,8 +880,25 @@ describe('Purge', () => {
     expect(await listKeys(`docs/${archived.documentId}/`)).toEqual([])
   }, 120_000)
 
-  it('resumes after an interruption during D1 cleanup', async () => {
-    const archived = await archive('purge_d1_crash', { versions: 81 })
+  it('resumes state cleanup after an interruption during D1 cleanup', async () => {
+    const archived = await archive('purge_d1_crash', {
+      versions: 80,
+      stateful: true,
+    })
+    const createdAt = '2026-09-14T10:00:00.000Z'
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO document_state_grants
+           (document_id, email, can_save, created_by_account_id, created_at)
+         VALUES (?, 'editor@example.com', 1, ?, ?)`,
+      ).bind(archived.documentId, archived.principal.accountId, createdAt),
+      env.DB.prepare(
+        `INSERT INTO document_edit_links
+           (document_id, generation, created_by_account_id, created_at,
+            revoked_at)
+         VALUES (?, 1, ?, ?, NULL)`,
+      ).bind(archived.documentId, archived.principal.accountId, createdAt),
+    ])
     const failingLayer = makeCoreLayer(env, { db: failDbBatchAt(2) })
     const failed = await run(
       Effect.gen(function* () {
@@ -713,6 +936,21 @@ describe('Purge', () => {
       deletedVersions: 80,
       deletedDocuments: 0,
     })
+    expect(
+      await env.DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM document_state_fields
+             WHERE document_id = ?1) AS fields,
+           (SELECT COUNT(*) FROM document_state_grants
+             WHERE document_id = ?1) AS grants,
+           (SELECT COUNT(*) FROM document_edit_links
+             WHERE document_id = ?1) AS links,
+           (SELECT COUNT(*) FROM document_state
+             WHERE document_id = ?1) AS state`,
+      )
+        .bind(archived.documentId)
+        .first(),
+    ).toEqual({ fields: 1, grants: 1, links: 1, state: 1 })
 
     const resumed = await purge(false, new Date(NOW.getTime() + 11 * 60_000))
 
@@ -727,12 +965,29 @@ describe('Purge', () => {
       await env.DB.prepare(
         `SELECT purge_status,
                 (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents,
-                (SELECT COUNT(*) FROM document_versions WHERE document_id = ?1) AS versions
+                (SELECT COUNT(*) FROM document_versions
+                  WHERE document_id = ?1) AS versions,
+                (SELECT COUNT(*) FROM document_state_fields
+                  WHERE document_id = ?1) AS fields,
+                (SELECT COUNT(*) FROM document_state_grants
+                  WHERE document_id = ?1) AS grants,
+                (SELECT COUNT(*) FROM document_edit_links
+                  WHERE document_id = ?1) AS links,
+                (SELECT COUNT(*) FROM document_state
+                  WHERE document_id = ?1) AS state
            FROM deletion_batches WHERE id = ?2`,
       )
         .bind(archived.documentId, archived.batchId)
         .first(),
-    ).toEqual({ purge_status: 'purged', documents: 0, versions: 0 })
+    ).toEqual({
+      purge_status: 'purged',
+      documents: 0,
+      versions: 0,
+      fields: 0,
+      grants: 0,
+      links: 0,
+      state: 0,
+    })
   }, 120_000)
 
   it('deletes more than 1000 object keys in bounded R2 chunks', async () => {

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Design review</title>
+    <style>
+      body {
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+        margin: 1.5rem;
+      }
+      label {
+        display: block;
+        margin: 0.75rem 0 0.25rem;
+      }
+      input[type='text'],
+      textarea {
+        width: 100%;
+        max-width: 30rem;
+      }
+      .decision {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+      }
+      .readout {
+        font-family: ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="heading">Design review</h1>
+
+    <label for="summary">Summary</label>
+    <input
+      type="text"
+      id="summary"
+      data-state="summary"
+      value="Ship the wrapper"
+    />
+
+    <label for="notes">Notes</label>
+    <textarea id="notes" data-state="notes">Draft notes</textarea>
+
+    <label
+      ><input type="checkbox" data-state="security" checked /> Security
+      reviewed</label
+    >
+    <label
+      ><input type="checkbox" data-state="accessibility" /> Accessibility
+      reviewed</label
+    >
+    <label
+      ><input type="checkbox" data-state="performance" /> Performance
+      reviewed</label
+    >
+
+    <!--
+  Three custom fields. Every one of them is a plain element that declares its
+  name and its default in HTML, so the scanner types it as json, and a script
+  registers the reader and the writer. "approve" and "reject" announce their
+  edits through onChange; "comment" never does, which is the A16 case: the
+  frame runtime's memory is the only thing that notices it changed.
+-->
+    <div class="decision">
+      <button type="button" id="approve-button">Approve</button>
+      <button type="button" id="reject-button">Reject</button>
+    </div>
+    <p class="readout">
+      Approval
+      <span
+        id="approve-state"
+        data-state="approve"
+        data-state-default='"pending"'
+        >pending</span
+      >
+    </p>
+    <p class="readout">
+      Rejection
+      <span id="reject-state" data-state="reject" data-state-default='"pending"'
+        >pending</span
+      >
+    </p>
+
+    <label for="comment-input">Comment</label>
+    <input type="text" id="comment-input" value="" />
+    <p class="readout">
+      Saved comment
+      <span
+        id="comment-state"
+        data-state="comment"
+        data-state-default='""'
+      ></span>
+    </p>
+
+    <script>
+      ;(() => {
+        const readout = (id) => document.getElementById(id)
+        const button = (id) => document.getElementById(id)
+
+        const decision = (name, decided) => {
+          const element = readout(`${name}-state`)
+          let value = 'pending'
+          window.dossierState.register({
+            name,
+            read: () => value,
+            write: (incoming) => {
+              value = typeof incoming === 'string' ? incoming : 'pending'
+              element.textContent = value
+            },
+            onChange: (notify) => {
+              button(`${name}-button`).addEventListener('click', () => {
+                value = value === decided ? 'pending' : decided
+                element.textContent = value
+                notify()
+              })
+            },
+          })
+        }
+
+        decision('approve', 'approved')
+        decision('reject', 'rejected')
+
+        // No onChange. Typing here never tells the wrapper anything, so the status
+        // line stays on "Save" and only collect discovers the edit.
+        const commentInput = document.getElementById('comment-input')
+        const commentState = readout('comment-state')
+        let commentReadFails = false
+        window.reviewFixture = {
+          setCommentReadFailure: (failed) => {
+            commentReadFails = failed
+          },
+        }
+        commentInput.addEventListener('input', () => {
+          commentState.textContent = commentInput.value
+        })
+        window.dossierState.register({
+          name: 'comment',
+          read: () => {
+            if (commentReadFails) throw new Error('fixture read failure')
+            return commentInput.value
+          },
+          write: (incoming) => {
+            commentInput.value = typeof incoming === 'string' ? incoming : ''
+            commentState.textContent = commentInput.value
+          },
+        })
+
+        document.addEventListener('dossier:state-applied', () => {
+          document.body.dataset.applied = 'yes'
+        })
+      })()
+    </script>
+  </body>
+</html>

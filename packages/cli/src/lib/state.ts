@@ -23,6 +23,7 @@ export interface DocumentMapping {
   readonly documentId: string
   readonly url: string
   readonly rawUrl: string
+  readonly stateful?: boolean
   readonly updatedAt: string
 }
 

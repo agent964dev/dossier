@@ -17,6 +17,7 @@ import {
   PurgeLive,
   ServingLive,
   SharesLive,
+  StateLive,
   TreeLive,
   SessionLayer,
   WorkerEnv,
@@ -39,8 +40,10 @@ export function testEnv(base: Cloudflare.Env): Cloudflare.Env {
     SEED_WORKSPACE: 'test:test.example',
     SEED_ADMIN_EMAIL: 'admin@test.example',
     SESSION_SECRET: TEST_SECRET,
+    LINK_SECRET: 'test-link-secret-at-least-32-bytes',
     BOOTSTRAP_API_KEY: undefined,
     UPLOAD_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    STATE_RATE_LIMITER: { limit: async () => ({ success: true }) },
   } as unknown as Cloudflare.Env
 }
 
@@ -68,6 +71,7 @@ export function makeCoreLayer(
   const documents = DocumentsLive.pipe(Layers.provide(auth))
   const serving = ServingLive.pipe(Layers.provide(auth))
   const shares = SharesLive.pipe(Layers.provide(auth))
+  const state = StateLive.pipe(Layers.provide(auth))
   const tree = TreeLive.pipe(Layers.provide(auth))
   const allowlist = AllowlistLive.pipe(Layers.provide(foundation))
   return Layers.mergeAll(
@@ -78,6 +82,7 @@ export function makeCoreLayer(
     documents,
     serving,
     shares,
+    state,
     tree,
     allowlist,
   )

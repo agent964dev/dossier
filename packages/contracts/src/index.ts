@@ -21,6 +21,77 @@ const Revision = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 export const DocumentId = Schema.String.pipe(Schema.pattern(/^[a-z0-9]{12}$/))
 export type DocumentId = typeof DocumentId.Type
 
+export const FieldType = Schema.Literal(
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'checkbox',
+  'radio',
+  'select',
+  'select-multiple',
+  'json',
+)
+export type FieldType = typeof FieldType.Type
+
+export const StateFieldValue = Schema.Struct({
+  value: Schema.Unknown,
+  revision: Schema.Number,
+  type: FieldType,
+})
+export type StateFieldValue = typeof StateFieldValue.Type
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function recordOf<A, I, R>(valueSchema: Schema.Schema<A, I, R>) {
+  const isValue = Schema.is(valueSchema)
+  return Schema.Unknown.pipe(
+    Schema.filter(
+      (value): value is Readonly<Record<string, A>> =>
+        isRecord(value) &&
+        Object.keys(value).every((key) => isValue(value[key])),
+      { jsonSchema: { type: 'object' } },
+    ),
+  )
+}
+
+export const StateResponse = Schema.Struct({
+  documentId: DocumentId,
+  version: Schema.Number,
+  revision: Schema.Number,
+  updatedAt: Schema.NullOr(Schema.String),
+  data: recordOf(Schema.Unknown),
+  fields: recordOf(StateFieldValue),
+})
+export type StateResponse = typeof StateResponse.Type
+
+export const StateChange = Schema.Struct({
+  name: Schema.String,
+  value: Schema.Unknown,
+  base: Schema.Number,
+})
+export type StateChange = typeof StateChange.Type
+
+export const StateSaveRequest = Schema.Struct({
+  changes: Schema.Array(StateChange),
+})
+export type StateSaveRequest = typeof StateSaveRequest.Type
+
+export const EditLinkResponse = Schema.Struct({
+  documentId: DocumentId,
+  active: Schema.Boolean,
+  editUrl: Schema.NullOr(Schema.String),
+})
+export type EditLinkResponse = typeof EditLinkResponse.Type
+
+export const LinkRevokeResponse = Schema.Struct({
+  documentId: DocumentId,
+  revoked: Schema.Boolean,
+})
+export type LinkRevokeResponse = typeof LinkRevokeResponse.Type
+
 export const Visibility = Schema.Literal('public', 'team', 'private')
 export type Visibility = typeof Visibility.Type
 
@@ -52,6 +123,13 @@ export const DocumentReader = Schema.Struct({
   authorAccountId: Schema.String,
   authorName: Schema.String,
   latestVersionNumber: Schema.Number,
+  stateful: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+  stateRevision: Schema.optionalWith(Schema.NullOr(Schema.Number), {
+    default: () => null,
+  }),
+  stateUpdatedAt: Schema.optionalWith(Schema.NullOr(Schema.String), {
+    default: () => null,
+  }),
   disabled: Schema.Boolean,
   url: Schema.String,
   rawUrl: Schema.String,
@@ -169,6 +247,8 @@ export const UploadRequest = Schema.Struct({
   parentId: Schema.optional(Schema.NullOr(DocumentId)),
   kind: OptionalNullableString,
   visibility: Schema.optional(Schema.NullOr(Visibility)),
+  stateful: Schema.optional(Schema.Boolean),
+  acceptStateChanges: Schema.optional(Schema.Boolean),
   description: OptionalNullableString,
   shares: Schema.optional(Schema.Array(Schema.String)),
   metadata: Schema.optional(UploadMetadata),
@@ -182,6 +262,7 @@ export const UploadResponse = Schema.Struct({
   versionNumber: Schema.Number,
   versionUrl: Schema.String,
   warnings: Schema.Array(Schema.String),
+  resetStateFields: Schema.optional(Schema.Array(Schema.String)),
   draftId: DocumentId,
   publicUrl: Schema.String,
   rawUrl: Schema.String,
@@ -377,6 +458,9 @@ export type DocumentPatch = typeof DocumentPatch.Type
 export const ShareDelta = Schema.Struct({
   add: Schema.optional(Schema.Array(Schema.String)),
   remove: Schema.optional(Schema.Array(Schema.String)),
+  addSavers: Schema.optional(Schema.Array(Schema.String)),
+  removeSavers: Schema.optional(Schema.Array(Schema.String)),
+  removeGrants: Schema.optional(Schema.Array(Schema.String)),
 })
 export type ShareDelta = typeof ShareDelta.Type
 
@@ -386,10 +470,21 @@ export const ShareReplacement = Schema.Struct({
 })
 export type ShareReplacement = typeof ShareReplacement.Type
 
+export const StateGrant = Schema.Struct({
+  email: Schema.String,
+  canSave: Schema.Boolean,
+})
+export type StateGrant = typeof StateGrant.Type
+
 export const SharesResponse = Schema.Struct({
   configured: Schema.Array(Schema.String),
   effective: Schema.Array(Schema.String),
   accessSource: AccessSource,
+  // A deployment without saved values omits grants. The CLI decodes it as
+  // an empty list so view-only sharing keeps working there.
+  grants: Schema.optionalWith(Schema.Array(StateGrant), {
+    default: () => [],
+  }),
 })
 export type SharesResponse = typeof SharesResponse.Type
 
@@ -456,6 +551,74 @@ export const RateLimitedError = errorSchema('rate_limited')
 export const DiffTooLargeError = errorSchema('diff_too_large')
 export type DiffTooLargeError = typeof DiffTooLargeError.Type
 
+function stateError<
+  const Code extends string,
+  Details extends Schema.Schema.Any,
+>(code: Code, details: Details) {
+  return Schema.Struct({
+    ok: Schema.Literal(false),
+    code: Schema.Literal(code),
+    message: Schema.String,
+    details,
+  })
+}
+
+export const StateConflictError = stateError(
+  'state_conflict',
+  Schema.Struct({
+    fields: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        revision: Schema.Number,
+        value: Schema.Unknown,
+      }),
+    ),
+  }),
+)
+export type StateConflictError = typeof StateConflictError.Type
+
+export const StateVersionChangedError = stateError(
+  'state_version_changed',
+  Schema.Struct({ currentVersion: Schema.Number }),
+)
+export type StateVersionChangedError = typeof StateVersionChangedError.Type
+
+export const StateTypeMismatchError = stateError(
+  'state_type_mismatch',
+  Schema.Struct({ fields: Schema.Array(Schema.String) }),
+)
+export type StateTypeMismatchError = typeof StateTypeMismatchError.Type
+
+export const StateTooLargeError = stateError(
+  'state_too_large',
+  Schema.Struct({ bytes: Schema.Number, limit: Schema.Number }),
+)
+export type StateTooLargeError = typeof StateTooLargeError.Type
+
+export const StateSchemaChangeError = stateError(
+  'state_schema_change',
+  Schema.Struct({
+    retyped: Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        from: FieldType,
+        to: FieldType,
+      }),
+    ),
+    orphaned: Schema.Array(Schema.String),
+  }),
+)
+export type StateSchemaChangeError = typeof StateSchemaChangeError.Type
+
+export const StateNotEnabledError = errorSchema('state_not_enabled')
+export type StateNotEnabledError = typeof StateNotEnabledError.Type
+export const StateEditRequiredError = errorSchema('state_edit_required')
+export type StateEditRequiredError = typeof StateEditRequiredError.Type
+export const LinkRevokedError = errorSchema('link_revoked')
+export type LinkRevokedError = typeof LinkRevokedError.Type
+export const StateUnavailableError = errorSchema('state_unavailable')
+export type StateUnavailableError = typeof StateUnavailableError.Type
+
 export const ApiError = Schema.Union(
   UnauthenticatedError,
   NotFoundError,
@@ -468,6 +631,15 @@ export const ApiError = Schema.Union(
   BodyTooLargeError,
   PolicyRejectedError,
   RateLimitedError,
+  StateConflictError,
+  StateVersionChangedError,
+  StateTypeMismatchError,
+  StateTooLargeError,
+  StateSchemaChangeError,
+  StateNotEnabledError,
+  StateEditRequiredError,
+  LinkRevokedError,
+  StateUnavailableError,
 )
 export type ApiError = typeof ApiError.Type
 
@@ -508,6 +680,7 @@ export const HealthzResponse = Schema.Struct({
   ok: Schema.Literal(true),
   service: Schema.Literal('dossier'),
   version: Schema.String,
+  features: Schema.optional(Schema.Array(Schema.String)),
 })
 export type HealthzResponse = typeof HealthzResponse.Type
 
@@ -536,7 +709,9 @@ export const AdminApiGroup = HttpApiGroup.make('admin').add(
 export const UploadsApiGroup = HttpApiGroup.make('uploads').add(
   HttpApiEndpoint.post('publish', '/api/uploads')
     .setPayload(UploadRequest)
-    .addSuccess(UploadResponse),
+    .addSuccess(UploadResponse)
+    .addError(StateSchemaChangeError, { status: 409 })
+    .addError(StateTooLargeError, { status: 413 }),
 )
 
 const AssetPath = Schema.Struct({ slug: AssetSlug })
@@ -556,6 +731,48 @@ export const AssetsApiGroup = HttpApiGroup.make('assets')
   )
 
 const DocumentPath = Schema.Struct({ id: DocumentId })
+
+export const StateApiGroup = HttpApiGroup.make('state')
+  .add(
+    HttpApiEndpoint.get('get', '/api/documents/:id/state')
+      .setPath(DocumentPath)
+      .addSuccess(StateResponse)
+      .addError(StateNotEnabledError, { status: 409 })
+      .addError(StateUnavailableError, { status: 503 }),
+  )
+  .add(
+    HttpApiEndpoint.put('set', '/api/documents/:id/state')
+      .setPath(DocumentPath)
+      .setPayload(StateSaveRequest)
+      .addSuccess(StateResponse)
+      .addError(StateConflictError, { status: 409 })
+      .addError(StateVersionChangedError, { status: 409 })
+      .addError(StateNotEnabledError, { status: 409 })
+      .addError(StateTypeMismatchError, { status: 422 })
+      .addError(StateTooLargeError, { status: 413 })
+      .addError(StateEditRequiredError, { status: 403 })
+      .addError(StateUnavailableError, { status: 503 })
+      .addError(RateLimitedError, { status: 429 }),
+  )
+  .add(
+    HttpApiEndpoint.post('linkCreate', '/api/documents/:id/state/link')
+      .setPath(DocumentPath)
+      .addSuccess(EditLinkResponse)
+      .addError(StateNotEnabledError, { status: 409 }),
+  )
+  .add(
+    HttpApiEndpoint.get('linkGet', '/api/documents/:id/state/link')
+      .setPath(DocumentPath)
+      .addSuccess(EditLinkResponse)
+      .addError(StateNotEnabledError, { status: 409 }),
+  )
+  .add(
+    HttpApiEndpoint.del('linkRevoke', '/api/documents/:id/state/link')
+      .setPath(DocumentPath)
+      .addSuccess(LinkRevokeResponse)
+      .addError(StateNotEnabledError, { status: 409 }),
+  )
+
 const RestorePayload = Schema.Struct({ batchId: Schema.String })
 const DisablePayload = Schema.Struct({ reason: OptionalNullableString })
 
@@ -701,6 +918,7 @@ export const SystemApi = HttpApi.make('dossier').add(SystemApiGroup)
 export const DossierApi = SystemApi.add(UploadsApiGroup)
   .add(AssetsApiGroup)
   .add(DocumentsApiGroup)
+  .add(StateApiGroup)
   .add(KeysApiGroup)
   .add(WorkspaceApiGroup)
   .add(MeApiGroup)

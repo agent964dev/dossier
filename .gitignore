@@ -19,3 +19,9 @@ dist/
 
 # Generated CLI package artifact
 packages/cli/LICENSE
+
+# Playwright browser suite
+test-results/
+playwright-report/
+blob-report/
+.auth/

@@ -1,5 +1,8 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { normalizeGlobalOptions, runCli } from './index.js'
+import { detectCommand, normalizeGlobalOptions, runCli } from './index.js'
 
 describe('argument normalization', () => {
   it('allows global options before or after a subcommand', () => {
@@ -36,6 +39,73 @@ describe('argument normalization', () => {
       '--api-url=http://localhost:8787',
       'assets',
       'list',
+    ])
+  })
+
+  it('walks command trees at depth two and three', () => {
+    expect(detectCommand(['state', 'get', '7k2m9x1qz3ab'])).toBe('state get')
+    expect(detectCommand(['state', 'set', '7k2m9x1qz3ab'])).toBe('state set')
+
+    for (const action of ['create', 'get', 'revoke'] as const) {
+      expect(detectCommand(['state', 'link', action, '7k2m9x1qz3ab'])).toBe(
+        `state link ${action}`,
+      )
+      expect(
+        normalizeGlobalOptions([
+          'node',
+          'dossier',
+          'state',
+          'link',
+          action,
+          '7k2m9x1qz3ab',
+          '--json',
+        ]).args,
+      ).toEqual([
+        'node',
+        'dossier',
+        '--json',
+        'state',
+        'link',
+        action,
+        '7k2m9x1qz3ab',
+      ])
+    }
+
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        'state',
+        'get',
+        '7k2m9x1qz3ab',
+        '--json',
+      ]).args,
+    ).toEqual(['node', 'dossier', '--json', 'state', 'get', '7k2m9x1qz3ab'])
+
+    expect(
+      normalizeGlobalOptions(
+        [
+          'node',
+          'dossier',
+          'state',
+          'link',
+          'create',
+          '7k2m9x1qz3ab',
+          '--expires-in',
+          '3600',
+        ],
+        { state: { link: { create: true } } },
+        { 'state link create': new Set(['--expires-in']) },
+      ).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      'state',
+      'link',
+      'create',
+      '--expires-in',
+      '3600',
+      '7k2m9x1qz3ab',
     ])
   })
 
@@ -86,6 +156,25 @@ describe('argument normalization', () => {
       '--from',
       '2',
       '--text',
+      '7k2m9x1qz3ab',
+    ])
+    expect(
+      normalizeGlobalOptions([
+        'node',
+        'dossier',
+        'share',
+        '7k2m9x1qz3ab',
+        '--add',
+        'person@example.com',
+        '--edit-state',
+      ]).args,
+    ).toEqual([
+      'node',
+      'dossier',
+      'share',
+      '--add',
+      'person@example.com',
+      '--edit-state',
       '7k2m9x1qz3ab',
     ])
   })
@@ -235,6 +324,174 @@ describe('argument normalization', () => {
       'batch_1',
       '7k2m9x1qz3ab',
     ])
+  })
+})
+
+describe('state set', () => {
+  const snapshot = {
+    documentId: 'stateset0001',
+    version: 2,
+    revision: 5,
+    updatedAt: '2026-09-14T08:00:00Z',
+    data: { objective: 'Before', approved: false },
+    fields: {
+      objective: { value: 'Before', revision: 4, type: 'text' },
+      approved: { value: false, revision: 0, type: 'checkbox' },
+    },
+  }
+
+  async function dataFile(value: unknown): Promise<{
+    readonly directory: string
+    readonly file: string
+  }> {
+    const directory = await mkdtemp(join(tmpdir(), 'dossier-state-unit-'))
+    const file = join(directory, 'values.json')
+    await writeFile(file, JSON.stringify(value), 'utf8')
+    return { directory, file }
+  }
+
+  function requestFrom(input: string | URL | Request, init?: RequestInit) {
+    return input instanceof Request ? input : new Request(input, init)
+  }
+
+  it('reads first and uses each field revision as its baseline', async () => {
+    const fixture = await dataFile({ objective: 'After', approved: true })
+    const calls: Array<{ method: string; path: string; body?: unknown }> = []
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const request = requestFrom(input, init)
+        const url = new URL(request.url)
+        const body =
+          request.method === 'PUT' ? await request.clone().json() : undefined
+        calls.push({ method: request.method, path: url.pathname, body })
+        if (url.pathname === '/api/healthz') {
+          return Response.json({
+            ok: true,
+            service: 'dossier',
+            version: '0.0.0',
+            features: ['state'],
+          })
+        }
+        if (request.method === 'GET') return Response.json(snapshot)
+        return Response.json({
+          ...snapshot,
+          revision: 6,
+          updatedAt: '2026-09-14T08:01:00Z',
+        })
+      },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('DOSSIER_API_KEY', 'test-key')
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+    try {
+      const exitCode = await runCli([
+        'node',
+        'dossier',
+        'state',
+        'set',
+        snapshot.documentId,
+        '--data',
+        fixture.file,
+        '--api-url',
+        'https://state-baseline.example',
+      ])
+      expect(exitCode).toBe(0)
+      expect(calls).toEqual([
+        { method: 'GET', path: '/api/healthz', body: undefined },
+        {
+          method: 'GET',
+          path: `/api/documents/${snapshot.documentId}/state`,
+          body: undefined,
+        },
+        {
+          method: 'PUT',
+          path: `/api/documents/${snapshot.documentId}/state`,
+          body: {
+            changes: [
+              { name: 'objective', value: 'After', base: 4 },
+              { name: 'approved', value: true, base: 0 },
+            ],
+          },
+        },
+      ])
+      expect(stderr).not.toHaveBeenCalled()
+    } finally {
+      stdout.mockRestore()
+      stderr.mockRestore()
+      vi.unstubAllGlobals()
+      vi.unstubAllEnvs()
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
+  })
+
+  it('retries a version change once with the original field bases', async () => {
+    const fixture = await dataFile({ objective: 'After' })
+    const payloads: unknown[] = []
+    let setAttempts = 0
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const request = requestFrom(input, init)
+        const url = new URL(request.url)
+        if (url.pathname === '/api/healthz') {
+          return Response.json({
+            ok: true,
+            service: 'dossier',
+            version: '0.0.0',
+            features: ['state'],
+          })
+        }
+        if (request.method === 'GET') return Response.json(snapshot)
+        payloads.push(await request.clone().json())
+        setAttempts += 1
+        if (setAttempts === 1) {
+          return Response.json(
+            {
+              ok: false,
+              code: 'state_version_changed',
+              message: 'The current document version changed.',
+              details: { currentVersion: 3 },
+            },
+            { status: 409 },
+          )
+        }
+        return Response.json({
+          ...snapshot,
+          version: 3,
+          revision: 6,
+          updatedAt: '2026-09-14T08:01:00Z',
+        })
+      },
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('DOSSIER_API_KEY', 'test-key')
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+    try {
+      const exitCode = await runCli([
+        'node',
+        'dossier',
+        '--api-url',
+        'https://state-retry.example',
+        'state',
+        'set',
+        snapshot.documentId,
+        '--data',
+        fixture.file,
+      ])
+      expect(exitCode).toBe(0)
+      expect(payloads).toEqual([
+        { changes: [{ name: 'objective', value: 'After', base: 4 }] },
+        { changes: [{ name: 'objective', value: 'After', base: 4 }] },
+      ])
+      expect(stderr).not.toHaveBeenCalled()
+    } finally {
+      stdout.mockRestore()
+      stderr.mockRestore()
+      vi.unstubAllGlobals()
+      vi.unstubAllEnvs()
+      await rm(fixture.directory, { recursive: true, force: true })
+    }
   })
 })
 

@@ -141,10 +141,29 @@ export const SharesLive = Layer.effect(
                     cause,
                   }),
               })
+        const grants = yield* Effect.tryPromise({
+          try: () =>
+            db.raw
+              .prepare(
+                `SELECT email, can_save FROM document_state_grants
+                  WHERE document_id = ? ORDER BY email`,
+              )
+              .bind(documentId)
+              .all<{ email: string; can_save: number }>(),
+          catch: (cause) =>
+            new PersistenceError({
+              operation: 'load state grants',
+              cause,
+            }),
+        })
         return {
           configured: configured.results.map((row) => row.email),
           effective: effective.results.map((row) => row.email),
           accessSource: decision.accessSource,
+          grants: grants.results.map((row) => ({
+            email: row.email,
+            canSave: row.can_save === 1,
+          })),
         }
       })
 
@@ -204,21 +223,31 @@ export const SharesLive = Layer.effect(
         yield* authorizeMutation(documentId, principal)
         const add = yield* normalizedEmails(change.add ?? [])
         const remove = yield* normalizedEmails(change.remove ?? [])
+        const addSavers = yield* normalizedEmails(change.addSavers ?? [])
+        const removeSavers = yield* normalizedEmails(change.removeSavers ?? [])
+        const removeGrants = yield* normalizedEmails(change.removeGrants ?? [])
         const now = new Date().toISOString()
         const guardId = ids.internalId()
+        const materialize = add.length > 0 || remove.length > 0
         yield* db
           .batch([
             guard(documentId, principal, guardId),
-            db.raw
-              .prepare(inheritedShareCopySql)
-              .bind(
-                documentId,
-                documentId,
-                principal.accountId,
-                now,
-                documentId,
-              ),
-            db.raw.prepare(inheritedVisibilitySql).bind(documentId, documentId),
+            ...(materialize
+              ? [
+                  db.raw
+                    .prepare(inheritedShareCopySql)
+                    .bind(
+                      documentId,
+                      documentId,
+                      principal.accountId,
+                      now,
+                      documentId,
+                    ),
+                  db.raw
+                    .prepare(inheritedVisibilitySql)
+                    .bind(documentId, documentId),
+                ]
+              : []),
             db.raw
               .prepare(
                 `DELETE FROM document_shares
@@ -227,11 +256,40 @@ export const SharesLive = Layer.effect(
               .bind(documentId, JSON.stringify(remove)),
             db.raw
               .prepare(
+                `DELETE FROM document_state_grants
+                WHERE document_id = ? AND email IN (SELECT CAST(value AS TEXT) FROM json_each(?))`,
+              )
+              .bind(documentId, JSON.stringify(removeGrants)),
+            db.raw
+              .prepare(
                 `INSERT OR IGNORE INTO document_shares
                  (document_id, email, created_by_account_id, created_at)
                SELECT ?, CAST(value AS TEXT), ?, ? FROM json_each(?)`,
               )
               .bind(documentId, principal.accountId, now, JSON.stringify(add)),
+            db.raw
+              .prepare(
+                `UPDATE document_state_grants SET can_save = 0
+                  WHERE document_id = ? AND email IN (SELECT CAST(value AS TEXT) FROM json_each(?))`,
+              )
+              .bind(documentId, JSON.stringify(removeSavers)),
+            db.raw
+              .prepare(
+                `INSERT INTO document_state_grants
+                   (document_id, email, can_save, created_by_account_id, created_at)
+                 SELECT ?, CAST(value AS TEXT), 1, ?, ? FROM json_each(?)
+                  WHERE true
+                 ON CONFLICT (document_id, email) DO UPDATE SET
+                   can_save = 1,
+                   created_by_account_id = excluded.created_by_account_id,
+                   created_at = excluded.created_at`,
+              )
+              .bind(
+                documentId,
+                principal.accountId,
+                now,
+                JSON.stringify(addSavers),
+              ),
             db.raw
               .prepare(
                 `UPDATE documents SET revision = revision + 1, updated_at = ? WHERE id = ?`,
