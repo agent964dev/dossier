@@ -82,9 +82,10 @@ There is no automatic version increment and no token fallback.
 A previously bumped but still unpublished version can be published by a later
 main release after that later revision passes all gates. This supports recovery
 from a failed release. Published versions are immutable: fix a published CLI by
-merging another explicit version bump. Main currently inherits CLI version
-`0.2.2` from before PR #8, and npm already has `0.2.2`; saved-values CLI additions
-from that PR need an explicit future bump to become a new npm release.
+merging another explicit version bump. This rollout explicitly bumps the CLI
+from the published `0.2.2` to `0.2.3`, including the saved-values CLI additions
+from PR #8. After the merge passes CI and production verification, the same
+release will publish `0.2.3` if it is still unpublished.
 
 ### First-time owner setup (before merging the CI/CD PR)
 
@@ -139,16 +140,20 @@ from that PR need an explicit future bump to become a new npm release.
    PR checks, block force pushes/deletion, and restrict bypass access. Production
    gating also happens inside the workflow, independently of branch protection.
 
-Inspection on 2026-09-16: GitHub Actions is enabled; no repository environments,
-Actions secrets/variables, branch protection, rulesets, or repository webhooks
-were configured. Current main CI passed. The production Worker is in the Agent964
-account and lists only `SESSION_SECRET` and `BOOTSTRAP_API_KEY`; **`LINK_SECRET`
-and `SEED_ADMIN_EMAIL` are missing**. Public health reports build `dab662e` without
-capabilities. The Workers Builds triggers API returned **403** with the available
-Wrangler OAuth credential, so Builds state is **unverified**, not presumed off.
-A read-only remote migration listing confirms only migration 0004 is pending.
-The npm registry reports `0.2.2`; trusted-publisher settings were not accessible.
-These external settings were inspected read-only and not changed by implementation.
+Setup status on 2026-09-16: the owner completed the external setup. Read-only
+inspection confirms the main-only `production` environment, no approval or wait
+timer, the expected Cloudflare credential name and variables, required CI checks,
+and protection against force pushes/deletion. The Worker lists all four required
+secret names, including `LINK_SECRET` and `SEED_ADMIN_EMAIL`; values were not read.
+The owner verified that Workers Builds is disconnected and npm trusted publishing
+is restricted to `release-cli.yml` / `production`, with direct publication allowed
+and bypass tokens disabled. Builds and npm settings are owner-verified: the
+available Builds API credential returned 403, and npm publisher settings were
+not accessible to the implementation session. Public health still reports
+existing build `dab662e` without capabilities. Only migration 0004 is pending.
+Registry metadata confirms `0.2.3` is unpublished. The first automated release
+and actual npm OIDC/provenance integration remain pending; these read-only checks
+did not deploy code, apply migrations, or publish a package.
 
 ### Retries, migrations, and recovery
 

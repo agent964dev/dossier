@@ -1,6 +1,6 @@
 {
   "name": "@agent964/dossier",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Publish, read, compare, and manage versioned HTML documents with Dossier.",
   "type": "module",
   "bin": {
