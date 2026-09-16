@@ -61,6 +61,11 @@ export function checkSecrets(secrets) {
 }
 
 export function checkConfig(config) {
+  if (
+    production.secrets.some((name) => Object.hasOwn(config.vars ?? {}, name))
+  ) {
+    throw new Error('Production vars must not overwrite Worker secrets')
+  }
   const db = config.d1_databases?.find((entry) => entry.binding === 'DB')
   const bucket = config.r2_buckets?.find((entry) => entry.binding === 'OBJECTS')
   const limiter = config.ratelimits?.find(

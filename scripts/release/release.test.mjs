@@ -169,6 +169,14 @@ test('production prerequisites reject missing secrets and development resources'
     ],
   }
   checkConfig(config)
+  assert.throws(
+    () =>
+      checkConfig({
+        ...config,
+        vars: { ...config.vars, SEED_ADMIN_EMAIL: 'placeholder@example.com' },
+      }),
+    /overwrite Worker secrets/,
+  )
   for (const change of [
     { name: 'dossier-dev' },
     {

@@ -257,7 +257,8 @@ never rerun creation to repair a release. Preserve evidence without secret value
    ```
 
    When Wrangler prompts for `SEED_ADMIN_EMAIL`, enter the owner's verified
-   production email. The value in `wrangler.jsonc` is only a placeholder. On
+   production email. Production must not declare a `SEED_ADMIN_EMAIL` plaintext var: it would
+   conflict with or replace the secret during deployment. On
    Linux, replace the `stat` command with
    `stat -c '%a %n' ../../.prod-bootstrap-key.local`. Confirm that the file mode
    is `600` and the secret list names `SESSION_SECRET`, `LINK_SECRET`,
@@ -527,8 +528,9 @@ rg -n -A 18 '"ratelimits"' wrangler.jsonc
 ```
 
 The development rate-limit block must contain `STATE_RATE_LIMITER`, namespace
-`1004`, limit `60`, and period `60`. The production namespace is `1003`. Worker
-secrets override variables of the same name. Localhost tests and local
+`1004`, limit `60`, and period `60`. The production namespace is `1003`. Before deploying development with `SEED_ADMIN_EMAIL` as a secret, remove its
+placeholder from `env.dev.vars`; a plaintext var can replace a remote secret.
+Production already omits this placeholder. Localhost tests and local
 development can use the permissive in-process limiter, but deployed environments
 must use the Cloudflare binding.
 
