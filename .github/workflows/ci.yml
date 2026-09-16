@@ -2,16 +2,16 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PR updates cancel obsolete checks. Main CI is called by the serialized
+  # release coordinator and has an independent group for each run/attempt.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -19,6 +19,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -39,6 +43,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Test release safeguards
+        run: node --test scripts/release/*.test.mjs
+
+      - name: Require a version bump for changed CLI payloads
+        run: node scripts/release/cli-version.mjs
+        env:
+          RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          RELEASE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Lint
         run: bun run lint
 
@@ -55,7 +68,9 @@ jobs:
         run: bun run test
 
       - name: Build web app
-        run: bun run --cwd apps/web build
+        run: env -u CLOUDFLARE_ENV bun run --cwd apps/web build
+        env:
+          DOSSIER_BUILD_VERSION: ${{ github.sha }}
 
       - name: Build CLI
         run: bun run --cwd packages/cli build
@@ -81,6 +96,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -137,6 +156,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install checksum-pinned Gitleaks
         env:

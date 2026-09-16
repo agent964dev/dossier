@@ -2,6 +2,181 @@
 
 Follow the steps in this runbook in order. Run shell commands from a clone of this repository. Never paste production secrets into chat, logs, screenshots, or a ticket. Replace `<date>`, `<version>`, `<document-id>`, and email placeholders before running commands.
 
+## Automatic production releases
+
+`release-cli.yml` is the sole production coordinator. A push to `main` (normally
+a merged PR) calls `ci.yml` at the same commit and waits for **all** of its
+`checks`, `browser`, and `secrets` jobs. This preserves lint, formatting, both
+TypeScript checks, unit and browser tests, Gitleaks, both builds, and the CLI
+pack/install smoke test. PRs run those checks without a production environment,
+Cloudflare credentials, or OIDC publishing permission. There is no tag release
+trigger and no tag is needed.
+
+The coordinator checks out only `github.sha`, builds production with the full
+SHA in `DOSSIER_BUILD_VERSION`, checks the generated production bindings and
+existing secret **names**, applies pending D1 migrations, deploys Vite's generated
+Worker/assets, then verifies `/api/healthz`. Health must return HTTP 200,
+`ok: true`, `service: "dossier"`, that exact full SHA as `version`, and every
+capability listed in `scripts/release/production.json` at that revision (currently
+`state`). It tries at most 12 times, with a 10-second request timeout and 5 seconds
+between attempts. A failed migration, deployment, or smoke check fails the run
+and blocks npm publication. Health proves build identity and advertised bindings;
+it is not an authenticated end-to-end saved-values or database-integrity test.
+
+### Serialization and stale runs
+
+The entire production workflow, including its reusable CI and npm job, holds
+`dossier-production` concurrency with `cancel-in-progress: false` and `queue: max`.
+A subsequent merge cannot cancel a migration or deployment. GitHub supports up to
+100 pending runs; if that queue fills, rerun the canceled release after capacity
+is available. Waiting order is FIFO by entry into the concurrency queue, which
+can differ from commit order. Each normal queued merge therefore gets its own
+checks and deployment; if a newer revision has already reached production, the
+older run fails its stale-release guard before changing production.
+
+Before either deployment or publication, the workflow reads **all** GitHub
+`production` deployment records and requires every attempted SHA to be an
+ancestor of the candidate. Failed attempts count: they might already have
+migrated D1 or activated code. The candidate must also still belong to `main`.
+GitHub creates the environment deployment record before starting the job, so the
+fence survives a failed smoke check or interrupted run. Same-SHA retries are
+allowed. API errors, unknown commits, and incomplete history fail closed. Keep
+these deployment records; deleting them removes this protection. The pagination
+limit is 10,000 records and deliberately requires maintenance if reached.
+
+PR CI retains cancellation of obsolete checks. Reusable main CI has a unique
+run/attempt concurrency group and cannot cancel the production coordinator.
+A rerun of just the npm job repeats both the history guard and, before publishing,
+the production smoke check, even if the deploy job succeeded in an older attempt.
+
+### CLI versioning
+
+For a releasable CLI change, explicitly increase `packages/cli/package.json`
+using a stable `X.Y.Z` version, run `bun install` to update `bun.lock`, and commit
+both. CI builds and packs isolated archives of the base and proposed revisions,
+normalizes only the version number, and compares the actual npm payload. This
+covers bundled workspace dependencies and their resolved dependencies, generated
+CLI code, README, license, and packaged skills/assets. Unchanged payloads such as
+web-only or test-only edits do not require a CLI release. A Bun compiler version
+change also requires a bump because it changes the CLI build toolchain. A version decrease fails.
+When the version already increases, the normal build and package smoke gates
+still run. PR comparison uses the PR base/head; main comparison uses the push's
+before/SHA, covering a push that contains several commits.
+
+After successful production verification, the npm job reads the public package
+metadata. An existing exact version is a successful no-op. An absent version
+must be greater than all published stable versions before it can be published.
+Only an HTTP 200, valid package document can establish absence; 404, 401/403,
+rate limiting, network errors, malformed responses, and registry failures fail
+the run. The existing package must already exist on npm. A failed publish may be
+retried; if npm accepted it before the job failed, the next attempt skips it.
+There is no automatic version increment and no token fallback.
+
+A previously bumped but still unpublished version can be published by a later
+main release after that later revision passes all gates. This supports recovery
+from a failed release. Published versions are immutable: fix a published CLI by
+merging another explicit version bump. Main currently inherits CLI version
+`0.2.2` from before PR #8, and npm already has `0.2.2`; saved-values CLI additions
+from that PR need an explicit future bump to become a new npm release.
+
+### First-time owner setup (before merging the CI/CD PR)
+
+1. **Remove competing Cloudflare deployments.** In Workers & Pages → `dossier`
+   → Settings → Builds, inspect the repository and production/preview triggers.
+   Disconnect the production Worker from Workers Builds, including deploy hooks,
+   so this workflow is its only deployment writer. A separately named development
+   Worker can retain its own pipeline. Record this verification and set the
+   GitHub `production` environment variable `WORKERS_BUILDS_DISABLED` to `true`.
+   This is an explicit owner attestation, not an API-discovered fact. The workflow
+   refuses production work until it is set.
+2. **Create the GitHub environment `production`.** Set deployment branches/tags
+   to **Selected branches and tags**, add a **branch** rule for `main` only, and
+   allow no tags. Do not configure required reviewers or a wait timer: ordinary
+   successful merges must release without manual approval. Add environment
+   variable `CLOUDFLARE_ACCOUNT_ID=0e58a177092eae6d95ff91afd4330c72` (Agent964)
+   and environment secret `CLOUDFLARE_API_TOKEN`. Keep the credential at environment
+   scope, not repository scope. Use a dedicated token restricted to that account
+   and the `agent964.com` zone: Workers Scripts Edit, D1 Edit for migrations,
+   Workers R2 Storage Read for existing bucket bindings, and the zone's Workers
+   Routes Edit and Zone Read for the custom domain. Add only a permission that a
+   documented Wrangler operation actually requires; do not use a global API key
+   or grant unrelated account-wide privileges. These API permission classes can
+   authorize more than a single Worker; restrict resources as far as Cloudflare
+   supports and never use that authority to recreate infrastructure. Do not store Worker
+   application secret values in GitHub.
+3. **Complete existing Worker prerequisites.** Use `wrangler secret list
+--config wrangler.jsonc` from `apps/web` to check names. Required:
+   `SESSION_SECRET`, `LINK_SECRET`, `SEED_ADMIN_EMAIL`, `BOOTSTRAP_API_KEY`.
+   Set only missing values using A5. Keep the existing `LINK_SECRET` stable:
+   rotating it invalidates anonymous edit links. The workflow never creates or
+   rotates secrets, databases, or buckets, and never calls `/api/setup`.
+   PR #8 merged as `04470e94061f2a134cbd5edb9d36a01579b10286` on 2026-09-16;
+   `0004_mature_colonel_america.sql` and `STATE_RATE_LIMITER` namespace `1003`
+   are already in main and will be applied by the first release. There is no
+   cherry-pick dependency remaining.
+4. **Authorize npm OIDC.** For `@agent964/dossier` on npmjs.com, configure a
+   GitHub Actions trusted publisher with organization/user **`agent964dev`**,
+   repository **`dossier`**, workflow filename **`release-cli.yml`**, and environment
+   **`production`** (exact case; filename only). Enable the allowed action for
+   **direct `npm publish`**; staged publishing alone is insufficient for automatic
+   releases. Replace the former publisher without an environment restriction so
+   historic tag workflows cannot retain publication authority. The publish job
+   runs directly in `release-cli.yml`; only CI is reusable, avoiding npm's caller
+   workflow identity ambiguity. It uses a GitHub-hosted Ubuntu runner, Node 24,
+   npm 11.19.1, job-scoped `id-token: write`, and explicit provenance. No
+   `NPM_TOKEN`, `NODE_AUTH_TOKEN`, npm-auth secret, or token-bearing `.npmrc` is
+   used. Choose npm's “Require two-factor authentication and disallow tokens”
+   setting. Verify the publisher in npm settings; saving it does not validate its
+   identity, and the first real publish is the final OIDC integration test.
+5. **Protect `main`.** Require PRs and the `checks`, `browser`, and `secrets`
+   PR checks, block force pushes/deletion, and restrict bypass access. Production
+   gating also happens inside the workflow, independently of branch protection.
+
+Inspection on 2026-09-16: GitHub Actions is enabled; no repository environments,
+Actions secrets/variables, branch protection, rulesets, or repository webhooks
+were configured. Current main CI passed. The production Worker is in the Agent964
+account and lists only `SESSION_SECRET` and `BOOTSTRAP_API_KEY`; **`LINK_SECRET`
+and `SEED_ADMIN_EMAIL` are missing**. Public health reports build `dab662e` without
+capabilities. The Workers Builds triggers API returned **403** with the available
+Wrangler OAuth credential, so Builds state is **unverified**, not presumed off.
+A read-only remote migration listing confirms only migration 0004 is pending.
+The npm registry reports `0.2.2`; trusted-publisher settings were not accessible.
+These external settings were inspected read-only and not changed by implementation.
+
+### Retries, migrations, and recovery
+
+Use **Re-run all jobs** on the main production run after fixing external setup or
+an infrastructure fault. The same immutable SHA is tested again, already-applied
+D1 migrations are skipped, and an already-published npm version is skipped. If a
+newer SHA has attempted deployment, the old run will be rejected; merge a forward fix or
+rerun the newer release. Never edit a historical migration that has been applied.
+
+All routine schema changes must be compatible with both the currently deployed
+Worker and the new Worker: add nullable/defaulted columns or tables first, deploy
+code that can use both shapes, and backfill separately when needed. Destructive
+changes require a separately planned later cutover after old code and rollback
+candidates stop using the old schema. Migration 0004 follows the additive rollout
+and initializes existing documents with saved values disabled. Migrations run
+before Worker activation while the previous Worker still serves requests. A
+migration failure stops immediately; earlier migrations in that batch may have
+committed, so inspect the migration ledger before retrying.
+
+If migrations succeed but deployment or smoke verification fails, preserve the
+schema and data. Investigate Wrangler output and Worker logs, then retry the same
+SHA or merge compatible corrected code. Do not reset D1, recreate infrastructure,
+or automatically reverse migrations. Prefer a forward code fix. An emergency
+code rollback is manual (C6) and safe only if that older code works with the
+current schema. npm publication remains blocked until production verifies.
+
+Official references checked for this implementation: [GitHub concurrency and
+queue semantics](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
+[GitHub deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments),
+[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/),
+[Cloudflare Vite environments](https://developers.cloudflare.com/workers/vite-plugin/reference/cloudflare-environments/),
+[Cloudflare GitHub Actions authentication](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/),
+[disconnecting Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/#disconnecting-builds),
+and [D1 migration tracking](https://developers.cloudflare.com/d1/reference/migrations/).
+
 ### Upgrade an existing deployment for saved values
 
 Complete this sequence before the first code deploy that includes saved values.
@@ -17,7 +192,9 @@ Worker deploy.
 
 ## A. Production cutover operator checklist
 
-The phase-4 integrator normally completes this section before handing the deployment to the owner. Preserve the evidence requested by each step, but redact tokens and secret values.
+This is the historical first-install checklist, not the routine deployment path.
+The production database and bucket already exist. Skip A2/A3 for this deployment;
+never rerun creation to repair a release. Preserve evidence without secret values.
 
 1. **Confirm Cloudflare access.**
 
@@ -57,7 +234,12 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    The production block must contain `UPLOAD_RATE_LIMITER`, namespace `1001`, limit `30`, and period `60`. It must also contain `STATE_RATE_LIMITER`, namespace `1003`, limit `60`, and period `60`. Do not copy development namespaces `1002` or `1004` into production. Paste back the production block.
 
-5. **Create and set the production secrets.**
+5. **Set only missing production secrets.**
+
+   Run `bunx wrangler secret list --config wrangler.jsonc` first. Run only the
+   individual commands below whose secret name is absent. Preserve existing
+   `SESSION_SECRET`, `LINK_SECRET`, and bootstrap credentials. Routine deployment
+   must never rotate `LINK_SECRET`.
 
    ```sh
    cd /path/to/dossier/apps/web
@@ -88,15 +270,14 @@ The phase-4 integrator normally completes this section before handing the deploy
 
    Wrangler must mark every pending migration as applied or report that there is nothing to apply. For the first saved-values deploy, confirm that the output includes `0004_mature_colonel_america.sql`. Paste back the migration names and statuses.
 
-7. **Build and deploy production.**
+7. **Build and deploy production through GitHub Actions.**
 
-   ```sh
-   cd /path/to/dossier/apps/web
-   bunx vite build
-   bunx wrangler deploy
-   ```
-
-   Confirm that Vite builds successfully and Wrangler uploads the Worker and static assets, reports the `dossier.agent964.com` custom domain, and exits zero. Report the deployed version ID, domain, and exit status.
+   Complete automatic-release setup above, then merge the compatible change to
+   `main`. Follow the `Production release` run. Its build clears `CLOUDFLARE_ENV`
+   to select the top-level Wrangler configuration (there is no `env.production`),
+   and deploys `apps/web/dist/server/wrangler.json`. `env.dev` and its databases
+   and buckets must never be used here. Record the run URL, full SHA, Cloudflare
+   version ID, and smoke-check result.
 
 8. **Run the protected setup endpoint.**
 
@@ -171,24 +352,13 @@ The phase-4 integrator normally completes this section before handing the deploy
 
 Only the owner performs these steps, in this order. Every CLI command below pins the production origin and clears inherited Dossier environment credentials, so an existing development configuration cannot receive the production key or later commands.
 
-1. **Publish the CLI package.**
+1. **Release the CLI package automatically.**
 
-   Bump the exact version in `packages/cli/package.json` in the release pull
-   request, then merge it to `main`. From an up-to-date `main` checkout, tag
-   and push the matching release.
-
-   ```sh
-   git tag cli-vX.Y.Z
-   git push origin cli-vX.Y.Z
-   npm view @agent964/dossier version
-   ```
-
-   CI publishes through npm trusted publishing. Complete the one-time setup on
-   npmjs.com under **Trusted publisher → GitHub Actions** with repository
-   `agent964dev/dossier` and workflow `release-cli.yml`, and enable direct
-   publishing. Confirm that the release workflow succeeds and `npm view` prints
-   `X.Y.Z`. Report the package version and workflow URL. Never paste npm
-   credentials or one-time codes.
+   Explicitly bump the CLI version and lockfile in a PR as described above. After
+   merging to `main`, wait for `Production release` to pass production health
+   verification and publish through npm OIDC. Do not push a release tag. Confirm
+   `npm view @agent964/dossier version` reports the expected version and retain
+   the workflow URL.
 
 2. **Install that exact release.**
 
@@ -282,10 +452,8 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
    Stop the tail after capturing the failing request. If the production binding is absent, restore the `STATE_RATE_LIMITER` block with namespace `1003`, limit `60`, and period `60`. Build and redeploy the Worker.
 
-   ```sh
-   bunx vite build
-   bunx wrangler deploy
-   ```
+   Merge the binding fix to `main` and follow the automatic release. Do not run
+   an independent production deploy alongside the workflow.
 
    If the binding exists and the limiter call still fails, resolve the Cloudflare binding error shown in the tail and redeploy. Do not remove the check or install the permissive local limiter in production. Verify that health lists `state`, then repeat the failed `dossier state get <document-id> --json` or save. Paste back the health JSON, deployed version ID, and successful command output with saved values redacted when needed.
 
@@ -310,6 +478,17 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 
 6. **Roll back a production deploy.**
 
+   Prefer a revert PR on current `main` so a new SHA passes all gates and deploys
+   through the normal coordinator. Preserve all applied migration files. The CLI
+   version must not decrease; any changed CLI payload needs another release bump.
+
+   For an emergency direct rollback, first disable `release-cli.yml` in Actions,
+   allow any active migration/deploy to finish, and cancel pending releases. Verify
+   the selected Worker is compatible with the current D1 schema. After the manual
+   operation below, merge a forward recovery/revert PR, re-enable the workflow,
+   and rerun that new SHA. Never use an old workflow rerun as a rollback, or delete
+   deployment history to bypass its fence.
+
    ```sh
    cd /path/to/dossier/apps/web
    bunx wrangler versions list
@@ -320,7 +499,7 @@ Only the owner performs these steps, in this order. Every CLI command below pins
    printf '\n'
    ```
 
-   Confirm that Wrangler activates the selected version and health returns `"ok":true`. Report the old and new version IDs, reason, and health JSON. A code rollback does not roll back D1 migrations. Restore database data separately if the incident requires it.
+   Confirm that Wrangler activates the selected version and health returns `"ok":true`. Report the old and new version IDs, reason, and health JSON. A code rollback does not roll back D1 migrations or restore R2 data. Any database restore is a separate incident procedure requiring explicit assessment of data loss and compatibility; this pipeline never performs one.
 
 7. **Read production logs.**
 
@@ -382,14 +561,14 @@ deployment runs the weekly schedule.
 
    ```sh
    cd /path/to/dossier
-   git fetch origin && git rev-parse --short origin/main
+   git fetch origin && git rev-parse origin/main
    curl --fail-with-body --silent https://dossier.agent964.com/api/healthz
    printf '\n'
    dossier --version
    dossier admin purge --help
    ```
 
-   Confirm that the health `version` matches the short commit that
+   Confirm that the health `version` matches the full release commit that
    `git rev-parse` prints, or a later commit that you know the deployment runs.
    That commit must be at or after the 0.2.0 merge (`2af0932`). Confirm that
    `dossier --version` prints 0.2.0 or newer and the help synopsis lists
@@ -443,11 +622,7 @@ deployment runs the weekly schedule.
    `"triggers": { "crons": ["17 3 * * SUN"] }` beside `"routes"`. The `env.dev`
    block has the same schedule. Deploying production registers it.
 
-   ```sh
-   cd /path/to/dossier/apps/web
-   bunx vite build
-   bunx wrangler deploy
-   ```
+   Merge the trigger change to `main` and inspect the automatic release output.
 
    Confirm that Wrangler reports the schedule `17 3 * * SUN` for the deployed
    version. Report the deployed version ID and the schedule line.

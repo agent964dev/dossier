@@ -1,0 +1,10 @@
+{
+  "healthUrl": "https://dossier.agent964.com/api/healthz",
+  "features": ["state"],
+  "secrets": [
+    "SESSION_SECRET",
+    "LINK_SECRET",
+    "SEED_ADMIN_EMAIL",
+    "BOOTSTRAP_API_KEY"
+  ]
+}

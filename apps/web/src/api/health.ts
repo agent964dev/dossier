@@ -17,7 +17,7 @@ export { WorkerEnv } from '../services/env'
 /** Injected by Vite `define` at build time; absent under the test runner. */
 declare const __DOSSIER_BUILD_VERSION__: string | undefined
 
-/** Returns the short git commit the Worker was built from, or "unknown". */
+/** Returns the git commit the Worker was built from, or "unknown". */
 function buildVersion(): string {
   return typeof __DOSSIER_BUILD_VERSION__ === 'string'
     ? __DOSSIER_BUILD_VERSION__
