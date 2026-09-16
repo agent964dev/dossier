@@ -590,11 +590,18 @@ deployment runs the weekly schedule.
 2. **Confirm the deployed Worker and the operator CLI support the purge.**
 
    The Worker reports its build's git commit as `version` in its health
-   response, so compare that value with the repository.
+   response. In Cloudflare, identify the active `dossier` Worker version and
+   match its version ID to the deployment output of a **Production release**
+   run. That run's production smoke check must have passed. Use its run ID below;
+   `origin/main` may already contain newer commits waiting in the release queue.
+   Wait for any active deployment to finish. If a failed deployment or manual
+   rollback changed the active version, resolve and verify that release before
+   proceeding with a purge.
 
    ```sh
    cd /path/to/dossier
-   git fetch origin && git rev-parse origin/main
+   RELEASE_RUN_ID='replace-with-the-matching-run-id'
+   gh run view "$RELEASE_RUN_ID" --repo agent964dev/dossier --json headSha --jq .headSha
    curl --fail-with-body --silent https://dossier.agent964.com/api/healthz
    printf '\n'
    dossier --version
@@ -602,11 +609,11 @@ deployment runs the weekly schedule.
    ```
 
    Confirm that the health `version` matches the full release commit that
-   `git rev-parse` prints, or a later commit that you know the deployment runs.
+   `gh run view` prints.
    That commit must be at or after the 0.2.0 merge (`2af0932`). Confirm that
    `dossier --version` prints 0.2.0 or newer and the help synopsis lists
-   `--execute` and `--retention-days`. Report the two commits, the CLI version,
-   and the help synopsis.
+   `--execute` and `--retention-days`. Report the release URL, Worker version ID,
+   expected and observed commits, CLI version, and help synopsis.
 
 3. **Run a dry run.**
 
