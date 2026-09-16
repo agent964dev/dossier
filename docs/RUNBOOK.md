@@ -191,7 +191,7 @@ Complete this sequence before the first code deploy that includes saved values.
 
 1. Confirm that `apps/web/wrangler.jsonc` declares `STATE_RATE_LIMITER` for production and development as described in step A4.
 2. Set a distinct `LINK_SECRET` in each environment. Step A5 covers production, and section D covers development. The `State` service belongs to `CoreServicesLive`, so requests that construct the core service layer fail when the secret is absent.
-3. Apply the D1 migrations in step A6 before deploying the new Worker. Confirm that Wrangler applies `0004_mature_colonel_america.sql`. The migration adds `document_state`, `document_state_fields`, `document_state_grants`, and `document_edit_links`. It also adds the saved-values manifest to document versions and initializes every existing document with saved values disabled.
+3. Let the production release coordinator apply D1 migrations before activating the new Worker, as described in A6/A7. Do not apply production migrations directly from a working checkout. Confirm that the release logs show Wrangler applying `0004_mature_colonel_america.sql`. The migration adds `document_state`, `document_state_fields`, `document_state_grants`, and `document_edit_links`. It also adds the saved-values manifest to document versions and initializes every existing document with saved values disabled.
 4. Deploy the Worker and complete the health check in step A9. The response must include `"features":["state"]`.
 
 Never reuse a `LINK_SECRET` value between environments or print either value.
@@ -270,14 +270,22 @@ never rerun creation to repair a release. Preserve evidence without secret value
    `SEED_ADMIN_EMAIL`, and `BOOTSTRAP_API_KEY` without revealing values. Report
    the mode line and secret names only.
 
-6. **Apply the production migrations.**
+6. **Verify production migrations through the release coordinator.**
+
+   Merge the tested change to `main` as described in A7. The automatic release
+   applies pending migrations under its freshness check and production lock,
+   before deploying the Worker. Do not run a separate migration apply command.
+   Confirm that the release logs mark each pending migration as applied or report
+   nothing to apply. For the first saved-values release, expect
+   `0004_mature_colonel_america.sql`. Record the migration names and statuses.
+
+   After the release completes, a read-only check can confirm that nothing is
+   pending at that tested revision:
 
    ```sh
    cd /path/to/dossier/apps/web
-   bunx wrangler d1 migrations apply dossier-production --remote
+   bunx wrangler d1 migrations list dossier-production --remote --config wrangler.jsonc
    ```
-
-   Wrangler must mark every pending migration as applied or report that there is nothing to apply. For the first saved-values deploy, confirm that the output includes `0004_mature_colonel_america.sql`. Paste back the migration names and statuses.
 
 7. **Build and deploy production through GitHub Actions.**
 
@@ -290,7 +298,14 @@ never rerun creation to repair a release. Preserve evidence without secret value
 
 8. **Run the protected setup endpoint.**
 
-   The script reapplies migrations intentionally, then calls `POST /api/setup` without exposing the key in the curl process arguments.
+   This is one-time manual bootstrap, not a routine release step. First disable
+   `release-cli.yml`, let any active release finish, and cancel queued releases.
+   Use a clean checkout of the exact SHA from the last successful production
+   release. Its migrations must already be applied, as verified in A6. The setup
+   script checks/applies that same migration set before calling `POST /api/setup`,
+   without exposing the key in curl arguments. This maintenance window prevents
+   racing another release; never run the script from an untested checkout.
+   Re-enable the workflow after bootstrap, before merging any further change.
 
    ```sh
    cd /path/to/dossier
@@ -409,6 +424,11 @@ Only the owner performs these steps, in this order. Every CLI command below pins
 ## C. Day-2 operations
 
 1. **Rotate the production bootstrap key.**
+
+   Use the manual maintenance window and tested checkout described in A8:
+   disable the coordinator, let the active release finish, cancel queued releases,
+   and re-enable it after maintenance. The setup script below must use only the
+   migrations already applied by that tested production release.
 
    This rotates both the setup-endpoint secret and the hashed `acct_bootstrap` API credential. It explicitly re-enables `key_bootstrap`. `dossier setup` never auto-unrevokes it.
 
@@ -552,18 +572,20 @@ deployment runs the weekly schedule.
 
 1. **Confirm migration 0003 on the production database.**
 
-   `apps/web/scripts/setup.sh` applies remote migrations before it calls
-   `POST /api/setup`, so a production setup run (steps A8 and C1) has already
-   applied it. Confirm, or apply it on its own, with the same command the script
-   uses.
+   Production migrations belong to the automatic release coordinator. Check the
+   successful release log for `0003_skinny_pet_avengers.sql` or the message that
+   no migrations remain. From that exact tested revision, list pending migrations
+   without changing production:
 
    ```sh
    cd /path/to/dossier/apps/web
-   bunx wrangler d1 migrations apply dossier-production --remote
+   bunx wrangler d1 migrations list dossier-production --remote --config wrangler.jsonc
    ```
 
-   Confirm that Wrangler lists `0003_skinny_pet_avengers.sql` as applied or
-   reports that there is nothing to apply. Report migration names and statuses.
+   If migration 0003 is still pending, merge the compatible revision to `main`
+   and let the coordinator apply it before deploying the code. Do not apply it
+   through an independent terminal command. Record the release URL and migration
+   statuses before running a purge.
 
 2. **Confirm the deployed Worker and the operator CLI support the purge.**
 
