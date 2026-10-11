@@ -502,7 +502,11 @@ export const blobs = sqliteTable(
   ],
 )
 
-/** A change in progress holding a blob until it commits. */
+/**
+ * A change in progress holding a blob until it commits. A hold is taken
+ * before the bytes are written, so a purge never removes a blob an upload
+ * is filling, and counts for a commit only once the bytes are verified.
+ */
 export const blobHolds = sqliteTable(
   'blob_holds',
   {
@@ -512,6 +516,8 @@ export const blobHolds = sqliteTable(
     sha256: text('sha256')
       .notNull()
       .references(() => blobs.sha256),
+    /** False while an upload is writing the bytes; true once they match. */
+    verified: integer('verified', { mode: 'boolean' }).notNull().default(true),
     createdAt: integer('created_at').notNull(),
   },
   (t) => [

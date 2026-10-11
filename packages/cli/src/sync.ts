@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmod,
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -126,7 +127,14 @@ export interface PullOutcome {
 }
 
 export interface SyncService {
-  readonly plan: (dir: string) => Effect.Effect<LocalPlan, SyncError>
+  /**
+   * `at` is the path inside the tree the folder is pushed to, so its pages'
+   * forms are checked where they will live.
+   */
+  readonly plan: (
+    dir: string,
+    at?: string,
+  ) => Effect.Effect<LocalPlan, SyncError>
   readonly push: (i: {
     readonly dir: string
     readonly target: LinkRef
@@ -261,15 +269,25 @@ const checkLimits = (files: readonly Found[]): DossierError | null => {
   return null
 }
 
-/** The folder as the tree will see it: pages, other files and folders. */
-const localTree = (paths: readonly string[]): TreeView => {
+/**
+ * The pushed folder as the tree will see it: pages, other files and folders,
+ * at `at` inside the tree. Paths outside it are unknown here; the deployment
+ * checks them against the whole tree.
+ */
+const localTree = (paths: readonly string[], at: string): TreeView => {
   const kinds = new Map<string, 'page' | 'file' | 'folder'>([['', 'folder']])
+  if (at !== '') {
+    const parts = at.split('/')
+    parts.forEach((_, i) =>
+      kinds.set(parts.slice(0, i + 1).join('/'), 'folder'),
+    )
+  }
   for (const path of paths) {
     kinds.set(path, isPageFile(path) ? 'page' : 'file')
-    let at = path.lastIndexOf('/')
-    while (at > 0) {
-      kinds.set(path.slice(0, at), 'folder')
-      at = path.lastIndexOf('/', at - 1)
+    let slash = path.lastIndexOf('/')
+    while (slash > 0) {
+      kinds.set(path.slice(0, slash), 'folder')
+      slash = path.lastIndexOf('/', slash - 1)
     }
   }
   return { kindAt: (path) => kinds.get(path) ?? null }
@@ -298,27 +316,34 @@ const readLocal = (found: Found): Effect.Effect<LocalFile, CliProblem> =>
  * Walks a folder, leaves out what the ignore rules name, checks the local
  * limits, hashes every file and checks its pages as a push would.
  */
-export const planFolder = (dir: string): Effect.Effect<LocalPlan, SyncError> =>
+export const planFolder = (
+  dir: string,
+  at = '',
+): Effect.Effect<LocalPlan, SyncError> =>
   Effect.gen(function* () {
     const root = resolve(dir)
     const { files: found, ignored } = yield* attempt(() => walk(root))
     const limit = checkLimits(found)
     if (limit !== null) return yield* Effect.fail(limit)
     const files = yield* Effect.forEach(found, readLocal, { concurrency: 4 })
+    const inTree = (path: string) => joinPath(at, path)
     const pages: PushFile[] = files.flatMap((file) =>
       file.analysis === null
         ? []
-        : [{ path: file.path, analysis: file.analysis }],
+        : [{ path: inTree(file.path), analysis: file.analysis }],
     )
     const check = yield* Effect.try({
       try: () => {
         const result = checkPush(
           pages,
-          localTree(files.map((file) => file.path)),
+          localTree(
+            files.map((file) => inTree(file.path)),
+            at,
+          ),
         )
         return {
           problems: [
-            ...files.flatMap((file) => pathProblems(file.path)),
+            ...files.flatMap((file) => pathProblems(inTree(file.path))),
             ...result.problems,
           ],
           warnings: result.warnings,
@@ -491,7 +516,7 @@ const pushWith = (
   i: Parameters<SyncService['push']>[0],
 ): Effect.Effect<PushOutcome, SyncError, Cli> =>
   Effect.gen(function* () {
-    const local = yield* planFolder(i.dir)
+    const local = yield* planFolder(i.dir, i.target.path)
     const folder = yield* attempt(() => realpath(i.dir))
     const key: HeadKey = {
       deployment: remote.deployment.id,
@@ -521,12 +546,7 @@ const pushWith = (
     // The local check runs on the folder alone; the deployment's runs on the
     // tree as it will be, so its warnings come first.
     const warningsOf = (plan: PushPlanWire): readonly PushWarning[] =>
-      plan.warnings.length > 0
-        ? plan.warnings
-        : local.check.warnings.map((warning) => ({
-            ...warning,
-            path: joinPath(i.target.path, warning.path),
-          }))
+      plan.warnings.length > 0 ? plan.warnings : local.check.warnings
     if (i.dryRun) {
       return {
         number: null,
@@ -609,6 +629,24 @@ const writeLocal = async (
   }
 }
 
+/**
+ * The first part of `rel` under `root`, folder by folder and the entry
+ * itself, that is a symbolic link, or null.
+ */
+const linkOnTheWay = async (
+  root: string,
+  rel: string,
+): Promise<string | null> => {
+  const segments = rel.split('/')
+  for (let i = 1; i <= segments.length; i += 1) {
+    const part = segments.slice(0, i).join('/')
+    const info = await lstat(join(root, part)).catch(() => null)
+    if (info === null) return null
+    if (info.isSymbolicLink()) return part
+  }
+  return null
+}
+
 /** Whether the local copy already holds these bytes. */
 const sameLocal = async (path: string, entry: EntryWire): Promise<boolean> => {
   if (entry.sha256 === null) return false
@@ -657,6 +695,26 @@ const pullWith = (
       })
     }
     const all = yield* Effect.forEach(ls.entries, placed)
+    // Nothing is written through a link: every folder on the way to an
+    // entry, and the entry itself, must not be a symbolic link.
+    yield* Effect.forEach(
+      all,
+      ({ entry, rel }) =>
+        attempt(() => linkOnTheWay(folder, rel)).pipe(
+          Effect.flatMap((link) =>
+            link === null
+              ? Effect.void
+              : Effect.fail(
+                  problem(
+                    `${link} in ${folder} is a symbolic link, so ${entry.path} ` +
+                      'is not pulled through it.',
+                    'Remove the link, or pull into another folder.',
+                  ),
+                ),
+          ),
+        ),
+      { discard: true },
+    )
     yield* Effect.forEach(
       all.filter(({ entry }) => entry.folder),
       ({ abs }) => attempt(() => mkdir(abs, { recursive: true })),
@@ -667,7 +725,13 @@ const pullWith = (
       files,
       ({ entry, rel, abs }) =>
         Effect.gen(function* () {
-          if (yield* attempt(() => sameLocal(abs, entry))) return null
+          if (yield* attempt(() => sameLocal(abs, entry))) {
+            // An unchanged data file is still read only.
+            if (entry.kind === 'data') {
+              yield* attempt(() => chmod(abs, 0o444))
+            }
+            return null
+          }
           const response = yield* rawCall(remote.deployment, remote.key, {
             method: 'GET',
             path:

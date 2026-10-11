@@ -1,0 +1,1 @@
+ALTER TABLE `blob_holds` ADD `verified` integer DEFAULT true NOT NULL;

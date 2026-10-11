@@ -15,6 +15,13 @@
       "when": 1791756754962,
       "tag": "0001_yummy_the_phantom",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791759993472,
+      "tag": "0002_majestic_roulette",
+      "breakpoints": true
     }
   ]
 }

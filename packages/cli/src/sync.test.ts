@@ -3,10 +3,12 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   readFile,
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -246,6 +248,22 @@ describe('Sync.plan', () => {
         'action="decisions.json" for one shared file.',
     })
   })
+
+  it('checks a form against the tree path it is pushed to, so ../ may climb inside the tree', async () => {
+    const dir = await tempDir()
+    await layout(dir, {
+      'question.html': PAGE(
+        '<form method="post" action="../answers/"><input name="a"></form>',
+      ),
+    })
+    const { run, fail } = await world()
+
+    const plan = await run((sync) => sync.plan(dir, 'plans'))
+    expect(plan.files.map((file) => file.path)).toEqual(['question.html'])
+    // At the tree's root the same form climbs out of the tree.
+    const error = await fail((sync) => sync.plan(dir, ''))
+    expect(error).toMatchObject({ code: 'policy_rejected' })
+  })
 })
 
 const TREE_ID = 'acmetree000000000001' as TreeId
@@ -434,5 +452,35 @@ describe('Sync.pull', () => {
     const error = await fail((sync) => sync.pull({ target: target(), dir }))
 
     expect(error.message).toContain('not inside the pulled folder')
+  })
+
+  it('makes an unchanged data file read only too', async () => {
+    const { run } = await world(serving(5))
+    const dir = join(await tempDir(), 'acme')
+    await layout(dir, {
+      'answers/sara@acme.com.json': bytesOf('answers/sara@acme.com.json'),
+    })
+    expect(
+      (await stat(join(dir, 'answers', 'sara@acme.com.json'))).mode & 0o777,
+    ).not.toBe(0o444)
+
+    const pulled = await run((sync) => sync.pull({ target: target(), dir }))
+
+    expect(pulled.written).toEqual(['index.html'])
+    const data = await stat(join(dir, 'answers', 'sara@acme.com.json'))
+    expect(data.mode & 0o777).toBe(0o444)
+  })
+
+  it('refuses to write through a symlinked folder inside the destination', async () => {
+    const { fail } = await world(serving(5))
+    const dir = join(await tempDir(), 'acme')
+    const outside = await tempDir()
+    await mkdir(dir, { recursive: true })
+    await symlink(outside, join(dir, 'answers'))
+
+    const error = await fail((sync) => sync.pull({ target: target(), dir }))
+
+    expect(error.message).toContain('answers')
+    expect(await readdir(outside)).toEqual([])
   })
 })

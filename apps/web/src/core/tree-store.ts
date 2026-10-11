@@ -127,11 +127,26 @@ export interface TreeStoreService {
   ) => Effect.Effect<FileBody, DossierError<'not_found'>>
   /** Rebuilt from the bytes when no analysis of this analyzer exists. */
   readonly analysis: (sha256: Sha256) => Effect.Effect<HtmlAnalysis | null>
+  /**
+   * Holds a blob before its bytes are written, so a purge leaves it alone.
+   * The hold counts for a commit only once `confirmHold` verifies it.
+   */
   readonly holdBlob: (
     holder: { readonly kind: HoldKind; readonly id: string },
     sha256: Sha256,
     size: number,
   ) => Effect.Effect<void, DossierError<'blob_reclaiming'>>
+  /** The bytes are in R2 and match their hash and size. */
+  readonly confirmHold: (
+    holder: { readonly kind: HoldKind; readonly id: string },
+    sha256: Sha256,
+    size: number,
+  ) => Effect.Effect<void>
+  /** Lets go of a hold whose bytes never arrived; a verified one stays. */
+  readonly dropHold: (
+    holder: { readonly kind: HoldKind; readonly id: string },
+    sha256: Sha256,
+  ) => Effect.Effect<void>
   /** One D1 batch: the change and its events, or nothing. */
   readonly change: <A, E>(
     treeId: TreeId | null,
@@ -242,15 +257,25 @@ const basisHolds = (basis: Basis, personId: string): Statement => {
   }
 }
 
-/** Any one of the bases that gave an action still holds. */
-const anyBasis = (bases: readonly Basis[], personId: string): Statement => {
+/** Every basis that gave an action still holds, with its role. */
+const everyBasis = (bases: readonly Basis[], personId: string): Statement => {
   if (bases.length === 0) return { sql: '0', binds: [] }
   const parts = bases.map((b) => basisHolds(b, personId))
   return {
-    sql: parts.map((p) => p.sql).join(' or '),
+    sql: parts.map((p) => `(${p.sql})`).join(' and '),
     binds: parts.flatMap((p) => p.binds),
   }
 }
+
+/** Only a person's browser or a key that reaches everything and writes. */
+const createsTrees = (caller: Caller): Statement =>
+  caller.via.kind === 'agent'
+    ? {
+        sql: `exists (select 1 from agent_keys where id = ? and revoked_at is null
+                and scope_node_id is null and read_only = 0)`,
+        binds: [caller.via.keyId],
+      }
+    : { sql: caller.via.kind === 'browser' ? '1' : '0', binds: [] }
 
 const allOf = (parts: readonly Statement[]): Statement =>
   parts.length === 0
@@ -384,7 +409,8 @@ const stagedWrites = (i: {
     {
       sql: `insert into node_versions (${versionColumns})
             select lower(hex(randomblob(16))), n.id, ?1, ${revision}, ${seq}, 'live',
-              f.sha256, null, f.size, f.content_type, ?4, ?5, ?2, null, null, ?3
+              f.sha256, null, (select b.size from blobs b where b.sha256 = f.sha256),
+              f.content_type, ?4, ?5, ?2, null, null, ?3
             from push_files f join nodes n on n.tree_id = ?1 and n.path = f.path
               and n.deleted_at is null and n.kind = 'file' and n.origin = 'authored'
             where f.push_id = ?2 and not exists (select 1 from node_versions cv
@@ -591,8 +617,8 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
                  values (?, ?, 0, 'live', ?) on conflict do nothing`,
               ).bind(sha256, size, at),
               DB.prepare(
-                `insert into blob_holds (holder_kind, holder_id, sha256, created_at)
-                 select ?, ?, ?, ? where exists
+                `insert into blob_holds (holder_kind, holder_id, sha256, verified, created_at)
+                 select ?, ?, ?, 0, ? where exists
                    (select 1 from blobs where sha256 = ? and state = 'live')
                  on conflict do nothing`,
               ).bind(holder.kind, holder.id, sha256, at, sha256),
@@ -615,13 +641,45 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
           }
         })
 
+      const confirmHold = (
+        holder: { readonly kind: HoldKind; readonly id: string },
+        sha256: Sha256,
+        size: number,
+      ) =>
+        read(() =>
+          DB.batch([
+            // Verified bytes fix the blob's size, whatever row came first.
+            DB.prepare('update blobs set size = ? where sha256 = ?').bind(
+              size,
+              sha256,
+            ),
+            DB.prepare(
+              `update blob_holds set verified = 1
+               where holder_kind = ? and holder_id = ? and sha256 = ?`,
+            ).bind(holder.kind, holder.id, sha256),
+          ]),
+        ).pipe(Effect.asVoid, Effect.orDie)
+
+      const dropHold = (
+        holder: { readonly kind: HoldKind; readonly id: string },
+        sha256: Sha256,
+      ) =>
+        read(() =>
+          DB.prepare(
+            `delete from blob_holds where holder_kind = ? and holder_id = ?
+               and sha256 = ? and verified = 0`,
+          )
+            .bind(holder.kind, holder.id, sha256)
+            .run(),
+        ).pipe(Effect.asVoid, Effect.orDie)
+
       const list = (folder: Granted<'read'>, depth: 'one' | 'all') =>
         Effect.gen(function* () {
           const readable = yield* access.readable(folder.treeId)
           const below =
             folder.path === ''
               ? sql`${schema.nodes.depth} > 0`
-              : sql`substr(${schema.nodes.path}, 1, ${folder.path.length + 1}) = ${`${folder.path}/`}`
+              : sql`substr(${schema.nodes.path}, 1, length(${folder.path}) + 1) = ${`${folder.path}/`}`
           const rows = yield* read(() =>
             database
               .select({
@@ -771,6 +829,8 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
           const heads: Statement[] = []
           const blobGuards: Statement[] = []
           const stateGuards: Statement[] = []
+          /** Checked after the writes: the tree came out as the change meant. */
+          const outcomes: Statement[] = []
           const bases: Statement[] = []
           const events: NewEvent[] = []
           let authored = 0
@@ -827,7 +887,10 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
                   ],
                 },
               )
-              bases.push(anyBasis([member.basis], person.id))
+              bases.push(
+                everyBasis([member.basis], person.id),
+                createsTrees(caller),
+              )
               return makeHandle(rootId)
             },
 
@@ -836,7 +899,7 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
               authored += 1
               pushCount += 1
               if (!isHandle(target)) {
-                bases.push(anyBasis(target.basis, person.id))
+                bases.push(everyBasis(target.basis, person.id))
                 stateGuards.push({
                   sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
                   binds: [target.id],
@@ -852,11 +915,38 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
                         not exists (select 1 from blobs b where b.sha256 = f.sha256
                                       and b.state = 'live')
                         or (not exists (select 1 from blob_holds h where h.holder_kind = 'push'
-                                          and h.holder_id = f.push_id and h.sha256 = f.sha256)
+                                          and h.holder_id = f.push_id and h.sha256 = f.sha256
+                                          and h.verified = 1)
                             and not exists (select 1 from node_versions v
                                               where v.tree_id = ? and v.blob_sha256 = f.sha256))))`,
                 binds: [pushId, t],
               })
+              outcomes.push(
+                {
+                  // Every staged file is live at its path with its bytes.
+                  sql: `not exists (select 1 from push_files f where f.push_id = ?
+                          and not exists (select 1 from nodes n
+                            join node_versions v on v.id = n.current_version_id
+                            where n.tree_id = ? and n.path = f.path and n.deleted_at is null
+                              and n.kind = 'file' and v.state = 'live'
+                              and v.blob_sha256 = f.sha256))`,
+                  binds: [pushId, t],
+                },
+                {
+                  sql: `not exists (select 1 from push_folders f where f.push_id = ?
+                          and not exists (select 1 from nodes n where n.tree_id = ?
+                            and n.path = f.path and n.deleted_at is null
+                            and n.kind = 'folder'))`,
+                  binds: [pushId, t],
+                },
+                {
+                  // Nothing live sits under a file or a deleted folder.
+                  sql: `not exists (select 1 from nodes c join nodes p on p.id = c.parent_id
+                          where c.tree_id = ? and c.deleted_at is null
+                            and (p.kind <> 'folder' or p.deleted_at is not null))`,
+                  binds: [t],
+                },
+              )
               writes.push(
                 ...stagedWrites({
                   treeId: t,
@@ -871,7 +961,7 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
             grant: (on, share) => {
               const t = tid()
               const nodeId = isHandle(on) ? handleId(on) : on.id
-              if (!isHandle(on)) bases.push(anyBasis(on.basis, person.id))
+              if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
               writes.push({
                 sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
                         created_by, created_at)
@@ -891,7 +981,7 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
             },
 
             revoke: (on, shareId) => {
-              bases.push(anyBasis(on.basis, person.id))
+              bases.push(everyBasis(on.basis, person.id))
               writes.push({
                 sql: 'delete from shares where id = ? and node_id = ?',
                 binds: [shareId, on.id],
@@ -910,24 +1000,29 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
           const t = tid()
           const statements: Statement[] = [
             ...creates,
-            ...heads.map((g) => guardRow(guardId, 'head', g)),
+            // Each guard row has its own id, so a change may hold several of
+            // one kind; they all share the change's prefix.
+            ...heads.map((g, i) => guardRow(`${guardId}:head${i}`, 'head', g)),
             guardRow(
-              guardId,
+              `${guardId}:basis`,
               'basis',
               allOf([callerLive(caller, now), ...bases]),
             ),
             ...(blobGuards.length === 0
               ? []
-              : [guardRow(guardId, 'blob', allOf(blobGuards))]),
+              : [guardRow(`${guardId}:blob`, 'blob', allOf(blobGuards))]),
             ...(stateGuards.length === 0
               ? []
-              : [guardRow(guardId, 'state', allOf(stateGuards))]),
+              : [guardRow(`${guardId}:state`, 'state', allOf(stateGuards))]),
             {
               sql: `update trees set authored_seq = authored_seq + ?, event_seq = event_seq + ?,
                       push_count = push_count + ? where id = ?`,
               binds: [authored, events.length, pushCount, t],
             },
             ...writes,
+            ...(outcomes.length === 0
+              ? []
+              : [guardRow(`${guardId}:after`, 'state', allOf(outcomes))]),
             ...events.map((e, i) => ({
               sql: `insert into events (tree_id, seq, type, node_id, path, actor_id, push_id,
                       created_at)
@@ -950,7 +1045,10 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
                 now,
               ],
             })),
-            { sql: 'delete from change_guards where id = ?', binds: [guardId] },
+            {
+              sql: 'delete from change_guards where substr(id, 1, ?) = ?',
+              binds: [guardId.length + 1, `${guardId}:`],
+            },
             {
               sql: `select authored_seq as authoredSeq, event_seq as eventSeq
                     from trees where id = ?`,
@@ -1002,6 +1100,8 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
         read: readFile,
         analysis,
         holdBlob,
+        confirmHold,
+        dropHold,
         change,
       } satisfies TreeStoreService
     }),

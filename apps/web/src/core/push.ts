@@ -21,16 +21,16 @@ import {
   type PushWarning,
   type TreeView,
 } from '@dossier/html'
-import { Clock, Context, Effect, Layer } from 'effect'
+import { Clock, Context, Data, Effect, Layer } from 'effect'
 
-import { Access, type Granted, type Membership } from './access.ts'
+import { Access, type Granted } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
-import { blobKey, TreeStore } from './tree-store.ts'
+import { blobKey, TreeStore, type ChangeFailure } from './tree-store.ts'
 
 export interface ManifestFile {
   /** Inside the pushed folder. */
@@ -110,7 +110,13 @@ export interface PushService {
   }) => Effect.Effect<
     void,
     DossierError<
-      'not_found' | 'invalid' | 'too_large' | 'blob_reclaiming' | 'unavailable'
+      | 'not_found'
+      | 'sign_in_required'
+      | 'forbidden'
+      | 'invalid'
+      | 'too_large'
+      | 'blob_reclaiming'
+      | 'unavailable'
     >,
     CurrentCaller
   >
@@ -216,6 +222,26 @@ const policyRejected = (problems: readonly PushProblem[]) => {
   return dossierError('policy_rejected', message, fix, path)
 }
 
+/** Another push moved the tree while this one committed: check again. */
+class Retry extends Data.TaggedError('Retry')<{
+  readonly error: ChangeFailure
+}> {}
+
+/** How often a commit checks again when other pushes keep landing. */
+const COMMIT_TRIES = 4
+
+interface StagedPush {
+  readonly id: PushId
+  readonly workspace_id: string
+  readonly workspace_name: string
+  readonly tree_name: string
+  readonly tree_id: TreeId | null
+  readonly path: string
+  readonly base_seq: number | null
+  readonly force: number
+  readonly expires_at: number
+}
+
 interface LiveFile {
   readonly path: string
   readonly kind: 'file' | 'folder'
@@ -285,8 +311,32 @@ export const PushLive: Layer.Layer<
             .bind(tree.id, ...paths)
             .all<{ path: string; kind: 'file' | 'folder' }>(),
         )
-        const file = found.results.find((n) => n.kind === 'file')
-        if (file !== undefined) {
+        const deepest = found.results
+          .filter((n) => n.kind === 'folder')
+          .map((n) => n.path)
+          .reduce((a, b) => (depthOf(b) > depthOf(a) ? b : a), '')
+        const file = found.results.find((n) => n.kind === 'file') ?? null
+        return { deepest, file }
+      })
+
+    /**
+     * Write on the deepest live folder at or above a path, through Access.
+     * Only a caller who holds it learns that a file is in the way.
+     */
+    const writeOn = (workspace: WorkspaceRow, tree: TreeRow, path: string) =>
+      Effect.gen(function* () {
+        const { deepest, file } = yield* anchorOf(tree, path)
+        const resolved = yield* store.resolve({
+          workspace: workspace.name,
+          tree: tree.name,
+          path: deepest,
+          folder: true,
+        })
+        const granted = yield* access.require(
+          'write',
+          'missing' in resolved ? resolved : resolved.node,
+        )
+        if (file !== null) {
           return yield* Effect.fail(
             dossierError(
               'invalid',
@@ -296,26 +346,7 @@ export const PushLive: Layer.Layer<
             ),
           )
         }
-        const deepest = found.results
-          .map((n) => n.path)
-          .reduce((a, b) => (depthOf(b) > depthOf(a) ? b : a), '')
-        return deepest
-      })
-
-    /** The live folder node at a path, through Access. */
-    const writeOn = (workspace: WorkspaceRow, tree: TreeRow, path: string) =>
-      Effect.gen(function* () {
-        const deepest = yield* anchorOf(tree, path)
-        const resolved = yield* store.resolve({
-          workspace: workspace.name,
-          tree: tree.name,
-          path: deepest,
-          folder: true,
-        })
-        return yield* access.require(
-          'write',
-          'missing' in resolved ? resolved : resolved.node,
-        )
+        return granted
       })
 
     /** Files pushed under the path since the base, newest first. */
@@ -472,6 +503,22 @@ export const PushLive: Layer.Layer<
         if (problems.length > 0) {
           return yield* Effect.fail(policyRejected(problems))
         }
+        // A path cannot be a file and a folder at once.
+        for (const path of manifest.keys()) {
+          const folder = ancestorPaths(parentOf(path)).find(
+            (p) => p !== '' && manifest.has(p),
+          )
+          if (folder !== undefined) {
+            return yield* Effect.fail(
+              dossierError(
+                'invalid',
+                `${folder} is listed as a file and as the folder of ${path}.`,
+                'Keep one of them: a path is either a file or a folder.',
+                folder,
+              ),
+            )
+          }
+        }
 
         const { target } = i
         const workspace = yield* store.workspace(target.workspace)
@@ -484,6 +531,35 @@ export const PushLive: Layer.Layer<
         }
         const ws = workspace as WorkspaceRow
         const link = folderLink(ws.name, target.tree, target.path)
+
+        // A hash the tree already holds is not uploaded again, so its size
+        // is the stored blob's, never the one the manifest claims.
+        if (tree !== null) {
+          const known = yield* query(() =>
+            DB.prepare(
+              `select b.sha256, b.size from blobs b
+               where b.sha256 in (select value from json_each(?))
+                 and exists (select 1 from node_versions v
+                               where v.tree_id = ? and v.blob_sha256 = b.sha256)`,
+            )
+              .bind(JSON.stringify([...new Set(manifest.values())]), tree.id)
+              .all<{ sha256: string; size: number }>(),
+          )
+          const stored = new Map(known.results.map((r) => [r.sha256, r.size]))
+          for (const file of i.files) {
+            const size = stored.get(file.sha256)
+            if (size !== undefined && size !== file.size) {
+              return yield* Effect.fail(
+                dossierError(
+                  'invalid',
+                  `${file.path} is listed as ${file.size} bytes, but its content is ${size} bytes.`,
+                  'List each file with its real size.',
+                  file.path,
+                ),
+              )
+            }
+          }
+        }
 
         const live = tree === null ? [] : yield* liveUnder(tree.id, target.path)
         if (tree !== null && !i.force) {
@@ -630,10 +706,10 @@ export const PushLive: Layer.Layer<
         } satisfies StageResult
       })
 
-    /** The caller's own staged push. */
+    /** The caller's own staged push, through the key that staged it. */
     const stagedPush = (pushId: PushId) =>
       Effect.gen(function* () {
-        const { person } = yield* signedIn.pipe(
+        const { caller, person } = yield* signedIn.pipe(
           Effect.catchAll(() =>
             Effect.fail(dossierError('not_found', 'No such push.')),
           ),
@@ -643,20 +719,14 @@ export const PushLive: Layer.Layer<
           DB.prepare(
             `select p.*, w.name as workspace_name from pushes p
              join workspaces w on w.id = p.workspace_id
-             where p.id = ? and p.author_id = ? and p.state = 'staged'`,
+             where p.id = ? and p.author_id = ? and p.key_id is ? and p.state = 'staged'`,
           )
-            .bind(pushId, person.id)
-            .first<{
-              id: PushId
-              workspace_id: string
-              workspace_name: string
-              tree_name: string
-              tree_id: TreeId | null
-              path: string
-              base_seq: number | null
-              force: number
-              expires_at: number
-            }>(),
+            .bind(
+              pushId,
+              person.id,
+              caller.via.kind === 'agent' ? caller.via.keyId : null,
+            )
+            .first<StagedPush>(),
         )
         if (row === null) {
           return yield* Effect.fail(
@@ -685,6 +755,45 @@ export const PushLive: Layer.Layer<
         return row
       })
 
+    /**
+     * What the caller holds for the push now: write on the folder it lands
+     * in, or membership of the workspace for a new tree. Checked again on
+     * every upload and at commit, so access that ends stops the push.
+     */
+    const authorize = (push: StagedPush) =>
+      Effect.gen(function* () {
+        const workspace = yield* store.workspace(push.workspace_name)
+        const tree =
+          workspace === null
+            ? null
+            : yield* store.tree(workspace, push.tree_name)
+        if (tree === null) {
+          const membership = yield* access.member(workspace)
+          return {
+            workspace: membership.workspace,
+            tree: null,
+            target: null,
+            membership,
+          }
+        }
+        const target = yield* writeOn(
+          workspace as WorkspaceRow,
+          tree,
+          push.path,
+        )
+        return {
+          workspace: workspace as WorkspaceRow,
+          tree,
+          target,
+          membership: null,
+        }
+      }).pipe(
+        Effect.catchIf(
+          (error) => error.code === 'sign_in_required',
+          () => Effect.fail(dossierError('not_found', 'No such push.')),
+        ),
+      )
+
     const putBlob = (i: {
       readonly pushId: PushId
       readonly sha256: Sha256
@@ -693,6 +802,7 @@ export const PushLive: Layer.Layer<
     }) =>
       Effect.gen(function* () {
         const push = yield* stagedPush(i.pushId)
+        yield* authorize(push)
         const listed = yield* query(() =>
           DB.prepare(
             'select path, size from push_files where push_id = ? and sha256 = ?',
@@ -728,31 +838,10 @@ export const PushLive: Layer.Layer<
             ),
           )
         }
-        const now = yield* Clock.currentTimeMillis
-        const state = yield* query(() =>
-          DB.batch([
-            DB.prepare(
-              `insert into blobs (sha256, size, ref_count, state, first_seen_at)
-               values (?, ?, 0, 'live', ?) on conflict do nothing`,
-            ).bind(i.sha256, i.size, now),
-            DB.prepare('select state from blobs where sha256 = ?').bind(
-              i.sha256,
-            ),
-          ]),
-        ).pipe(
-          Effect.map(
-            (r) => (r[1]?.results[0] as { state?: string } | undefined)?.state,
-          ),
-        )
-        if (state !== 'live') {
-          return yield* Effect.fail(
-            dossierError(
-              'blob_reclaiming',
-              'This file is being cleaned up. Upload it again shortly.',
-              'Push again in a minute.',
-            ),
-          )
-        }
+        const holder = { kind: 'push', id: push.id } as const
+        // The hold comes first, so a purge never takes the blob while its
+        // bytes are being written; it counts for the commit once verified.
+        yield* store.holdBlob(holder, i.sha256, i.size)
         // The bytes are always written, so the answer never tells whether
         // they were stored before.
         yield* Effect.tryPromise({
@@ -779,26 +868,70 @@ export const PushLive: Layer.Layer<
               first.path,
             )
           },
-        })
+        }).pipe(Effect.tapError(() => store.dropHold(holder, i.sha256)))
         if (listed.results.some((f) => isPageFile(f.path))) {
           yield* store.analysis(i.sha256)
         }
-        yield* store.holdBlob({ kind: 'push', id: push.id }, i.sha256, i.size)
+        yield* store.confirmHold(holder, i.sha256, i.size)
       })
 
-    const commit = (pushId: PushId) =>
+    /** Every HTML file the tree will hold after the push, with its analysis. */
+    const pagesAfter = (
+      push: StagedPush,
+      tree: TreeRow | null,
+      manifestRows: readonly {
+        path: string
+        sha256: Sha256
+        json: string | null
+      }[],
+    ) =>
+      Effect.gen(function* () {
+        const outside =
+          tree === null
+            ? []
+            : (yield* query(() =>
+                DB.prepare(
+                  `select n.path, v.blob_sha256 as sha256, a.json
+                   from nodes n join node_versions v on v.id = n.current_version_id
+                   left join analyses a on a.sha256 = v.blob_sha256
+                     and a.analyzer = 'html' and a.version = ?3
+                   where n.tree_id = ?1 and n.deleted_at is null and n.kind = 'file'
+                     and n.origin = 'authored' and v.state = 'live'
+                     and n.path like '%.html'
+                     and not (?2 = '' or n.path = ?2
+                       or substr(n.path, 1, length(?2) + 1) = ?2 || '/')`,
+                )
+                  .bind(tree.id, push.path, ANALYZER)
+                  .all<{ path: string; sha256: Sha256; json: string | null }>(),
+              )).results
+        const pages: PushFile[] = []
+        for (const row of [...manifestRows, ...outside]) {
+          if (!isPageFile(row.path)) continue
+          const analysis =
+            row.json === null
+              ? yield* store.analysis(row.sha256)
+              : (JSON.parse(row.json) as HtmlAnalysis)
+          if (analysis !== null) pages.push({ path: row.path, analysis })
+        }
+        return pages
+      })
+
+    /** One try at committing; `Retry` when another push moved the tree. */
+    const commitOnce = (pushId: PushId) =>
       Effect.gen(function* () {
         const push = yield* stagedPush(pushId)
-        const workspace = yield* store.workspace(push.workspace_name)
-        const tree =
-          workspace === null
-            ? null
-            : yield* store.tree(workspace, push.tree_name)
+        const {
+          workspace: ws,
+          tree,
+          target,
+          membership,
+        } = yield* authorize(push)
         const notHeld = yield* query(() =>
           DB.prepare(
             `select f.path from push_files f where f.push_id = ?1
                and not exists (select 1 from blob_holds h where h.holder_kind = 'push'
-                                 and h.holder_id = ?1 and h.sha256 = f.sha256)
+                                 and h.holder_id = ?1 and h.sha256 = f.sha256
+                                 and h.verified = 1)
                and not exists (select 1 from node_versions v where v.tree_id = ?2
                                  and v.blob_sha256 = f.sha256)
              order by f.path limit 21`,
@@ -817,15 +950,6 @@ export const PushLive: Layer.Layer<
           )
         }
 
-        let target: Granted<'write'> | null = null
-        let membership: Membership | null = null
-        if (tree === null) {
-          membership = yield* access.member(workspace)
-        } else {
-          target = yield* writeOn(workspace as WorkspaceRow, tree, push.path)
-        }
-        const ws = workspace as WorkspaceRow
-
         const manifestRows = yield* query(() =>
           DB.prepare(
             `select f.path, f.sha256, a.json from push_files f
@@ -838,15 +962,6 @@ export const PushLive: Layer.Layer<
         const manifest = new Map(
           manifestRows.results.map((r) => [r.path, r.sha256]),
         )
-        const pages: PushFile[] = []
-        for (const row of manifestRows.results) {
-          if (!isPageFile(row.path)) continue
-          const analysis =
-            row.json === null
-              ? yield* store.analysis(row.sha256)
-              : (JSON.parse(row.json) as HtmlAnalysis)
-          if (analysis !== null) pages.push({ path: row.path, analysis })
-        }
         const all =
           tree === null
             ? []
@@ -883,6 +998,9 @@ export const PushLive: Layer.Layer<
           if (!kinds.has(path))
             kinds.set(path, isPageFile(path) ? 'page' : 'file')
         }
+        // Every page of the tree as it will be, not only the pushed ones: a
+        // push elsewhere can break a form that targets its path.
+        const pages = yield* pagesAfter(push, tree, manifestRows.results)
         const check = checkPush(pages, { kindAt: (p) => kinds.get(p) ?? null })
         if (check.problems.length > 0) {
           return yield* Effect.fail(policyRejected(check.problems))
@@ -903,20 +1021,40 @@ export const PushLive: Layer.Layer<
           warnings: check.warnings,
         }
 
-        const committed = yield* store.change(tree?.id ?? null, (cs) =>
-          Effect.sync(() => {
-            const root =
-              membership === null
-                ? null
-                : cs.createTree(membership, push.tree_name)
-            if (tree !== null && push.force === 0) {
-              cs.guardHead(push.path, base as AuthoredSeq)
-            }
-            cs.putStaged(root ?? (target as Granted<'write'>), pushId)
-            cs.event({ type: 'push', path: push.path, pushId })
-            return {}
-          }),
-        )
+        const committed = yield* store
+          .change(tree?.id ?? null, (cs) =>
+            Effect.sync(() => {
+              const root =
+                membership === null
+                  ? null
+                  : cs.createTree(membership, push.tree_name)
+              if (tree !== null) {
+                // The tree the checks above read: any authored change since
+                // fails the batch, and the commit checks again.
+                cs.guardHead('', tree.authoredSeq as AuthoredSeq)
+                if (push.force === 0) {
+                  cs.guardHead(push.path, base as AuthoredSeq)
+                }
+              }
+              cs.putStaged(root ?? (target as Granted<'write'>), pushId)
+              cs.event({ type: 'push', path: push.path, pushId })
+              return {}
+            }),
+          )
+          .pipe(
+            Effect.catchAll(
+              (error): Effect.Effect<never, ChangeFailure | Retry> =>
+                error.code === 'stale_head' || error.code === 'conflict'
+                  ? Effect.flatMap(
+                      treeMoved(push, tree).pipe(Effect.orDie),
+                      (moved): Effect.Effect<never, ChangeFailure | Retry> =>
+                        moved
+                          ? Effect.fail(new Retry({ error }))
+                          : Effect.fail(error),
+                    )
+                  : Effect.fail(error),
+            ),
+          )
         const number = yield* query(() =>
           DB.prepare('select number from pushes where id = ?')
             .bind(pushId)
@@ -930,6 +1068,39 @@ export const PushLive: Layer.Layer<
           plan,
         } satisfies CommitResult
       })
+
+    /** Whether the tree changed since the commit read it, or came to be. */
+    const treeMoved = (push: StagedPush, seen: TreeRow | null) =>
+      Effect.gen(function* () {
+        const workspace = yield* store.workspace(push.workspace_name)
+        const now =
+          workspace === null
+            ? null
+            : yield* store.tree(workspace, push.tree_name)
+        return now?.id !== seen?.id || now?.authoredSeq !== seen?.authoredSeq
+      })
+
+    type CommitError = Exclude<
+      Effect.Effect.Error<ReturnType<typeof commitOnce>>,
+      Retry
+    >
+
+    /** Commits, checking again while other pushes keep moving the tree. */
+    const commit = (pushId: PushId) => {
+      const attempt = (
+        left: number,
+      ): Effect.Effect<CommitResult, CommitError, CurrentCaller> =>
+        commitOnce(pushId).pipe(
+          Effect.catchAll((error) =>
+            error instanceof Retry
+              ? left > 0
+                ? attempt(left - 1)
+                : Effect.fail(error.error)
+              : Effect.fail(error),
+          ),
+        )
+      return attempt(COMMIT_TRIES - 1)
+    }
 
     return { stage, putBlob, commit }
   }),
