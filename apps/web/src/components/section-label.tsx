@@ -18,7 +18,10 @@ export function SectionLabel({
       >
         {children}
         {count === undefined ? null : (
-          <span className="ml-2 text-neutral-500">{count}</span>
+          <>
+            {' '}
+            <span className="ml-1 text-neutral-500">{count}</span>
+          </>
         )}
       </h2>
       <span aria-hidden className="h-px flex-1 bg-border/80" />

@@ -365,7 +365,7 @@ function EmptyState({ empty }: { empty: NonNullable<ListingView['empty']> }) {
       {empty.hint === null ? null : (
         <p className="max-w-sm text-sm leading-relaxed text-neutral-300">
           Publish with{' '}
-          <code className="rounded-md border border-brand-300/20 bg-brand-300/10 px-1.5 py-0.5 font-mono text-[0.8125rem] break-all text-brand-100">
+          <code className="rounded-md border border-brand-300/20 bg-brand-300/10 px-1.5 py-0.5 font-mono text-[0.8125rem] break-words text-brand-100 [box-decoration-break:clone]">
             {empty.hint}
           </code>
           .

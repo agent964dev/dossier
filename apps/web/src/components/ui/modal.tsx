@@ -50,7 +50,7 @@ export function Modal({
         if (event.target === ref.current) onClose()
       }}
       className={cn(
-        'dossier-modal mt-auto mr-0 mb-0 ml-0 w-full max-h-[min(85dvh,44rem)] overflow-visible',
+        'dossier-modal mt-auto mr-0 mb-0 ml-0 w-full max-w-full max-h-[min(85dvh,44rem)] overflow-visible',
         'rounded-t-2xl rounded-b-none border border-border bg-card p-0 text-neutral-100',
         'sm:m-auto sm:w-[min(34rem,calc(100vw-1.5rem))] sm:rounded-xl',
         'backdrop:bg-neutral-950/75 backdrop:backdrop-blur-[2px]',

@@ -292,6 +292,7 @@ export const renderShell = (boot: ShellBoot): Response => {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>${escapeHtml(boot.deployment.name)}</title>
+<link rel="icon" href="/_/app/favicon.svg" type="image/svg+xml">
 <style>html,body{margin:0;height:100%}iframe{display:block;border:0;width:100%;height:100%}</style>
 <script type="application/json" id="dossier-shell">${data}</script>
 <script type="module" src="/_/base/${encodeURIComponent(boot.base)}/shell.js"></script>
