@@ -162,6 +162,8 @@ export const EntryWire = Schema.Struct({
   /** Inside the tree. */
   path: Schema.String,
   kind: EntryKindSchema,
+  /** A folder, whatever its kind: a page folder holds index.html. */
+  folder: Schema.Boolean,
   size: Schema.NullOr(Schema.Int),
   sha256: Schema.NullOr(Sha256),
   contentType: Schema.NullOr(Schema.String),

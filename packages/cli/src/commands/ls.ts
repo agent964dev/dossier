@@ -23,7 +23,7 @@ export const formatSize = (bytes: number | null): string => {
 }
 
 const row = (entry: EntryWire): readonly string[] => [
-  entry.kind === 'folder' ? `${entry.name}/` : entry.name,
+  entry.folder ? `${entry.name}/` : entry.name,
   entry.kind,
   formatSize(entry.size),
   entry.push === null ? '-' : `push ${entry.push.number}`,

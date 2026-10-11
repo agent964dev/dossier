@@ -21,6 +21,7 @@ const entry = (
   name,
   path: name,
   kind,
+  folder: kind === 'folder',
   size,
   sha256: kind === 'folder' ? null : SHA,
   contentType: null,
@@ -41,6 +42,13 @@ const ENTRIES = [
   entry('index.html', 'page', 1_250, 3),
   entry('logo.svg', 'attachment', 230, 1),
   entry('plans', 'folder', null, 3),
+  {
+    ...entry('plans', 'page', null, 3),
+    name: 'brief',
+    path: 'brief',
+    folder: true,
+    sha256: null,
+  },
   entry('team.json', 'data', 4_200_000, null),
 ]
 
@@ -69,6 +77,7 @@ describe('dossier ls', () => {
         'index.html  page        1.2 KiB  push 3',
         'logo.svg    attachment  230 B    push 1',
         'plans/      folder      -        push 3',
+        'brief/      page        -        push 3',
         'team.json   data        4.0 MiB  -',
         '',
       ].join('\n'),

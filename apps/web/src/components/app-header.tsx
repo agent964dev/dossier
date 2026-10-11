@@ -15,7 +15,7 @@ export function AppHeader({
   return (
     <header className="px-3 pt-3 sm:px-6 sm:pt-5">
       <div className="chrome-glass mx-auto flex h-12 max-w-3xl items-center justify-between gap-3 rounded-xl px-3.5">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 shrink-0 items-center gap-2 max-sm:max-w-[70%]">
           <Link
             to="/"
             className="shrink-0 font-clash text-[1.0625rem] font-semibold tracking-[-0.02em] text-neutral-50 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 rounded-md"
@@ -35,7 +35,7 @@ export function AppHeader({
           <Link
             to="/_/settings"
             aria-label={`Account settings for ${email}`}
-            className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-900/60 py-1 pr-2.5 pl-1 text-neutral-200 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-900/60 py-1 pr-2.5 pl-1 text-neutral-200 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50 ${beside === undefined ? '' : 'max-sm:pr-1'}`}
           >
             <span
               aria-hidden
@@ -43,7 +43,11 @@ export function AppHeader({
             >
               {email.charAt(0)}
             </span>
-            <span className="truncate font-mono text-xs">{email}</span>
+            <span
+              className={`truncate font-mono text-xs ${beside === undefined ? '' : 'max-sm:sr-only'}`}
+            >
+              {email}
+            </span>
           </Link>
         )}
       </div>

@@ -9,6 +9,7 @@ const toWire = (entry: Entry): EntryWire => ({
   name: entry.name,
   path: entry.path,
   kind: entry.kind,
+  folder: entry.node.kind === 'folder',
   size: entry.size,
   sha256: entry.sha256,
   contentType: entry.contentType,

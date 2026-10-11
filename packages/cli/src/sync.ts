@@ -658,11 +658,11 @@ const pullWith = (
     }
     const all = yield* Effect.forEach(ls.entries, placed)
     yield* Effect.forEach(
-      all.filter(({ entry }) => entry.kind === 'folder'),
+      all.filter(({ entry }) => entry.folder),
       ({ abs }) => attempt(() => mkdir(abs, { recursive: true })),
       { discard: true },
     )
-    const files = all.filter(({ entry }) => entry.kind !== 'folder')
+    const files = all.filter(({ entry }) => !entry.folder)
     const fetched = yield* Effect.forEach(
       files,
       ({ entry, rel, abs }) =>
