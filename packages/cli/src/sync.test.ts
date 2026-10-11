@@ -483,4 +483,25 @@ describe('Sync.pull', () => {
     expect(error.message).toContain('answers')
     expect(await readdir(outside)).toEqual([])
   })
+
+  it('refuses a folder swapped for a symbolic link while its file downloads', async () => {
+    const dir = join(await tempDir(), 'acme')
+    const outside = await tempDir()
+    const swapping: Route = async (request) => {
+      if (request.url.pathname === '/_/api/file') {
+        const path = request.url.searchParams.get('path') ?? ''
+        if (path.endsWith('sara@acme.com.json')) {
+          await rm(join(dir, 'answers'), { recursive: true, force: true })
+          await symlink(outside, join(dir, 'answers'))
+        }
+      }
+      return serving(5)(request)
+    }
+    const { fail } = await world(swapping)
+
+    const error = await fail((sync) => sync.pull({ target: target(), dir }))
+
+    expect(error.message).toContain('answers')
+    expect(await readdir(outside)).toEqual([])
+  })
 })

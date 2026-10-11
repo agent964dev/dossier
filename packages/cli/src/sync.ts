@@ -1,15 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmod,
+  constants,
   lstat,
   mkdir,
+  open,
   readdir,
   readFile,
   realpath,
   rename,
   rm,
   stat,
-  writeFile,
 } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 
@@ -606,27 +607,83 @@ const pushWith = (
 
 // -------------------------------------------------------------------- pull
 
-/** Writes a temporary file beside the path and renames it into place. */
-const writeLocal = async (
-  path: string,
+const NO_FOLLOW_CREATE =
+  constants.O_CREAT |
+  constants.O_EXCL |
+  constants.O_WRONLY |
+  constants.O_NOFOLLOW
+
+const throughLink = (root: string, rel: string) =>
+  problem(
+    `A folder on the way to ${rel} in ${root} is a symbolic link, so it is ` +
+      'not pulled through it.',
+    'Remove the link, or pull into another folder.',
+  )
+
+/**
+ * The folder `rel` sits in, made folder by folder under `root`, and proved
+ * to be that folder itself, not a link to somewhere else.
+ */
+const containedFolder = async (root: string, rel: string): Promise<string> => {
+  const segments = rel.split('/').slice(0, -1)
+  let at = root
+  for (const segment of segments) {
+    at = join(at, segment)
+    await mkdir(at).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EEXIST') throw error
+    })
+    const info = await lstat(at)
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw throughLink(root, rel)
+    }
+  }
+  if ((await realpath(at)) !== at) throw throughLink(root, rel)
+  return at
+}
+
+/**
+ * Writes a file inside `root` without following any link: the folder is
+ * checked just before the temporary file is opened with no-follow, and again
+ * just before it is renamed over the path.
+ */
+const writeInside = async (
+  root: string,
+  rel: string,
   bytes: Uint8Array,
   readOnly: boolean,
 ): Promise<void> => {
-  await mkdir(dirname(path), { recursive: true })
-  const temporary = join(
-    dirname(path),
-    `.${basename(path)}.${randomUUID()}.tmp`,
-  )
+  const folder = await containedFolder(root, rel)
+  const name = basename(rel)
+  const temporary = join(folder, `.${name}.${randomUUID()}.tmp`)
   try {
-    await writeFile(temporary, bytes, {
-      flag: 'wx',
-      ...(readOnly ? { mode: 0o444 } : {}),
-    })
+    const handle = await open(
+      temporary,
+      NO_FOLLOW_CREATE,
+      readOnly ? 0o444 : 0o666,
+    )
+    try {
+      await handle.writeFile(bytes)
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
     if (readOnly) await chmod(temporary, 0o444)
-    await rename(temporary, path)
+    if ((await realpath(folder)) !== folder) throw throughLink(root, rel)
+    const existing = await lstat(join(folder, name)).catch(() => null)
+    if (existing?.isSymbolicLink() === true) throw throughLink(root, rel)
+    await rename(temporary, join(folder, name))
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined)
   }
+}
+
+/** Makes an unchanged file read only, inside `root` and through no link. */
+const readOnlyInside = async (root: string, rel: string): Promise<void> => {
+  const folder = await containedFolder(root, rel)
+  const path = join(folder, basename(rel))
+  const info = await lstat(path)
+  if (info.isSymbolicLink()) throw throughLink(root, rel)
+  await chmod(path, 0o444)
 }
 
 /**
@@ -728,7 +785,7 @@ const pullWith = (
           if (yield* attempt(() => sameLocal(abs, entry))) {
             // An unchanged data file is still read only.
             if (entry.kind === 'data') {
-              yield* attempt(() => chmod(abs, 0o444))
+              yield* attempt(() => readOnlyInside(folder, rel))
             }
             return null
           }
@@ -753,7 +810,9 @@ const pullWith = (
               ),
             )
           }
-          yield* attempt(() => writeLocal(abs, bytes, entry.kind === 'data'))
+          yield* attempt(() =>
+            writeInside(folder, rel, bytes, entry.kind === 'data'),
+          )
           return rel
         }),
       { concurrency: IN_FLIGHT },

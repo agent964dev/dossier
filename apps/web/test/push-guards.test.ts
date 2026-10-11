@@ -470,3 +470,208 @@ const stageAndCommitFailure = async (
     return unwrap(error)
   }
 }
+
+/**
+ * The real database, except that after the first read whose SQL matches
+ * returns, `after` runs before the reader sees its rows: a change that lands
+ * between two reads of one commit.
+ */
+const afterRead = (
+  database: D1Database,
+  matches: (sql: string) => boolean,
+  after: () => Promise<unknown>,
+): D1Database => {
+  let armed = true
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values))
+        }
+        if (property === 'all') {
+          return async () => {
+            const result = await target.all()
+            if (armed) {
+              armed = false
+              await after()
+            }
+            return result
+          }
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => {
+          const statement = target.prepare(query)
+          return matches(query) ? wrap(statement) : statement
+        }
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+describe('the second look at a push', () => {
+  it('names no page the caller cannot open when the whole tree refuses a push', async () => {
+    const { ws, key, creator } = await setUp()
+    const first = committed(
+      await pushAll(key, `${ws.name}/acme`, {
+        'secret.html':
+          '<title>S</title>\n<form method="post" action="plans/answers/"><input name="a"></form>',
+        'plans/a.txt': 'a',
+      }),
+    )
+    const scoped = await agent(creator, {
+      scope: (await nodeAt(first.treeId, 'plans'))?.id ?? null,
+    })
+    const refused = await stageAndCommitFailure(
+      scoped,
+      `${ws.name}/acme/plans/answers`,
+      { 'x.txt': 'authored' },
+      { baseSeq: first.seq, baseTree: first.treeId },
+    )
+    expect(refused?.code).toBe('policy_rejected')
+    expect(refused?.message).not.toContain('secret')
+    expect(refused?.path ?? '').not.toContain('secret')
+    // A caller who can open the page still learns which one it is.
+    const named = await stageAndCommitFailure(
+      key,
+      `${ws.name}/acme/plans/answers`,
+      { 'x.txt': 'authored' },
+      { baseSeq: first.seq, baseTree: first.treeId },
+    )
+    expect(named?.message).toContain('secret.html')
+  })
+
+  it('refuses at commit a size that does not match the bytes another push stored meanwhile', async () => {
+    const { ws, key } = await setUp()
+    const first = committed(
+      await pushAll(key, `${ws.name}/acme`, {
+        'index.html': '<title>A</title>',
+      }),
+    )
+    const text = `twelve bytes ${crypto.randomUUID()}`
+    const sha256 = await sha256Of(text)
+    const forged = await runAs(
+      key,
+      Effect.flatMap(Push, (push) =>
+        push.stage({
+          target: ref(`${ws.name}/acme/a`),
+          baseSeq: first.seq,
+          baseTree: first.treeId,
+          force: false,
+          dryRun: false,
+          message: null,
+          files: [{ path: 'z.txt', sha256, size: 0 }],
+        }),
+      ),
+    )
+    committed(
+      await pushAll(
+        key,
+        `${ws.name}/acme/b`,
+        { 'h.txt': text },
+        {
+          baseSeq: first.seq,
+          baseTree: first.treeId,
+        },
+      ),
+    )
+    const refused = await failureAs(
+      key,
+      Effect.flatMap(Push, (push) => push.commit(forged.pushId as PushId)),
+    )
+    expect(refused).toMatchObject({ code: 'invalid', path: 'a/z.txt' })
+    expect(await nodeAt(first.treeId, 'a/z.txt')).toBeUndefined()
+  })
+
+  it('refuses one hash listed with two sizes', async () => {
+    const { ws, key } = await setUp()
+    const sha256 = await sha256Of('12345678')
+    const refused = await failureAs(
+      key,
+      Effect.flatMap(Push, (push) =>
+        push.stage({
+          target: ref(`${ws.name}/twins`),
+          baseSeq: null,
+          baseTree: null,
+          force: false,
+          dryRun: false,
+          message: null,
+          files: [
+            { path: 'x.txt', sha256, size: 8 },
+            { path: 'y.txt', sha256, size: 0 },
+          ],
+        }),
+      ),
+    )
+    expect(refused).toMatchObject({ code: 'invalid', path: 'y.txt' })
+  })
+
+  it('commits concurrent pushes to different folders of a large tree', async () => {
+    const { ws, key } = await setUp()
+    const pages = Object.fromEntries(
+      Array.from({ length: 120 }, (_, i) => [
+        `pages/p${i}.html`,
+        `<title>P${i}</title><p>${i}</p>`,
+      ]),
+    )
+    const first = committed(await pushAll(key, `${ws.name}/big`, pages))
+    const base = { baseSeq: first.seq, baseTree: first.treeId }
+    const staged = []
+    for (let i = 0; i < 6; i += 1) {
+      const files = { 'a.txt': `folder ${i}` }
+      const s = await stage(key, `${ws.name}/big/f${i}`, files, base)
+      await upload(key, s.pushId as PushId, files, s.missing)
+      staged.push(s.pushId as PushId)
+    }
+    const outcomes = await Promise.allSettled(
+      staged.map((pushId) => commit(key, pushId)),
+    )
+    expect(outcomes.map((o) => o.status)).toEqual(Array(6).fill('fulfilled'))
+    expect((await treeOf(ws.name, 'big'))?.push_count).toBe(7)
+  })
+
+  it('checks again rather than refuse when the tree changes between its reads', async () => {
+    const { ws, key } = await setUp()
+    const first = committed(
+      await pushAll(key, `${ws.name}/acme`, {
+        'question.html':
+          '<title>Q</title>\n<form method="post" action="answers/"><input name="a"></form>',
+      }),
+    )
+    const base = { baseSeq: first.seq, baseTree: first.treeId }
+    const answers = { 'x.txt': 'authored' }
+    const p = await stage(key, `${ws.name}/acme/answers`, answers, base)
+    await upload(key, p.pushId as PushId, answers, p.missing)
+    // Meanwhile the page is pushed again without its form.
+    const plain = { 'question.html': '<title>Q</title><p>No form now.</p>' }
+    const q = await stage(key, `${ws.name}/acme`, plain, base)
+    await upload(key, q.pushId as PushId, plain, q.missing)
+    harness.use(
+      testRuntime({
+        env: {
+          DB: afterRead(
+            env.DB,
+            (sql) => sql.includes("like '%.html'"),
+            () => commit(key, q.pushId as PushId),
+          ),
+        },
+      }),
+    )
+    const outcome = await runAs(
+      key,
+      Effect.flatMap(Push, (push) => push.commit(p.pushId as PushId)).pipe(
+        Effect.either,
+      ),
+    )
+    harness.reset()
+    expect(outcome._tag).toBe('Right')
+    expect(await nodeAt(first.treeId, 'answers/x.txt')).toBeDefined()
+  })
+})

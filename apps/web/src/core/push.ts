@@ -21,7 +21,7 @@ import {
   type PushWarning,
   type TreeView,
 } from '@dossier/html'
-import { Clock, Context, Data, Effect, Layer } from 'effect'
+import { Clock, Context, Data, Effect, Layer, Random } from 'effect'
 
 import { Access, type Granted } from './access.ts'
 import { Bindings } from './bindings.ts'
@@ -129,6 +129,7 @@ export interface PushService {
       | 'sign_in_required'
       | 'forbidden'
       | 'invalid'
+      | 'too_large'
       | 'stale_head'
       | 'policy_rejected'
       | 'conflict'
@@ -222,13 +223,21 @@ const policyRejected = (problems: readonly PushProblem[]) => {
   return dossierError('policy_rejected', message, fix, path)
 }
 
-/** Another push moved the tree while this one committed: check again. */
+/**
+ * Another push moved the tree while this one committed: check again.
+ * `contention` marks a batch that lost to other pushes, as opposed to a
+ * check that read a tree changing under it.
+ */
 class Retry extends Data.TaggedError('Retry')<{
-  readonly error: ChangeFailure
+  readonly error: DossierError
+  readonly contention: boolean
 }> {}
 
 /** How often a commit checks again when other pushes keep landing. */
-const COMMIT_TRIES = 4
+const COMMIT_TRIES = 8
+/** The first wait before checking again; it doubles, with jitter. */
+const BACKOFF_MS = 20
+const BACKOFF_CAP_MS = 640
 
 interface StagedPush {
   readonly id: PushId
@@ -502,6 +511,22 @@ export const PushLive: Layer.Layer<
         }
         if (problems.length > 0) {
           return yield* Effect.fail(policyRejected(problems))
+        }
+        // One hash is one content, so it has one size.
+        const sizeOfHash = new Map<string, number>()
+        for (const file of i.files) {
+          const seen = sizeOfHash.get(file.sha256)
+          if (seen !== undefined && seen !== file.size) {
+            return yield* Effect.fail(
+              dossierError(
+                'invalid',
+                `${file.path} has the same content as another file in this push, but is listed as ${file.size} bytes instead of ${seen}.`,
+                'List each file with its real size.',
+                file.path,
+              ),
+            )
+          }
+          sizeOfHash.set(file.sha256, file.size)
         }
         // A path cannot be a file and a folder at once.
         for (const path of manifest.keys()) {
@@ -950,6 +975,41 @@ export const PushLive: Layer.Layer<
           )
         }
 
+        // Every file's size is its verified bytes', and the limits count those.
+        const verified = yield* query(() =>
+          DB.prepare(
+            `select f.path, f.size, b.size as stored from push_files f
+             join blobs b on b.sha256 = f.sha256 where f.push_id = ?`,
+          )
+            .bind(pushId)
+            .all<{ path: string; size: number; stored: number }>(),
+        ).pipe(Effect.map((r) => r.results))
+        const forged = verified.find((f) => f.size !== f.stored)
+        if (forged !== undefined) {
+          return yield* Effect.fail(
+            dossierError(
+              'invalid',
+              `${forged.path} is listed as ${forged.size} bytes, but its content is ${forged.stored} bytes.`,
+              'Push again with each file at its real size.',
+              forged.path,
+            ),
+          )
+        }
+        const limit = yield* limits.current()
+        const total = verified.reduce((sum, f) => sum + f.stored, 0)
+        const largest = verified.find((f) => f.stored > limit.fileBytes)
+        if (largest !== undefined || total > limit.pushBytes) {
+          return yield* Effect.fail(
+            largest === undefined
+              ? tooLarge(
+                  `This push is ${bytes(total)}; a push may be at most ${bytes(limit.pushBytes)}.`,
+                )
+              : tooLarge(
+                  `${largest.path} is ${bytes(largest.stored)}; one file in a push may be at most ${bytes(limit.fileBytes)}.`,
+                ),
+          )
+        }
+
         const manifestRows = yield* query(() =>
           DB.prepare(
             `select f.path, f.sha256, a.json from push_files f
@@ -1003,7 +1063,16 @@ export const PushLive: Layer.Layer<
         const pages = yield* pagesAfter(push, tree, manifestRows.results)
         const check = checkPush(pages, { kindAt: (p) => kinds.get(p) ?? null })
         if (check.problems.length > 0) {
-          return yield* Effect.fail(policyRejected(check.problems))
+          // The reads above may straddle another push: refuse only what the
+          // tree as it stands still shows, and check again otherwise.
+          const error = policyRejected(
+            yield* redacted(ws, tree, manifest, push.path, check.problems),
+          )
+          return yield* Effect.flatMap(treeMoved(push, tree), (moved) =>
+            Effect.fail(
+              moved ? new Retry({ error, contention: false }) : error,
+            ),
+          )
         }
 
         const live = tree === null ? [] : yield* liveUnder(tree.id, push.path)
@@ -1049,7 +1118,7 @@ export const PushLive: Layer.Layer<
                       treeMoved(push, tree).pipe(Effect.orDie),
                       (moved): Effect.Effect<never, ChangeFailure | Retry> =>
                         moved
-                          ? Effect.fail(new Retry({ error }))
+                          ? Effect.fail(new Retry({ error, contention: true }))
                           : Effect.fail(error),
                     )
                   : Effect.fail(error),
@@ -1069,6 +1138,49 @@ export const PushLive: Layer.Layer<
         } satisfies CommitResult
       })
 
+    /**
+     * The problems as the caller may see them: a page they cannot open is
+     * never named, only that the push would break one.
+     */
+    const redacted = (
+      ws: WorkspaceRow,
+      tree: TreeRow | null,
+      manifest: ReadonlyMap<string, string>,
+      pushPath: string,
+      problems: readonly PushProblem[],
+    ) =>
+      Effect.gen(function* () {
+        const shown: PushProblem[] = []
+        let hidden: PushProblem | null = null
+        for (const problem of problems) {
+          if (tree === null || manifest.has(problem.path)) {
+            shown.push(problem)
+            continue
+          }
+          const resolved = yield* store.resolve({
+            workspace: ws.name,
+            tree: tree.name,
+            path: problem.path,
+            folder: false,
+          })
+          const readable = yield* access
+            .require('read', 'missing' in resolved ? resolved : resolved.node)
+            .pipe(Effect.isSuccess)
+          if (readable) {
+            shown.push(problem)
+          } else {
+            hidden ??= {
+              code: problem.code,
+              path: pushPath,
+              line: null,
+              message: `This push would break a page you cannot open, so ${displayPath(ws.name, tree.name, pushPath)} cannot be pushed as it is.`,
+              fix: 'Push to another path, or ask someone who can open the whole tree to push it.',
+            }
+          }
+        }
+        return hidden === null ? shown : [...shown, hidden]
+      })
+
     /** Whether the tree changed since the commit read it, or came to be. */
     const treeMoved = (push: StagedPush, seen: TreeRow | null) =>
       Effect.gen(function* () {
@@ -1085,21 +1197,41 @@ export const PushLive: Layer.Layer<
       Retry
     >
 
-    /** Commits, checking again while other pushes keep moving the tree. */
+    /**
+     * Commits, checking again with a jittered, doubling wait while other
+     * pushes keep moving the tree. A push whose own path moved answers
+     * stale_head from its check; a tree that stays too busy answers conflict.
+     */
     const commit = (pushId: PushId) => {
       const attempt = (
-        left: number,
+        tried: number,
       ): Effect.Effect<CommitResult, CommitError, CurrentCaller> =>
         commitOnce(pushId).pipe(
-          Effect.catchAll((error) =>
-            error instanceof Retry
-              ? left > 0
-                ? attempt(left - 1)
-                : Effect.fail(error.error)
-              : Effect.fail(error),
+          Effect.catchAll(
+            (
+              error,
+            ): Effect.Effect<CommitResult, CommitError, CurrentCaller> => {
+              if (!(error instanceof Retry)) return Effect.fail(error)
+              if (tried + 1 >= COMMIT_TRIES) {
+                return Effect.fail(
+                  error.contention
+                    ? dossierError(
+                        'conflict',
+                        'Other pushes kept changing this tree, so nothing was applied.',
+                        'Push again.',
+                      )
+                    : (error.error as CommitError),
+                )
+              }
+              const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_MS * 2 ** tried)
+              return Random.nextIntBetween(ceiling / 2, ceiling + 1).pipe(
+                Effect.flatMap((ms) => Effect.sleep(ms)),
+                Effect.zipRight(attempt(tried + 1)),
+              )
+            },
           ),
         )
-      return attempt(COMMIT_TRIES - 1)
+      return attempt(0)
     }
 
     return { stage, putBlob, commit }
