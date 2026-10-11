@@ -95,3 +95,53 @@ export const failingStatements = (
     },
   })
 }
+
+/**
+ * The real database, except that the first batch holding a statement whose
+ * SQL matches waits for `before` to finish, then runs: a way to land another
+ * request's write between a read and the batch that rests on it.
+ */
+export const beforeBatch = (
+  database: D1Database,
+  matches: (sql: string) => boolean,
+  before: () => Promise<void>,
+): D1Database => {
+  const real = new WeakMap<object, D1PreparedStatement>()
+  const matching = new WeakSet<object>()
+  let armed = true
+  const wrap = (
+    statement: D1PreparedStatement,
+    hit: boolean,
+  ): D1PreparedStatement => {
+    const proxy: D1PreparedStatement = new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values), hit)
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    real.set(proxy, statement)
+    if (hit) matching.add(proxy)
+    return proxy
+  }
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => wrap(target.prepare(query), matches(query))
+      }
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          if (armed && statements.some((s) => matching.has(s))) {
+            armed = false
+            await before()
+          }
+          return target.batch(statements.map((s) => real.get(s) ?? s))
+        }
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}

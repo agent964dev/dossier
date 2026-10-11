@@ -307,81 +307,19 @@ export const SignInLive: Layer.Layer<
           : { allow: true }
       },
 
-      afterLink: async ({ userId, accountId, claims }) => {
-        const others = (await accountsOf(userId)).filter(
-          (a) => a.accountId !== accountId,
-        )
-        const decision = decideLink(
-          authorityOf(claims),
-          others.map((a) => ({
-            accountId: a.accountId,
-            authority: toAuthority(a.authority),
-          })),
-        )
-        const detached = decision.kind === 'link' ? decision.takeover : []
-        const at = now()
-        const linked = database.insert(schema.personHistory).values({
-          id: newId(),
-          userId,
-          kind: 'linked',
-          detailJson: JSON.stringify({ accountId }),
-          createdAt: at,
-        })
-        if (detached.length === 0) {
-          await linked.run()
-          return
-        }
-        // One batch: the detached accounts lose everything they opened.
-        await database.batch([
-          linked,
-          database
-            .delete(schema.session)
-            .where(
-              and(
-                eq(schema.session.userId, userId),
-                inArray(schema.session.googleAccountId, [...detached]),
-              ),
-            ),
-          database
-            .update(schema.agentKeys)
-            .set({ revokedAt: at })
-            .where(
-              and(
-                eq(schema.agentKeys.userId, userId),
-                inArray(schema.agentKeys.googleAccountId, [...detached]),
-                isNull(schema.agentKeys.revokedAt),
-              ),
-            ),
-          database
-            .update(schema.deviceCode)
-            .set({ status: 'denied' })
-            .where(
-              and(
-                inArray(schema.deviceCode.approvedByGoogleAccountId, [
-                  ...detached,
-                ]),
-                eq(schema.deviceCode.status, 'approved'),
-              ),
-            ),
-          database
-            .delete(schema.googleAccounts)
-            .where(inArray(schema.googleAccounts.accountId, [...detached])),
-          database
-            .delete(schema.account)
-            .where(
-              and(
-                eq(schema.account.userId, userId),
-                inArray(schema.account.id, [...detached]),
-              ),
-            ),
-          database.insert(schema.personHistory).values({
+      // The takeover itself runs with the sign-in's own writes (afterSignIn),
+      // so a takeover that fails is carried out at the next sign-in.
+      afterLink: async ({ userId, accountId }) => {
+        await database
+          .insert(schema.personHistory)
+          .values({
             id: newId(),
             userId,
-            kind: 'takeover',
-            detailJson: JSON.stringify({ by: accountId, detached }),
-            createdAt: at,
-          }),
-        ])
+            kind: 'linked',
+            detailJson: JSON.stringify({ accountId }),
+            createdAt: now(),
+          })
+          .run()
       },
 
       afterSignIn: async ({
@@ -394,6 +332,74 @@ export const SignInLive: Layer.Layer<
         const at = now()
         const authority = authorityOf(claims)
         const seedSuperAdmin = newUser && config.superAdmins.has(claims.email)
+        // An account Google vouches for takes over every other account of
+        // the person Google does not, at every sign-in, so nothing is left
+        // behind if an earlier takeover failed.
+        const others = (await accountsOf(userId)).filter(
+          (a) => a.accountId !== accountId,
+        )
+        const decision = decideLink(
+          authority,
+          others.map((a) => ({
+            accountId: a.accountId,
+            authority: toAuthority(a.authority),
+          })),
+        )
+        const detached = decision.kind === 'link' ? [...decision.takeover] : []
+        const takeover =
+          detached.length === 0
+            ? []
+            : [
+                database
+                  .delete(schema.session)
+                  .where(
+                    and(
+                      eq(schema.session.userId, userId),
+                      inArray(schema.session.googleAccountId, detached),
+                    ),
+                  ),
+                database
+                  .update(schema.agentKeys)
+                  .set({ revokedAt: at })
+                  .where(
+                    and(
+                      eq(schema.agentKeys.userId, userId),
+                      inArray(schema.agentKeys.googleAccountId, detached),
+                      isNull(schema.agentKeys.revokedAt),
+                    ),
+                  ),
+                database
+                  .update(schema.deviceCode)
+                  .set({ status: 'denied' })
+                  .where(
+                    and(
+                      inArray(
+                        schema.deviceCode.approvedByGoogleAccountId,
+                        detached,
+                      ),
+                      eq(schema.deviceCode.status, 'approved'),
+                    ),
+                  ),
+                database
+                  .delete(schema.googleAccounts)
+                  .where(inArray(schema.googleAccounts.accountId, detached)),
+                database
+                  .delete(schema.account)
+                  .where(
+                    and(
+                      eq(schema.account.userId, userId),
+                      inArray(schema.account.id, detached),
+                    ),
+                  ),
+                database.insert(schema.personHistory).values({
+                  id: newId(),
+                  userId,
+                  kind: 'takeover',
+                  detailJson: JSON.stringify({ by: accountId, detached }),
+                  createdAt: at,
+                }),
+              ]
+        // One batch: if any of it fails, Better Auth writes no session.
         await database.batch([
           database
             .insert(schema.googleAccounts)
@@ -413,6 +419,7 @@ export const SignInLive: Layer.Layer<
                 observedAt: at,
               },
             }),
+          ...takeover,
           database
             .insert(schema.people)
             .values({
@@ -611,18 +618,35 @@ export const SignInLive: Layer.Layer<
         }),
 
       session: (headers) =>
-        auth.getSession(headers).pipe(
-          Effect.map((found) =>
-            found === null
-              ? null
-              : {
-                  person: found.person,
-                  sessionId: found.sessionId,
-                  googleAccountId: found.googleAccountId,
-                  setCookie: found.setCookie,
-                },
-          ),
-        ),
+        Effect.gen(function* () {
+          const found = yield* auth.getSession(headers)
+          if (found === null) return null
+          // A session lasts only while the account that opened it still
+          // belongs to its person: a takeover can detach the account while
+          // the account's own sign-in is still writing its session.
+          const accountId = found.googleAccountId
+          const attached =
+            accountId !== null &&
+            (yield* query(() =>
+              database
+                .select({ id: schema.account.id })
+                .from(schema.account)
+                .where(
+                  and(
+                    eq(schema.account.id, accountId),
+                    eq(schema.account.userId, found.person.id),
+                  ),
+                )
+                .get(),
+            )) !== undefined
+          if (!attached) return null
+          return {
+            person: found.person,
+            sessionId: found.sessionId,
+            googleAccountId: accountId,
+            setCookie: found.setCookie,
+          }
+        }),
 
       agent: (secret) =>
         Effect.gen(function* () {
@@ -883,16 +907,13 @@ export const SignInLive: Layer.Layer<
               'name',
             )
           }
-          const googleAccountId =
-            via.kind === 'browser'
-              ? ((yield* query(() =>
-                  database
-                    .select({ id: schema.session.googleAccountId })
-                    .from(schema.session)
-                    .where(eq(schema.session.id, via.sessionId))
-                    .get(),
-                ))?.id ?? null)
-              : null
+          if (via.kind !== 'browser') {
+            return yield* fail(
+              'sign_in_required',
+              'Agent keys are made in account settings.',
+              'Sign in with Google and open account settings.',
+            )
+          }
           // A key reaches only what its person can open when it is made.
           let scopeNodeId: NodeId | null = null
           if (reach.kind === 'node') {
@@ -914,36 +935,57 @@ export const SignInLive: Layer.Layer<
           const secret = newKeySecret()
           const hash = yield* Effect.promise(() => sha256Hex(secret))
           const at = yield* Clock.currentTimeMillis
-          const key = {
-            id: newId(),
-            userId: person.id,
-            name: trimmed,
-            hashSha256: hash,
-            createdVia: 'settings',
-            googleAccountId,
-            scopeNodeId,
-            readOnly,
-            lastUsedAt: null,
-            revokedAt: null,
-            createdAt: at,
-          }
-          yield* query(() =>
-            database.batch([
-              database.insert(schema.agentKeys).values(key),
-              database.insert(schema.personHistory).values({
-                id: newId(),
-                userId: person.id,
-                kind: 'key_created',
-                detailJson: JSON.stringify({
-                  keyId: key.id,
+          const keyId = newId()
+          // The key takes the account of the session asking for it, and is
+          // written only while that session lives and its account still
+          // belongs to the person, so a takeover in between leaves no key.
+          const written = yield* query(() =>
+            bindings.DB.batch([
+              bindings.DB.prepare(
+                `insert into agent_keys (id, user_id, name, hash_sha256, created_via,
+                   google_account_id, scope_node_id, read_only, created_at)
+                 select ?, ?, ?, ?, 'settings', s.google_account_id, ?, ?, ?
+                 from session s
+                 join account a on a.id = s.google_account_id and a.user_id = s.user_id
+                 where s.id = ? and s.user_id = ? and s.expires_at > ?`,
+              ).bind(
+                keyId,
+                person.id,
+                trimmed,
+                hash,
+                scopeNodeId,
+                readOnly ? 1 : 0,
+                at,
+                via.sessionId,
+                person.id,
+                at,
+              ),
+              bindings.DB.prepare(
+                `insert into person_history (id, user_id, kind, detail_json, created_at)
+                 select ?, ?, 'key_created', ?, ?
+                 where exists (select 1 from agent_keys where id = ?)`,
+              ).bind(
+                newId(),
+                person.id,
+                JSON.stringify({
+                  keyId,
                   via: 'settings',
                   scope: scopeNodeId,
                   readOnly,
                 }),
-                createdAt: at,
-              }),
+                at,
+                keyId,
+              ),
             ]),
           )
+          if (written[0]?.meta.changes !== 1) {
+            return yield* fail(
+              'sign_in_required',
+              'This session has ended.',
+              'Sign in with Google again.',
+            )
+          }
+          const key = { id: keyId }
           const [view] = yield* keyRows(person.id, key.id as AgentKeyId)
           if (view === undefined) return yield* Effect.die('key not stored')
           return { secret, key: view }

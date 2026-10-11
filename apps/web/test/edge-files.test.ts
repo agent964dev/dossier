@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { SignIn } from '../src/core/index.ts'
 import { ORIGIN } from './support/harness.ts'
 import { everything } from './support/keys.ts'
-import { runAs } from './support/people.ts'
+import { runAs, sessionFor } from './support/people.ts'
 import { join, person, sha256Of, workspace } from './support/trees.ts'
 
 /** A member of a fresh workspace and a real agent key of theirs. */
@@ -17,11 +17,7 @@ const member = async () => {
   const who = await person('agent-owner')
   await join(ws, who)
   const { secret } = await runAs(
-    {
-      person: who,
-      via: { kind: 'browser', sessionId: 'none' as never },
-      requestId: 'test',
-    },
+    await sessionFor(who),
     Effect.flatMap(SignIn, (signIn) =>
       signIn.createKey({ name: 'edge', ...everything }),
     ),

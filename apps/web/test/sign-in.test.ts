@@ -331,11 +331,12 @@ describe('signing in with Google', () => {
     const token = 'abcdefghijklmnopqrstuvwxyz012345'
     const now = Date.now()
     await exec(
-      'insert into session (id, user_id, token, expires_at, created_at, updated_at) values (?, ?, ?, ?, ?, ?)',
+      'insert into session (id, user_id, token, expires_at, google_account_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)',
       `minted-${now}`,
       userId,
       token,
       now + 60_000_000,
+      await accountIdOf(identity.sub),
       now,
       now,
     )

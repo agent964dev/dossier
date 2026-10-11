@@ -1,3 +1,5 @@
+import type { Person, SessionId } from '@dossier/contracts'
+import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 
 import {
@@ -38,6 +40,39 @@ export const callerOf = async (browser: Browser): Promise<Caller> => {
   return {
     person: session.person,
     via: { kind: 'browser', sessionId: session.sessionId },
+    requestId: 'test',
+  }
+}
+
+/**
+ * A browser caller for a person made directly in D1: a Google account and a
+ * live session behind it, as a real sign-in leaves them.
+ */
+export const sessionFor = async (who: Person): Promise<Caller> => {
+  const now = Date.now()
+  const accountId = crypto.randomUUID()
+  const sessionId = crypto.randomUUID()
+  await env.DB.batch([
+    env.DB.prepare(
+      `insert into account (id, user_id, provider_id, account_id, created_at, updated_at)
+       values (?, ?, 'google', ?, ?, ?)`,
+    ).bind(accountId, who.id, `sub-${accountId}`, now, now),
+    env.DB.prepare(
+      `insert into session (id, user_id, token, expires_at, google_account_id, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      sessionId,
+      who.id,
+      crypto.randomUUID(),
+      now + 86_400_000,
+      accountId,
+      now,
+      now,
+    ),
+  ])
+  return {
+    person: who,
+    via: { kind: 'browser', sessionId: sessionId as SessionId },
     requestId: 'test',
   }
 }
