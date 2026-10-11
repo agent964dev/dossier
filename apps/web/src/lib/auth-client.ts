@@ -34,5 +34,7 @@ export async function startGoogleSignIn(next: string): Promise<void> {
 
 /** Ends this browser's session. */
 export async function signOut(): Promise<void> {
-  await post('/_/auth/sign-out', {})
+  const response = await post('/_/auth/sign-out', {})
+  if (!response.ok)
+    throw new Error(`Sign-out did not finish (${response.status})`)
 }

@@ -218,7 +218,7 @@ describe('errors', () => {
     })
   })
 
-  it('answers a screen whose loader fails with unavailable with the plain error page', async () => {
+  it('answers the plain error page when a screen’s read through runScreen fails with unavailable', async () => {
     harness.use(testRuntime({ env: { DB: brokenDatabase() } }))
     const response = await SELF.fetch(`${ORIGIN}/`, {
       headers: { 'sec-fetch-mode': 'navigate' },
@@ -226,6 +226,46 @@ describe('errors', () => {
     expect(response.status).toBe(503)
     expect(response.headers.get('content-type')).toContain('text/html')
     expect(await response.text()).toContain('Something went wrong. Try again.')
+  })
+
+  it('answers the unavailable body with the protocol header when a setting is missing', async () => {
+    harness.use(testRuntime({ env: { BETTER_AUTH_SECRET: '' } }))
+    const health = await SELF.fetch(`${ORIGIN}/_/api/health`)
+    expect(health.status).toBe(503)
+    expect(health.headers.get('dossier-protocol')).toBe('1')
+    expect((await errorBody(health)).error.code).toBe('unavailable')
+    const screen = await SELF.fetch(`${ORIGIN}/`, {
+      headers: { 'sec-fetch-mode': 'navigate' },
+    })
+    expect(screen.status).toBe(503)
+    expect(await screen.text()).toContain('Something went wrong. Try again.')
+  })
+
+  it('checks the protocol on a WebSocket upgrade of the API too', async () => {
+    const upgrade = await SELF.fetch(`${ORIGIN}/_/api/watch`, {
+      headers: { upgrade: 'websocket', 'dossier-protocol': '2' },
+    })
+    expect(upgrade.status).toBe(426)
+    expect((await errorBody(upgrade)).error.code).toBe('protocol_mismatch')
+  })
+
+  it('keeps the WebSocket of a 101 through the edge', async () => {
+    const response = await SELF.fetch(`${ORIGIN}/_/socket`, {
+      headers: { upgrade: 'websocket' },
+    })
+    expect(response.status).toBe(101)
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    const socket = response.webSocket
+    expect(socket).not.toBeNull()
+    socket?.accept()
+    const reply = new Promise<string>((resolve) =>
+      socket?.addEventListener('message', (event) =>
+        resolve(String(event.data)),
+      ),
+    )
+    socket?.send('hello')
+    expect(await reply).toBe('echo hello')
+    socket?.close()
   })
 
   it('puts Dossier-Protocol: 1 on every API response', async () => {

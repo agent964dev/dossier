@@ -1,6 +1,9 @@
 // Stands in for TanStack Start's server entry, which needs Vite's virtual
-// modules. Each screen reads D1 and the caller through the real runScreen, as
-// a loader does, so the edge's screen scope and failure rules run as written.
+// modules. It is not a TanStack screen: it reads D1 and the caller through the
+// real runScreen, as a screen's loader does, so tests through it prove the
+// edge's screen scope, caller rules and failure rules, not TanStack's
+// rendering. (The built entry's failure path is checked by hand against
+// `dev:https`.) A WebSocket upgrade gets a real 101 with an echoing socket.
 import { dossierError } from '@dossier/contracts'
 import { Effect } from 'effect'
 
@@ -15,6 +18,14 @@ export default {
     const { pathname } = new URL(request.url)
     if (pathname === CRASHING_SCREEN) {
       throw new Error('stack trace that must not reach the browser')
+    }
+    if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+      const { 0: client, 1: server } = new WebSocketPair()
+      server.accept()
+      server.addEventListener('message', (event) =>
+        server.send(`echo ${String(event.data)}`),
+      )
+      return new Response(null, { status: 101, webSocket: client })
     }
     const result = await runScreen(
       Effect.gen(function* () {

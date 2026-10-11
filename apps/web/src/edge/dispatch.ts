@@ -122,7 +122,15 @@ export const serve = async (
     config = await runtime.runPromise(Config)
   } catch (error) {
     console.error('Dossier could not start', { requestId, error })
-    return plainErrorPage(requestId)
+    // API callers still get the one error body and the protocol header.
+    return under(new URL(request.url).pathname, '/_/api')
+      ? withCommonHeaders(
+          codeResponse('unavailable', requestId),
+          'api-read',
+          [],
+          'main',
+        )
+      : plainErrorPage(requestId)
   }
   const url = new URL(request.url)
   const host = resolveHost(url, config)
@@ -172,6 +180,18 @@ export const serve = async (
     return found.caller
   }
 
+  /** Every API request, upgrades included, speaks this deployment's protocol. */
+  function checkProtocol(): void {
+    const protocol = request.headers.get(PROTOCOL_HEADER)
+    if (protocol !== null && protocol.trim() !== String(PROTOCOL)) {
+      throw dossierError(
+        'protocol_mismatch',
+        `This deployment speaks protocol ${PROTOCOL}.`,
+        'Update the CLI with dossier update.',
+      )
+    }
+  }
+
   async function route(): Promise<Response> {
     switch (kind) {
       case 'auth': {
@@ -182,19 +202,14 @@ export const serve = async (
       }
       case 'api-read':
       case 'api-write': {
-        const protocol = request.headers.get(PROTOCOL_HEADER)
-        if (protocol !== null && protocol.trim() !== String(PROTOCOL)) {
-          throw dossierError(
-            'protocol_mismatch',
-            `This deployment speaks protocol ${PROTOCOL}.`,
-            'Update the CLI with dossier update.',
-          )
-        }
+        checkProtocol()
         const who = await caller()
         const handler = await apiHandlerFor(runtime)
         return normalizeApiError(await handler(request, who), requestId)
       }
       case 'upgrade':
+        checkProtocol()
+        throw dossierError('not_found')
       case 'frame':
       case 'fonts':
       case 'legacy':

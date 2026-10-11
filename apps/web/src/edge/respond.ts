@@ -233,6 +233,15 @@ export const withCommonHeaders = (
   } else {
     for (const cookie of setCookie) headers.append('set-cookie', cookie)
   }
+  // A 101 carries its WebSocket, which a plain copy of the response drops.
+  if (response.status === 101) {
+    return new Response(null, {
+      status: 101,
+      statusText: response.statusText,
+      headers,
+      webSocket: response.webSocket,
+    })
+  }
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

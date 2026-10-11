@@ -185,8 +185,12 @@ describe('dossier login', () => {
     expect(await codeOf(await poll(code, true))).toBe('device_pending')
   })
 
-  it('refuses the plugin’s own session redemption and other clients', async () => {
+  it('refuses the plugin’s own session redemption of an approved code, and other clients', async () => {
     const code = await requestCode()
+    const identity = fresh()
+    await approveAs(await signedIn(identity), code)
+    await forgetLastPoll(code)
+    const sessions = await count('session')
     const viaPlugin = await SELF.fetch(`${ORIGIN}/_/auth/device/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -197,6 +201,17 @@ describe('dossier login', () => {
       }),
     })
     expect(viaPlugin.status).toBe(400)
+    expect(((await viaPlugin.json()) as { error: string }).error).toBe(
+      'invalid_grant',
+    )
+    expect(viaPlugin.headers.getSetCookie()).toEqual([])
+    expect(await count('session')).toBe(sessions)
+    // The code is still Dossier's to redeem, for an agent key.
+    await forgetLastPoll(code)
+    const redeemed = await poll(code)
+    expect(redeemed.response.status).toBe(200)
+    expect(await keysOf(identity.email)).toHaveLength(1)
+
     const other = await SELF.fetch(`${ORIGIN}/_/auth/device/code`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
