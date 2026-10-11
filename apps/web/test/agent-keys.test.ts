@@ -9,6 +9,7 @@ import { signedIn } from './support/browser.ts'
 import { rows } from './support/d1.ts'
 import { ORIGIN } from './support/harness.ts'
 import { callerOf, fresh, run, runAs } from './support/people.ts'
+import { everything } from './support/keys.ts'
 
 const bearer = (key: string) =>
   SELF.fetch(`${ORIGIN}/_/api/me`, {
@@ -28,7 +29,9 @@ describe('agent keys', () => {
     const caller = await callerOf(await signedIn(fresh()))
     const created = await runAs(
       caller,
-      Effect.flatMap(SignIn, (signIn) => signIn.createKey({ name: '  CI  ' })),
+      Effect.flatMap(SignIn, (signIn) =>
+        signIn.createKey({ name: '  CI  ', ...everything }),
+      ),
     )
     expect(created.secret).toMatch(/^dsk_[A-Za-z0-9_-]{43}$/)
     expect(created.key).toMatchObject({ name: 'CI', lastUsedAt: null })
@@ -52,9 +55,9 @@ describe('agent keys', () => {
     for (const name of ['   ', 'x'.repeat(65)]) {
       const exit = await runAs(
         caller,
-        Effect.flatMap(SignIn, (signIn) => signIn.createKey({ name })).pipe(
-          Effect.flip,
-        ),
+        Effect.flatMap(SignIn, (signIn) =>
+          signIn.createKey({ name, ...everything }),
+        ).pipe(Effect.flip),
       )
       expect(exit).toMatchObject({ code: 'invalid', path: 'name' })
     }
@@ -64,7 +67,9 @@ describe('agent keys', () => {
     const caller = await callerOf(await signedIn(fresh()))
     const { secret, key } = await runAs(
       caller,
-      Effect.flatMap(SignIn, (signIn) => signIn.createKey({ name: 'clock' })),
+      Effect.flatMap(SignIn, (signIn) =>
+        signIn.createKey({ name: 'clock', ...everything }),
+      ),
     )
     const seen = await run(
       Effect.gen(function* () {
@@ -90,7 +95,7 @@ describe('agent keys', () => {
     const { secret, key } = await runAs(
       caller,
       Effect.flatMap(SignIn, (signIn) =>
-        signIn.createKey({ name: 'revoke me' }),
+        signIn.createKey({ name: 'revoke me', ...everything }),
       ),
     )
     expect((await bearer(secret)).status).toBe(200)
@@ -121,7 +126,9 @@ describe('agent keys', () => {
     const caller = await callerOf(await signedIn(fresh()))
     const { secret } = await runAs(
       caller,
-      Effect.flatMap(SignIn, (signIn) => signIn.createKey({ name: 'self' })),
+      Effect.flatMap(SignIn, (signIn) =>
+        signIn.createKey({ name: 'self', ...everything }),
+      ),
     )
     const revoked = await SELF.fetch(`${ORIGIN}/_/api/keys/current`, {
       method: 'DELETE',
@@ -138,7 +145,9 @@ describe('agent keys', () => {
     const caller = await callerOf(laptop)
     const { secret } = await runAs(
       caller,
-      Effect.flatMap(SignIn, (signIn) => signIn.createKey({ name: 'stays' })),
+      Effect.flatMap(SignIn, (signIn) =>
+        signIn.createKey({ name: 'stays', ...everything }),
+      ),
     )
     await runAs(
       caller,

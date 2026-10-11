@@ -15,6 +15,59 @@ export {
   type AgentPrincipal,
   type BrowserSession,
   type DevicePrompt,
+  type KeyReach,
   type SignInNotice,
   type SignInService,
 } from './sign-in.ts'
+export {
+  Access,
+  capabilitiesOf,
+  type AccessService,
+  type Action,
+  type Basis,
+  type Capability,
+  type Granted,
+  type Membership,
+  type ReadableNodes,
+  type Role,
+  type RoleSet,
+} from './access.ts'
+// ChangeSet stays inside core: only TreeStore.change hands one out.
+export {
+  TreeStore,
+  type Entry,
+  type FileBody,
+  type NewEvent,
+  type NewShare,
+  type NodeHandle,
+  type Resolved,
+  type TreeStoreService,
+} from './tree-store.ts'
+export {
+  Push,
+  type CommitResult,
+  type ManifestFile,
+  type PushPlan,
+  type PushService,
+  type StageInput,
+  type StageResult,
+} from './push.ts'
+export { Files, type FilesService, type Listing } from './files.ts'
+export { People, type PeopleService, type TreeSharing } from './people.ts'
+export {
+  DEFAULT_LIMITS,
+  Limits,
+  type LimitsService,
+  type LimitValues,
+  type Rate,
+} from './limits.ts'
+export type {
+  EventRow,
+  MissingNode,
+  NodeRow,
+  PushRow,
+  ShareRow,
+  TreeRow,
+  VersionRow,
+  WorkspaceRow,
+} from './rows.ts'

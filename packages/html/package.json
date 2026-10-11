@@ -1,0 +1,16 @@
+{
+  "name": "@dossier/html",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "parse5": "8.0.1"
+  }
+}

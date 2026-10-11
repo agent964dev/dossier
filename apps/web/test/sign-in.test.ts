@@ -8,6 +8,7 @@ import { Browser, SESSION_COOKIE, signedIn } from './support/browser.ts'
 import { count, exec, rows } from './support/d1.ts'
 import { ORIGIN } from './support/harness.ts'
 import { callerOf, fresh, run, runAs } from './support/people.ts'
+import { everything } from './support/keys.ts'
 
 const userIdOf = async (email: string) =>
   (
@@ -133,7 +134,7 @@ describe('signing in with Google', () => {
     const key = await runAs(
       await callerOf(lapsedBrowser),
       Effect.flatMap(SignIn, (signIn) =>
-        signIn.createKey({ name: 'old laptop' }),
+        signIn.createKey({ name: 'old laptop', ...everything }),
       ),
     )
     expect(await keyWorks(key.secret)).toBe(true)

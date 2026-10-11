@@ -244,3 +244,75 @@ export const postJson = (
         ),
     }),
   )
+
+/** How long one upload or download of a file may take. */
+export const TRANSFER_TIMEOUT = Duration.minutes(5)
+
+/**
+ * A raw request to the deployment's API outside the derived client, for the
+ * bytes of a file: the same origin, the protocol header, the agent key only
+ * to the deployment's own origin, no redirects, and any answer but a 2xx
+ * turned into the error it carries.
+ */
+export const rawCall = (
+  deployment: Deployment,
+  key: string | null,
+  request: {
+    readonly method: 'GET' | 'PUT'
+    /** The path and query under the deployment's origin. */
+    readonly path: string
+    readonly body?: Uint8Array
+    readonly accept?: string
+  },
+): Effect.Effect<Response, DossierError | CliProblem, Cli> =>
+  Effect.gen(function* () {
+    const { io } = yield* Cli
+    const url = new URL(request.path, deployment.origin)
+    const headers: Record<string, string> = {
+      accept: request.accept ?? 'application/json',
+      [PROTOCOL_HEADER]: String(PROTOCOL),
+      'user-agent': `dossier/${VERSION}`,
+    }
+    if (key !== null && url.origin === deployment.origin.origin) {
+      headers.authorization = `Bearer ${key}`
+    }
+    if (request.body !== undefined) {
+      headers['content-type'] = 'application/octet-stream'
+      headers['content-length'] = String(request.body.byteLength)
+    }
+    const response = yield* Effect.tryPromise({
+      try: (signal) =>
+        io.fetch(url, {
+          method: request.method,
+          redirect: 'manual',
+          signal,
+          headers,
+          body: request.body as Uint8Array<ArrayBuffer> | undefined,
+        }),
+      catch: (cause) => unreachable(deployment, cause),
+    })
+    if (response.status < 200 || response.status >= 300) {
+      const payload = yield* Effect.promise((): Promise<unknown> =>
+        response.json().catch(() => null),
+      )
+      return yield* Effect.fail(
+        errorFromResponse(
+          deployment,
+          response.status,
+          payload,
+          response.headers.get('location'),
+        ),
+      )
+    }
+    return response
+  }).pipe(
+    Effect.timeoutFail({
+      duration: TRANSFER_TIMEOUT,
+      onTimeout: () =>
+        problem(
+          `${deployment.id} did not answer within ` +
+            `${Duration.toMinutes(TRANSFER_TIMEOUT)} minutes.`,
+          'Try again shortly.',
+        ),
+    }),
+  )

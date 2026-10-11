@@ -1,12 +1,28 @@
 import { Layer, ManagedRuntime } from 'effect'
 
 import { Auth, AuthLive } from '../ports/auth.ts'
+import { Access, AccessLive } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { Config, ConfigLive } from './config.ts'
+import { Files, FilesLive } from './files.ts'
+import { Limits, LimitsLive } from './limits.ts'
+import { People, PeopleLive } from './people.ts'
+import { Push, PushLive } from './push.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
+import { TreeStore, TreeStoreLive } from './tree-store.ts'
 
 /** Every service the edge and the screens reach. */
-export type CoreServices = Bindings | Config | Auth | SignIn
+export type CoreServices =
+  | Bindings
+  | Config
+  | Auth
+  | SignIn
+  | Access
+  | TreeStore
+  | Limits
+  | Push
+  | Files
+  | People
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -21,8 +37,15 @@ export const makeLayer = (
   const config = ConfigLive.pipe(
     Layer.provideMerge(Layer.succeed(Bindings, env)),
   )
-  const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(config))
-  return SignInLive.pipe(Layer.provideMerge(auth))
+  const trees = TreeStoreLive.pipe(
+    Layer.provideMerge(AccessLive),
+    Layer.provideMerge(LimitsLive),
+    Layer.provideMerge(config),
+  )
+  const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(trees))
+  return Layer.mergeAll(SignInLive, PushLive, FilesLive, PeopleLive).pipe(
+    Layer.provideMerge(auth),
+  )
 }
 
 export type CoreRuntime = ManagedRuntime.ManagedRuntime<CoreServices, never>

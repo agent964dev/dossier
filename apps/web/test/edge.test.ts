@@ -10,6 +10,7 @@ import { brokenDatabase } from './support/d1.ts'
 import { harness, ORIGIN, testRuntime } from './support/harness.ts'
 import { callerOf, fresh, run, runAs } from './support/people.ts'
 import { CRASHING_SCREEN } from './support/screens.ts'
+import { everything } from './support/keys.ts'
 
 const CONTENT = 'k3v9q2m7x8c4w1z5h6t0.content.test'
 
@@ -302,7 +303,9 @@ async function createKeyFor(browser: Browser) {
   const caller = await callerOf(browser)
   const created = await runAs(
     caller,
-    Effect.flatMap(SignIn, (signIn) => signIn.createKey({ name: 'edge' })),
+    Effect.flatMap(SignIn, (signIn) =>
+      signIn.createKey({ name: 'edge', ...everything }),
+    ),
   )
   return { key: created.secret }
 }

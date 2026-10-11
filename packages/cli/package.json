@@ -41,6 +41,8 @@
     "effect": "3.22.2"
   },
   "devDependencies": {
-    "@dossier/contracts": "workspace:*"
+    "@dossier/contracts": "workspace:*",
+    "@dossier/html": "workspace:*",
+    "ignore": "7.0.12"
   }
 }

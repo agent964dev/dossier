@@ -25,7 +25,7 @@ const deploymentWithKey = (key: string) => {
       return Response.json({
         person,
         deployment: request.url.host,
-        key: { id: 'key_1', name: 'cli on m4' },
+        key: { id: 'key_1', name: 'cli on m4', scope: null, readOnly: false },
       })
     }
     if (

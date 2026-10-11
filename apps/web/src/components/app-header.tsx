@@ -1,16 +1,36 @@
 import { Link } from '@tanstack/react-router'
+import type { ReactNode } from 'react'
 
-/** The glass header: the wordmark, and the account chip when signed in. */
-export function AppHeader({ email }: { email: string | null }) {
+/**
+ * The glass header: the wordmark, an optional control beside it (the
+ * workspace menu on the home), and the account chip when signed in.
+ */
+export function AppHeader({
+  email,
+  beside,
+}: {
+  email: string | null
+  beside?: ReactNode
+}) {
   return (
     <header className="px-3 pt-3 sm:px-6 sm:pt-5">
       <div className="chrome-glass mx-auto flex h-12 max-w-3xl items-center justify-between gap-3 rounded-xl px-3.5">
-        <Link
-          to="/"
-          className="font-clash text-[1.0625rem] font-semibold tracking-[-0.02em] text-neutral-50 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 rounded-md"
-        >
-          Dossier
-        </Link>
+        <div className="flex min-w-0 items-center gap-2">
+          <Link
+            to="/"
+            className="shrink-0 font-clash text-[1.0625rem] font-semibold tracking-[-0.02em] text-neutral-50 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 rounded-md"
+          >
+            Dossier
+          </Link>
+          {beside === undefined ? null : (
+            <>
+              <span aria-hidden className="text-neutral-600">
+                /
+              </span>
+              {beside}
+            </>
+          )}
+        </div>
         {email === null ? null : (
           <Link
             to="/_/settings"

@@ -3,9 +3,11 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
+  type SQLiteColumn,
 } from 'drizzle-orm/sqlite-core'
 
 /** Better Auth's dates: epoch milliseconds, read back as `Date`. */
@@ -214,6 +216,11 @@ export const agentKeys = sqliteTable(
     createdVia: text('created_via').notNull(),
     /** The account whose session created or approved it. */
     googleAccountId: text('google_account_id'),
+    /** The node the key is limited to; null reaches the whole account. */
+    scopeNodeId: text('scope_node_id').references(() => nodes.id),
+    readOnly: integer('read_only', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     /** Moved at most once a minute. */
     lastUsedAt: integer('last_used_at'),
     revokedAt: integer('revoked_at'),
@@ -227,3 +234,414 @@ export const agentKeys = sqliteTable(
     ),
   ],
 )
+
+// Workspaces and trees.
+
+/** Lowercase letters, digits and hyphens, 1 to 63, not starting with '-'. */
+const nameRule = (c: SQLiteColumn) =>
+  sql`length(${c}) between 1 and 63 and ${c} not glob '*[^a-z0-9-]*' and ${c} not glob '-*'`
+
+export const workspaces = sqliteTable(
+  'workspaces',
+  {
+    id: text('id').primaryKey(),
+    /** In links; never 'api' or 'cli'. */
+    name: text('name').notNull(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer('created_at').notNull(),
+    suspendedAt: integer('suspended_at'),
+    /** The name stays taken. */
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [
+    uniqueIndex('workspaces_name_unique').on(t.name),
+    check(
+      'workspaces_name_check',
+      sql`${nameRule(t.name)} and ${t.name} not in ('api', 'cli')`,
+    ),
+  ],
+)
+
+export const workspaceMembers = sqliteTable(
+  'workspace_members',
+  {
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    role: text('role').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.userId] }),
+    index('workspace_members_user_idx').on(t.userId),
+    check(
+      'workspace_members_role_check',
+      sql`${t.role} in ('admin', 'member')`,
+    ),
+  ],
+)
+
+export const trees = sqliteTable(
+  'trees',
+  {
+    /** Stable through moves; 20 of a-z 0-9, a DNS label of the content host. */
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    name: text('name').notNull(),
+    /** Written in the same batch as the root node. */
+    rootNodeId: text('root_node_id').notNull(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => user.id),
+    /** +1 per change to authored files; frame URLs pin it. */
+    authoredSeq: integer('authored_seq').notNull().default(0),
+    /** +1 per event. */
+    eventSeq: integer('event_seq').notNull().default(0),
+    /** Push numbers count per tree. */
+    pushCount: integer('push_count').notNull().default(0),
+    createdAt: integer('created_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [
+    uniqueIndex('trees_workspace_name_unique')
+      .on(t.workspaceId, t.name)
+      .where(sql`${t.deletedAt} is null`),
+    check('trees_name_check', nameRule(t.name)),
+    check(
+      'trees_id_check',
+      sql`length(${t.id}) = 20 and ${t.id} not glob '*[^a-z0-9]*'`,
+    ),
+  ],
+)
+
+export const nodes = sqliteTable(
+  'nodes',
+  {
+    id: text('id').primaryKey(),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** Null only for the root. */
+    parentId: text('parent_id'),
+    /** '' for the root. */
+    name: text('name').notNull(),
+    /** '' for the root, 'a/b.html' below; written only by creation and move. */
+    path: text('path').notNull(),
+    /** 0 for the root, at most 32. */
+    depth: integer('depth').notNull(),
+    kind: text('kind').notNull(),
+    origin: text('origin').notNull(),
+    /** Data nodes written by one person. */
+    ownerId: text('owner_id').references(() => user.id),
+    /** Files only. */
+    currentVersionId: text('current_version_id'),
+    createdAt: integer('created_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [
+    uniqueIndex('nodes_live_path_unique')
+      .on(t.treeId, t.path)
+      .where(sql`${t.deletedAt} is null`),
+    index('nodes_tree_path_idx').on(t.treeId, t.path),
+    index('nodes_parent_idx').on(t.parentId),
+    check('nodes_kind_check', sql`${t.kind} in ('folder', 'file')`),
+    check('nodes_origin_check', sql`${t.origin} in ('authored', 'data')`),
+    check(
+      'nodes_owner_check',
+      sql`${t.origin} = 'data' or ${t.ownerId} is null`,
+    ),
+    check('nodes_depth_check', sql`${t.depth} between 0 and 32`),
+  ],
+)
+
+export const nodeVersions = sqliteTable(
+  'node_versions',
+  {
+    id: text('id').primaryKey(),
+    nodeId: text('node_id')
+      .notNull()
+      .references(() => nodes.id),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** 1, 2, 3 … per node. */
+    revision: integer('revision').notNull(),
+    /** The tree's authored_seq this version took effect at; null for data. */
+    authoredSeq: integer('authored_seq'),
+    /** A deletion is a new version in state 'deleted' with no content. */
+    state: text('state').notNull(),
+    blobSha256: text('blob_sha256').references(() => blobs.sha256),
+    /** JSON data files, at most 1 MiB. */
+    jsonValue: text('json_value'),
+    size: integer('size'),
+    contentType: text('content_type'),
+    authorId: text('author_id')
+      .notNull()
+      .references(() => user.id),
+    keyId: text('key_id').references(() => agentKeys.id),
+    pushId: text('push_id').references(() => pushes.id),
+    /** Data versions: the push the writer saw. */
+    seenPushNumber: integer('seen_push_number'),
+    /** Data versions. */
+    opId: text('op_id'),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('node_versions_node_revision_unique').on(t.nodeId, t.revision),
+    index('node_versions_node_seq_idx').on(t.nodeId, t.authoredSeq),
+    index('node_versions_tree_seq_idx').on(t.treeId, t.authoredSeq),
+    index('node_versions_blob_idx').on(t.blobSha256),
+    index('node_versions_push_idx').on(t.pushId),
+    check(
+      'node_versions_state_check',
+      sql`${t.state} in ('live', 'deleted', 'withdrawn')`,
+    ),
+    check(
+      'node_versions_content_check',
+      sql`case when ${t.state} = 'live'
+    then (${t.blobSha256} is null) <> (${t.jsonValue} is null)
+    else ${t.blobSha256} is null and ${t.jsonValue} is null end`,
+    ),
+  ],
+)
+
+export const pushes = sqliteTable(
+  'pushes',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    treeName: text('tree_name').notNull(),
+    /** Null while the push would create its tree. */
+    treeId: text('tree_id').references(() => trees.id),
+    /** The pushed folder inside the tree, '' for the root. */
+    path: text('path').notNull(),
+    /** Null with --force, or when the folder saw nothing there. */
+    baseSeq: integer('base_seq'),
+    /** Set at commit. */
+    number: integer('number'),
+    message: text('message'),
+    force: integer('force', { mode: 'boolean' }).notNull().default(false),
+    authorId: text('author_id')
+      .notNull()
+      .references(() => user.id),
+    keyId: text('key_id').references(() => agentKeys.id),
+    state: text('state').notNull(),
+    fileCount: integer('file_count').notNull(),
+    byteCount: integer('byte_count').notNull(),
+    createdAt: integer('created_at').notNull(),
+    /** A day after staging. */
+    expiresAt: integer('expires_at').notNull(),
+    committedAt: integer('committed_at'),
+  },
+  (t) => [
+    uniqueIndex('pushes_tree_number_unique').on(t.treeId, t.number),
+    index('pushes_state_expires_idx').on(t.state, t.expiresAt),
+    check(
+      'pushes_state_check',
+      sql`${t.state} in ('staged', 'committed', 'expired')`,
+    ),
+  ],
+)
+
+/** The staged manifest; the commit reads it set-wise. */
+export const pushFiles = sqliteTable(
+  'push_files',
+  {
+    pushId: text('push_id')
+      .notNull()
+      .references(() => pushes.id, { onDelete: 'cascade' }),
+    /** Inside the tree. */
+    path: text('path').notNull(),
+    parentPath: text('parent_path').notNull(),
+    name: text('name').notNull(),
+    depth: integer('depth').notNull(),
+    sha256: text('sha256').notNull(),
+    size: integer('size').notNull(),
+    contentType: text('content_type').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.pushId, t.path] })],
+)
+
+export const pushFolders = sqliteTable(
+  'push_folders',
+  {
+    pushId: text('push_id')
+      .notNull()
+      .references(() => pushes.id, { onDelete: 'cascade' }),
+    path: text('path').notNull(),
+    parentPath: text('parent_path').notNull(),
+    name: text('name').notNull(),
+    depth: integer('depth').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.pushId, t.path] })],
+)
+
+/** Bytes in R2 at blobs/<sha256>; their life is owned by the tree store. */
+export const blobs = sqliteTable(
+  'blobs',
+  {
+    sha256: text('sha256').primaryKey(),
+    size: integer('size').notNull(),
+    /** Versions that point at it. */
+    refCount: integer('ref_count').notNull().default(0),
+    state: text('state').notNull().default('live'),
+    firstSeenAt: integer('first_seen_at').notNull(),
+    reclaimStartedAt: integer('reclaim_started_at'),
+  },
+  (t) => [
+    check('blobs_state_check', sql`${t.state} in ('live', 'reclaiming')`),
+  ],
+)
+
+/** A change in progress holding a blob until it commits. */
+export const blobHolds = sqliteTable(
+  'blob_holds',
+  {
+    /** push, upload, restore or move. */
+    holderKind: text('holder_kind').notNull(),
+    holderId: text('holder_id').notNull(),
+    sha256: text('sha256')
+      .notNull()
+      .references(() => blobs.sha256),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.holderKind, t.holderId, t.sha256] }),
+    index('blob_holds_sha_idx').on(t.sha256),
+    check(
+      'blob_holds_kind_check',
+      sql`${t.holderKind} in ('push', 'restore', 'upload', 'move')`,
+    ),
+  ],
+)
+
+/** An HTML file's analysis, stored by blob hash when it is uploaded. */
+export const analyses = sqliteTable(
+  'analyses',
+  {
+    sha256: text('sha256').notNull(),
+    /** 'html'. */
+    analyzer: text('analyzer').notNull(),
+    version: integer('version').notNull(),
+    json: text('json').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.sha256, t.analyzer, t.version] })],
+)
+
+export const shares = sqliteTable(
+  'shares',
+  {
+    id: text('id').primaryKey(),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    nodeId: text('node_id')
+      .notNull()
+      .references(() => nodes.id),
+    targetKind: text('target_kind').notNull(),
+    /** Lower-cased email, team id, workspace id, or '*'. */
+    target: text('target').notNull(),
+    role: text('role').notNull(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('shares_node_target_unique').on(
+      t.nodeId,
+      t.targetKind,
+      t.target,
+    ),
+    index('shares_tree_idx').on(t.treeId),
+    index('shares_target_idx').on(t.targetKind, t.target),
+    check(
+      'shares_target_kind_check',
+      sql`${t.targetKind} in ('email', 'team', 'workspace', 'anyone')`,
+    ),
+    check('shares_role_check', sql`${t.role} in ('read', 'respond', 'write')`),
+  ],
+)
+
+/** The literals of EventTypeSchema; a test keeps them equal. */
+export const EVENT_TYPES_SQL = sql`'push', 'delete', 'restore', 'move', 'submission', 'entry', 'withdrawal', 'data_write', 'comment', 'mention', 'share'`
+
+export const events = sqliteTable(
+  'events',
+  {
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    seq: integer('seq').notNull(),
+    type: text('type').notNull(),
+    nodeId: text('node_id'),
+    path: text('path').notNull(),
+    /** Null where the event hides its actor. */
+    actorId: text('actor_id').references(() => user.id),
+    pushId: text('push_id').references(() => pushes.id),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.treeId, t.seq] }),
+    check('events_type_check', sql`${t.type} in (${EVENT_TYPES_SQL})`),
+  ],
+)
+
+/** Replay of data writes, by operation id. */
+export const operations = sqliteTable(
+  'operations',
+  {
+    /** A person's id, or 'anon:<session>'. */
+    principal: text('principal').notNull(),
+    /** '<tree id>:<target folder or file path>'. */
+    scope: text('scope').notNull(),
+    opId: text('op_id').notNull(),
+    resultNodeId: text('result_node_id'),
+    resultVersionId: text('result_version_id'),
+    resultState: text('result_state').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.principal, t.scope, t.opId] }),
+    check(
+      'operations_result_state_check',
+      sql`${t.resultState} in ('stored', 'withdrawn')`,
+    ),
+  ],
+)
+
+/** A failed guard row aborts the whole batch it is part of. */
+export const changeGuards = sqliteTable(
+  'change_guards',
+  {
+    id: text('id').notNull(),
+    reason: text('reason').notNull(),
+    ok: integer('ok'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.id, t.reason] }),
+    check('change_guard_head', sql`${t.reason} <> 'head' or ${t.ok} = 1`),
+    check('change_guard_basis', sql`${t.reason} <> 'basis' or ${t.ok} = 1`),
+    check('change_guard_blob', sql`${t.reason} <> 'blob' or ${t.ok} = 1`),
+    check('change_guard_state', sql`${t.reason} <> 'state' or ${t.ok} = 1`),
+  ],
+)
+
+/** One row per counted key, over a fixed one-minute window. */
+export const rateCounters = sqliteTable('rate_counters', {
+  /** 'push:<agent key id>', 'send:<person id or anon:<session>>'. */
+  key: text('key').primaryKey(),
+  /** The minute, epoch ms. */
+  windowStart: integer('window_start').notNull(),
+  count: integer('count').notNull(),
+})

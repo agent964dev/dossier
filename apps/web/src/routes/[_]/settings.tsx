@@ -1,19 +1,30 @@
 import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
-import { Check, Copy, Info, KeyRound, LogOut, User, X } from 'lucide-react'
+import {
+  Building2,
+  Check,
+  Copy,
+  Info,
+  KeyRound,
+  LogOut,
+  User,
+  X,
+} from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 
 import { AppHeader } from '../../components/app-header'
 import { SectionLabel } from '../../components/section-label'
 import { Button } from '../../components/ui/button'
-import { Input, Label } from '../../components/ui/input'
+import { Input, Label, Select } from '../../components/ui/input'
 import { Modal } from '../../components/ui/modal'
 import { signOut } from '../../lib/auth-client'
 import type { AgentKeyView } from '../../core/index'
 import {
   accountView,
   createKey,
+  createWorkspace,
   revokeKey,
   signOutEverywhere,
+  type WorkspaceRowView,
 } from '../../server/account'
 import { isScreenFailure } from '../../server/failure'
 
@@ -90,19 +101,16 @@ function AccountSettings() {
           </p>
         </div>
 
-        <section
-          aria-labelledby="workspaces-label"
-          className="flex flex-col gap-3"
-        >
-          <SectionLabel id="workspaces-label" count={0}>
-            Workspaces
-          </SectionLabel>
-          <p className="text-[0.9375rem] text-neutral-400">
-            No workspaces yet.
-          </p>
-        </section>
+        <Workspaces
+          workspaces={view.workspaces}
+          mayCreate={view.mayCreateWorkspace}
+        />
 
-        <AgentKeys keys={view.keys} onChange={() => router.invalidate()} />
+        <AgentKeys
+          keys={view.keys}
+          trees={view.trees}
+          onChange={() => router.invalidate()}
+        />
 
         <section
           aria-labelledby="signing-out-label"
@@ -148,11 +156,164 @@ function AccountSettings() {
   )
 }
 
+function Workspaces({
+  workspaces,
+  mayCreate,
+}: {
+  workspaces: readonly WorkspaceRowView[]
+  mayCreate: boolean
+}) {
+  const [creating, setCreating] = useState(false)
+  return (
+    <section aria-labelledby="workspaces-label" className="flex flex-col gap-3">
+      <SectionLabel id="workspaces-label" count={workspaces.length}>
+        Workspaces
+      </SectionLabel>
+      {workspaces.length === 0 ? (
+        <p className="text-[0.9375rem] text-neutral-400">No workspaces yet.</p>
+      ) : (
+        <ul className="divide-y divide-border/80 overflow-hidden rounded-xl border border-border bg-card">
+          {workspaces.map((workspace) => (
+            <li key={workspace.name}>
+              <a
+                href={`/?w=${encodeURIComponent(workspace.name)}`}
+                className="flex items-center gap-3 px-3.5 py-3 outline-none transition-colors duration-200 ease-agent hover:bg-neutral-800/40 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
+              >
+                <span
+                  aria-hidden
+                  className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-800/70 text-neutral-300"
+                >
+                  <Building2 className="size-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[0.9375rem] text-neutral-50">
+                    {workspace.name}
+                  </span>
+                  <span className="block font-mono text-xs text-neutral-500">
+                    {workspace.role === 'admin' ? 'Admin' : 'Member'}
+                  </span>
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      {mayCreate ? (
+        <>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="w-fit"
+            onClick={() => setCreating(true)}
+          >
+            Create workspace
+          </Button>
+          <CreateWorkspaceDialog
+            open={creating}
+            onClose={() => setCreating(false)}
+          />
+        </>
+      ) : null}
+    </section>
+  )
+}
+
+function CreateWorkspaceDialog({
+  open,
+  onClose,
+}: {
+  open: boolean
+  onClose: () => void
+}) {
+  const [name, setName] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const close = () => {
+    setName('')
+    setError(null)
+    onClose()
+  }
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    const result = await createWorkspace({ data: { name } })
+    if (isScreenFailure(result)) {
+      setBusy(false)
+      setError(result.error.message)
+      return
+    }
+    window.location.assign(`/?w=${encodeURIComponent(result.name)}`)
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={close}
+      title="Create workspace"
+      description="You become its first admin. Its name is part of every link in it."
+      footer={
+        <>
+          <Button variant="ghost" type="button" onClick={close}>
+            Cancel
+          </Button>
+          <Button type="submit" form="new-workspace-form" disabled={busy}>
+            Create workspace
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="new-workspace-form"
+        onSubmit={submit}
+        className="flex flex-col gap-2"
+      >
+        <Label htmlFor="new-workspace-name">Name</Label>
+        <Input
+          id="new-workspace-name"
+          value={name}
+          maxLength={63}
+          required
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          placeholder="agent964"
+          aria-describedby="new-workspace-rule"
+          aria-invalid={error === null ? undefined : true}
+          className="font-mono"
+          onChange={(event) => setName(event.target.value)}
+        />
+        <p id="new-workspace-rule" className="text-sm text-neutral-400">
+          Lowercase letters, digits and hyphens.
+        </p>
+        {error === null ? null : (
+          <p role="alert" className="text-sm text-error-300">
+            {error}
+          </p>
+        )}
+      </form>
+    </Modal>
+  )
+}
+
+/** "agent964/acme/ · read only · used 2 min ago" */
+export function keyDetails(key: AgentKeyView, now: number): string {
+  return [
+    key.reach ?? 'everything',
+    ...(key.readOnly ? ['read only'] : []),
+    usedAgo(key.lastUsedAt, now),
+  ].join(' · ')
+}
+
 function AgentKeys({
   keys,
+  trees,
   onChange,
 }: {
   keys: readonly AgentKeyView[]
+  trees: readonly string[]
   onChange: () => Promise<void>
 }) {
   const [creating, setCreating] = useState(false)
@@ -190,8 +351,8 @@ function AgentKeys({
                 <p className="truncate text-[0.9375rem] text-neutral-50">
                   {key.name}
                 </p>
-                <p className="font-mono text-xs text-neutral-500">
-                  {usedAgo(key.lastUsedAt, now)}
+                <p className="font-mono text-xs break-all text-neutral-500">
+                  {keyDetails(key, now)}
                 </p>
               </div>
               <Button
@@ -222,6 +383,7 @@ function AgentKeys({
       </Button>
       <NewKeyDialog
         open={creating}
+        trees={trees}
         onClose={() => setCreating(false)}
         onCreated={onChange}
       />
@@ -229,16 +391,24 @@ function AgentKeys({
   )
 }
 
+type Reach = 'everything' | 'tree' | 'path'
+
 function NewKeyDialog({
   open,
+  trees,
   onClose,
   onCreated,
 }: {
   open: boolean
+  trees: readonly string[]
   onClose: () => void
   onCreated: () => Promise<void>
 }) {
   const [name, setName] = useState('')
+  const [reach, setReach] = useState<Reach>('everything')
+  const [tree, setTree] = useState('')
+  const [path, setPath] = useState('')
+  const [readOnly, setReadOnly] = useState(false)
   const [secret, setSecret] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -246,6 +416,10 @@ function NewKeyDialog({
 
   const close = () => {
     setName('')
+    setReach('everything')
+    setTree('')
+    setPath('')
+    setReadOnly(false)
     setSecret(null)
     setError(null)
     setCopied(false)
@@ -256,7 +430,17 @@ function NewKeyDialog({
     event.preventDefault()
     setBusy(true)
     setError(null)
-    const result = await createKey({ data: { name } })
+    const target =
+      reach === 'tree'
+        ? tree === ''
+          ? (trees[0] ?? '')
+          : tree
+        : reach === 'path'
+          ? path.trim()
+          : null
+    const result = await createKey({
+      data: { name, reach: target, readOnly },
+    })
     setBusy(false)
     if (isScreenFailure(result)) {
       setError(result.error.message)
@@ -315,6 +499,71 @@ function NewKeyDialog({
             placeholder="CI for acme"
             onChange={(event) => setName(event.target.value)}
           />
+          <fieldset className="mt-3 flex flex-col gap-2">
+            <legend className="mb-2 text-sm font-medium text-neutral-300">
+              Reach
+            </legend>
+            <ReachOption
+              value="everything"
+              current={reach}
+              onChange={setReach}
+              label="Everything"
+              hint="Every tree you can open."
+            />
+            <ReachOption
+              value="tree"
+              current={reach}
+              onChange={setReach}
+              label="One tree"
+              disabled={trees.length === 0}
+              hint={trees.length === 0 ? 'No trees yet.' : undefined}
+            />
+            {reach === 'tree' && trees.length > 0 ? (
+              <Select
+                aria-label="Tree"
+                value={tree === '' ? trees[0] : tree}
+                wrapperClassName="pl-7"
+                className="font-mono"
+                onChange={(event) => setTree(event.target.value)}
+              >
+                {trees.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </Select>
+            ) : null}
+            <ReachOption
+              value="path"
+              current={reach}
+              onChange={setReach}
+              label="A path in a tree"
+            />
+            {reach === 'path' ? (
+              <div className="pl-7">
+                <Input
+                  aria-label="Path"
+                  value={path}
+                  required
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="agent964/acme/plans/"
+                  className="font-mono"
+                  onChange={(event) => setPath(event.target.value)}
+                />
+              </div>
+            ) : null}
+          </fieldset>
+          <label className="mt-2 flex items-center gap-2.5 text-[0.9375rem] text-neutral-200">
+            <input
+              type="checkbox"
+              checked={readOnly}
+              onChange={(event) => setReadOnly(event.target.checked)}
+              className="size-4 accent-brand-300"
+            />
+            Read only
+          </label>
           {error === null ? null : (
             <p role="alert" className="text-sm text-error-300">
               {error}
@@ -333,5 +582,43 @@ function NewKeyDialog({
         </div>
       )}
     </Modal>
+  )
+}
+
+function ReachOption({
+  value,
+  current,
+  onChange,
+  label,
+  hint,
+  disabled = false,
+}: {
+  value: Reach
+  current: Reach
+  onChange: (value: Reach) => void
+  label: string
+  hint?: string
+  disabled?: boolean
+}) {
+  return (
+    <label
+      className={`flex items-start gap-2.5 text-[0.9375rem] ${disabled ? 'text-neutral-500' : 'text-neutral-200'}`}
+    >
+      <input
+        type="radio"
+        name="key-reach"
+        value={value}
+        checked={current === value}
+        disabled={disabled}
+        onChange={() => onChange(value)}
+        className="mt-1 size-4 accent-brand-300"
+      />
+      <span>
+        {label}
+        {hint === undefined ? null : (
+          <span className="block text-sm text-neutral-500">{hint}</span>
+        )}
+      </span>
+    </label>
   )
 }

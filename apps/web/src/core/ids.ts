@@ -1,3 +1,5 @@
+import type { TreeId } from '@dossier/contracts'
+
 const base64url = (bytes: Uint8Array): string => {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
@@ -44,4 +46,21 @@ export const hmacSha256 = async (
     new TextEncoder().encode(value),
   )
   return base64url(new Uint8Array(signature))
+}
+
+const TREE_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+/**
+ * A new tree's ID: 20 characters drawn uniformly from lowercase letters and
+ * digits (about 103 random bits), so it is a DNS label of the content host.
+ */
+export const newTreeId = (): TreeId => {
+  let id = ''
+  while (id.length < 20) {
+    for (const byte of randomBytes(32)) {
+      // 252 is the largest multiple of 36 below 256: no bias.
+      if (byte < 252 && id.length < 20) id += TREE_ALPHABET[byte % 36]
+    }
+  }
+  return id as TreeId
 }

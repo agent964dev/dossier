@@ -117,18 +117,32 @@ describe('failures', () => {
 })
 
 describe('the agent guide', () => {
-  it('lists login, logout, whoami and update with exit codes 0 to 6', async () => {
+  it('lists every verb with exit codes 0 to 6', async () => {
     const fetch = stubFetch(() => new Response(null, { status: 500 }))
     current = await harness({ fetch: fetch.fetch })
 
     expect(await current.run(['--agent-info'])).toBe(0)
     const markdown = current.stdout()
-    for (const verb of ['login', 'logout', 'whoami', 'update']) {
+    for (const verb of [
+      'login',
+      'logout',
+      'whoami',
+      'update',
+      'push',
+      'pull',
+      'ls',
+    ]) {
       expect(markdown).toContain(`### ${verb}\n`)
       expect(markdown).toContain(`dossier ${verb} `)
     }
     expect(markdown).toContain('dossier update [--check] [--json]')
     expect(markdown).toContain('dossier login [--json] [<deployment>]')
+    expect(markdown).toContain(
+      'dossier push [(-m, --message text)] [--dry-run] [--force] [--json] ' +
+        '<dir> <target>',
+    )
+    expect(markdown).toContain('dossier pull [--json] <target> <dir>')
+    expect(markdown).toContain('dossier ls [--json] <target>')
     for (const [code, meaning] of [
       [0, 'success'],
       [1, 'failure'],
@@ -154,6 +168,9 @@ describe('the agent guide', () => {
       'logout',
       'whoami',
       'update',
+      'push',
+      'pull',
+      'ls',
     ])
     expect(Object.keys(data.exitCodes)).toEqual([
       '0',

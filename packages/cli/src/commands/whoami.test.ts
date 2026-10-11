@@ -17,7 +17,7 @@ const meFor = (deployment: string, keyName = 'cli on m4') =>
   Response.json({
     person,
     deployment,
-    key: { id: 'key_1', name: keyName },
+    key: { id: 'key_1', name: keyName, scope: null, readOnly: false },
   })
 
 /** Answers `/_/api/me` for any deployment whose key it knows. */
@@ -116,7 +116,7 @@ describe('dossier whoami', () => {
     expect(JSON.parse(cli.stdout())).toEqual({
       person,
       deployment: 'dossier.agent964.com',
-      key: { id: 'key_1', name: 'cli on m4' },
+      key: { id: 'key_1', name: 'cli on m4', scope: null, readOnly: false },
     })
   })
 

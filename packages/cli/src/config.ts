@@ -79,6 +79,7 @@ const ensureDirectory = async (directory: string): Promise<void> => {
 const acquireLock = async (
   path: string,
   options: LockOptions,
+  what: string,
 ): Promise<() => Promise<void>> => {
   const lockPath = `${path}.lock`
   const deadline = Date.now() + (options.timeoutMs ?? 5_000)
@@ -102,7 +103,7 @@ const acquireLock = async (
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       if (Date.now() >= deadline) {
         throw problem(
-          'Another dossier process is changing the config file.',
+          `Another dossier process is changing ${what}.`,
           `Try again when it is done. If none is running, remove ${lockPath}.`,
         )
       }
@@ -140,15 +141,29 @@ const writeAtomically = async (path: string, value: unknown): Promise<void> => {
  * Changes the config file under its lock: read, change, write a temporary
  * file with mode 0600, sync it, and rename it into place.
  */
-export const updateConfig = async (
+export const updateConfig = (
   path: string,
   change: (config: CliConfig) => CliConfig,
   options: LockOptions = {},
-): Promise<CliConfig> => {
+): Promise<CliConfig> =>
+  updateJsonFile(path, readConfig, change, options, 'the config file')
+
+/**
+ * Changes a JSON file of this CLI's under its lock, the way the config file
+ * changes: read, change, write a temporary file with mode 0600, sync it, and
+ * rename it into place.
+ */
+export const updateJsonFile = async <T>(
+  path: string,
+  read: (path: string) => Promise<T>,
+  change: (value: T) => T,
+  options: LockOptions,
+  what: string,
+): Promise<T> => {
   await ensureDirectory(dirname(path))
-  const release = await acquireLock(path, options)
+  const release = await acquireLock(path, options, what)
   try {
-    const next = change(await readConfig(path))
+    const next = change(await read(path))
     await writeAtomically(path, next)
     return next
   } finally {
