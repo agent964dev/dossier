@@ -2,6 +2,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { AlertTriangle, Info } from 'lucide-react'
 import { useState } from 'react'
 
+import { HostName } from '../../components/host-name'
 import { GoogleMark } from '../../components/google-mark'
 import { Button } from '../../components/ui/button'
 import { safeNext, startGoogleSignIn } from '../../lib/auth-client'
@@ -56,7 +57,7 @@ function SignInScreen() {
         {view.deployment}
       </span>
       <h1 className="font-clash text-[1.75rem] leading-[1.1] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
-        Sign in to continue to {view.deployment}
+        Sign in to continue to <HostName host={view.deployment} />
       </h1>
       <Notice
         view={view}

@@ -2,6 +2,7 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { Info } from 'lucide-react'
 import { useState } from 'react'
 
+import { HostName } from '../components/host-name'
 import { AppHeader } from '../components/app-header'
 import { Button } from '../components/ui/button'
 import { signOut, startGoogleSignIn } from '../lib/auth-client'
@@ -37,7 +38,7 @@ function FrontPage({ deployment }: { deployment: string }) {
         Dossier
       </span>
       <h1 className="font-clash text-[2rem] leading-[1.05] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
-        {deployment}
+        <HostName host={deployment} />
       </h1>
       <p className="text-neutral-400">
         Open what is shared with you, signed in with your Google account.
@@ -69,7 +70,7 @@ function Home({
     <div className="min-h-dvh">
       <AppHeader email={me.email} />
       <main className="mx-auto flex max-w-3xl flex-col gap-5 px-4 pt-6 pb-16 sm:px-6">
-        <h1 className="font-clash text-[1.75rem] font-semibold tracking-[-0.03em] text-neutral-50">
+        <h1 className="font-clash text-[1.75rem] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
           Shared with me
         </h1>
         <section aria-label="Shared with me" className="flex flex-col gap-3">

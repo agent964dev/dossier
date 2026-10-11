@@ -2,6 +2,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { Check, Info, X } from 'lucide-react'
 import { useState } from 'react'
 
+import { HostName } from '../../components/host-name'
 import { AppHeader } from '../../components/app-header'
 import { Button } from '../../components/ui/button'
 import { approveDevice, denyDevice, devicePrompt } from '../../server/device'
@@ -69,7 +70,7 @@ function DeviceScreen() {
           <>
             <h1 className="font-clash text-[1.625rem] leading-[1.15] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
               Allow ‘{data.prompt.name}’ to act as you on{' '}
-              {data.prompt.deployment}?
+              <HostName host={data.prompt.deployment} />?
             </h1>
             <p className="font-mono text-sm tracking-[0.12em] text-neutral-400">
               Code {formatCode(userCode)}
