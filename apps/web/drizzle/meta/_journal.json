@@ -29,6 +29,13 @@
       "when": 1791760855637,
       "tag": "0003_session_account_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791761050055,
+      "tag": "0004_strong_omega_sentinel",
+      "breakpoints": true
     }
   ]
 }

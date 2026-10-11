@@ -35,7 +35,8 @@ import type {
   WorkspaceRow,
 } from './rows.ts'
 
-export type Resolved =
+/** A node a path names, as a CLI argument or a push names it. */
+export type Located =
   | {
       readonly kind: 'file'
       readonly node: NodeRow
@@ -43,6 +44,41 @@ export type Resolved =
       readonly tree: TreeRow
     }
   | { readonly kind: 'folder'; readonly node: NodeRow; readonly tree: TreeRow }
+
+/** A path inside a tree known by its ID, as a frame on its host names it. */
+export interface TreeRef {
+  readonly treeId: TreeId
+  /** Inside the tree, without a leading or trailing slash. */
+  readonly path: string
+  /** A trailing slash, or the root. */
+  readonly folder: boolean
+}
+
+/** What a link names. */
+export type Resolved =
+  | {
+      readonly kind: 'page'
+      readonly node: NodeRow
+      readonly version: VersionRow
+      readonly tree: TreeRow
+      /** The link's path inside the tree, encoded: 'questions/', 'plan'. */
+      readonly linkPath: string
+    }
+  | {
+      readonly kind: 'file'
+      readonly node: NodeRow
+      readonly version: VersionRow
+      readonly tree: TreeRow
+    }
+  /** A folder without index.html. */
+  | { readonly kind: 'folder'; readonly node: NodeRow; readonly tree: TreeRow }
+  | {
+      readonly kind: 'redirect'
+      readonly node: NodeRow
+      readonly tree: TreeRow
+      /** The link's path inside the tree, encoded. */
+      readonly to: string
+    }
 
 export interface FileBody {
   readonly version: VersionRow
@@ -115,9 +151,25 @@ export interface TreeStoreService {
     workspace: WorkspaceRow,
     name: string,
   ) => Effect.Effect<TreeRow | null>
-  readonly resolve: (
+  /** The node a path names: a folder, a file, or the page `path.html`. */
+  readonly locate: (
     ref: LinkRef,
+  ) => Effect.Effect<Located | MissingNode, DossierError<'unavailable'>>
+  /**
+   * What a link names, live or at an authored sequence: every file of one
+   * page load then comes from the same push.
+   */
+  readonly resolve: (
+    ref: LinkRef | TreeRef,
+    at?: AuthoredSeq,
   ) => Effect.Effect<Resolved | MissingNode, DossierError<'unavailable'>>
+  /** The live tree with this ID and its live workspace, or null. */
+  readonly treeById: (
+    treeId: TreeId,
+  ) => Effect.Effect<
+    { readonly tree: TreeRow; readonly workspace: WorkspaceRow } | null,
+    DossierError<'unavailable'>
+  >
   readonly list: (
     folder: Granted<'read'>,
     depth: 'one' | 'all',
@@ -460,6 +512,28 @@ const highestParam = (text: string): number => {
   return max
 }
 
+const joinPath = (folder: string, name: string) =>
+  folder === '' ? name : `${folder}/${name}`
+
+/** A page file's path as its link names it: 'a/index.html' → 'a/', 'a/b.html' → 'a/b'. */
+const pageLinkPath = (path: string): string => {
+  if (path === 'index.html') return ''
+  if (path.endsWith('/index.html'))
+    return `${path.slice(0, -'index.html'.length)}`
+  return path.endsWith('.html') ? path.slice(0, -'.html'.length) : path
+}
+
+/**
+ * A tree path in the link's encoded form, with a trailing slash for a
+ * folder: ('a b/c', true) → 'a%20b/c/'.
+ */
+export const linkPathOf = (path: string, folder: boolean): string => {
+  const bare = path.endsWith('/') ? path.slice(0, -1) : path
+  if (bare === '') return ''
+  const encoded = bare.split('/').map(encodeURIComponent).join('/')
+  return folder || path.endsWith('/') ? `${encoded}/` : encoded
+}
+
 export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
   Layer.effect(
     TreeStore,
@@ -542,7 +616,7 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
             )
       }
 
-      const resolve = (ref: LinkRef) =>
+      const locate = (ref: LinkRef) =>
         Effect.gen(function* () {
           const missing = (treeId: TreeId | null): MissingNode => ({
             missing: true,
@@ -562,7 +636,7 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
             const node = yield* liveNode(found.id, path)
             if (node === null) continue
             if (node.kind === 'folder') {
-              return { kind: 'folder', node, tree: found } satisfies Resolved
+              return { kind: 'folder', node, tree: found } satisfies Located
             }
             if (ref.folder) continue
             const version = yield* versionOf(node)
@@ -572,9 +646,184 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
               node,
               version,
               tree: found,
-            } satisfies Resolved
+            } satisfies Located
           }
           return missing(found.id)
+        })
+
+      const treeById = (treeId: TreeId) =>
+        read(() =>
+          database
+            .select({ tree: schema.trees, workspace: schema.workspaces })
+            .from(schema.trees)
+            .innerJoin(
+              schema.workspaces,
+              eq(schema.workspaces.id, schema.trees.workspaceId),
+            )
+            .where(
+              and(
+                eq(schema.trees.id, treeId),
+                isNull(schema.trees.deletedAt),
+                isNull(schema.workspaces.deletedAt),
+              ),
+            )
+            .get(),
+        ).pipe(
+          Effect.map((row) =>
+            row === undefined
+              ? null
+              : {
+                  tree: row.tree as TreeRow,
+                  workspace: row.workspace as WorkspaceRow,
+                },
+          ),
+        )
+
+      /** An authored or data file's live version now, or at a sequence. */
+      const fileAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
+        Effect.gen(function* () {
+          if (at === undefined) {
+            const node = yield* liveNode(treeId, path)
+            if (node === null || node.kind !== 'file') return null
+            const version = yield* versionOf(node)
+            return version === null ? null : { node, version }
+          }
+          const row = yield* read(() =>
+            database
+              .select({ node: schema.nodes, version: schema.nodeVersions })
+              .from(schema.nodeVersions)
+              .innerJoin(
+                schema.nodes,
+                eq(schema.nodes.id, schema.nodeVersions.nodeId),
+              )
+              .where(
+                and(
+                  eq(schema.nodes.treeId, treeId),
+                  eq(schema.nodes.path, path),
+                  eq(schema.nodes.kind, 'file'),
+                  eq(schema.nodes.origin, 'authored'),
+                  sql`${schema.nodeVersions.authoredSeq} <= ${at}`,
+                ),
+              )
+              .orderBy(
+                sql`${schema.nodeVersions.authoredSeq} desc`,
+                sql`${schema.nodeVersions.revision} desc`,
+              )
+              .limit(1)
+              .get(),
+          )
+          if (row === undefined || row.version.state !== 'live') return null
+          return {
+            node: row.node as NodeRow,
+            version: row.version as VersionRow,
+          }
+        })
+
+      /**
+       * A folder now, or at a sequence: the folder's node, when it holds a
+       * file live at that sequence (the root always exists).
+       */
+      const folderAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
+        Effect.gen(function* () {
+          if (at === undefined) {
+            const node = yield* liveNode(treeId, path)
+            return node !== null && node.kind === 'folder' ? node : null
+          }
+          const node = yield* read(() =>
+            database
+              .select()
+              .from(schema.nodes)
+              .where(
+                and(
+                  eq(schema.nodes.treeId, treeId),
+                  eq(schema.nodes.path, path),
+                  eq(schema.nodes.kind, 'folder'),
+                ),
+              )
+              .orderBy(
+                sql`${schema.nodes.deletedAt} is not null`,
+                sql`${schema.nodes.createdAt} desc`,
+              )
+              .limit(1)
+              .get(),
+          )
+          if (node === undefined) return null
+          if (path === '') return node as NodeRow
+          const held = yield* read(() =>
+            DB.prepare(
+              `select 1 as held from nodes n
+               where n.tree_id = ?1 and n.kind = 'file' and n.origin = 'authored'
+                 and substr(n.path, 1, length(?2) + 1) = ?2 || '/'
+                 and (select v.state from node_versions v
+                        where v.node_id = n.id and v.authored_seq <= ?3
+                        order by v.authored_seq desc, v.revision desc limit 1) = 'live'
+               limit 1`,
+            )
+              .bind(treeId, path, at)
+              .first<{ held: number }>(),
+          )
+          return held === null ? null : (node as NodeRow)
+        })
+
+      const resolve = (ref: LinkRef | TreeRef, at?: AuthoredSeq) =>
+        Effect.gen(function* () {
+          let found: TreeRow | null
+          if ('treeId' in ref) {
+            found = (yield* treeById(ref.treeId))?.tree ?? null
+          } else {
+            const ws = yield* workspace(ref.workspace)
+            found = ws === null ? null : yield* tree(ws, ref.tree)
+          }
+          const missing = (): MissingNode => ({
+            missing: true,
+            treeId: found?.id ?? null,
+            path: ref.path,
+          })
+          if (found === null) return missing()
+          const t = found
+          const asked = linkPathOf(ref.path, ref.folder || ref.path === '')
+          const page = (file: { node: NodeRow; version: VersionRow }) => {
+            const linkPath = linkPathOf(pageLinkPath(file.node.path), false)
+            return linkPath === asked
+              ? ({
+                  kind: 'page',
+                  ...file,
+                  tree: t,
+                  linkPath,
+                } satisfies Resolved)
+              : ({
+                  kind: 'redirect',
+                  node: file.node,
+                  tree: t,
+                  to: linkPath,
+                } satisfies Resolved)
+          }
+          if (ref.folder || ref.path === '') {
+            const folder = yield* folderAt(t.id, ref.path, at)
+            if (folder === null) return missing()
+            const index = yield* fileAt(
+              t.id,
+              joinPath(ref.path, 'index.html'),
+              at,
+            )
+            if (index !== null) return page(index)
+            return { kind: 'folder', node: folder, tree: t } satisfies Resolved
+          }
+          const html = yield* fileAt(t.id, `${ref.path}.html`, at)
+          if (html !== null) return page(html)
+          const folder = yield* folderAt(t.id, ref.path, at)
+          if (folder !== null) {
+            return {
+              kind: 'redirect',
+              node: folder,
+              tree: t,
+              to: linkPathOf(ref.path, true),
+            } satisfies Resolved
+          }
+          const file = yield* fileAt(t.id, ref.path, at)
+          if (file === null) return missing()
+          if (file.node.name.endsWith('.html')) return page(file)
+          return { kind: 'file', ...file, tree: t } satisfies Resolved
         })
 
       const analysis = (sha256: Sha256) =>
@@ -1095,7 +1344,9 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
       return {
         workspace,
         tree,
+        locate,
         resolve,
+        treeById,
         list,
         read: readFile,
         analysis,

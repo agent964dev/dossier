@@ -40,7 +40,9 @@ export {
   type NewEvent,
   type NewShare,
   type NodeHandle,
+  type Located,
   type Resolved,
+  type TreeRef,
   type TreeStoreService,
 } from './tree-store.ts'
 export {
@@ -54,6 +56,14 @@ export {
 } from './push.ts'
 export { Files, type FilesService, type Listing } from './files.ts'
 export { People, type PeopleService, type TreeSharing } from './people.ts'
+export {
+  Pages,
+  parseRange,
+  treeRefOf,
+  type PagesService,
+  type SeenByRow,
+  type Served,
+} from './pages.ts'
 export {
   DEFAULT_LIMITS,
   Limits,

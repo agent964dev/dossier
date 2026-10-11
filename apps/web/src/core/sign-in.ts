@@ -955,7 +955,7 @@ export const SignInLive: Layer.Layer<
           // A key reaches only what its person can open when it is made.
           let scopeNodeId: NodeId | null = null
           if (reach.kind === 'node') {
-            const resolved = yield* store.resolve(reach.ref)
+            const resolved = yield* store.locate(reach.ref)
             const granted = yield* access
               .require('read', 'missing' in resolved ? resolved : resolved.node)
               .pipe(

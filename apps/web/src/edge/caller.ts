@@ -1,7 +1,13 @@
-import { CSRF_HEADER, fail, type DossierError } from '@dossier/contracts'
+import {
+  CSRF_HEADER,
+  fail,
+  type AuthoredSeq,
+  type DossierError,
+  type TreeId,
+} from '@dossier/contracts'
 import { Effect } from 'effect'
 
-import { SignIn, type Caller } from '../core/index.ts'
+import { Pages, SignIn, type Caller } from '../core/index.ts'
 import type { RequestKind } from './dispatch.ts'
 
 const BEARER = /^Bearer\s+(\S+)$/i
@@ -114,4 +120,36 @@ export const callerFor = (
       },
       setCookie: session.setCookie,
     }
+  })
+
+/** A frame path: `/_/v/<handle>/<seq>/<link path inside the tree>`. */
+export interface FramePath {
+  readonly handle: string
+  readonly seq: AuthoredSeq
+  /** Encoded, as in the URL. */
+  readonly linkPath: string
+}
+
+export const framePathOf = (pathname: string): FramePath | null => {
+  const match = /^\/_\/v\/([^/]+)\/(\d{1,15})\/(.*)$/.exec(pathname)
+  if (match === null) return null
+  const [, handle = '', seq = '', linkPath = ''] = match
+  return { handle, seq: Number(seq) as AuthoredSeq, linkPath }
+}
+
+/**
+ * The frame rule: the view handle in the path, for the tree whose content
+ * host was asked, and never a cookie. Null when the handle is refused.
+ */
+export const frameCallerFor = (
+  request: Request,
+  handle: string,
+  treeId: TreeId,
+): Effect.Effect<Caller | null, DossierError<'unavailable'>, Pages> =>
+  Effect.gen(function* () {
+    const pages = yield* Pages
+    const caller = yield* pages.handleCaller(handle, treeId)
+    return caller === null
+      ? null
+      : { ...caller, requestId: requestIdOf(request) }
   })

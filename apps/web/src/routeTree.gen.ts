@@ -10,18 +10,31 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as WorkspaceIndexRouteImport } from './routes/$workspace/index'
 import { Route as Char91_Char93DeviceRouteImport } from './routes/[_]/device'
+import { Route as Char91_Char93NoAccessRouteImport } from './routes/[_]/no-access'
 import { Route as Char91_Char93SettingsRouteImport } from './routes/[_]/settings'
 import { Route as Char91_Char93SignInRouteImport } from './routes/[_]/sign-in'
+import { Route as WorkspaceTreeSplatRouteImport } from './routes/$workspace/$tree/$'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
+  id: '/$workspace/',
+  path: '/$workspace/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const Char91_Char93DeviceRoute = Char91_Char93DeviceRouteImport.update({
   id: '/_/device',
   path: '/_/device',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const Char91_Char93NoAccessRoute = Char91_Char93NoAccessRouteImport.update({
+  id: '/_/no-access',
+  path: '/_/no-access',
   getParentRoute: () => rootRouteImport,
 } as any)
 const Char91_Char93SettingsRoute = Char91_Char93SettingsRouteImport.update({
@@ -34,39 +47,78 @@ const Char91_Char93SignInRoute = Char91_Char93SignInRouteImport.update({
   path: '/_/sign-in',
   getParentRoute: () => rootRouteImport,
 } as any)
+const WorkspaceTreeSplatRoute = WorkspaceTreeSplatRouteImport.update({
+  id: '/$workspace/$tree/$',
+  path: '/$workspace/$tree/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/no-access': typeof Char91_Char93NoAccessRoute
   '/_/settings': typeof Char91_Char93SettingsRoute
   '/_/sign-in': typeof Char91_Char93SignInRoute
+  '/$workspace/': typeof WorkspaceIndexRoute
+  '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/no-access': typeof Char91_Char93NoAccessRoute
   '/_/settings': typeof Char91_Char93SettingsRoute
   '/_/sign-in': typeof Char91_Char93SignInRoute
+  '/$workspace': typeof WorkspaceIndexRoute
+  '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/no-access': typeof Char91_Char93NoAccessRoute
   '/_/settings': typeof Char91_Char93SettingsRoute
   '/_/sign-in': typeof Char91_Char93SignInRoute
+  '/$workspace/': typeof WorkspaceIndexRoute
+  '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/_/device' | '/_/settings' | '/_/sign-in'
+  fullPaths:
+    | '/'
+    | '/_/device'
+    | '/_/no-access'
+    | '/_/settings'
+    | '/_/sign-in'
+    | '/$workspace/'
+    | '/$workspace/$tree/$'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/_/device' | '/_/settings' | '/_/sign-in'
-  id: '__root__' | '/' | '/_/device' | '/_/settings' | '/_/sign-in'
+  to:
+    | '/'
+    | '/_/device'
+    | '/_/no-access'
+    | '/_/settings'
+    | '/_/sign-in'
+    | '/$workspace'
+    | '/$workspace/$tree/$'
+  id:
+    | '__root__'
+    | '/'
+    | '/_/device'
+    | '/_/no-access'
+    | '/_/settings'
+    | '/_/sign-in'
+    | '/$workspace/'
+    | '/$workspace/$tree/$'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   Char91_Char93DeviceRoute: typeof Char91_Char93DeviceRoute
+  Char91_Char93NoAccessRoute: typeof Char91_Char93NoAccessRoute
   Char91_Char93SettingsRoute: typeof Char91_Char93SettingsRoute
   Char91_Char93SignInRoute: typeof Char91_Char93SignInRoute
+  WorkspaceIndexRoute: typeof WorkspaceIndexRoute
+  WorkspaceTreeSplatRoute: typeof WorkspaceTreeSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -78,11 +130,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$workspace/': {
+      id: '/$workspace/'
+      path: '/$workspace'
+      fullPath: '/$workspace/'
+      preLoaderRoute: typeof WorkspaceIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_/device': {
       id: '/_/device'
       path: '/_/device'
       fullPath: '/_/device'
       preLoaderRoute: typeof Char91_Char93DeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/no-access': {
+      id: '/_/no-access'
+      path: '/_/no-access'
+      fullPath: '/_/no-access'
+      preLoaderRoute: typeof Char91_Char93NoAccessRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_/settings': {
@@ -99,14 +165,24 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof Char91_Char93SignInRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$workspace/$tree/$': {
+      id: '/$workspace/$tree/$'
+      path: '/$workspace/$tree/$'
+      fullPath: '/$workspace/$tree/$'
+      preLoaderRoute: typeof WorkspaceTreeSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   Char91_Char93DeviceRoute: Char91_Char93DeviceRoute,
+  Char91_Char93NoAccessRoute: Char91_Char93NoAccessRoute,
   Char91_Char93SettingsRoute: Char91_Char93SettingsRoute,
   Char91_Char93SignInRoute: Char91_Char93SignInRoute,
+  WorkspaceIndexRoute: WorkspaceIndexRoute,
+  WorkspaceTreeSplatRoute: WorkspaceTreeSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

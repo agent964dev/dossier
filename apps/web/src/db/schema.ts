@@ -643,6 +643,73 @@ export const changeGuards = sqliteTable(
   ],
 )
 
+// Viewing pages.
+
+/**
+ * A view handle: what a tree's frames carry in their path, since a content
+ * host reads no cookie. The handle itself is never stored.
+ */
+export const viewHandles = sqliteTable(
+  'view_handles',
+  {
+    /** Hex SHA-256 of the handle. */
+    hashSha256: text('hash_sha256').primaryKey(),
+    /** Bumped when an expired handle is replaced. */
+    generation: integer('generation').notNull(),
+    userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
+    sessionId: text('session_id').references(() => session.id, {
+      onDelete: 'cascade',
+    }),
+    /** Visitors' handles. */
+    anonSessionId: text('anon_session_id'),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** 24 hours after the last renewal. */
+    expiresAt: integer('expires_at').notNull(),
+    renewedAt: integer('renewed_at').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('view_handles_session_tree_unique').on(t.sessionId, t.treeId),
+    index('view_handles_expires_idx').on(t.expiresAt),
+    check(
+      'view_handles_owner_check',
+      sql`(${t.sessionId} is null) <> (${t.anonSessionId} is null)`,
+    ),
+  ],
+)
+
+/** The authored sequences a view issued to a handle. */
+export const viewHandleSeqs = sqliteTable(
+  'view_handle_seqs',
+  {
+    handleHash: text('handle_hash')
+      .notNull()
+      .references(() => viewHandles.hashSha256, { onDelete: 'cascade' }),
+    /** A frame without write opens only these. */
+    seq: integer('seq').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.handleHash, t.seq] })],
+)
+
+/** Who opened a page, and about when they last did. */
+export const seenBy = sqliteTable(
+  'seen_by',
+  {
+    nodeId: text('node_id')
+      .notNull()
+      .references(() => nodes.id),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    /** Trails the last open by up to an hour. */
+    lastSeenAt: integer('last_seen_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.nodeId, t.userId] })],
+)
+
 /** One row per counted key, over a fixed one-minute window. */
 export const rateCounters = sqliteTable('rate_counters', {
   /** 'push:<agent key id>', 'send:<person id or anon:<session>>'. */

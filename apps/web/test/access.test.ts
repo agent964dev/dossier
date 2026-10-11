@@ -72,7 +72,7 @@ const attempt = (
   runAs(
     caller,
     Effect.gen(function* () {
-      const resolved = yield* (yield* TreeStore).resolve(ref(target))
+      const resolved = yield* (yield* TreeStore).locate(ref(target))
       return yield* (yield* Access).require(
         action,
         'missing' in resolved ? resolved : resolved.node,
@@ -87,7 +87,7 @@ const rolesOf = (caller: Caller, target: string) =>
   runAs(
     caller,
     Effect.gen(function* () {
-      const resolved = yield* (yield* TreeStore).resolve(ref(target))
+      const resolved = yield* (yield* TreeStore).locate(ref(target))
       if ('missing' in resolved) throw new Error(`missing ${target}`)
       return yield* (yield* Access).roleOn(resolved.node)
     }),
@@ -300,7 +300,7 @@ describe('who may do what on a node', () => {
     const missing = await failureAs(
       outsider,
       Effect.gen(function* () {
-        const resolved = yield* (yield* TreeStore).resolve(
+        const resolved = yield* (yield* TreeStore).locate(
           ref(at(w, 'nope.html')),
         )
         return yield* (yield* Access).require(
@@ -312,7 +312,7 @@ describe('who may do what on a node', () => {
     const hidden = await failureAs(
       outsider,
       Effect.gen(function* () {
-        const resolved = yield* (yield* TreeStore).resolve(
+        const resolved = yield* (yield* TreeStore).locate(
           ref(at(w, 'notes.txt')),
         )
         return yield* (yield* Access).require(

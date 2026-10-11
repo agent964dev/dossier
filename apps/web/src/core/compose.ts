@@ -6,6 +6,7 @@ import { Bindings } from './bindings.ts'
 import { Config, ConfigLive } from './config.ts'
 import { Files, FilesLive } from './files.ts'
 import { Limits, LimitsLive } from './limits.ts'
+import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
 import { Push, PushLive } from './push.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
@@ -23,6 +24,7 @@ export type CoreServices =
   | Push
   | Files
   | People
+  | Pages
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -43,9 +45,13 @@ export const makeLayer = (
     Layer.provideMerge(config),
   )
   const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(trees))
-  return Layer.mergeAll(SignInLive, PushLive, FilesLive, PeopleLive).pipe(
-    Layer.provideMerge(auth),
-  )
+  return Layer.mergeAll(
+    SignInLive,
+    PushLive,
+    FilesLive,
+    PeopleLive,
+    PagesLive,
+  ).pipe(Layer.provideMerge(auth))
 }
 
 export type CoreRuntime = ManagedRuntime.ManagedRuntime<CoreServices, never>

@@ -1,6 +1,31 @@
+import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
 import { defineConfig } from 'vitest/config'
+
+/**
+ * Static Assets for the test Worker: the real public/_headers and a
+ * stand-in base layer at version 'test', so tests see the headers the
+ * deployed assets get.
+ */
+const testAssets = (): string => {
+  const directory = path.join(
+    import.meta.dirname,
+    'node_modules/.cache/dossier-test-assets',
+  )
+  mkdirSync(path.join(directory, '_/base/test'), { recursive: true })
+  copyFileSync(
+    path.join(import.meta.dirname, 'public/_headers'),
+    path.join(directory, '_headers'),
+  )
+  for (const name of ['shell.js', 'client.js']) {
+    writeFileSync(
+      path.join(directory, '_/base/test', name),
+      `// the test build's stand-in ${name}\n`,
+    )
+  }
+  return directory
+}
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations(
@@ -8,7 +33,10 @@ export default defineConfig(async () => {
   )
 
   return {
-    define: { __DOSSIER_BUILD_VERSION__: JSON.stringify('test') },
+    define: {
+      __DOSSIER_BUILD_VERSION__: JSON.stringify('test'),
+      __BASE_VERSION__: JSON.stringify('test'),
+    },
     resolve: {
       alias: {
         // TanStack Start's server entry needs Vite's virtual modules; tests
@@ -29,6 +57,10 @@ export default defineConfig(async () => {
         main: './test/support/worker.ts',
         wrangler: { configPath: './wrangler.jsonc' },
         miniflare: {
+          assets: {
+            directory: testAssets(),
+            binding: 'ASSETS',
+          },
           bindings: {
             TEST_MIGRATIONS: migrations,
             PUBLIC_ORIGIN: 'https://dossier.test',

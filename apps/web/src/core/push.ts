@@ -326,7 +326,7 @@ export const PushLive: Layer.Layer<
     const writeOn = (workspace: WorkspaceRow, tree: TreeRow, path: string) =>
       Effect.gen(function* () {
         const { deepest, file } = yield* anchorOf(tree, path)
-        const resolved = yield* store.resolve({
+        const resolved = yield* store.locate({
           workspace: workspace.name,
           tree: tree.name,
           path: deepest,

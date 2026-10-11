@@ -15,7 +15,12 @@ import { Access, type Membership } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { newId } from './ids.ts'
-import type { NodeRow, TreeRow, WorkspaceRow } from './rows.ts'
+import {
+  ancestorPaths,
+  type NodeRow,
+  type TreeRow,
+  type WorkspaceRow,
+} from './rows.ts'
 import { TreeStore } from './tree-store.ts'
 
 export type TreeSharing =
@@ -53,6 +58,13 @@ export interface PeopleService {
     readonly { readonly tree: TreeRow; readonly sharing: TreeSharing }[],
     DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
+  >
+  /** Who a node is shared with, through its own shares and its folders'. */
+  readonly sharedWith: (
+    node: NodeRow,
+  ) => Effect.Effect<
+    readonly { readonly targetKind: string; readonly target: string }[],
+    DossierError<'unavailable'>
   >
 }
 
@@ -292,6 +304,28 @@ export const PeopleLive: Layer.Layer<
         return result
       })
 
-    return { mayCreateWorkspace, createWorkspace, myWorkspaces, trees }
+    const sharedWith = (node: NodeRow) =>
+      Effect.gen(function* () {
+        const paths = ancestorPaths(node.path)
+        const rows = yield* query(() =>
+          bindings.DB.prepare(
+            `select s.target_kind as targetKind, s.target from shares s
+               join nodes a on a.id = s.node_id and a.deleted_at is null
+             where s.tree_id = ? and a.path in (${paths.map(() => '?').join(', ')})
+             order by s.created_at, s.target`,
+          )
+            .bind(node.treeId, ...paths)
+            .all<{ targetKind: string; target: string }>(),
+        )
+        return rows.results
+      })
+
+    return {
+      mayCreateWorkspace,
+      createWorkspace,
+      myWorkspaces,
+      trees,
+      sharedWith,
+    }
   }),
 )

@@ -245,7 +245,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
     const roleOn = (node: NodeRow) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
-        if (caller.via.kind === 'system' || caller.via.kind === 'handle') {
+        if (caller.via.kind === 'system') return EMPTY
+        // A view handle reaches only the tree whose content host it serves.
+        if (caller.via.kind === 'handle' && caller.via.treeId !== node.treeId) {
           return EMPTY
         }
         const facts = yield* treeFacts(caller, node.treeId)
@@ -357,7 +359,10 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         const nothing: ReadableNodes = { where: sql`0` }
-        if (caller.via.kind === 'system' || caller.via.kind === 'handle') {
+        if (
+          caller.via.kind === 'system' ||
+          (caller.via.kind === 'handle' && caller.via.treeId !== treeId)
+        ) {
           return nothing
         }
         const facts = yield* treeFacts(caller, treeId)

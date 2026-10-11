@@ -13,6 +13,7 @@ import { FilesLive } from './files.ts'
 import { MeLive } from './me.ts'
 import { PushesLive } from './pushes.ts'
 import { SystemLive } from './system.ts'
+import { ViewLive } from './view.ts'
 
 export type ApiHandler = (request: Request, caller: Caller) => Promise<Response>
 
@@ -21,7 +22,14 @@ const handlers = new WeakMap<CoreRuntime, Promise<ApiHandler>>()
 const build = async (runtime: CoreRuntime): Promise<ApiHandler> => {
   const core = await runtime.runtime()
   const api = HttpApiBuilder.api(DossierApi).pipe(
-    Layer.provide([SystemLive, MeLive, DeviceLive, PushesLive, FilesLive]),
+    Layer.provide([
+      SystemLive,
+      MeLive,
+      DeviceLive,
+      PushesLive,
+      FilesLive,
+      ViewLive,
+    ]),
     Layer.provide(Layer.succeedContext(core.context)),
     // Every request passes its own caller; this one only satisfies the build.
     Layer.provide(Layer.succeed(CurrentCaller, visitor('build'))),

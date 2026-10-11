@@ -65,7 +65,7 @@ const readAs = (caller: Caller, target: string) =>
     Effect.gen(function* () {
       const store = yield* TreeStore
       const access = yield* Access
-      const resolved = yield* store.resolve(ref(target))
+      const resolved = yield* store.locate(ref(target))
       return yield* access
         .require('read', 'missing' in resolved ? resolved : resolved.node)
         .pipe(Effect.either)
@@ -96,7 +96,7 @@ describe('a push', () => {
       const roles = await runAs(
         writer,
         Effect.gen(function* () {
-          const resolved = yield* (yield* TreeStore).resolve(
+          const resolved = yield* (yield* TreeStore).locate(
             ref(`${ws.name}/acme/`),
           )
           if ('missing' in resolved) throw new Error('no root')

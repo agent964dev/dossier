@@ -1,31 +1,50 @@
 import {
   dossierError,
   isDossierError,
+  parseTarget,
   PROTOCOL,
   PROTOCOL_HEADER,
   treeIdForHost,
+  type DossierError,
+  type LinkRef,
   type TreeId,
 } from '@dossier/contracts'
 import tanstack from '@tanstack/react-start/server-entry'
 import { Cause, Effect, Exit, Option } from 'effect'
 
 import {
+  Access,
   Config,
+  CurrentCaller,
+  Pages,
   runtimeFor,
   SignIn,
+  TreeStore,
+  treeRefOf,
+  type Caller,
+  type Served,
   type CoreRuntime,
   type CoreServices,
   type DeploymentConfig,
 } from '../core/index.ts'
 import { apiHandlerFor } from './api/index.ts'
-import { callerFor, requestIdOf } from './caller.ts'
+import {
+  callerFor,
+  frameCallerFor,
+  framePathOf,
+  requestIdOf,
+} from './caller.ts'
 import {
   codeResponse,
   errorResponse,
+  frameFailure,
+  frameResponse,
   normalizeApiError,
   notFoundPage,
   plainErrorPage,
   plainNotFound,
+  redirectTo,
+  renderShell,
   withCommonHeaders,
 } from './respond.ts'
 import { screenScope, type ScreenScope } from './screens.ts'
@@ -210,10 +229,11 @@ export const serve = async (
       case 'upgrade':
         checkProtocol()
         throw dossierError('not_found')
-      case 'frame':
       case 'fonts':
       case 'legacy':
         throw dossierError('not_found')
+      case 'frame':
+        return frame()
       case 'static':
         return env.ASSETS.fetch(request)
       case 'base': {
@@ -221,39 +241,147 @@ export const serve = async (
         if (version !== config.baseVersion) return plainNotFound()
         return env.ASSETS.fetch(request)
       }
-      case 'link': {
-        const who = await caller()
-        if (who.person === null) {
-          const next = `${url.pathname}${url.search}`
-          const target = new URL('/_/sign-in', config.origin)
-          target.searchParams.set('next', next)
-          return new Response(null, {
-            status: 302,
-            headers: {
-              location: `${target.pathname}${target.search}`,
-              'cache-control': 'no-store',
-            },
-          })
-        }
-        throw dossierError('not_found')
-      }
+      case 'link':
+        return link()
       case 'screen':
-      case 'screen-call': {
-        const scope: ScreenScope = {
-          caller: await caller(),
-          runtime,
-          unavailable: false,
-        }
-        const response = await screenScope.run(scope, () =>
-          tanstack.fetch(request),
-        )
-        if (kind === 'screen' && scope.unavailable && isHtml(response)) {
-          return plainErrorPage(requestId)
-        }
-        return response
-      }
+      case 'screen-call':
+        return screen(await caller())
     }
     throw dossierError('not_found')
+  }
+
+  /** A TanStack screen, rendered as the caller. */
+  async function screen(who: Caller, status?: number): Promise<Response> {
+    const scope: ScreenScope = { caller: who, runtime, unavailable: false }
+    const response = await screenScope.run(scope, () => tanstack.fetch(request))
+    if (kind !== 'screen-call' && scope.unavailable && isHtml(response)) {
+      return plainErrorPage(requestId)
+    }
+    if (status === undefined || !isHtml(response)) return response
+    return new Response(response.body, {
+      status,
+      headers: response.headers,
+    })
+  }
+
+  /** The sign-in page, continuing to this link afterwards. */
+  function signInFirst(): Response {
+    const target = new URL('/_/sign-in', config.origin)
+    target.searchParams.set('next', `${url.pathname}${url.search}`)
+    return redirectTo(`${target.pathname}${target.search}`, 302)
+  }
+
+  /** Who may open what is decided before anything is said about a path. */
+  async function link(): Promise<Response> {
+    const who = await caller()
+    const denied = (error: DossierError) =>
+      error.code === 'sign_in_required'
+        ? signInFirst()
+        : // The one no-access page, at the asked link, for missing and
+          // unreadable alike.
+          screen(who, 404)
+    const segments = url.pathname.slice(1).split('/')
+    // `/<workspace>` and `/<workspace>/`: the workspace's home, for members.
+    if (
+      segments.length === 1 ||
+      (segments.length === 2 && segments[1] === '')
+    ) {
+      const name = segments[0] ?? ''
+      const member = await runAs(
+        who,
+        Effect.gen(function* () {
+          const store = yield* TreeStore
+          const access = yield* Access
+          return yield* access.member(yield* store.workspace(name))
+        }),
+      )
+      if (isDossierError(member)) return denied(member)
+      return redirectTo(`/?w=${encodeURIComponent(member.workspace.name)}`, 302)
+    }
+    const ref: LinkRef | null = parseTarget(url.href, config.origin)
+    if (ref === null)
+      return denied(
+        dossierError(who.person === null ? 'sign_in_required' : 'not_found'),
+      )
+    const served = await runAs(
+      who,
+      Effect.flatMap(Pages, (pages) => pages.open({ ref, wantsAgent: false })),
+    )
+    if (isDossierError(served)) {
+      if (served.code === 'unavailable') throw served
+      return denied(served)
+    }
+    // `/<workspace>/<tree>` gains its slash, once the root may be opened.
+    if (segments.length === 2) {
+      return redirectTo(`${url.pathname}/${url.search}`, 301)
+    }
+    return answer(served, who)
+  }
+
+  async function answer(served: Served, who: Caller): Promise<Response> {
+    switch (served.kind) {
+      case 'shell':
+        return renderShell(served.boot)
+      case 'listing':
+        return screen(who)
+      case 'redirect':
+        return redirectTo(served.to, served.status)
+      default:
+        throw new Error(`A link cannot answer ${served.kind}`)
+    }
+  }
+
+  /** A tree's content host: only what the view handle in the path opens. */
+  async function frame(): Promise<Response> {
+    if (host?.kind !== 'content') return frameFailure(404)
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return frameFailure(404)
+    }
+    const treeId = host.treeId
+    const path = framePathOf(url.pathname)
+    const ref = path === null ? null : treeRefOf(treeId, path.linkPath)
+    if (path === null || ref === null) return frameFailure(404)
+    try {
+      const who = await run(
+        runtime,
+        frameCallerFor(request, path.handle, treeId),
+      )
+      if (who === null) return frameFailure(404)
+      const served = await runAs(
+        who,
+        Effect.flatMap(Pages, (pages) =>
+          pages.frame({
+            treeId,
+            seq: path.seq,
+            path: ref.path,
+            folder: ref.folder,
+            range: request.headers.get('range'),
+            ifNoneMatch: request.headers.get('if-none-match'),
+          }),
+        ),
+      )
+      if (isDossierError(served)) {
+        return frameFailure(served.code === 'unavailable' ? 503 : 404)
+      }
+      return frameResponse(served)
+    } catch (error) {
+      console.error('A frame request failed', { requestId, error })
+      return frameFailure(503)
+    }
+  }
+
+  /** Runs an effect as `who`; a typed failure comes back as the value. */
+  async function runAs<A, E extends DossierError>(
+    who: Caller,
+    effect: Effect.Effect<A, E, CoreServices | CurrentCaller>,
+  ): Promise<A | E> {
+    const exit = await runtime.runPromiseExit(
+      Effect.provideService(effect, CurrentCaller, who),
+    )
+    if (Exit.isSuccess(exit)) return exit.value
+    const failure = Cause.failureOption(exit.cause)
+    if (Option.isSome(failure)) return failure.value
+    throw Cause.squash(exit.cause)
   }
 }
 

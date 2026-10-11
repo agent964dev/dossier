@@ -4,6 +4,7 @@ import { Context, Effect, Layer, Redacted } from 'effect'
 import { Bindings } from './bindings.ts'
 
 declare const __DOSSIER_BUILD_VERSION__: string | undefined
+declare const __BASE_VERSION__: string | undefined
 
 /** The deployment's settings, parsed once from the Worker's environment. */
 export interface DeploymentConfig {
@@ -39,6 +40,12 @@ const required = (env: Env, name: keyof Env): string => {
   }
   return value.trim()
 }
+
+/** The base layer's version: a hash of its built files, set by the build. */
+const baseVersion = (fallback: string): string =>
+  typeof __BASE_VERSION__ === 'string' && __BASE_VERSION__ !== ''
+    ? __BASE_VERSION__
+    : fallback
 
 const buildVersion = (): string =>
   typeof __DOSSIER_BUILD_VERSION__ === 'string' &&
@@ -83,7 +90,7 @@ export const parseConfig = (env: Env): DeploymentConfig => {
         ? { clientId, clientSecret: Redacted.make(clientSecret) }
         : null,
     buildVersion: version,
-    baseVersion: version,
+    baseVersion: baseVersion(version),
   }
 }
 

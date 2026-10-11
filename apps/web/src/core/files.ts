@@ -80,7 +80,7 @@ export const FilesLive: Layer.Layer<Files, never, TreeStore | Access> =
       const ls: FilesService['ls'] = ({ ref, depth }) =>
         readOnly(
           Effect.gen(function* () {
-            const resolved = yield* store.resolve(ref)
+            const resolved = yield* store.locate(ref)
             if ('missing' in resolved) return yield* denied(resolved)
             const granted = yield* access.require('read', resolved.node)
             const roles = yield* access.roleOn(resolved.node)
@@ -135,7 +135,7 @@ export const FilesLive: Layer.Layer<Files, never, TreeStore | Access> =
       const content: FilesService['content'] = (ref) =>
         readOnly(
           Effect.gen(function* () {
-            const resolved = yield* store.resolve(ref)
+            const resolved = yield* store.locate(ref)
             if ('missing' in resolved || resolved.kind === 'folder') {
               return yield* denied(
                 'missing' in resolved
