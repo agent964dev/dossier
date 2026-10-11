@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Storage</title>
+    <script>
+      // The first inline script reads what the last load wrote.
+      const before = localStorage.getItem('dossier-check')
+      document.documentElement.dataset.before = before ?? ''
+      localStorage.setItem('dossier-check', `acme ${Date.now()}`)
+    </script>
+  </head>
+  <body>
+    <h1>Storage</h1>
+    <p id="before"></p>
+    <script>
+      document.getElementById('before').textContent =
+        `Stored before this load: ${document.documentElement.dataset.before || 'nothing'}`
+    </script>
+  </body>
+</html>

@@ -134,7 +134,15 @@ function Meta({ first, second }: { first: ReactNode; second: string | null }) {
   )
 }
 
-function ColumnHeads({ first, second }: { first: string; second: string }) {
+function ColumnHeads({
+  name,
+  first,
+  second,
+}: {
+  name: string
+  first: string
+  second: string
+}) {
   return (
     <div
       aria-hidden
@@ -142,7 +150,7 @@ function ColumnHeads({ first, second }: { first: string; second: string }) {
     >
       <span className="size-8 shrink-0" />
       <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)] gap-4 font-mono text-[0.6875rem] tracking-[0.2em] text-neutral-500 uppercase">
-        <span>Title</span>
+        <span>{name}</span>
         <span>{first}</span>
         <span>{second}</span>
       </div>
@@ -237,7 +245,9 @@ function Listing({ view }: { view: ListingView }) {
                 id="pages-label"
                 label="Pages"
                 count={view.pages.length}
-                heads={<ColumnHeads first="Path" second="Last push" />}
+                heads={
+                  <ColumnHeads name="Title" first="Path" second="Last push" />
+                }
               >
                 {view.pages.map((page) => (
                   <li key={page.link} className={ROW}>
@@ -272,7 +282,9 @@ function Listing({ view }: { view: ListingView }) {
                 id="folders-label"
                 label="Folders"
                 count={view.folders.length}
-                heads={<ColumnHeads first="Pages" second="Last push" />}
+                heads={
+                  <ColumnHeads name="Name" first="Pages" second="Last push" />
+                }
               >
                 {view.folders.map((folder) => (
                   <li key={folder.link} className={ROW}>
@@ -307,7 +319,9 @@ function Listing({ view }: { view: ListingView }) {
                 id="files-label"
                 label="Files"
                 count={view.files.length}
-                heads={<ColumnHeads first="Kind" second="Last push" />}
+                heads={
+                  <ColumnHeads name="Name" first="Kind" second="Last push" />
+                }
               >
                 {view.files.map((file) => (
                   <li key={file.link} className={ROW}>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Probe</title>
+  </head>
+  <body>
+    <h1>Probe</h1>
+    <p>Each line is a route from this page toward the viewer's session.</p>
+    <button id="run" type="button">Run the probes</button>
+    <ol id="out"></ol>
+    <script>
+      const out = document.getElementById('out')
+      const line = (text) => {
+        const item = document.createElement('li')
+        item.textContent = text
+        out.append(item)
+      }
+      const main = JSON.parse(
+        document.getElementById('dossier-bootstrap').textContent,
+      ).origin
+      document.getElementById('run').addEventListener('click', async () => {
+        out.replaceChildren()
+        try {
+          const response = await fetch(`${main}/_/api/me`, {
+            credentials: 'include',
+          })
+          line(`api: ${response.status}`)
+        } catch (error) {
+          line(`api: refused (${error.name})`)
+        }
+        try {
+          await navigator.serviceWorker.register('./sw.js')
+          line('service worker: registered')
+        } catch (error) {
+          line(`service worker: rejected (${error.name})`)
+        }
+        try {
+          line(`top document: ${String(window.top.document.title)}`)
+        } catch (error) {
+          line(`top document: throws (${error.name})`)
+        }
+        const echo = new URLSearchParams(location.hash.slice(1)).get('echo')
+        if (echo !== null) {
+          const image = new Image()
+          image.onload = () => line('echo: loaded')
+          image.onerror = () => line('echo: requested')
+          image.src = `${echo}/pixel.png?from=probe`
+        }
+      })
+    </script>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Other</title>
+    <style>
+      html[data-dossier-embedded] .chrome {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <p class="chrome">This line shows only when the page is not embedded.</p>
+    <h1>Other</h1>
+    <p id="me">Waiting for the shell…</p>
+    <p><a href="./links">Back to the links</a></p>
+    <script>
+      window.dossier.ready.then(
+        () => {
+          const me = window.dossier.me
+          document.getElementById('me').textContent = me
+            ? `Signed in as ${me.email} (${me.role})`
+            : 'No viewer'
+        },
+        (error) => {
+          document.getElementById('me').textContent = `Not ready: ${error.code}`
+        },
+      )
+    </script>
+  </body>
+</html>

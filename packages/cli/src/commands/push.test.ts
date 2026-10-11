@@ -19,12 +19,26 @@ const FIXTURE = fileURLToPath(
   new URL('../../test/fixtures/acme', import.meta.url),
 )
 const FIXTURE_FILES = [
+  '_components/lazy.js',
+  '_components/x.js',
   '_theme.css',
-  'index.html',
+  'body.html',
+  'clip.mp4',
+  'complete.html',
+  'links.html',
   'logo.svg',
+  'module.html',
+  'nested.html',
+  'other.html',
+  'plan.html',
   'plans/index.html',
   'plans/q3.html',
+  'probe.html',
   'questions.html',
+  'storage.html',
+  'sw.js',
+  'video.html',
+  'youtube.html',
 ]
 const ENV = { DOSSIER_DEPLOYMENT: 'dossier.acme.com', DOSSIER_KEY: 'dsk_one' }
 const TREE_ID = 'acmetree000000000001'
@@ -107,13 +121,13 @@ const sequence = () =>
 
 describe('dossier push', () => {
   it('stages, uploads only the missing files, commits and prints each change', async () => {
-    const missing = [await sha('index.html'), await sha('logo.svg')]
+    const missing = [await sha('plan.html'), await sha('logo.svg')]
     const cli = await setUp(
       pushing({
         missing,
         plan: plan({
           createsTree: true,
-          added: ['index.html', 'logo.svg'],
+          added: ['plan.html', 'logo.svg'],
           changed: ['plans/q3.html'],
           deleted: ['old.html'],
           unchanged: 3,
@@ -134,7 +148,7 @@ describe('dossier push', () => {
     expect(exit).toBe(0)
     expect(cli.stdout()).toBe(
       [
-        'added    index.html',
+        'added    plan.html',
         'added    logo.svg',
         'changed  plans/q3.html',
         'deleted  old.html',
@@ -186,14 +200,14 @@ describe('dossier push', () => {
 
   it('prints the JSON value with --json', async () => {
     const cli = await setUp(
-      pushing({ plan: plan({ added: ['index.html'], unchanged: 5 }) }),
+      pushing({ plan: plan({ added: ['plan.html'], unchanged: 5 }) }),
     )
 
     expect(await cli.run(['push', FIXTURE, 'agent964/acme', '--json'])).toBe(0)
     expect(JSON.parse(cli.stdout())).toEqual({
       push: 3,
       link: LINK,
-      added: ['index.html'],
+      added: ['plan.html'],
       changed: [],
       deleted: [],
       ignored: [],
@@ -276,8 +290,8 @@ describe('dossier push', () => {
   it('stages a dry run and never uploads or commits', async () => {
     const cli = await setUp(
       pushing({
-        missing: [await sha('index.html')],
-        plan: plan({ added: ['index.html'] }),
+        missing: [await sha('plan.html')],
+        plan: plan({ added: ['plan.html'] }),
       }),
     )
 
@@ -285,7 +299,7 @@ describe('dossier push', () => {
       0,
     )
     expect(cli.stdout()).toBe(
-      `added    index.html\nDry run: nothing was published. ${LINK}\n`,
+      `added    plan.html\nDry run: nothing was published. ${LINK}\n`,
     )
     expect(sequence()).toEqual(['POST /_/api/pushes'])
     expect(requests[0]?.body).toMatchObject({ dryRun: true })
