@@ -230,11 +230,36 @@ export class FilesGroup extends HttpApiGroup.make('files')
       .addSuccess(HttpApiSchema.Uint8Array()),
   ) {}
 
+export const ViewGrantSchema = Schema.Struct({
+  /** Goes in the frame's path on the tree's content host. */
+  handle: Schema.String,
+  expiresAt: Schema.String,
+  /** The tree's authored sequence the frame opens. */
+  seq: AuthoredSeq,
+  role: Schema.Literal('read', 'respond', 'write'),
+})
+export type ViewGrant = typeof ViewGrantSchema.Type
+
+export class ViewGroup extends HttpApiGroup.make('view')
+  // not_found | sign_in_required · browser callers only
+  .add(
+    HttpApiEndpoint.post('view', '/view')
+      .setPayload(
+        Schema.Struct({
+          tree: TreeId,
+          /** The link's path inside the tree: '', 'questions/', 'plan'. */
+          path: Schema.String,
+        }),
+      )
+      .addSuccess(ViewGrantSchema),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
   .add(DeviceGroup)
   .add(PushesGroup)
   .add(FilesGroup)
+  .add(ViewGroup)
   .addError(DossierError)
   .prefix('/_/api') {}
