@@ -26,7 +26,7 @@ const accountIdOf = async (sub: string) =>
 const historyOf = async (userId: string) =>
   (
     await rows<{ kind: string; detail_json: string }>(
-      'select kind, detail_json from person_history where user_id = ? order by created_at',
+      'select kind, detail_json from person_history where user_id = ? order by created_at, rowid',
       userId,
     )
   ).map((row) => ({

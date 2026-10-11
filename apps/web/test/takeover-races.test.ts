@@ -78,6 +78,20 @@ describe('a takeover racing the account it detaches', () => {
     expect(armed).toBe(false)
     expect(await accountIdOf(lapsed.sub)).toBeUndefined()
     expect((await me(late)).status).toBe(401)
+    // Better Auth's own session routes do not accept it either.
+    const session = await late.fetch('/_/auth/get-session', { purpose: 'read' })
+    expect(await session.json()).toBeNull()
+    const rename = await late.postAuth('/_/auth/update-user', {
+      name: 'not yours',
+    })
+    expect(rename.status).toBe(401)
+    expect(
+      await rows(
+        'select 1 from "user" where email = ? and name = ?',
+        lapsed.email,
+        'not yours',
+      ),
+    ).toEqual([])
   })
 
   it('refuses a settings key asked for after the takeover ended the session', async () => {
@@ -119,6 +133,91 @@ describe('a takeover racing the account it detaches', () => {
     )
     expect(refused.code).toBe('sign_in_required')
     expect(await keyNamed('racing takeover', lapsed.email)).toEqual([])
+  })
+})
+
+/** An Auth whose sign-in, for `sub`, first lets `meanwhile` run. */
+const pausing = (sub: string, meanwhile: () => Promise<void>) => {
+  let armed = true
+  return Layer.effect(
+    Auth,
+    Effect.gen(function* () {
+      const bindings = yield* Bindings
+      const config = yield* Config
+      return (hooks) =>
+        makeAuthPort(
+          bindings,
+          config,
+          {
+            ...hooks,
+            afterSignIn: async (signIn) => {
+              if (armed && signIn.claims.sub === sub) {
+                armed = false
+                await meanwhile()
+              }
+              await hooks.afterSignIn(signIn)
+            },
+          },
+          [testUtils()],
+        )
+    }),
+  )
+}
+
+describe('takeovers happen only when an account joins', () => {
+  it('leaves a joining Workspace account alone when another vouched account signs in meanwhile', async () => {
+    const first = fresh('acme.test', 'vouched')
+    const firstIdentity = { ...first, hd: 'acme.test' }
+    await signedIn(firstIdentity)
+    const joining = {
+      sub: `${first.sub}-second`,
+      email: first.email,
+      hd: 'acme.test',
+    }
+    harness.use(
+      testRuntime({
+        overrides: {
+          auth: pausing(joining.sub, async () => {
+            await new Browser().signIn(firstIdentity)
+          }),
+        },
+      }),
+    )
+    const joiner = new Browser()
+    await joiner.signIn(joining)
+    expect(await accountIdOf(joining.sub)).toBeDefined()
+    expect(await accountIdOf(first.sub)).toBeDefined()
+    expect((await me(joiner)).status).toBe(200)
+    const kinds = await rows<{ kind: string }>(
+      `select kind from person_history h join "user" u on u.id = h.user_id where u.email = ?`,
+      first.email,
+    )
+    expect(kinds.map((row) => row.kind)).toEqual(['linked'])
+  })
+
+  it('does not detach an account that later loses its vouching when another account signs in', async () => {
+    const first = fresh('acme.test', 'keeps')
+    const firstIdentity = { ...first, hd: 'acme.test' }
+    await signedIn(firstIdentity)
+    const second = {
+      sub: `${first.sub}-second`,
+      email: first.email,
+      hd: 'acme.test',
+    }
+    await signedIn(second)
+    // The second account comes back without its hosted domain.
+    const lapsedBrowser = await signedIn({
+      sub: second.sub,
+      email: second.email,
+    })
+    const [metadata] = await rows<{ email_authority: string }>(
+      'select email_authority from google_accounts where account_id = ?',
+      await accountIdOf(second.sub),
+    )
+    expect(metadata?.email_authority).toBe('none')
+    await signedIn(firstIdentity)
+    expect(await accountIdOf(second.sub)).toBeDefined()
+    expect((await me(lapsedBrowser)).status).toBe(200)
   })
 })
 

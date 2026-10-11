@@ -58,12 +58,6 @@ export interface AuthHooks {
     readonly claims: GoogleClaims
     readonly existingUserId: string | null
   }) => Promise<AccountDecision>
-  /** Runs after a new Google account joined a person who already existed. */
-  readonly afterLink: (i: {
-    readonly userId: string
-    readonly accountId: string
-    readonly claims: GoogleClaims
-  }) => Promise<void>
   /** Runs after a Google sign-in, before its session is written. */
   readonly afterSignIn: (i: {
     readonly userId: string
@@ -460,24 +454,6 @@ export const authOptions = (
             const keepEmail = scopes.getStore()?.keepEmail
             if (keepEmail === undefined || !('email' in data)) return
             return { data: { ...data, email: keepEmail } }
-          },
-        },
-      },
-      account: {
-        create: {
-          after: async (account) => {
-            const scope = scopes.getStore()
-            if (
-              scope?.action !== 'link-account' ||
-              scope.claims === undefined ||
-              account.providerId !== 'google'
-            )
-              return
-            await hooks.afterLink({
-              userId: account.userId,
-              accountId: account.id,
-              claims: scope.claims,
-            })
           },
         },
       },

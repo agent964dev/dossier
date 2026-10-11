@@ -12,7 +12,7 @@ import {
   type PersonId,
   type SessionId,
 } from '@dossier/contracts'
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, notExists } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer, Redacted } from 'effect'
 
 import { db, schema } from '../db/client.ts'
@@ -307,21 +307,6 @@ export const SignInLive: Layer.Layer<
           : { allow: true }
       },
 
-      // The takeover itself runs with the sign-in's own writes (afterSignIn),
-      // so a takeover that fails is carried out at the next sign-in.
-      afterLink: async ({ userId, accountId }) => {
-        await database
-          .insert(schema.personHistory)
-          .values({
-            id: newId(),
-            userId,
-            kind: 'linked',
-            detailJson: JSON.stringify({ accountId }),
-            createdAt: now(),
-          })
-          .run()
-      },
-
       afterSignIn: async ({
         userId,
         accountId,
@@ -332,20 +317,40 @@ export const SignInLive: Layer.Layer<
         const at = now()
         const authority = authorityOf(claims)
         const seedSuperAdmin = newUser && config.superAdmins.has(claims.email)
-        // An account Google vouches for takes over every other account of
-        // the person Google does not, at every sign-in, so nothing is left
-        // behind if an earlier takeover failed.
-        const others = (await accountsOf(userId)).filter(
-          (a) => a.accountId !== accountId,
+        // An account's join is finished once its Google details are recorded,
+        // which happens in this batch together with the join's takeover. So a
+        // takeover runs only while the signing-in account is joining, and a
+        // join whose batch failed is finished at that account's next sign-in.
+        const accounts = await accountsOf(userId)
+        const joining =
+          !newUser &&
+          !accounts.some(
+            (a) => a.accountId === accountId && a.authority !== null,
+          )
+        // Another account still joining has no details yet; it is not lapsed.
+        const recorded = accounts.filter(
+          (a) => a.accountId !== accountId && a.authority !== null,
         )
         const decision = decideLink(
           authority,
-          others.map((a) => ({
+          recorded.map((a) => ({
             accountId: a.accountId,
             authority: toAuthority(a.authority),
           })),
         )
-        const detached = decision.kind === 'link' ? [...decision.takeover] : []
+        const detached =
+          joining && decision.kind === 'link' ? [...decision.takeover] : []
+        // Checked again inside the batch: only accounts still recorded as
+        // lapsed lose what they hold.
+        const stillLapsed = database
+          .select({ id: schema.googleAccounts.accountId })
+          .from(schema.googleAccounts)
+          .where(
+            and(
+              inArray(schema.googleAccounts.accountId, detached),
+              eq(schema.googleAccounts.emailAuthority, 'none'),
+            ),
+          )
         const takeover =
           detached.length === 0
             ? []
@@ -355,7 +360,7 @@ export const SignInLive: Layer.Layer<
                   .where(
                     and(
                       eq(schema.session.userId, userId),
-                      inArray(schema.session.googleAccountId, detached),
+                      inArray(schema.session.googleAccountId, stillLapsed),
                     ),
                   ),
                 database
@@ -364,7 +369,7 @@ export const SignInLive: Layer.Layer<
                   .where(
                     and(
                       eq(schema.agentKeys.userId, userId),
-                      inArray(schema.agentKeys.googleAccountId, detached),
+                      inArray(schema.agentKeys.googleAccountId, stillLapsed),
                       isNull(schema.agentKeys.revokedAt),
                     ),
                   ),
@@ -375,22 +380,53 @@ export const SignInLive: Layer.Layer<
                     and(
                       inArray(
                         schema.deviceCode.approvedByGoogleAccountId,
-                        detached,
+                        stillLapsed,
                       ),
                       eq(schema.deviceCode.status, 'approved'),
                     ),
                   ),
                 database
-                  .delete(schema.googleAccounts)
-                  .where(inArray(schema.googleAccounts.accountId, detached)),
-                database
                   .delete(schema.account)
                   .where(
                     and(
                       eq(schema.account.userId, userId),
-                      inArray(schema.account.id, detached),
+                      inArray(schema.account.id, stillLapsed),
                     ),
                   ),
+                database
+                  .delete(schema.googleAccounts)
+                  .where(
+                    and(
+                      inArray(schema.googleAccounts.accountId, detached),
+                      notExists(
+                        database
+                          .select({ id: schema.account.id })
+                          .from(schema.account)
+                          .where(
+                            eq(
+                              schema.account.id,
+                              schema.googleAccounts.accountId,
+                            ),
+                          ),
+                      ),
+                    ),
+                  ),
+              ]
+        const history = [
+          ...(joining && recorded.length > 0
+            ? [
+                database.insert(schema.personHistory).values({
+                  id: newId(),
+                  userId,
+                  kind: 'linked',
+                  detailJson: JSON.stringify({ accountId }),
+                  createdAt: at,
+                }),
+              ]
+            : []),
+          ...(detached.length === 0
+            ? []
+            : [
                 database.insert(schema.personHistory).values({
                   id: newId(),
                   userId,
@@ -398,7 +434,8 @@ export const SignInLive: Layer.Layer<
                   detailJson: JSON.stringify({ by: accountId, detached }),
                   createdAt: at,
                 }),
-              ]
+              ]),
+        ]
         // One batch: if any of it fails, Better Auth writes no session.
         await database.batch([
           database
@@ -420,6 +457,7 @@ export const SignInLive: Layer.Layer<
               },
             }),
           ...takeover,
+          ...history,
           database
             .insert(schema.people)
             .values({
