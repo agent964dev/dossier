@@ -431,6 +431,7 @@ export const PushLive: Layer.Layer<
         }
         let total = 0
         const manifest = new Map<string, Sha256>()
+        const sizeOf = new Map<string, number>()
         const problems: PushProblem[] = []
         for (const file of i.files) {
           if (file.size > limit.fileBytes) {
@@ -459,6 +460,7 @@ export const PushLive: Layer.Layer<
           }
           problems.push(...pathProblems(full))
           manifest.set(full, file.sha256)
+          sizeOf.set(full, file.size)
         }
         if (total > limit.pushBytes) {
           return yield* Effect.fail(
@@ -524,7 +526,7 @@ export const PushLive: Layer.Layer<
             name: nameOf(path),
             depth: depthOf(path),
             sha256,
-            size: i.files.find((f) => join(target.path, f.path) === path)?.size,
+            size: sizeOf.get(path) ?? 0,
             type: contentTypeOf(path),
           }))
         const folderPaths = new Set<string>()

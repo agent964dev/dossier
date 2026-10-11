@@ -351,7 +351,7 @@ function AgentKeys({
                 <p className="truncate text-[0.9375rem] text-neutral-50">
                   {key.name}
                 </p>
-                <p className="font-mono text-xs break-all text-neutral-500">
+                <p className="font-mono text-xs wrap-anywhere text-neutral-500">
                   {keyDetails(key, now)}
                 </p>
               </div>
