@@ -221,6 +221,100 @@ describe('takeovers happen only when an account joins', () => {
   })
 })
 
+describe('a join paused before its batch', () => {
+  const historyOf = async (email: string) =>
+    (
+      await rows<{ kind: string; detail_json: string }>(
+        `select h.kind, h.detail_json from person_history h join "user" u on u.id = h.user_id
+           where u.email = ? order by h.created_at, h.rowid`,
+        email,
+      )
+    ).map((row) => ({
+      kind: row.kind,
+      detail: JSON.parse(row.detail_json) as unknown,
+    }))
+
+  /** Serves `body` with B's first sign-in paused just before its batch while `meanwhile` runs. */
+  const pausedJoin = (meanwhile: () => Promise<void>) =>
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => /insert into "?google_accounts/.test(sql),
+            async () => {
+              harness.reset()
+              await meanwhile()
+            },
+          ),
+        },
+      }),
+    )
+
+  it('does nothing when another sign-in finished the same join meanwhile', async () => {
+    const lapsed = fresh('acme.test', 'paused')
+    await signedIn(lapsed)
+    const vouched = { ...lapsed, hd: 'acme.test' }
+    const joining = {
+      sub: `${lapsed.sub}-join`,
+      email: lapsed.email,
+      hd: 'acme.test',
+    }
+    pausedJoin(async () => {
+      await signedIn(vouched) // the first account regains its vouching
+      await signedIn(joining) // a second sign-in finishes the join
+      await signedIn(lapsed) // the first account loses its vouching again
+    })
+    await new Browser().signIn(joining)
+    harness.reset()
+    expect(await accountIdOf(lapsed.sub)).toBeDefined()
+    expect((await historyOf(lapsed.email)).map((h) => h.kind)).toEqual([
+      'linked',
+    ])
+  })
+
+  it('records only the accounts the takeover actually detached', async () => {
+    const lapsed = fresh('acme.test', 'regains')
+    await signedIn(lapsed)
+    const joining = {
+      sub: `${lapsed.sub}-join`,
+      email: lapsed.email,
+      hd: 'acme.test',
+    }
+    pausedJoin(async () => {
+      await signedIn({ ...lapsed, hd: 'acme.test' })
+    })
+    await new Browser().signIn(joining)
+    harness.reset()
+    expect(await accountIdOf(lapsed.sub)).toBeDefined()
+    expect((await historyOf(lapsed.email)).map((h) => h.kind)).toEqual([
+      'linked',
+    ])
+  })
+
+  it('records the detached accounts of a takeover that happens', async () => {
+    const lapsed = fresh('acme.test', 'detached')
+    await signedIn(lapsed)
+    const lapsedAccount = await accountIdOf(lapsed.sub)
+    const joining = {
+      sub: `${lapsed.sub}-join`,
+      email: lapsed.email,
+      hd: 'acme.test',
+    }
+    await signedIn(joining)
+    expect(await historyOf(lapsed.email)).toEqual([
+      { kind: 'linked', detail: { accountId: await accountIdOf(joining.sub) } },
+      {
+        kind: 'takeover',
+        detail: {
+          by: await accountIdOf(joining.sub),
+          detached: [lapsedAccount],
+        },
+      },
+    ])
+  })
+})
+
 describe('a takeover that fails partway', () => {
   it('is carried out at the owner’s next sign-in', async () => {
     const { lapsed, owner } = lapsedAndOwner()
@@ -229,7 +323,7 @@ describe('a takeover that fails partway', () => {
       testRuntime({
         env: {
           DB: failingStatements(env.DB, (sql) =>
-            /delete from "account"/.test(sql),
+            /delete from "?account"? /.test(sql),
           ),
         },
       }),

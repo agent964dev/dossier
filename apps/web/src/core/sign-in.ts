@@ -12,7 +12,7 @@ import {
   type PersonId,
   type SessionId,
 } from '@dossier/contracts'
-import { and, desc, eq, inArray, isNull, notExists } from 'drizzle-orm'
+import { and, desc, eq, isNull } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer, Redacted } from 'effect'
 
 import { db, schema } from '../db/client.ts'
@@ -317,177 +317,114 @@ export const SignInLive: Layer.Layer<
         const at = now()
         const authority = authorityOf(claims)
         const seedSuperAdmin = newUser && config.superAdmins.has(claims.email)
+        const DB = bindings.DB
         // An account's join is finished once its Google details are recorded,
-        // which happens in this batch together with the join's takeover. So a
-        // takeover runs only while the signing-in account is joining, and a
-        // join whose batch failed is finished at that account's next sign-in.
-        const accounts = await accountsOf(userId)
-        const joining =
-          !newUser &&
-          !accounts.some(
-            (a) => a.accountId === accountId && a.authority !== null,
-          )
-        // Another account still joining has no details yet; it is not lapsed.
-        const recorded = accounts.filter(
-          (a) => a.accountId !== accountId && a.authority !== null,
-        )
-        const decision = decideLink(
-          authority,
-          recorded.map((a) => ({
-            accountId: a.accountId,
-            authority: toAuthority(a.authority),
-          })),
-        )
-        const detached =
-          joining && decision.kind === 'link' ? [...decision.takeover] : []
-        // Checked again inside the batch: only accounts still recorded as
-        // lapsed lose what they hold.
-        const stillLapsed = database
+        // which happens at the end of this batch. Every join statement below
+        // checks, inside the batch, that the join is still unfinished, so a
+        // takeover runs only while the account is joining, at most once, and
+        // a join whose batch failed is finished at the account's next sign-in.
+        // Reading first only skips the join statements for accounts whose
+        // join finished long ago: details are never removed from an account.
+        const own = await database
           .select({ id: schema.googleAccounts.accountId })
           .from(schema.googleAccounts)
-          .where(
-            and(
-              inArray(schema.googleAccounts.accountId, detached),
-              eq(schema.googleAccounts.emailAuthority, 'none'),
-            ),
-          )
-        const takeover =
-          detached.length === 0
-            ? []
-            : [
-                database
-                  .delete(schema.session)
-                  .where(
-                    and(
-                      eq(schema.session.userId, userId),
-                      inArray(schema.session.googleAccountId, stillLapsed),
+          .where(eq(schema.googleAccounts.accountId, accountId))
+          .get()
+        const maybeJoining = !newUser && own === undefined
+        const unfinished =
+          'not exists (select 1 from google_accounts where account_id = ?1)'
+        // The person's other accounts with recorded details Google does not
+        // vouch for now; an account still joining has none and is not lapsed.
+        const lapsed = `select g.account_id from google_accounts g
+          join account a on a.id = g.account_id
+          where a.user_id = ?2 and a.id <> ?1 and g.email_authority = 'none'`
+        const joinStatements = !maybeJoining
+          ? []
+          : [
+              // Joining a person who has other accounts is recorded once.
+              DB.prepare(
+                `insert into person_history (id, user_id, kind, detail_json, created_at)
+                 select ?3, ?2, 'linked', ?4, ?5
+                 where ${unfinished} and exists (
+                   select 1 from google_accounts g join account a on a.id = g.account_id
+                   where a.user_id = ?2 and a.id <> ?1)`,
+              ).bind(
+                accountId,
+                userId,
+                newId(),
+                JSON.stringify({ accountId }),
+                at,
+              ),
+              // An account Google vouches for takes over the lapsed ones.
+              ...(decideLink(authority, []).kind !== 'link'
+                ? []
+                : [
+                    // The history names exactly the accounts detached below.
+                    DB.prepare(
+                      `insert into person_history (id, user_id, kind, detail_json, created_at)
+                       select ?3, ?2, 'takeover',
+                         json_object('by', ?1, 'detached', json_group_array(account_id)), ?4
+                       from (${lapsed}) where ${unfinished} having count(*) > 0`,
+                    ).bind(accountId, userId, newId(), at),
+                    DB.prepare(
+                      `delete from session where user_id = ?2
+                         and google_account_id in (${lapsed}) and ${unfinished}`,
+                    ).bind(accountId, userId),
+                    DB.prepare(
+                      `update agent_keys set revoked_at = ?3 where user_id = ?2
+                         and google_account_id in (${lapsed}) and revoked_at is null
+                         and ${unfinished}`,
+                    ).bind(accountId, userId, at),
+                    DB.prepare(
+                      `update device_code set status = 'denied' where status = 'approved'
+                         and approved_by_google_account_id in (${lapsed}) and ${unfinished}`,
+                    ).bind(accountId, userId),
+                    DB.prepare(
+                      `delete from account where user_id = ?2 and id in (${lapsed})
+                         and ${unfinished}`,
+                    ).bind(accountId, userId),
+                    DB.prepare(
+                      `delete from google_accounts where not exists (
+                         select 1 from account where account.id = google_accounts.account_id)`,
                     ),
-                  ),
-                database
-                  .update(schema.agentKeys)
-                  .set({ revokedAt: at })
-                  .where(
-                    and(
-                      eq(schema.agentKeys.userId, userId),
-                      inArray(schema.agentKeys.googleAccountId, stillLapsed),
-                      isNull(schema.agentKeys.revokedAt),
-                    ),
-                  ),
-                database
-                  .update(schema.deviceCode)
-                  .set({ status: 'denied' })
-                  .where(
-                    and(
-                      inArray(
-                        schema.deviceCode.approvedByGoogleAccountId,
-                        stillLapsed,
-                      ),
-                      eq(schema.deviceCode.status, 'approved'),
-                    ),
-                  ),
-                database
-                  .delete(schema.account)
-                  .where(
-                    and(
-                      eq(schema.account.userId, userId),
-                      inArray(schema.account.id, stillLapsed),
-                    ),
-                  ),
-                database
-                  .delete(schema.googleAccounts)
-                  .where(
-                    and(
-                      inArray(schema.googleAccounts.accountId, detached),
-                      notExists(
-                        database
-                          .select({ id: schema.account.id })
-                          .from(schema.account)
-                          .where(
-                            eq(
-                              schema.account.id,
-                              schema.googleAccounts.accountId,
-                            ),
-                          ),
-                      ),
-                    ),
-                  ),
-              ]
-        const history = [
-          ...(joining && recorded.length > 0
-            ? [
-                database.insert(schema.personHistory).values({
-                  id: newId(),
-                  userId,
-                  kind: 'linked',
-                  detailJson: JSON.stringify({ accountId }),
-                  createdAt: at,
-                }),
-              ]
-            : []),
-          ...(detached.length === 0
-            ? []
-            : [
-                database.insert(schema.personHistory).values({
-                  id: newId(),
-                  userId,
-                  kind: 'takeover',
-                  detailJson: JSON.stringify({ by: accountId, detached }),
-                  createdAt: at,
-                }),
-              ]),
-        ]
+                  ]),
+            ]
         // One batch: if any of it fails, Better Auth writes no session.
-        await database.batch([
-          database
-            .insert(schema.googleAccounts)
-            .values({
-              accountId,
-              email: claims.email,
-              emailAuthority: authority,
-              hostedDomain: claims.hd ?? null,
-              observedAt: at,
-            })
-            .onConflictDoUpdate({
-              target: schema.googleAccounts.accountId,
-              set: {
-                email: claims.email,
-                emailAuthority: authority,
-                hostedDomain: claims.hd ?? null,
-                observedAt: at,
-              },
-            }),
-          ...takeover,
-          ...history,
-          database
-            .insert(schema.people)
-            .values({
-              userId,
-              emailAuthority: authority,
-              firstSignInAt: at,
-              lastSignInAt: at,
-            })
-            .onConflictDoUpdate({
-              target: schema.people.userId,
-              set: { emailAuthority: authority, lastSignInAt: at },
-            }),
+        await DB.batch([
+          ...joinStatements,
+          DB.prepare(
+            `insert into google_accounts (account_id, email, email_authority, hosted_domain, observed_at)
+             values (?1, ?2, ?3, ?4, ?5)
+             on conflict (account_id) do update set email = excluded.email,
+               email_authority = excluded.email_authority,
+               hosted_domain = excluded.hosted_domain, observed_at = excluded.observed_at`,
+          ).bind(accountId, claims.email, authority, claims.hd ?? null, at),
+          DB.prepare(
+            `insert into people (user_id, email_authority, first_sign_in_at, last_sign_in_at)
+             values (?1, ?2, ?3, ?3)
+             on conflict (user_id) do update set email_authority = excluded.email_authority,
+               last_sign_in_at = excluded.last_sign_in_at`,
+          ).bind(userId, authority, at),
           ...(seedSuperAdmin
             ? [
-                database
-                  .insert(schema.superAdmins)
-                  .values({ userId, addedBy: null, createdAt: at })
-                  .onConflictDoNothing(),
+                DB.prepare(
+                  `insert into super_admins (user_id, added_by, created_at)
+                   values (?, null, ?) on conflict (user_id) do nothing`,
+                ).bind(userId, at),
               ]
             : []),
           ...(emailKept === null
             ? []
             : [
-                database.insert(schema.personHistory).values({
-                  id: newId(),
+                DB.prepare(
+                  `insert into person_history (id, user_id, kind, detail_json, created_at)
+                   values (?, ?, 'email_kept', ?, ?)`,
+                ).bind(
+                  newId(),
                   userId,
-                  kind: 'email_kept',
-                  detailJson: JSON.stringify({ accountId, ...emailKept }),
-                  createdAt: at,
-                }),
+                  JSON.stringify({ accountId, ...emailKept }),
+                  at,
+                ),
               ]),
         ])
       },
