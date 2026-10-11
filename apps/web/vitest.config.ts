@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
-import { configDefaults, defineConfig } from 'vitest/config'
+import { defineConfig } from 'vitest/config'
 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations(
@@ -8,28 +8,43 @@ export default defineConfig(async () => {
   )
 
   return {
-    // The Cloudflare Vitest pool loads the custom Worker entry without the
-    // TanStack Vite plugin that provides its virtual server-entry imports.
-    // Alias only that dependency; the Worker router and Effect handler remain real.
+    define: { __DOSSIER_BUILD_VERSION__: JSON.stringify('test') },
     resolve: {
       alias: {
+        // TanStack Start's server entry needs Vite's virtual modules; tests
+        // render screens through a stand-in that calls the real runScreen.
         '@tanstack/react-start/server-entry': path.join(
           import.meta.dirname,
-          'test/tanstack-server-entry.stub.ts',
+          'test/support/screens.ts',
+        ),
+        '@tanstack/react-start/server': path.join(
+          import.meta.dirname,
+          'test/support/start-server.ts',
         ),
       },
     },
     plugins: [
       cloudflareTest({
+        // The test entry serves through the real edge with the stand-in Google.
+        main: './test/support/worker.ts',
         wrangler: { configPath: './wrangler.jsonc' },
-        miniflare: { bindings: { TEST_MIGRATIONS: migrations } },
+        miniflare: {
+          bindings: {
+            TEST_MIGRATIONS: migrations,
+            PUBLIC_ORIGIN: 'https://dossier.test',
+            CONTENT_HOST: '{tree}.content.test',
+            DEPLOYMENT_NAME: 'dossier.test',
+            SUPER_ADMINS: 'root@example.com, Chief@Example.com',
+            BETTER_AUTH_SECRET: 'test-secret-0123456789abcdef0123456789abcdef',
+            HANDLE_SECRET: 'test-handle-secret-0123456789abcdef',
+            GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com',
+            GOOGLE_CLIENT_SECRET: 'test-client-secret',
+          },
+        },
       }),
     ],
     test: {
-      // The Playwright suite lives under test/browser and runs in Chromium
-      // through `bun run test:browser`, not in the workerd pool.
-      exclude: [...configDefaults.exclude, 'test/browser/**'],
-      setupFiles: ['./test/apply-migrations.ts'],
+      setupFiles: ['./test/support/setup.ts'],
       // workerd plus D1 migrations per file is slow on shared CI runners.
       testTimeout: 30_000,
       hookTimeout: 60_000,

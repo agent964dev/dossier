@@ -1,229 +1,102 @@
-import { createFileRoute, redirect } from '@tanstack/react-router'
-import { ArrowRight, Terminal } from 'lucide-react'
-import { Atmosphere } from '../components/atmosphere'
-import { BrandMark } from '../components/brand-mark'
-import { CopyButton } from '../components/copy-button'
-import { HealthStatus } from '../components/health-status'
-import { Badge } from '../components/ui/badge'
+import { createFileRoute, Link } from '@tanstack/react-router'
+import { Info } from 'lucide-react'
+import { useState } from 'react'
+
+import { AppHeader } from '../components/app-header'
 import { Button } from '../components/ui/button'
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from '../components/ui/card'
-import { peekSession } from '../server/account'
+import { signOut, startGoogleSignIn } from '../lib/auth-client'
+import { homeView, type HomeView } from '../server/home'
+import { isScreenFailure } from '../server/failure'
 
 export const Route = createFileRoute('/')({
-  // Signed in already? The landing page has nothing to say — go to the work.
   loader: async () => {
-    const session = await peekSession()
-    if (session.signedIn) throw redirect({ to: '/dashboard' })
+    const view = await homeView()
+    if (isScreenFailure(view)) throw new Error(view.error.message)
+    return view
   },
-  component: HomePage,
+  head: ({ loaderData }) => ({
+    meta: [{ title: loaderData?.deployment ?? 'Dossier' }],
+  }),
+  component: HomeScreen,
 })
 
-const AUTH_COMMAND = 'bunx @agent964/dossier auth login'
+function HomeScreen() {
+  const view = Route.useLoaderData()
+  return view.me === null ? (
+    <FrontPage deployment={view.deployment} />
+  ) : (
+    <Home view={view} me={view.me} />
+  )
+}
 
-const STEPS = [
-  {
-    n: '01',
-    title: 'Authenticate',
-    body: 'Opens sign-in in your browser and stores a scoped key on this machine.',
-  },
-  {
-    n: '02',
-    title: 'Upload',
-    body: 'One command returns a permanent link and a version number.',
-  },
-  {
-    n: '03',
-    title: 'Share',
-    body: 'Hand the link to a teammate, or keep it to you and the admins.',
-  },
-] as const
-
-const PROPERTIES = [
-  {
-    label: 'Versioned',
-    body: 'Every upload adds a version. Nothing is overwritten, and any two can be compared.',
-  },
-  {
-    label: 'Addressable',
-    body: 'Each document keeps one permanent link, with its own tree of child documents.',
-  },
-  {
-    label: 'Scoped',
-    body: 'Public, team, or private — chosen per document, inherited down the tree.',
-  },
-  {
-    label: 'Recoverable',
-    body: 'Deleting archives the whole subtree, authors included. Restoring brings it back.',
-  },
-] as const
-
-function HomePage() {
+function FrontPage({ deployment }: { deployment: string }) {
   return (
-    <main className="relative isolate flex min-h-dvh flex-col overflow-x-hidden">
-      <Atmosphere />
-
-      <header className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-5 py-5 sm:px-8 sm:py-6">
-        <a
-          href="/"
-          className="group flex items-center gap-2.5 rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-        >
-          <BrandMark className="mark-glow size-[22px] text-brand-300" />
-          <span className="font-clash text-[1.0625rem] font-semibold tracking-[-0.015em] text-neutral-50">
-            dossier
-          </span>
-          <span className="text-micro-lg hidden border-l border-border pl-2.5 text-neutral-500 sm:inline">
-            agent964
-          </span>
-        </a>
-        <HealthStatus />
-      </header>
-
-      <section className="mx-auto w-full max-w-6xl px-5 pt-8 pb-12 sm:px-8 sm:pt-12 lg:pt-14 lg:pb-16">
-        <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-12 lg:gap-14">
-          <div className="min-w-0 lg:col-span-7">
-            <div className="flex items-center gap-2.5">
-              <Badge variant="accent">Invite only</Badge>
-              <span className="text-micro-lg text-neutral-500">
-                Agent964 workspace
-              </span>
-            </div>
-
-            <h1 className="font-clash mt-6 text-[2.125rem] leading-[1.05] font-semibold tracking-[-0.035em] text-balance text-neutral-50 sm:text-5xl lg:text-[3.75rem]">
-              Everything your agents write, filed.
-            </h1>
-
-            <p className="mt-5 max-w-xl text-base leading-body text-neutral-400 sm:text-lg">
-              dossier is a private publishing workspace: an agent uploads a
-              document, every version is kept, and each one gets a permanent
-              link your team can open.
-            </p>
-
-            <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Button asChild size="lg" className="w-full sm:w-auto">
-                <a href="/sign-in">
-                  Sign in
-                  <ArrowRight aria-hidden />
-                </a>
-              </Button>
-              <Button
-                asChild
-                variant="outline"
-                size="lg"
-                className="w-full sm:w-auto"
-              >
-                <a href="#cli">Set up the CLI</a>
-              </Button>
-            </div>
-
-            <p className="text-micro-lg mt-5 text-neutral-500">
-              Access by allowlist only
-            </p>
-          </div>
-
-          <Card id="cli" className="min-w-0 scroll-mt-6 lg:col-span-5">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Terminal className="size-4 text-complement-400" aria-hidden />
-                Publish from the terminal
-              </CardTitle>
-              <CardAction>
-                <Badge variant="muted">npm</Badge>
-              </CardAction>
-              <CardDescription>
-                Authenticate once on a machine, then publish from any agent
-                session on it.
-              </CardDescription>
-            </CardHeader>
-
-            <CardContent>
-              <div className="flex items-start gap-1 rounded-lg border border-border bg-neutral-950/70 p-1.5">
-                <pre className="min-w-0 flex-1 px-2 py-1.5 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-neutral-200 sm:text-[0.8125rem]">
-                  <code>
-                    <span
-                      aria-hidden
-                      className="pr-1.5 text-neutral-400 select-none"
-                    >
-                      $
-                    </span>
-                    {AUTH_COMMAND}
-                  </code>
-                </pre>
-                <CopyButton
-                  value={AUTH_COMMAND}
-                  label="Copy the sign-in command"
-                />
-              </div>
-
-              <ol className="mt-5 grid gap-3.5">
-                {STEPS.map((step) => (
-                  <li key={step.n} className="flex gap-3">
-                    <span
-                      data-numeric
-                      className="text-micro-lg mt-[5px] text-neutral-600"
-                    >
-                      {step.n}
-                    </span>
-                    <p className="text-sm leading-body text-neutral-400">
-                      <span className="font-medium text-neutral-200">
-                        {step.title}
-                      </span>
-                      <span className="text-neutral-600"> — </span>
-                      {step.body}
-                    </p>
-                  </li>
-                ))}
-              </ol>
-            </CardContent>
-
-            <CardFooter className="gap-2 border-t border-border/60 pt-4">
-              <span className="text-micro-lg text-neutral-400">
-                Node 22+ or Bun
-              </span>
-              <span aria-hidden className="text-neutral-700">
-                ·
-              </span>
-              <span className="text-micro-lg text-neutral-400">
-                Nothing to install
-              </span>
-            </CardFooter>
-          </Card>
-        </div>
-      </section>
-
-      <section className="mx-auto w-full max-w-6xl px-5 pb-14 sm:px-8 lg:pb-20">
-        <h2 className="text-micro-lg border-t border-border pt-6 text-neutral-500">
-          What a document gets
-        </h2>
-        <dl className="mt-6 grid gap-x-10 gap-y-7 sm:grid-cols-2 lg:grid-cols-4">
-          {PROPERTIES.map((property) => (
-            <div key={property.label} className="border-l border-border pl-4">
-              <dt className="text-micro-lg text-neutral-200">
-                {property.label}
-              </dt>
-              <dd className="mt-2 text-sm leading-body text-neutral-500">
-                {property.body}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      </section>
-
-      <footer className="mt-auto border-t border-border/70">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-1.5 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-8">
-          <p className="text-micro-lg text-neutral-500">dossier.agent964.com</p>
-          <p className="text-micro-lg text-neutral-500">
-            Cloudflare Workers · D1 · R2
-          </p>
-        </div>
-      </footer>
+    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 px-6 py-12">
+      <span className="inline-flex w-fit items-center gap-1.5 rounded-md border border-brand-300/35 bg-brand-300/10 px-2 py-0.5 font-mono text-[0.625rem] tracking-[0.16em] text-brand-200 uppercase">
+        <span aria-hidden className="size-1.5 rounded-full bg-brand-300" />
+        Dossier
+      </span>
+      <h1 className="font-clash text-[2rem] leading-[1.05] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
+        {deployment}
+      </h1>
+      <p className="text-neutral-400">
+        Open what is shared with you, signed in with your Google account.
+      </p>
+      <Button asChild size="lg" className="w-full">
+        <Link to="/_/sign-in">Sign in with Google</Link>
+      </Button>
     </main>
+  )
+}
+
+function Home({
+  me,
+}: {
+  view: HomeView
+  me: { readonly email: string; readonly name: string }
+}) {
+  const [busy, setBusy] = useState(false)
+  const useAnotherAccount = async () => {
+    setBusy(true)
+    try {
+      await signOut()
+      await startGoogleSignIn('/')
+    } catch {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="min-h-dvh">
+      <AppHeader email={me.email} />
+      <main className="mx-auto flex max-w-3xl flex-col gap-5 px-4 pt-6 pb-16 sm:px-6">
+        <h1 className="font-clash text-[1.75rem] font-semibold tracking-[-0.03em] text-neutral-50">
+          Shared with me
+        </h1>
+        <section aria-label="Shared with me" className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4 rounded-xl border border-border bg-card px-4 py-5">
+            <p className="flex gap-2.5 text-[0.9375rem] leading-relaxed text-neutral-300">
+              <Info
+                aria-hidden
+                className="mt-1 size-4 shrink-0 text-neutral-500"
+              />
+              <span>
+                Nothing is shared with{' '}
+                <span className="text-neutral-50">{me.email}</span> yet. If
+                someone sent you a link, open it while signed in with this
+                address.
+              </span>
+            </p>
+            <Button
+              variant="outline"
+              className="w-fit"
+              disabled={busy}
+              onClick={useAnotherAccount}
+            >
+              Use another Google account
+            </Button>
+          </div>
+        </section>
+      </main>
+    </div>
   )
 }

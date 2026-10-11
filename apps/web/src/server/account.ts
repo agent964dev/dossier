@@ -1,28 +1,50 @@
+import type { AgentKeyId } from '@dossier/contracts'
 import { createServerFn } from '@tanstack/react-start'
-import { getRequest } from '@tanstack/react-start/server'
 import { Effect } from 'effect'
 
-import { runSurface } from './runtime'
-import { resolveWeb } from './viewer'
+import { CurrentCaller, SignIn, type AgentKeyView } from '../core/index.ts'
+import { runScreen } from './run.ts'
 
-export type SessionPeek =
-  | { readonly signedIn: true; readonly workspaceSlug: string }
-  | { readonly signedIn: false }
+export interface AccountView {
+  readonly email: string
+  readonly name: string
+  readonly keys: readonly AgentKeyView[]
+}
 
-/**
- * "Is anybody signed in?" — the cheapest question the sign-in page can ask, so
- * a returning reader lands on their dashboard instead of a sign-in wall.
- * Any failure (no cookie, disabled account, stale workspace) reads as signed out.
- */
-export const peekSession = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<SessionPeek> => {
-    const request = getRequest()
-    const result = await runSurface(
-      Effect.map(resolveWeb(request), (session) => ({
-        signedIn: true as const,
-        workspaceSlug: session.viewer.workspaceSlug,
-      })),
-    )
-    return 'signedIn' in result ? result : { signedIn: false }
-  },
+export const accountView = createServerFn({ method: 'GET' }).handler(() =>
+  runScreen(
+    Effect.gen(function* () {
+      const signIn = yield* SignIn
+      const keys = yield* signIn.keys()
+      const { person } = yield* CurrentCaller
+      return {
+        email: person?.email ?? '',
+        name: person?.name ?? '',
+        keys,
+      } satisfies AccountView
+    }),
+  ),
+)
+
+export const createKey = createServerFn({ method: 'POST' })
+  .validator((input: { readonly name: string }) => ({
+    name: String(input.name),
+  }))
+  .handler(({ data }) =>
+    runScreen(Effect.flatMap(SignIn, (signIn) => signIn.createKey(data))),
+  )
+
+export const revokeKey = createServerFn({ method: 'POST' })
+  .validator((input: { readonly id: string }) => ({ id: String(input.id) }))
+  .handler(({ data }) =>
+    runScreen(
+      Effect.flatMap(SignIn, (signIn) =>
+        signIn.revokeKey(data.id as AgentKeyId),
+      ),
+    ),
+  )
+
+export const signOutEverywhere = createServerFn({ method: 'POST' }).handler(
+  () =>
+    runScreen(Effect.flatMap(SignIn, (signIn) => signIn.signOutEverywhere())),
 )

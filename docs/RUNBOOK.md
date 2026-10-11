@@ -1,5 +1,7 @@
 # Dossier production runbook
 
+> This describes Dossier before Dossier next. It is rewritten for Dossier next before launch.
+
 Follow the steps in this runbook in order. Run shell commands from a clone of this repository. Never paste production secrets into chat, logs, screenshots, or a ticket. Replace `<date>`, `<version>`, `<document-id>`, and email placeholders before running commands.
 
 ## Automatic production releases

@@ -1,5 +1,7 @@
 # Dossier CLI
 
+> This describes Dossier before Dossier next. It is rewritten for Dossier next before launch.
+
 `@agent964/dossier` publishes, reads, compares, and manages documents on a Dossier deployment. The `dossier` executable is ESM and supports Node.js 22.12 or newer and Bun.
 
 ## Install

@@ -10,129 +10,63 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SignInRouteImport } from './routes/sign-in'
-import { Route as WorkspaceRouteImport } from './routes/workspace'
-import { Route as CliAuthRouteImport } from './routes/cli.auth'
-import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
-import { Route as DashboardTrashRouteImport } from './routes/dashboard/trash'
-import { Route as DashboardDocumentsIdRouteImport } from './routes/dashboard/documents.$id'
-import { Route as DashboardDocumentsIdDiffRouteImport } from './routes/dashboard/documents.$id_.diff'
+import { Route as Char91_Char93DeviceRouteImport } from './routes/[_]/device'
+import { Route as Char91_Char93SettingsRouteImport } from './routes/[_]/settings'
+import { Route as Char91_Char93SignInRouteImport } from './routes/[_]/sign-in'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SignInRoute = SignInRouteImport.update({
-  id: '/sign-in',
-  path: '/sign-in',
+const Char91_Char93DeviceRoute = Char91_Char93DeviceRouteImport.update({
+  id: '/_/device',
+  path: '/_/device',
   getParentRoute: () => rootRouteImport,
 } as any)
-const WorkspaceRoute = WorkspaceRouteImport.update({
-  id: '/workspace',
-  path: '/workspace',
+const Char91_Char93SettingsRoute = Char91_Char93SettingsRouteImport.update({
+  id: '/_/settings',
+  path: '/_/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CliAuthRoute = CliAuthRouteImport.update({
-  id: '/cli/auth',
-  path: '/cli/auth',
+const Char91_Char93SignInRoute = Char91_Char93SignInRouteImport.update({
+  id: '/_/sign-in',
+  path: '/_/sign-in',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DashboardIndexRoute = DashboardIndexRouteImport.update({
-  id: '/dashboard/',
-  path: '/dashboard/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DashboardTrashRoute = DashboardTrashRouteImport.update({
-  id: '/dashboard/trash',
-  path: '/dashboard/trash',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DashboardDocumentsIdRoute = DashboardDocumentsIdRouteImport.update({
-  id: '/dashboard/documents/$id',
-  path: '/dashboard/documents/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DashboardDocumentsIdDiffRoute =
-  DashboardDocumentsIdDiffRouteImport.update({
-    id: '/dashboard/documents/$id_/diff',
-    path: '/dashboard/documents/$id/diff',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/sign-in': typeof SignInRoute
-  '/workspace': typeof WorkspaceRoute
-  '/cli/auth': typeof CliAuthRoute
-  '/dashboard/trash': typeof DashboardTrashRoute
-  '/dashboard/': typeof DashboardIndexRoute
-  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
-  '/dashboard/documents/$id/diff': typeof DashboardDocumentsIdDiffRoute
+  '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/settings': typeof Char91_Char93SettingsRoute
+  '/_/sign-in': typeof Char91_Char93SignInRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/sign-in': typeof SignInRoute
-  '/workspace': typeof WorkspaceRoute
-  '/cli/auth': typeof CliAuthRoute
-  '/dashboard/trash': typeof DashboardTrashRoute
-  '/dashboard': typeof DashboardIndexRoute
-  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
-  '/dashboard/documents/$id/diff': typeof DashboardDocumentsIdDiffRoute
+  '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/settings': typeof Char91_Char93SettingsRoute
+  '/_/sign-in': typeof Char91_Char93SignInRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/sign-in': typeof SignInRoute
-  '/workspace': typeof WorkspaceRoute
-  '/cli/auth': typeof CliAuthRoute
-  '/dashboard/trash': typeof DashboardTrashRoute
-  '/dashboard/': typeof DashboardIndexRoute
-  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
-  '/dashboard/documents/$id_/diff': typeof DashboardDocumentsIdDiffRoute
+  '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/settings': typeof Char91_Char93SettingsRoute
+  '/_/sign-in': typeof Char91_Char93SignInRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/sign-in'
-    | '/workspace'
-    | '/cli/auth'
-    | '/dashboard/trash'
-    | '/dashboard/'
-    | '/dashboard/documents/$id'
-    | '/dashboard/documents/$id/diff'
+  fullPaths: '/' | '/_/device' | '/_/settings' | '/_/sign-in'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/'
-    | '/sign-in'
-    | '/workspace'
-    | '/cli/auth'
-    | '/dashboard/trash'
-    | '/dashboard'
-    | '/dashboard/documents/$id'
-    | '/dashboard/documents/$id/diff'
-  id:
-    | '__root__'
-    | '/'
-    | '/sign-in'
-    | '/workspace'
-    | '/cli/auth'
-    | '/dashboard/trash'
-    | '/dashboard/'
-    | '/dashboard/documents/$id'
-    | '/dashboard/documents/$id_/diff'
+  to: '/' | '/_/device' | '/_/settings' | '/_/sign-in'
+  id: '__root__' | '/' | '/_/device' | '/_/settings' | '/_/sign-in'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  SignInRoute: typeof SignInRoute
-  WorkspaceRoute: typeof WorkspaceRoute
-  CliAuthRoute: typeof CliAuthRoute
-  DashboardTrashRoute: typeof DashboardTrashRoute
-  DashboardIndexRoute: typeof DashboardIndexRoute
-  DashboardDocumentsIdRoute: typeof DashboardDocumentsIdRoute
-  DashboardDocumentsIdDiffRoute: typeof DashboardDocumentsIdDiffRoute
+  Char91_Char93DeviceRoute: typeof Char91_Char93DeviceRoute
+  Char91_Char93SettingsRoute: typeof Char91_Char93SettingsRoute
+  Char91_Char93SignInRoute: typeof Char91_Char93SignInRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -144,53 +78,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/sign-in': {
-      id: '/sign-in'
-      path: '/sign-in'
-      fullPath: '/sign-in'
-      preLoaderRoute: typeof SignInRouteImport
+    '/_/device': {
+      id: '/_/device'
+      path: '/_/device'
+      fullPath: '/_/device'
+      preLoaderRoute: typeof Char91_Char93DeviceRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/workspace': {
-      id: '/workspace'
-      path: '/workspace'
-      fullPath: '/workspace'
-      preLoaderRoute: typeof WorkspaceRouteImport
+    '/_/settings': {
+      id: '/_/settings'
+      path: '/_/settings'
+      fullPath: '/_/settings'
+      preLoaderRoute: typeof Char91_Char93SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/cli/auth': {
-      id: '/cli/auth'
-      path: '/cli/auth'
-      fullPath: '/cli/auth'
-      preLoaderRoute: typeof CliAuthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/': {
-      id: '/dashboard/'
-      path: '/dashboard'
-      fullPath: '/dashboard/'
-      preLoaderRoute: typeof DashboardIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/trash': {
-      id: '/dashboard/trash'
-      path: '/dashboard/trash'
-      fullPath: '/dashboard/trash'
-      preLoaderRoute: typeof DashboardTrashRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/documents/$id': {
-      id: '/dashboard/documents/$id'
-      path: '/dashboard/documents/$id'
-      fullPath: '/dashboard/documents/$id'
-      preLoaderRoute: typeof DashboardDocumentsIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/documents/$id_/diff': {
-      id: '/dashboard/documents/$id_/diff'
-      path: '/dashboard/documents/$id/diff'
-      fullPath: '/dashboard/documents/$id/diff'
-      preLoaderRoute: typeof DashboardDocumentsIdDiffRouteImport
+    '/_/sign-in': {
+      id: '/_/sign-in'
+      path: '/_/sign-in'
+      fullPath: '/_/sign-in'
+      preLoaderRoute: typeof Char91_Char93SignInRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -198,23 +104,20 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  SignInRoute: SignInRoute,
-  WorkspaceRoute: WorkspaceRoute,
-  CliAuthRoute: CliAuthRoute,
-  DashboardTrashRoute: DashboardTrashRoute,
-  DashboardIndexRoute: DashboardIndexRoute,
-  DashboardDocumentsIdRoute: DashboardDocumentsIdRoute,
-  DashboardDocumentsIdDiffRoute: DashboardDocumentsIdDiffRoute,
+  Char91_Char93DeviceRoute: Char91_Char93DeviceRoute,
+  Char91_Char93SettingsRoute: Char91_Char93SettingsRoute,
+  Char91_Char93SignInRoute: Char91_Char93SignInRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
 
 import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
+import type { startInstance } from './start.ts'
 declare module '@tanstack/react-start' {
   interface Register {
     ssr: true
     router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
   }
 }

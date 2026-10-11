@@ -5,6 +5,8 @@ import {
   Scripts,
   createRootRoute,
 } from '@tanstack/react-router'
+
+import { PlainError } from '../components/plain-error'
 import '../styles/app.css'
 
 export const Route = createRootRoute({
@@ -14,24 +16,21 @@ export const Route = createRootRoute({
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
       { name: 'color-scheme', content: 'dark' },
       { name: 'theme-color', content: '#031119' },
-      {
-        name: 'description',
-        content:
-          'dossier is a private publishing workspace for the documents your agents write: every version kept, every document a permanent link.',
-      },
-      { title: 'dossier — a private publishing workspace' },
+      { name: 'referrer', content: 'strict-origin-when-cross-origin' },
+      { title: 'Dossier' },
     ],
     links: [
+      { rel: 'icon', href: '/_/app/favicon.svg', type: 'image/svg+xml' },
       {
         rel: 'preload',
-        href: '/fonts/ClashDisplay-Variable.woff2',
+        href: '/_/app/fonts/ClashDisplay-Variable.woff2',
         as: 'font',
         type: 'font/woff2',
         crossOrigin: 'anonymous',
       },
       {
         rel: 'preload',
-        href: '/fonts/Geist-Variable.woff2',
+        href: '/_/app/fonts/Geist-Variable.woff2',
         as: 'font',
         type: 'font/woff2',
         crossOrigin: 'anonymous',
@@ -39,6 +38,12 @@ export const Route = createRootRoute({
     ],
   }),
   component: RootComponent,
+  errorComponent: () => (
+    <RootDocument>
+      <PlainError />
+    </RootDocument>
+  ),
+  notFoundComponent: NotFound,
 })
 
 function RootComponent() {
@@ -49,9 +54,27 @@ function RootComponent() {
   )
 }
 
+function NotFound() {
+  return (
+    <main className="grid min-h-dvh place-items-center px-6 text-center">
+      <div className="flex flex-col gap-3">
+        <h1 className="text-xl font-semibold text-neutral-50">
+          This page does not exist, or you cannot open it.
+        </h1>
+        <a
+          href="/"
+          className="text-brand-300 underline-offset-4 hover:underline"
+        >
+          Go home
+        </a>
+      </div>
+    </main>
+  )
+}
+
 function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    // Dark only. There is no light variant and no toggle (DESIGN.md section 9).
+    // Dark only: the agent964 design language has no light variant.
     <html lang="en" className="dark">
       <head>
         <HeadContent />

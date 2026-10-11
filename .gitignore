@@ -20,8 +20,8 @@ dist/
 # Generated CLI package artifact
 packages/cli/LICENSE
 
-# Playwright browser suite
-test-results/
-playwright-report/
-blob-report/
-.auth/
+# The dev Worker's Better Auth secret, kept for scripts/dev-session.ts --remote
+.dev-next-secrets.local
+
+# mkcert certificates for the local HTTPS Worker
+.certs/

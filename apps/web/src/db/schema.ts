@@ -3,462 +3,227 @@ import {
   check,
   index,
   integer,
-  primaryKey,
   sqliteTable,
   text,
-  unique,
   uniqueIndex,
-  type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core'
 
-export const workspaces = sqliteTable(
-  'workspaces',
-  {
-    id: text('id').primaryKey(),
-    slug: text('slug').notNull(),
-    kind: text('kind').notNull(),
-    emailDomain: text('email_domain'),
-    name: text('name').notNull(),
-    createdAt: text('created_at').notNull(),
-    updatedAt: text('updated_at').notNull(),
-  },
-  (table) => [
-    uniqueIndex('workspaces_slug_unique').on(table.slug),
-    uniqueIndex('workspaces_email_domain_unique').on(table.emailDomain),
-    check('workspaces_kind_check', sql`${table.kind} IN ('team', 'personal')`),
-  ],
-)
-
-export const accounts = sqliteTable(
-  'accounts',
-  {
-    id: text('id').primaryKey(),
-    name: text('name').notNull(),
-    kind: text('kind').notNull(),
-    deploymentAdmin: integer('deployment_admin').notNull().default(0),
-    disabledAt: text('disabled_at'),
-    createdAt: text('created_at').notNull(),
-    updatedAt: text('updated_at').notNull(),
-  },
-  (table) => [
-    check('accounts_kind_check', sql`${table.kind} IN ('user', 'service')`),
-    check(
-      'accounts_deployment_admin_check',
-      sql`${table.deploymentAdmin} IN (0, 1)`,
-    ),
-  ],
-)
-
-export const memberships = sqliteTable(
-  'memberships',
-  {
-    workspaceId: text('workspace_id')
-      .notNull()
-      .references(() => workspaces.id),
-    accountId: text('account_id')
-      .notNull()
-      .references(() => accounts.id),
-    role: text('role').notNull(),
-    createdAt: text('created_at').notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.workspaceId, table.accountId] }),
-    index('memberships_account_id_idx').on(table.accountId),
-    check('memberships_role_check', sql`${table.role} IN ('admin', 'member')`),
-  ],
-)
-
-export const allowlist = sqliteTable(
-  'allowlist',
-  {
-    id: text('id').primaryKey(),
-    kind: text('kind').notNull(),
-    value: text('value').notNull(),
-    workspaceId: text('workspace_id')
-      .notNull()
-      .references(() => workspaces.id),
-    role: text('role').notNull(),
-    createdBy: text('created_by')
-      .notNull()
-      .references(() => accounts.id),
-    createdAt: text('created_at').notNull(),
-    lastUsedAt: text('last_used_at'),
-  },
-  (table) => [
-    uniqueIndex('allowlist_value_unique').on(table.value),
-    index('allowlist_value_idx').on(table.value),
-    check('allowlist_kind_check', sql`${table.kind} IN ('email', 'domain')`),
-    check('allowlist_role_check', sql`${table.role} IN ('admin', 'member')`),
-  ],
-)
-
-export const identities = sqliteTable(
-  'identities',
-  {
-    id: text('id').primaryKey(),
-    accountId: text('account_id')
-      .notNull()
-      .references(() => accounts.id),
-    provider: text('provider').notNull(),
-    subject: text('subject').notNull(),
-    email: text('email').notNull(),
-    emailVerified: integer('email_verified').notNull(),
-    displayName: text('display_name'),
-    pictureUrl: text('picture_url'),
-    piiSubject: text('pii_subject'),
-    createdAt: text('created_at').notNull(),
-    lastLoginAt: text('last_login_at'),
-  },
-  (table) => [
-    unique('identities_provider_subject_unique').on(
-      table.provider,
-      table.subject,
-    ),
-    index('identities_account_id_idx').on(table.accountId),
-    check(
-      'identities_email_verified_check',
-      sql`${table.emailVerified} IN (0, 1)`,
-    ),
-  ],
-)
-
-export const apiKeys = sqliteTable(
-  'api_keys',
-  {
-    id: text('id').primaryKey(),
-    accountId: text('account_id')
-      .notNull()
-      .references(() => accounts.id),
-    workspaceId: text('workspace_id')
-      .notNull()
-      .references(() => workspaces.id),
-    name: text('name').notNull(),
-    keyHash: text('key_hash').notNull(),
-    createdAt: text('created_at').notNull(),
-    lastUsedAt: text('last_used_at'),
-    revokedAt: text('revoked_at'),
-  },
-  (table) => [
-    uniqueIndex('api_keys_key_hash_unique').on(table.keyHash),
-    index('api_keys_account_id_idx').on(table.accountId),
-  ],
-)
-
-export const documents = sqliteTable(
-  'documents',
-  {
-    id: text('id').primaryKey(),
-    workspaceId: text('workspace_id')
-      .notNull()
-      .references(() => workspaces.id),
-    createdBy: text('created_by')
-      .notNull()
-      .references(() => accounts.id),
-    parentId: text('parent_id').references((): AnySQLiteColumn => documents.id),
-    path: text('path').notNull(),
-    depth: integer('depth').notNull(),
-    kind: text('kind'),
-    title: text('title').notNull(),
-    description: text('description'),
-    visibility: text('visibility'),
-    currentVersionId: text('current_version_id'),
-    nextVersionNumber: integer('next_version_number').notNull().default(1),
-    revision: integer('revision').notNull().default(0),
-    createdAt: text('created_at').notNull(),
-    updatedAt: text('updated_at').notNull(),
-    deletedAt: text('deleted_at'),
-    deletionBatchId: text('deletion_batch_id').references(
-      (): AnySQLiteColumn => deletionBatches.id,
-    ),
-    disabledAt: text('disabled_at'),
-    disabledReason: text('disabled_reason'),
-    stateful: integer('stateful').notNull().default(0),
-  },
-  (table) => [
-    check(
-      'documents_id_check',
-      sql`length(${table.id}) = 12 AND ${table.id} NOT GLOB '*[^a-z0-9]*'`,
-    ),
-    check('documents_depth_check', sql`${table.depth} BETWEEN 0 AND 16`),
-    check(
-      'documents_kind_check',
-      sql`${table.kind} IS NULL OR (length(${table.kind}) BETWEEN 1 AND 32 AND ${table.kind} NOT GLOB '*[^a-z0-9-]*')`,
-    ),
-    check(
-      'documents_visibility_check',
-      sql`${table.visibility} IS NULL OR ${table.visibility} IN ('public', 'team', 'private')`,
-    ),
-    check('documents_stateful_check', sql`${table.stateful} IN (0, 1)`),
-    index('documents_path_binary_idx').on(sql`${table.path} COLLATE BINARY`),
-    index('documents_parent_deleted_idx').on(table.parentId, table.deletedAt),
-    index('documents_workspace_deleted_updated_idx').on(
-      table.workspaceId,
-      table.deletedAt,
-      table.updatedAt,
-    ),
-    index('documents_created_by_deleted_updated_idx').on(
-      table.createdBy,
-      table.deletedAt,
-      table.updatedAt,
-    ),
-  ],
-)
-
-export const documentVersions = sqliteTable(
-  'document_versions',
-  {
-    id: text('id').primaryKey(),
-    documentId: text('document_id')
-      .notNull()
-      .references(() => documents.id),
-    versionNumber: integer('version_number').notNull(),
-    objectKey: text('object_key').notNull(),
-    contentHash: text('content_hash').notNull(),
-    fileSize: integer('file_size').notNull(),
-    createdAt: text('created_at').notNull(),
-    createdByAccountId: text('created_by_account_id')
-      .notNull()
-      .references(() => accounts.id),
-    createdByApiKeyId: text('created_by_api_key_id').references(
-      () => apiKeys.id,
-    ),
-    userAgent: text('user_agent'),
-    cliVersion: text('cli_version'),
-    gitBranch: text('git_branch'),
-    gitCommitSha: text('git_commit_sha'),
-    gitCommitSubject: text('git_commit_subject'),
-    gitDirty: integer('git_dirty'),
-    originalFilename: text('original_filename'),
-    hasInlineScript: integer('has_inline_script').notNull(),
-    externalImageHosts: text('external_image_hosts'),
-    stylesheetRefs: text('stylesheet_refs'),
-    ciRunUrl: text('ci_run_url'),
-    ciActor: text('ci_actor'),
-    idempotencyKey: text('idempotency_key'),
-    requestHash: text('request_hash'),
-    stateFieldsJson: text('state_fields_json'),
-  },
-  (table) => [
-    uniqueIndex('document_versions_object_key_unique').on(table.objectKey),
-    unique('document_versions_document_number_unique').on(
-      table.documentId,
-      table.versionNumber,
-    ),
-    unique('document_versions_api_key_idempotency_unique').on(
-      table.createdByApiKeyId,
-      table.idempotencyKey,
-    ),
-    check(
-      'document_versions_git_dirty_check',
-      sql`${table.gitDirty} IS NULL OR ${table.gitDirty} IN (0, 1)`,
-    ),
-    check(
-      'document_versions_has_inline_script_check',
-      sql`${table.hasInlineScript} IN (0, 1)`,
-    ),
-  ],
-)
-
-export const documentState = sqliteTable('document_state', {
-  documentId: text('document_id')
-    .primaryKey()
-    .references(() => documents.id),
-  revision: integer('revision').notNull().default(0),
-  updatedAt: text('updated_at'),
-  bytes: integer('bytes').notNull().default(0),
-})
-
-export const documentStateFields = sqliteTable(
-  'document_state_fields',
-  {
-    documentId: text('document_id')
-      .notNull()
-      .references(() => documents.id),
-    name: text('name').notNull(),
-    type: text('type').notNull(),
-    valueJson: text('value_json').notNull(),
-    revision: integer('revision').notNull(),
-    updatedBy: text('updated_by').notNull(),
-    updatedAt: text('updated_at').notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.documentId, table.name] }),
-    check(
-      'document_state_fields_type_check',
-      sql`${table.type} IN ('text', 'textarea', 'number', 'date', 'checkbox', 'radio', 'select', 'select-multiple', 'json')`,
-    ),
-  ],
-)
-
-export const documentStateGrants = sqliteTable(
-  'document_state_grants',
-  {
-    documentId: text('document_id')
-      .notNull()
-      .references(() => documents.id),
-    email: text('email').notNull(),
-    canSave: integer('can_save').notNull().default(1),
-    createdByAccountId: text('created_by_account_id')
-      .notNull()
-      .references(() => accounts.id),
-    createdAt: text('created_at').notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.documentId, table.email] }),
-    index('document_state_grants_email_idx').on(table.email),
-    check(
-      'document_state_grants_can_save_check',
-      sql`${table.canSave} IN (0, 1)`,
-    ),
-  ],
-)
-
-export const documentEditLinks = sqliteTable('document_edit_links', {
-  documentId: text('document_id')
-    .primaryKey()
-    .references(() => documents.id),
-  generation: integer('generation').notNull().default(1),
-  createdByAccountId: text('created_by_account_id')
+/** Better Auth's dates: epoch milliseconds, read back as `Date`. */
+const ms = (name: string) => integer(name, { mode: 'timestamp_ms' })
+const nowMs = sql`(cast(unixepoch('subsecond') * 1000 as integer))`
+/** Better Auth's creation time, defaulting to the moment of the insert. */
+const createdAt = () => ms('created_at').default(nowMs).notNull()
+/** Better Auth's update time, moved on every update. */
+const updatedAt = () =>
+  ms('updated_at')
+    .default(nowMs)
+    .$onUpdate(() => new Date())
     .notNull()
-    .references(() => accounts.id),
-  createdAt: text('created_at').notNull(),
-  revokedAt: text('revoked_at'),
+
+// Better Auth's tables, as its generator writes them for the options in
+// ports/auth.ts, plus the unique index on an account's provider and subject.
+
+export const user = sqliteTable('user', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  /** Lower-cased: the latest verified address Google returned. */
+  email: text('email').notNull().unique(),
+  emailVerified: integer('email_verified', { mode: 'boolean' })
+    .default(false)
+    .notNull(),
+  image: text('image'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
 })
 
-export const documentShares = sqliteTable(
-  'document_shares',
+export const session = sqliteTable(
+  'session',
   {
-    documentId: text('document_id')
+    id: text('id').primaryKey(),
+    userId: text('user_id')
       .notNull()
-      .references(() => documents.id),
-    email: text('email').notNull(),
-    createdByAccountId: text('created_by_account_id')
-      .notNull()
-      .references(() => accounts.id),
-    createdAt: text('created_at').notNull(),
+      .references(() => user.id, { onDelete: 'cascade' }),
+    token: text('token').notNull().unique(),
+    expiresAt: ms('expires_at').notNull(),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    /** The account that opened it, so a takeover revokes only its sessions. */
+    googleAccountId: text('google_account_id'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
   },
-  (table) => [
-    primaryKey({ columns: [table.documentId, table.email] }),
-    index('document_shares_email_idx').on(table.email),
+  (t) => [index('session_user_idx').on(t.userId)],
+)
+
+export const account = sqliteTable(
+  'account',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    /** Always 'google'. */
+    providerId: text('provider_id').notNull(),
+    /** Google's subject. */
+    accountId: text('account_id').notNull(),
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    idToken: text('id_token'),
+    accessTokenExpiresAt: ms('access_token_expires_at'),
+    refreshTokenExpiresAt: ms('refresh_token_expires_at'),
+    scope: text('scope'),
+    password: text('password'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('account_provider_account_unique').on(
+      t.providerId,
+      t.accountId,
+    ),
+    index('account_user_idx').on(t.userId),
   ],
 )
 
-export const deletionBatches = sqliteTable(
-  'deletion_batches',
+export const verification = sqliteTable(
+  'verification',
   {
     id: text('id').primaryKey(),
-    // Kept as an audit identifier after the document row is purged.
-    rootDocumentId: text('root_document_id').notNull(),
+    identifier: text('identifier').notNull(),
+    value: text('value').notNull(),
+    expiresAt: ms('expires_at').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('verification_identifier_idx').on(t.identifier)],
+)
+
+export const deviceCode = sqliteTable('device_code', {
+  id: text('id').primaryKey(),
+  deviceCode: text('device_code').notNull().unique(),
+  userCode: text('user_code').notNull().unique(),
+  userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
+  expiresAt: ms('expires_at').notNull(),
+  /** 'pending' | 'approved' | 'denied' */
+  status: text('status').notNull(),
+  lastPolledAt: ms('last_polled_at'),
+  pollingInterval: integer('polling_interval'),
+  clientId: text('client_id'),
+  scope: text('scope'),
+  /** "cli on m4", from Dossier's grant. */
+  deviceName: text('device_name'),
+  /** 'dossier-agent-key' */
+  grantKind: text('grant_kind'),
+  /**
+   * The account whose session pressed Allow. A takeover denies the codes of
+   * the accounts it detaches, and minting checks it again.
+   */
+  approvedByGoogleAccountId: text('approved_by_google_account_id'),
+})
+
+export const rateLimit = sqliteTable('rate_limit', {
+  id: text('id').primaryKey(),
+  key: text('key').notNull().unique(),
+  count: integer('count').notNull(),
+  lastRequest: integer('last_request').notNull(),
+})
+
+// Dossier's tables. Times are epoch milliseconds from Effect's Clock.
+
+export const people = sqliteTable(
+  'people',
+  {
+    userId: text('user_id')
+      .primaryKey()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    /** Whether Google is the authority for the email, at the latest sign-in. */
+    emailAuthority: text('email_authority').notNull(),
+    firstSignInAt: integer('first_sign_in_at').notNull(),
+    lastSignInAt: integer('last_sign_in_at').notNull(),
+    deletedAt: integer('deleted_at'),
+  },
+  (t) => [
+    check(
+      'people_email_authority_check',
+      sql`${t.emailAuthority} in ('google', 'none')`,
+    ),
+  ],
+)
+
+export const googleAccounts = sqliteTable(
+  'google_accounts',
+  {
     accountId: text('account_id')
-      .notNull()
-      .references(() => accounts.id),
-    createdAt: text('created_at').notNull(),
-    restoredAt: text('restored_at'),
-    deletedCount: integer('deleted_count').notNull(),
-    rootTitle: text('root_title'),
-    purgeStatus: text('purge_status').notNull().default('pending'),
-    purgeLeaseUntil: text('purge_lease_until'),
-    purgeProgress: text('purge_progress'),
-    purgedAt: text('purged_at'),
-    purgedBytes: integer('purged_bytes'),
+      .primaryKey()
+      .references(() => account.id, { onDelete: 'cascade' }),
+    /** As Google last returned it, lower-cased. */
+    email: text('email').notNull(),
+    emailAuthority: text('email_authority').notNull(),
+    /** Google's hosted domain claim, kept on the server only. */
+    hostedDomain: text('hosted_domain'),
+    observedAt: integer('observed_at').notNull(),
   },
-  (table) => [
-    index('deletion_batches_purge_status_created_at_idx').on(
-      table.purgeStatus,
-      table.createdAt,
-    ),
+  (t) => [
     check(
-      'deletion_batches_purge_status_check',
-      sql`${table.purgeStatus} IN ('pending', 'claimed', 'purged')`,
+      'google_accounts_email_authority_check',
+      sql`${t.emailAuthority} in ('google', 'none')`,
     ),
   ],
 )
 
-export const assets = sqliteTable(
-  'assets',
+export const personHistory = sqliteTable(
+  'person_history',
   {
     id: text('id').primaryKey(),
-    workspaceId: text('workspace_id')
+    userId: text('user_id')
       .notNull()
-      .references(() => workspaces.id),
-    createdBy: text('created_by')
-      .notNull()
-      .references(() => accounts.id),
-    slug: text('slug').notNull(),
-    ext: text('ext').notNull(),
-    currentVersionId: text('current_version_id'),
-    nextVersionNumber: integer('next_version_number').notNull().default(1),
-    createdAt: text('created_at').notNull(),
-    updatedAt: text('updated_at').notNull(),
-    deletedAt: text('deleted_at'),
+      .references(() => user.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    /** Account ids, emails, counts; never secrets. */
+    detailJson: text('detail_json').notNull(),
+    createdAt: integer('created_at').notNull(),
   },
-  (table) => [
-    uniqueIndex('assets_slug_unique').on(table.slug),
+  (t) => [
+    index('person_history_user_idx').on(t.userId, t.createdAt),
     check(
-      'assets_slug_check',
-      sql`length(${table.slug}) BETWEEN 1 AND 64 AND ${table.slug} GLOB '[a-z0-9]*' AND ${table.slug} NOT GLOB '*[^a-z0-9-]*'`,
+      'person_history_kind_check',
+      sql`${t.kind} in ('linked', 'takeover', 'email_kept', 'signed_out_everywhere', 'key_created', 'key_revoked')`,
     ),
-    check('assets_ext_check', sql`${table.ext} IN ('css', 'woff2')`),
   ],
 )
 
-export const assetVersions = sqliteTable(
-  'asset_versions',
+export const superAdmins = sqliteTable('super_admins', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  /** Null when seeded from SUPER_ADMINS. */
+  addedBy: text('added_by').references(() => user.id),
+  createdAt: integer('created_at').notNull(),
+})
+
+export const agentKeys = sqliteTable(
+  'agent_keys',
   {
     id: text('id').primaryKey(),
-    assetId: text('asset_id')
+    userId: text('user_id')
       .notNull()
-      .references(() => assets.id),
-    versionNumber: integer('version_number').notNull(),
-    objectKey: text('object_key').notNull(),
-    contentType: text('content_type').notNull(),
-    contentHash: text('content_hash').notNull(),
-    fileSize: integer('file_size').notNull(),
-    createdAt: text('created_at').notNull(),
-    createdByApiKeyId: text('created_by_api_key_id').references(
-      () => apiKeys.id,
-    ),
+      .references(() => user.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** Hex SHA-256 of the `dsk_` secret; the secret is never stored. */
+    hashSha256: text('hash_sha256').notNull().unique(),
+    createdVia: text('created_via').notNull(),
+    /** The account whose session created or approved it. */
+    googleAccountId: text('google_account_id'),
+    /** Moved at most once a minute. */
+    lastUsedAt: integer('last_used_at'),
+    revokedAt: integer('revoked_at'),
+    createdAt: integer('created_at').notNull(),
   },
-  (table) => [
-    uniqueIndex('asset_versions_object_key_unique').on(table.objectKey),
-    unique('asset_versions_asset_number_unique').on(
-      table.assetId,
-      table.versionNumber,
+  (t) => [
+    index('agent_keys_user_idx').on(t.userId),
+    check(
+      'agent_keys_created_via_check',
+      sql`${t.createdVia} in ('device', 'settings')`,
     ),
   ],
-)
-
-export const uploadEvents = sqliteTable(
-  'upload_events',
-  {
-    id: text('id').primaryKey(),
-    documentId: text('document_id').references(() => documents.id),
-    documentVersionId: text('document_version_id').references(
-      () => documentVersions.id,
-    ),
-    accountId: text('account_id').references(() => accounts.id),
-    apiKeyId: text('api_key_id').references(() => apiKeys.id),
-    eventType: text('event_type').notNull(),
-    metadataJson: text('metadata_json'),
-    createdAt: text('created_at').notNull(),
-  },
-  (table) => [
-    index('upload_events_document_created_idx').on(
-      table.documentId,
-      table.createdAt,
-    ),
-  ],
-)
-
-/**
- * Ephemeral rows used inside D1 batches. Inserting ok=0 raises a CHECK
- * constraint so a failed publication or document guard rolls back the batch.
- */
-export const publicationGuards = sqliteTable(
-  'publication_guards',
-  {
-    id: text('id').primaryKey(),
-    ok: integer('ok').notNull(),
-  },
-  (table) => [check('publication_guards_ok_check', sql`${table.ok} = 1`)],
 )

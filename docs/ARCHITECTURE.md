@@ -1,5 +1,7 @@
 # Dossier architecture
 
+> This describes Dossier before Dossier next. It is rewritten for Dossier next before launch.
+
 Dossier is a Bun workspace built around one Cloudflare Worker. The Worker
 publishes versioned HTML documents, reusable assets, and a TanStack Start
 management application. Effect owns the HTTP and service boundary, D1 stores

@@ -1,15 +1,12 @@
 # Dossier CLI
 
-Publish, read, compare, and manage versioned HTML documents from your terminal.
-Dossier organizes documents into workspace-owned trees, preserves published
-versions, and supports shared CSS and font assets.
-
-Publish an HTML plan with shared saved values. Collaborators edit, save, and
-return to the same document.
+The command line for [Dossier](https://github.com/agent964dev/dossier). It signs
+you in to a Dossier deployment and acts there with an agent key, for you or for
+a coding agent.
 
 ## Install
 
-The CLI requires **Node.js 22.12 or newer** and also runs under Bun.
+The CLI needs **Node.js 22.12 or newer**.
 
 ```sh
 npm install --global @agent964/dossier
@@ -19,116 +16,64 @@ dossier --help
 ## Sign in
 
 ```sh
-dossier auth login
+dossier login
+```
+
+`login` prints a link and a code, and opens the link in your browser. Confirm
+that the code matches and press Allow. The CLI then saves an agent key named
+after this machine, such as `cli on m4`, in `~/.config/dossier/config.json`
+(or under `$XDG_CONFIG_HOME`), readable only by you.
+
+By default the CLI talks to [dossier.agent964.com](https://dossier.agent964.com).
+To sign in to another deployment, give its host or any link into it. It becomes
+the default for later commands.
+
+```sh
+dossier login dossier.example.com
+```
+
+## Who am I, and signing out
+
+```sh
+dossier whoami
+dossier logout
+```
+
+`whoami` prints the person, the deployment and the agent key, for example
+`sara@acme.com on dossier.agent964.com (key "cli on m4")`. `logout` revokes the
+agent key on the deployment and removes it from this machine.
+
+## Scripts and agents
+
+To use an agent key created in settings, set both variables. The key is sent
+only to that deployment.
+
+```sh
+export DOSSIER_DEPLOYMENT=dossier.example.com
+export DOSSIER_KEY=dsk_…
 dossier whoami
 ```
 
-`auth login` opens the Dossier sign-in page in your browser, then prompts you to
-paste an API key. By default, the CLI connects to
-[dossier.agent964.com](https://dossier.agent964.com).
+`DOSSIER_KEY` without `DOSSIER_DEPLOYMENT` is refused.
 
-For another deployment, supply its origin when signing in.
+Every verb takes `--json` (or `DOSSIER_JSON=1`) and then prints one JSON value
+on stdout. A failure prints
+`{ "error": { "code": <exit code>, "message", "fix", "path" } }`.
 
-```sh
-dossier --api-url https://dossier.example auth login
-```
+`dossier --agent-info` prints a guide for agents: every verb with its usage and
+flags, and the exit codes. `dossier --agent-info --json` gives the same as JSON.
 
-For scripts, set `DOSSIER_API_KEY` in the environment or pipe a key into
-`dossier auth set`. Set `DOSSIER_API_URL` to choose another deployment. The
-CLI stores credentials under `~/.dossier` by default, and `DOSSIER_HOME`
-overrides that directory.
+## Exit codes
 
-## Publish and read documents
-
-Create a complete HTML file, then upload it.
-
-```sh
-dossier upload report.html --kind report
-dossier list --tree
-```
-
-Uploading the same file path again updates its mapped document with a new
-version. Use `--new` to publish it as a separate document. The CLI validates
-HTML and CSS before uploading. The deployment's policy is authoritative.
-
-Use the document ID or URL returned by the upload in these commands.
-
-```text
-dossier fetch <id-or-url> -o saved-report.html
-dossier tree <id-or-url>
-dossier diff <id-or-url>
-dossier diff <id-or-url> --from 1 --to 2 --text
-```
-
-`diff` compares the previous and latest versions by default. `--text` compares
-visible text instead of HTML source. A reference such as `7k2m9x1qz3ab@2` pins
-a particular version.
-
-## Publish a plan with saved values
-
-Mark each control whose value should persist with `data-state="name"`, then
-upload with `--stateful`.
-
-```sh
-dossier upload plan.html --kind plan --stateful
-dossier share <id> --add person@example.com --edit-state
-dossier state link create <id>
-dossier state get <id> --json
-```
-
-```text
-dossier state get <id>
-dossier state set <id> --data values.json --revision <n>
-dossier state link create <id>
-dossier state link get <id>
-dossier state link revoke <id>
-```
-
-Everyone with access sees one shared set of values. Collaborators press Save
-in the browser, and the CLI reads and saves the same values. A signed-in
-collaborator saves after `share --add <email> --edit-state`. Anyone with the
-edit link saves without an account until you revoke it. Uploading the same
-document again keeps its values, grants, and link. Uploads without
-`--stateful` behave as before.
-
-## Share assets and organize documents
-
-```sh
-dossier assets push theme.css
-dossier assets push font.woff2
-dossier assets list
-dossier trash
-```
-
-```text
-dossier move <id> --parent <parent-id>
-dossier visibility <id> public
-dossier share <id> --add reader@example.com
-dossier delete <id>
-dossier restore <id>
-```
-
-`delete` archives a document. Deleting a subtree requires `--force`. Archived
-documents become eligible for permanent removal after the deployment's
-retention window, normally 30 days. A weekly job on the deployment removes
-eligible batches automatically, and an operator can remove them sooner with
-`dossier admin purge --execute`.
-
-## Use from scripts and agents
-
-```sh
-dossier upload report.html --kind report --json
-dossier list --tree --json
-dossier state get <id> --json
-dossier whoami --json
-```
-
-`--json` writes one JSON value to stdout, and errors go to stderr. `--quiet`
-reduces normal output, and uploads print only the resulting URL.
-
-The package includes an agent skill at `skills/dossier/SKILL.md`. See the
-[packaged skill instructions](https://github.com/agent964dev/dossier/blob/main/packages/cli/skills/dossier/SKILL.md)
-for document policy, publishing guidance, and the saved-values workflow.
+| Code | Meaning                      |
+| ---- | ---------------------------- |
+| 0    | success                      |
+| 1    | failure                      |
+| 2    | usage                        |
+| 3    | not found or no access       |
+| 4    | not signed in or key refused |
+| 5    | conflict                     |
+| 6    | refused by a rule or a limit |
 
 ## Update
 
@@ -137,18 +82,9 @@ dossier update --check
 dossier update
 ```
 
-For a global npm installation, you can also run npm directly.
-
-```sh
-npm install --global @agent964/dossier@latest
-```
-
-## Documentation
-
-- [Complete CLI reference](https://github.com/agent964dev/dossier/blob/main/docs/CLI.md)
-- [Repository and development guide](https://github.com/agent964dev/dossier)
-- [Deployment runbook](https://github.com/agent964dev/dossier/blob/main/docs/RUNBOOK.md)
-- [Report an issue](https://github.com/agent964dev/dossier/issues)
+`update` installs the latest release with the package manager that installed
+the CLI. For a global npm install you can also run
+`npm install --global @agent964/dossier@latest`.
 
 ## License
 

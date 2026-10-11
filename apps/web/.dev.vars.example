@@ -1,13 +1,15 @@
-PUBLIC_BASE_URL=http://localhost:8787
-# Derives anonymous edit links without storing their bearer tokens. Use a
-# different random value in every environment; rotating it invalidates every
-# edit link in that environment.
-LINK_SECRET=replace-with-a-random-secret
-# Signs session cookies, CSRF tokens, and the 60-second frame tickets the
-# wrapper uses. The Playwright browser job needs it too: test/browser reads it
-# from this file (or from the environment) to mint the signed-in session it
-# runs the wrapper specs with.
-SESSION_SECRET=replace-with-a-random-secret
-# Seeds the workspace through POST /api/setup and doubles as the API key the
-# browser job publishes its fixtures with.
-BOOTSTRAP_API_KEY=replace-with-a-bootstrap-api-key
+# Local values over the dev environment in wrangler.jsonc. Copy to .dev.vars.
+# The local Worker runs over HTTPS (bun run dev:https) with a certificate for
+# localhost and *.content.localhost made with mkcert.
+PUBLIC_ORIGIN=https://localhost:8787
+CONTENT_HOST={tree}.content.localhost:8787
+DEPLOYMENT_NAME=localhost:8787
+# Secrets: use different random values in every environment.
+BETTER_AUTH_SECRET=replace-with-openssl-rand-base64-32
+HANDLE_SECRET=replace-with-openssl-rand-base64-32
+SUPER_ADMINS=you@example.com
+# Google sign-in needs a client whose redirect URI is this origin's
+# /_/auth/callback/google. Without these the sign-in page says sign-in is not
+# set up yet.
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
