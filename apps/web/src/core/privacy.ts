@@ -26,7 +26,7 @@ What Dossier keeps
 
 Cookies
 
-Dossier sets a session cookie when you sign in, and the visitor cookie above. It sets no other cookies, and none for advertising or analytics.
+Dossier sets a session cookie when you sign in, and the visitor cookie above. While you sign in with Google, it also sets a sign-in cookie that protects the sign-in from forgery and lasts at most five minutes. It sets none for advertising or analytics.
 
 No trackers
 

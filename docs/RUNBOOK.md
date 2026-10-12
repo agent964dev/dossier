@@ -539,7 +539,7 @@ release instead of being created.
   full SHA as `version`, the expected `protocol` and `deployment`, and
   `db: "ok"`. Then it asks the content probe once, which must answer `404`
   with `Referrer-Policy: strict-origin-when-cross-origin`, a
-  `Content-Security-Policy` holding `sandbox`, and no `Set-Cookie`.
+  `Content-Security-Policy` with a `sandbox` directive, and no `Set-Cookie`.
 
 `bun run test:release` runs these checks' own tests.
 
@@ -889,6 +889,7 @@ this machine.
    ```sh
    brew install mkcert nss
    mkcert -install
+   mkdir -p .certs
    mkcert -key-file .certs/localhost-key.pem -cert-file .certs/localhost.pem localhost '*.content.localhost'
    ```
 

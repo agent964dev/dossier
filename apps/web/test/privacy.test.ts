@@ -92,6 +92,13 @@ describe('the generated privacy text', () => {
     expect(text).toContain('none for advertising or analytics')
   })
 
+  it('names every cookie Dossier sets, the short-lived sign-in cookie included', () => {
+    expect(text).toContain('session cookie')
+    expect(text).toContain('visitor cookie')
+    expect(text).toMatch(/sign-in cookie[^.]*five minutes/)
+    expect(text).not.toContain('It sets no other cookies')
+  })
+
   it('cites no design IDs and keeps within the saved text’s limit', () => {
     expect(text).not.toMatch(/\b[SBCXDT]-\d{2,3}\b|\bPRD\b|\bTDD\b/)
     expect(text.length).toBeLessThan(PRIVACY_TEXT_LIMIT)

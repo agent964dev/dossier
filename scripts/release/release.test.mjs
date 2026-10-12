@@ -118,6 +118,37 @@ test('health accepts the new body only at the expected SHA, protocol and deploym
 
 test('the content probe wants a 404 with the sandbox and referrer headers and no cookie', () => {
   checkContent(contentReply())
+  // sandbox as a directive, alone, with tokens, or after another directive.
+  for (const csp of [
+    'sandbox',
+    'sandbox allow-scripts',
+    "default-src 'none'; sandbox allow-scripts",
+    "default-src 'none';sandbox",
+    'SANDBOX allow-forms',
+  ]) {
+    checkContent(
+      contentReply(404, { ...CONTENT_HEADERS, 'content-security-policy': csp }),
+    )
+  }
+  // sandbox only as a source or token of another directive is no sandbox.
+  for (const csp of [
+    'default-src sandbox',
+    "script-src 'self' sandbox; frame-ancestors 'none'",
+    'sandboxed',
+    'default-src sandbox; img-src *',
+  ]) {
+    assert.throws(
+      () =>
+        checkContent(
+          contentReply(404, {
+            ...CONTENT_HEADERS,
+            'content-security-policy': csp,
+          }),
+        ),
+      /sandbox/,
+      csp,
+    )
+  }
   const refused = [
     [contentReply(200), /not 404/],
     [contentReply(302), /not 404/],

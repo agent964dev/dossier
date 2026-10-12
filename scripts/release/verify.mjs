@@ -28,6 +28,14 @@ export function checkHealth(body, sha) {
   }
 }
 
+/** A policy names `name` as one of its directives, not as a value. */
+const hasDirective = (policy, name) =>
+  policy
+    .split(';')
+    .some(
+      (directive) => directive.trim().split(/\s+/)[0].toLowerCase() === name,
+    )
+
 /**
  * A content host asked for a path only the main host serves: a 404 with the
  * content headers and no cookie. It shows that the wildcard DNS record, the
@@ -45,9 +53,9 @@ export function checkContent(response) {
     'strict-origin-when-cross-origin'
       ? null
       : 'no strict-origin-when-cross-origin Referrer-Policy',
-    /(^|[\s;])sandbox(\s|;|$)/.test(csp)
+    hasDirective(csp, 'sandbox')
       ? null
-      : 'no sandbox in its Content-Security-Policy',
+      : 'no sandbox directive in its Content-Security-Policy',
     cookies.length === 0 ? null : 'it sets a cookie',
   ].filter(Boolean)
   if (problems.length > 0) {
