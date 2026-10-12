@@ -12,8 +12,8 @@ import {
   type Served,
 } from '../src/core/index.ts'
 import { signedIn, type Browser } from './support/browser.ts'
-import { exec, rows } from './support/d1.ts'
-import { harness, testRuntime } from './support/harness.ts'
+import { beforeBatch, exec, failingStatements, rows } from './support/d1.ts'
+import { harness, testRuntime, withRuntime } from './support/harness.ts'
 import { callerOf, fresh, run, runAs, sessionFor } from './support/people.ts'
 import {
   agent,
@@ -482,6 +482,217 @@ describe('moving within a tree', () => {
   })
 })
 
+describe('what a move guards and refuses', () => {
+  it('fails when the write on the destination is taken away before the move commits', async () => {
+    const w = await world()
+    const lina = await person('lina')
+    const docs = await nodeAt(w.treeId, 'docs')
+    const guide = await nodeAt(w.treeId, 'guide')
+    await share(
+      w.treeId,
+      docs!.id,
+      'email',
+      lina.email,
+      'write',
+      w.owner.person!,
+    )
+    await share(
+      w.treeId,
+      guide!.id,
+      'email',
+      lina.email,
+      'write',
+      w.owner.person!,
+    )
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes('insert into path_aliases'),
+            async () => {
+              await exec(
+                'delete from shares where node_id = ? and target = ?',
+                guide!.id,
+                lina.email,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const failed = await mvFailure(
+      await agent(lina),
+      w.at('docs/pic.png'),
+      w.at('guide/pic.png'),
+    )
+    harness.reset()
+    expect(['forbidden', 'not_found', 'conflict']).toContain(failed.code)
+    expect(await nodeAt(w.treeId, 'docs/pic.png')).toBeDefined()
+    expect(await nodeAt(w.treeId, 'guide/pic.png')).toBeUndefined()
+  })
+
+  it('reads the tree again when a move lands between a delete’s reads and its commit', async () => {
+    const w = await world()
+    // A folder whose page needs only what lies beside it: moving it rewrites nothing.
+    await pushAll(
+      w.key,
+      `${w.ws.name}/${w.name}`,
+      {
+        ...FILES,
+        'solo/a.html': '<!doctype html><title>A</title><img src="b.png">',
+        'solo/b.png': 'b bytes',
+      },
+      { force: true },
+    )
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes("'deleted', null, null, null, null, ?5"),
+            async () => {
+              const pure = await withRuntime(testRuntime(), () =>
+                mv(w.key, w.at('solo/'), w.at('solo2/')),
+              )
+              expect(pure.rewritten).toEqual([])
+            },
+          ),
+        },
+      }),
+    )
+    await runAs(
+      w.key,
+      Effect.flatMap(Files, (f) => f.rm({ ref: w.at('docs/pic.png') })),
+    )
+    harness.reset()
+    const pages = await rows<{ page_path: string }>(
+      'select distinct page_path from page_needs where tree_id = ?',
+      w.treeId,
+    )
+    expect(pages.map((p) => p.page_path)).toContain('solo2/a.html')
+    expect(pages.map((p) => p.page_path)).not.toContain('solo/a.html')
+  })
+
+  it('renames a page’s comments with it, keeping replies and resolves in their threads', async () => {
+    const w = await world()
+    const sara = await person('sara')
+    const root = `plan.comments/${sara.email}/1.json`
+    await dataFile(w.treeId, root, { text: 'Nice', anchor: null }, sara)
+    await dataFile(
+      w.treeId,
+      `plan.comments/${sara.email}/2.json`,
+      { text: 'Agreed', anchor: null, replyTo: root },
+      sara,
+    )
+    await dataFile(
+      w.treeId,
+      `plan.comments/${sara.email}/3.json`,
+      { resolves: root },
+      sara,
+    )
+    await mv(w.key, w.at('plan.html'), w.at('q3.html'))
+    const values = await rows<{ path: string; json: string }>(
+      `select n.path, v.json_value as json from nodes n join node_versions v on v.id = n.current_version_id
+       where n.tree_id = ? and n.path like 'q3.comments/%' and n.kind = 'file' order by n.path`,
+      w.treeId,
+    )
+    expect(values.map((v) => JSON.parse(v.json))).toEqual([
+      { text: 'Nice', anchor: null },
+      {
+        text: 'Agreed',
+        anchor: null,
+        replyTo: `q3.comments/${sara.email}/1.json`,
+      },
+      { resolves: `q3.comments/${sara.email}/1.json` },
+    ])
+  })
+
+  it('rewrites links to a folder whose index page moves', async () => {
+    const w = await world()
+    await pushAll(
+      w.key,
+      `${w.ws.name}/${w.name}`,
+      {
+        ...FILES,
+        'team/index.html': '<!doctype html><title>Team</title><p>Team</p>',
+        'index.html': FILES['index.html'] + ' <a href="team/">Team</a>',
+      },
+      { force: true },
+    )
+    const moved = await mv(
+      w.key,
+      w.at('team/index.html'),
+      w.at('team/home.html'),
+    )
+    expect(moved.rewritten).toContain('index.html')
+  })
+
+  it('refuses a move into a page’s comments folder, and answers a private path as it answers a missing one', async () => {
+    const w = await world()
+    expect(
+      (
+        await mvFailure(
+          w.key,
+          w.at('docs/pic.png'),
+          w.at('plan.comments/pic.png'),
+        )
+      ).code,
+    ).toBe('invalid')
+    const lina = await person('lina')
+    const docs = await nodeAt(w.treeId, 'docs')
+    await share(
+      w.treeId,
+      docs!.id,
+      'email',
+      lina.email,
+      'write',
+      w.owner.person!,
+    )
+    const theirs = await agent(lina)
+    const taken = await mvFailure(
+      theirs,
+      w.at('docs/pic.png'),
+      w.at('style.css'),
+    )
+    const free = await mvFailure(
+      theirs,
+      w.at('docs/pic.png'),
+      w.at('nothing-here.css'),
+    )
+    expect({ code: taken.code, message: taken.message }).toEqual({
+      code: free.code,
+      message: free.message,
+    })
+  })
+
+  it('lets go of the bytes it held when a move fails before it commits', async () => {
+    const w = await world()
+    harness.use(
+      testRuntime({
+        env: {
+          DB: failingStatements(env.DB, (sql) =>
+            sql.includes('from page_needs where tree_id'),
+          ),
+        },
+      }),
+    )
+    await runAs(
+      w.key,
+      Effect.flatMap(Files, (f) =>
+        f.mv({ from: w.at('plan.html'), to: w.at('plans/plan.html') }),
+      ).pipe(
+        Effect.either,
+        Effect.catchAllDefect(() => Effect.void),
+      ),
+    )
+    harness.reset()
+    expect(
+      await rows("select 1 from blob_holds where holder_kind = 'move'"),
+    ).toEqual([])
+  })
+})
+
 describe('moving a tree to another workspace', () => {
   const setUp = async () => {
     const w = await world()
@@ -555,6 +766,35 @@ describe('moving a tree to another workspace', () => {
     const old = await t.ownerBrowser.fetch(`/${t.ws.name}/${t.name}/plan`)
     expect(old.status).toBe(301)
     expect(old.headers.get('location')).toBe(`/${t.studio.name}/${t.name}/plan`)
+  })
+
+  it('fails when the tree is deleted before the move commits', async () => {
+    const t = await setUp()
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes('insert into tree_aliases'),
+            async () => {
+              await exec(
+                'update trees set deleted_at = ? where id = ?',
+                Date.now(),
+                t.treeId,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const failed = await mvFailure(
+      t.key,
+      ref(`${t.ws.name}/${t.name}`),
+      ref(`${t.studio.name}/${t.name}`),
+    )
+    harness.reset()
+    expect(['conflict', 'not_found']).toContain(failed.code)
+    expect(await treeOf(t.studio.name, t.name)).toBeUndefined()
   })
 
   it('refuses someone outside the workspace and a name it already has', async () => {

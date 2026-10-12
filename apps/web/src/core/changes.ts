@@ -26,7 +26,7 @@ import {
   rewriteForMove,
   type HtmlAnalysis,
 } from '@dossier/html'
-import { Clock, Data as EffectData, Effect } from 'effect'
+import { Clock, Data as EffectData, Effect, Exit } from 'effect'
 
 import type { AccessService, Granted } from './access.ts'
 import { CurrentCaller } from './caller.ts'
@@ -35,6 +35,7 @@ import type { DataService } from './data.ts'
 import type { ChangeResult, MoveResult, RestorePoint } from './files.ts'
 import type { makeHistory } from './history.ts'
 import { newId, sha256Hex } from './ids.ts'
+import { formRowsOf } from './push.ts'
 import {
   neededAfter,
   type HtmlAfter,
@@ -45,6 +46,7 @@ import {
   blobKey,
   nodeOfRaw,
   type ChangeFailure,
+  type NewFormRow,
   type RestorePlan,
   type TreeStoreService,
 } from './tree-store.ts'
@@ -484,15 +486,12 @@ export const makeChanges = (deps: ChangesDeps) => {
         const removed = new Set(remove.map((n) => n.id))
         const live = yield* liveNodes(tree.id)
         const liveAt = new Map(live.map((n) => [n.path, n]))
-        // A deleted node comes back only where nothing else lives now.
+        // A deleted node comes back only where nothing else lives now,
+        // even a newer file the point did not hold.
         for (const r of revive) {
           if (r.node.deletedAt === null) continue
           const there = liveAt.get(r.node.path)
-          if (
-            there !== undefined &&
-            there.id !== r.node.id &&
-            !removed.has(there.id)
-          ) {
+          if (there !== undefined && there.id !== r.node.id) {
             return yield* Effect.fail(
               dossierError(
                 'conflict',
@@ -594,6 +593,7 @@ export const makeChanges = (deps: ChangesDeps) => {
           author: f.author,
           was: f.node.path,
         }))
+        const forms: { node: NodeRow; rows: NewFormRow[] }[] = []
         for (const r of revive) {
           if (!isPageFile(r.node) && !r.node.path.endsWith('.html')) continue
           if (r.node.origin !== 'authored') continue
@@ -601,6 +601,20 @@ export const makeChanges = (deps: ChangesDeps) => {
           const analysis =
             sha === null ? null : yield* store.analysis(sha as Sha256)
           if (analysis === null) continue
+          // Its forms send where its content says from where it stands now.
+          forms.push({
+            node: r.node,
+            rows: formRowsOf([{ path: r.node.path, analysis }]).map((f) => ({
+              target: f.target,
+              key: f.key,
+              kind: f.kind,
+              closesAt: f.closesAt,
+              closed: f.closed,
+              line: f.line,
+              title: f.title,
+              schema: f.schema,
+            })),
+          })
           files.push({
             path: r.node.path,
             analysis,
@@ -631,6 +645,7 @@ export const makeChanges = (deps: ChangesDeps) => {
           folders: [...folders.values()],
           empty: empty.filter((n) => n.deletedAt === null || folders.has(n.id)),
           tree: tree.deletedAt !== null,
+          forms,
         }
         const committed = yield* committing(
           store.change(tree.id, (cs) =>
@@ -687,7 +702,9 @@ export const makeChanges = (deps: ChangesDeps) => {
         } catch {
           continue
         }
-        const named = [path, `${path}.html`].some((p) => isUnder(p, from))
+        const named = [path, `${path}.html`, `${path}/index.html`].some((p) =>
+          isUnder(p, from),
+        )
         if (inside ? !named : named) return true
       }
     }
@@ -764,11 +781,58 @@ export const makeChanges = (deps: ChangesDeps) => {
       if (node.kind === 'folder' && isUnder(dest, node.path)) {
         return yield* invalid('A folder cannot move into itself.')
       }
+      // A page's comments folder holds only comments.
+      if (commentsFolderIn(dest) !== null) {
+        return yield* invalid(
+          "A page's comments folder holds only its comments.",
+          'Choose a path outside it.',
+        )
+      }
+      if (node.origin === 'data') {
+        return yield* invalid(
+          "Data files move with their page's folder.",
+          'Move the folder that holds them.',
+        )
+      }
+      const granted = yield* access.require('write', node)
+      // The deepest folder on the way that exists, and the ones to make. The
+      // caller must write it before anything about the destination is
+      // answered: then whatever is there is theirs to read.
+      const ways = ancestorPaths(parentOf(dest))
+      let nearest = liveAt.get('')
+      let inTheWay: NodeRow | null = null
+      const make: string[] = []
+      for (const p of ways) {
+        const there = liveAt.get(p)
+        if (there === undefined) {
+          make.push(p)
+          continue
+        }
+        if (there.kind !== 'folder') {
+          inTheWay = there
+          break
+        }
+        if (make.length === 0) nearest = there
+      }
+      if (nearest === undefined) return yield* denied(located.node)
+      const destination = yield* access.require('write', nearest).pipe(
+        // The same answer whether or not something is there.
+        Effect.mapError((error) =>
+          error.code === 'not_found'
+            ? dossierError('not_found', error.message, error.fix, i.to.path)
+            : error,
+        ),
+      )
+      if (inTheWay !== null) {
+        return yield* invalid(
+          `${display(inTheWay.path)} is a file, so nothing can move inside it.`,
+        )
+      }
       const dataHere = (path: string) =>
         ancestorPaths(path).some(
           (p) => p !== '' && liveAt.get(p)?.origin === 'data',
         )
-      if (node.origin === 'data' || dataHere(node.path) || dataHere(dest)) {
+      if (dataHere(node.path) || dataHere(dest)) {
         return yield* invalid(
           "Data files move with their page's folder.",
           'Move the folder that holds them.',
@@ -783,26 +847,6 @@ export const makeChanges = (deps: ChangesDeps) => {
           ),
         )
       }
-      const granted = yield* access.require('write', node)
-      // The deepest folder on the way that exists, and the ones to make.
-      const ways = ancestorPaths(parentOf(dest))
-      let nearest = liveAt.get('')
-      const make: string[] = []
-      for (const p of ways) {
-        const there = liveAt.get(p)
-        if (there === undefined) {
-          make.push(p)
-          continue
-        }
-        if (there.kind !== 'folder') {
-          return yield* invalid(
-            `${display(p)} is a file, so nothing can move inside it.`,
-          )
-        }
-        if (make.length === 0) nearest = there
-      }
-      if (nearest === undefined) return yield* denied(located.node)
-      yield* access.require('write', nearest)
       // A page and a folder of one name may not sit side by side.
       const clash =
         node.kind === 'file' && dest.endsWith('.html')
@@ -918,7 +962,8 @@ export const makeChanges = (deps: ChangesDeps) => {
         { discard: true },
       )
       const analyses = new Map<string, HtmlAnalysis>()
-      const stored = yield* Effect.gen(function* () {
+      // Every way out but the commit lets go of what it held.
+      const committed = yield* Effect.gen(function* () {
         for (const r of rewrites) {
           yield* store.holdBlob(hold, r.sha, r.size)
           held.push(r.sha)
@@ -932,59 +977,70 @@ export const makeChanges = (deps: ChangesDeps) => {
           const analysis = yield* store.analysis(r.sha)
           if (analysis !== null) analyses.set(r.file.node.id, analysis)
         }
-      }).pipe(Effect.either)
-      if (stored._tag === 'Left') {
-        yield* release
-        return yield* Effect.fail(stored.left)
-      }
-      const files: HtmlAfter[] = html.map((f) => ({
-        path: newOf(f.node.path),
-        analysis: analyses.get(f.node.id) ?? f.analysis,
-        author: f.author,
-        was: f.node.path,
-      }))
-      const kindsAfter = new Map<string, NodeKindAfter>()
-      for (const n of live) kindsAfter.set(newOf(n.path), kindOf(n))
-      for (const p of make) kindsAfter.set(p, 'folder')
-      const needs = yield* neededAfter({
-        DB,
-        access,
-        store,
-        treeId: tree.id,
-        files,
-        kindAt: (p) => kindsAfter.get(p) ?? null,
-        oldOf,
-        newOf,
-        requestId: yield* requestId,
-      })
-      const committed = yield* committing(
-        store.change(tree.id, (cs) =>
-          Effect.sync(() => {
-            cs.guardHead('', tree.authoredSeq as AuthoredSeq)
-            cs.move(granted, dest, make)
-            if (commentsGranted !== null && commentsTo !== null) {
-              cs.move(commentsGranted, commentsTo, [])
-            }
-            rewrites.forEach((r, n) =>
-              cs.putVersion(grants[n]!, {
-                sha256: r.sha,
-                size: r.size,
-                contentType: r.file.type,
-                hold,
-                previous: r.file.versionId,
-              }),
-            )
-            cs.putPageNeeds(needs.needs, needs.narrowed)
-            cs.event({
-              type: 'move',
-              path: node.path,
-              node: granted,
-              detail: dest,
-            })
-            return {}
-          }),
-        ),
-      ).pipe(Effect.tapError(() => release))
+        const files: HtmlAfter[] = html.map((f) => ({
+          path: newOf(f.node.path),
+          analysis: analyses.get(f.node.id) ?? f.analysis,
+          author: f.author,
+          was: f.node.path,
+        }))
+        const kindsAfter = new Map<string, NodeKindAfter>()
+        for (const n of live) kindsAfter.set(newOf(n.path), kindOf(n))
+        for (const p of make) kindsAfter.set(p, 'folder')
+        const needs = yield* neededAfter({
+          DB,
+          access,
+          store,
+          treeId: tree.id,
+          files,
+          kindAt: (p) => kindsAfter.get(p) ?? null,
+          oldOf,
+          newOf,
+          requestId: yield* requestId,
+        })
+        return yield* committing(
+          store.change(tree.id, (cs) =>
+            Effect.sync(() => {
+              cs.guardHead('', tree.authoredSeq as AuthoredSeq)
+              // The write on the destination, as the check saw it.
+              cs.holds(destination)
+              cs.move(granted, dest, make)
+              if (
+                comments !== undefined &&
+                commentsGranted !== null &&
+                commentsTo !== null
+              ) {
+                const was = comments.name
+                const now = commentsTo.slice(commentsTo.lastIndexOf('/') + 1)
+                cs.move(
+                  commentsGranted,
+                  commentsTo,
+                  [],
+                  was === now ? undefined : { from: was, to: now },
+                )
+              }
+              rewrites.forEach((r, n) =>
+                cs.putVersion(grants[n]!, {
+                  sha256: r.sha,
+                  size: r.size,
+                  contentType: r.file.type,
+                  hold,
+                  previous: r.file.versionId,
+                }),
+              )
+              cs.putPageNeeds(needs.needs, needs.narrowed)
+              cs.event({
+                type: 'move',
+                path: node.path,
+                node: granted,
+                detail: dest,
+              })
+              return {}
+            }),
+          ),
+        )
+      }).pipe(
+        Effect.onExit((exit) => (Exit.isFailure(exit) ? release : Effect.void)),
+      )
       // Shares on a folder reach what lies below it by path: what moved out
       // of one is no longer read through it.
       yield* deps.feed.invalidate({
@@ -1071,7 +1127,10 @@ export const makeChanges = (deps: ChangesDeps) => {
         const committed = yield* committing(
           store.change(tree.id, (cs) =>
             Effect.sync(() => {
-              cs.moveTree(granted, membership, i.to.tree)
+              cs.moveTree(granted, membership, i.to.tree, {
+                workspaceId: tree.workspaceId,
+                name: tree.name,
+              })
               for (const r of revokes) cs.revoke(r.granted, r.shareId)
               if (revokes.length > 0) cs.event({ type: 'share', path: '' })
               cs.event({

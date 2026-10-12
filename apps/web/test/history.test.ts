@@ -9,7 +9,7 @@ import { Effect } from 'effect'
 import { beforeAll, describe, expect, it } from 'vitest'
 
 import { Data, Files, type Caller } from '../src/core/index.ts'
-import { rows } from './support/d1.ts'
+import { exec, rows } from './support/d1.ts'
 import { formRef, pageWith, QUESTIONS } from './support/forms.ts'
 import { ORIGIN } from './support/harness.ts'
 import { keySecretFor } from './support/keys.ts'
@@ -286,6 +286,105 @@ describe('history', () => {
       kind: 'move',
       to: 'private/questions.html',
     })
+  })
+
+  it('never names a path the reader of a folder’s history cannot read', async () => {
+    const t = await acme()
+    const lina = await person('lina')
+    const qs = await nodeAt(t.tree, 'questions')
+    await share(t.tree, qs!.id, 'email', lina.email, 'write', t.owner)
+    const f = files(t.ownerAgent)
+    // A private file is deleted, restored, then moved into questions/.
+    await pushAt(
+      h(1),
+      t.ownerAgent,
+      `${t.ws.name}/${t.name}`,
+      { ...FIRST, 'private/target.html': PLAN_1 },
+      { force: true, message: 'Lay off Alice on Friday' },
+    )
+    await f.run(h(2), (x) => x.rm({ ref: t.at('private/target.html') }))
+    await f.run(h(3), (x) =>
+      x.restore({ ref: t.at('private/target.html'), to: { at: h(2) - 1 } }),
+    )
+    await f.run(h(4), (x) =>
+      x.mv({
+        from: t.at('private/target.html'),
+        to: t.at('questions/target.html'),
+      }),
+    )
+    const theirs = await files(await agent(lina)).run(h(5), (x) =>
+      x.log({ ref: t.at('questions/'), cursor: null }),
+    )
+    expect(JSON.stringify(theirs.lines)).not.toContain('private/')
+    // The push that touched only private/ is not theirs to open.
+    const unrelated = await files(await agent(lina)).fail(h(5), (x) =>
+      x.pushDetail({ ref: t.at('questions/'), number: 2 as PushNumber }),
+    )
+    expect(unrelated.code).toBe('not_found')
+  })
+
+  it('offers Restore on a deleted folder’s line', async () => {
+    const t = await acme()
+    await files(t.ownerAgent).run(h(1), (x) =>
+      x.rm({ ref: t.at('questions/') }),
+    )
+    const log = await files(t.ownerAgent).run(h(2), (x) =>
+      x.log({ ref: t.at(''), cursor: null }),
+    )
+    expect(log.lines[0]).toMatchObject({
+      kind: 'delete',
+      path: 'questions',
+      restorable: true,
+    })
+  })
+
+  it('diffs a folder by its latest push, backwards too, and says when files are left out', async () => {
+    const t = await acme()
+    const f = files(t.ownerAgent)
+    await pushAt(
+      h(1),
+      t.ownerAgent,
+      `${t.ws.name}/${t.name}`,
+      { ...FIRST, 'plan.html': PLAN_2 },
+      { force: true },
+    )
+    // A deletion on top of the log, and more lines than a page of it.
+    for (let n = 0; n < 26; n += 1) {
+      await f.run(h(2) + n * 2, (x) => x.rm({ ref: t.at('img/map.png') }))
+      await f.run(h(2) + n * 2 + 1, (x) =>
+        x.restore({ ref: t.at('img/map.png'), to: { push: 2 as PushNumber } }),
+      )
+    }
+    await f.run(h(3), (x) => x.rm({ ref: t.at('img/map.png') }))
+    const latest = await f.run(h(4), (x) =>
+      x.diff({ ref: t.at(''), from: null, to: null }),
+    )
+    expect(latest.patch).toContain(
+      '+<p>Per pallet until December, then per truck.</p>',
+    )
+    const back = await f.run(h(4), (x) =>
+      x.diff({ ref: t.at(''), from: 2 as PushNumber, to: 1 as PushNumber }),
+    )
+    expect(back.patch).toContain(
+      '-<p>Per pallet until December, then per truck.</p>',
+    )
+    const many = Object.fromEntries(
+      Array.from({ length: 105 }, (_, n) => [`many/f${n}.txt`, `line ${n}\n`]),
+    )
+    await pushAt(
+      h(5),
+      t.ownerAgent,
+      `${t.ws.name}/${t.name}/many`,
+      Object.fromEntries(Object.entries(many).map(([k, v]) => [k.slice(5), v])),
+    )
+    const wide = await f.run(h(6), (x) =>
+      x.diff({
+        ref: t.at('many/'),
+        from: 2 as PushNumber,
+        to: 3 as PushNumber,
+      }),
+    )
+    expect(wide.patch).toContain('5 more changed files are not shown')
   })
 
   it('pages 50 lines at a time, newest first', async () => {
@@ -682,6 +781,79 @@ describe('restoring', () => {
       await liveText(t.tree, `questions/answers/${other.email}.json`),
     ).not.toBeNull()
     expect(await liveText(t.tree, 'questions/index.html')).toBe(QUESTIONS)
+  })
+
+  it('answers conflict when a folder’s restore would bring a file back where a newer one lives', async () => {
+    const t = await acme()
+    const f = files(t.ownerAgent)
+    await f.run(h(1), (x) => x.rm({ ref: t.at('plan.html') }))
+    await pushAt(
+      h(2),
+      t.ownerAgent,
+      `${t.ws.name}/${t.name}`,
+      { ...FIRST, 'plan.html': PLAN_2 },
+      { force: true },
+    )
+    const refused = await f.fail(h(3), (x) =>
+      x.restore({ ref: t.at(''), to: { push: 1 as PushNumber } }),
+    )
+    expect(refused).toMatchObject({
+      code: 'conflict',
+      message: 'A newer plan.html is there now. Move it first.',
+    })
+    expect(await liveText(t.tree, 'plan.html')).toBe(PLAN_2)
+  })
+
+  it('counts what a restore brings back against the workspace’s storage', async () => {
+    const t = await acme()
+    await files(t.ownerAgent).run(h(1), (x) => x.rm({ ref: t.at('plan.html') }))
+    const [used] = await rows<{ used: number }>(
+      `select sum(coalesce(v.size, 0)) as used from node_versions v join trees tr on tr.id = v.tree_id
+       where tr.workspace_id = ?`,
+      t.ws.id,
+    )
+    await exec(
+      `insert into deployment_settings (key, value_json, updated_by, updated_at) values ('limits', ?, ?, ?)
+       on conflict (key) do update set value_json = excluded.value_json`,
+      JSON.stringify({ storageBytes: used!.used }),
+      t.owner.id,
+      Date.now(),
+    )
+    const refused = await files(await agent(t.owner)).fail(h(2), (x) =>
+      x.restore({ ref: t.at('plan.html'), to: { at: h(1) - 1 } }),
+    )
+    await exec("delete from deployment_settings where key = 'limits'")
+    expect(refused.code).toBe('too_large')
+  })
+
+  it('gives a restored page the forms its content holds where it stands now', async () => {
+    const t = await acme()
+    const f = files(t.ownerAgent)
+    await pushAt(
+      h(1),
+      t.ownerAgent,
+      `${t.ws.name}/${t.name}`,
+      {
+        ...FIRST,
+        'q/ask.html': pageWith(
+          '<form action="answers/" method="post"><input name="a"><button>Send</button></form>',
+          'Ask',
+        ),
+      },
+      { force: true },
+    )
+    await f.run(h(2), (x) =>
+      x.mv({ from: t.at('q/ask.html'), to: t.at('ask.html') }),
+    )
+    await f.run(h(3), (x) =>
+      x.restore({ ref: t.at('ask.html'), to: { push: 2 as PushNumber } }),
+    )
+    const targets = await rows<{ target: string }>(
+      `select f.target_path as target from forms f join nodes n on n.id = f.host_node_id
+         and n.current_version_id = f.host_version_id where n.tree_id = ? and n.path = 'ask.html'`,
+      t.tree,
+    )
+    expect(targets.map((x) => x.target)).toEqual(['answers/'])
   })
 
   it('refuses a path a newer node holds, and versions past the retention period', async () => {

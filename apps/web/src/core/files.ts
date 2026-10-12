@@ -212,6 +212,9 @@ export const entryWire = (entry: Entry): EntryWire => ({
         },
 })
 
+const isUnder = (path: string, prefix: string): boolean =>
+  prefix === '' || path === prefix || path.startsWith(`${prefix}/`)
+
 /** Reading never asks for more than read, so forbidden cannot happen. */
 const readOnly = <A, R>(
   effect: Effect.Effect<
@@ -425,10 +428,27 @@ export const FilesLive: Layer.Layer<
           cursor,
           retentionDays,
         })
-        // A move names where the node went only to whoever reads it there.
-        const lines = yield* Effect.forEach(page.lines, (line, n) =>
+        // A line names only paths the caller may see: at or below what
+        // they asked about, a folder above it, or a place they read.
+        const asked = located.node.path
+        const sees = (path: string) =>
           Effect.gen(function* () {
-            const id = page.nodes[n]
+            if (isUnder(path, asked) || isUnder(asked, path)) return true
+            const near = yield* store.nearest(located.tree.id, path)
+            return (
+              near !== null &&
+              (yield* access.require('read', near).pipe(Effect.isSuccess))
+            )
+          })
+        const shown: LogLine[] = []
+        for (const line of page.lines) {
+          if (yield* sees(line.path)) shown.push(line)
+        }
+        // A move names where the node went only to whoever reads it there.
+        const nodeOf = new Map(page.lines.map((l, n) => [l, page.nodes[n]]))
+        const lines = yield* Effect.forEach(shown, (line) =>
+          Effect.gen(function* () {
+            const id = nodeOf.get(line)
             if (line.kind !== 'move' || line.to === null || id == null) {
               return line
             }
@@ -465,12 +485,28 @@ export const FilesLive: Layer.Layer<
             ),
           )
         }
-        return yield* history.pushDetail({
+        const detail = yield* history.pushDetail({
           caller,
           tree: located.tree,
           node: located.node,
           push,
         })
+        // Only a push in this history: one that changed something here, or
+        // one pushed here.
+        if (
+          detail.files.length === 0 &&
+          !isUnder(push.path, located.node.path)
+        ) {
+          return yield* Effect.fail(
+            dossierError(
+              'not_found',
+              `There is no push ${number} in this history.`,
+              null,
+              ref.path,
+            ),
+          )
+        }
+        return detail
       }).pipe(Effect.catchTag('DossierError', narrowHistory)) as ReturnType<
         FilesService['pushDetail']
       >
@@ -498,15 +534,8 @@ export const FilesLive: Layer.Layer<
           let fromSeq: number
           let toSeq: number | null
           if (from === null && to === null) {
-            const latest = yield* history.log({
-              caller: yield* CurrentCaller,
-              tree,
-              node,
-              cursor: null,
-              retentionDays: yield* retention(),
-            })
-            const push = latest.lines.find((l) => l.push !== null)?.push
-            if (push === undefined || push === null) {
+            const number = yield* history.latestPushUnder(node)
+            if (number === null) {
               return {
                 path: node.path,
                 from: null,
@@ -517,7 +546,7 @@ export const FilesLive: Layer.Layer<
                 patch: '',
               }
             }
-            toSeq = yield* seqOf(push.number)
+            toSeq = yield* seqOf(number)
             fromSeq = toSeq - 1
           } else if (from === null) {
             return yield* Effect.fail(

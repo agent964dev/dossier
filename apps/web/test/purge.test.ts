@@ -1150,3 +1150,77 @@ describe('restoring and purging', () => {
     await restoredWithBytes(t)
   })
 })
+
+describe('claims and holds a run inherits', () => {
+  const store = <A, E>(
+    f: (s: Effect.Effect.Success<typeof TreeStore>) => Effect.Effect<A, E>,
+  ) => run(Effect.flatMap(TreeStore, f))
+
+  it('never deletes the bytes of a blob a stopped run had claimed that lives again', async () => {
+    const { tag, name } = fresh()
+    const t0 = Date.UTC(2026, 10, 2, 9)
+    const text = `alive again ${tag}`
+    await pushAt(t0, await agent(owner), `${ws.name}/${name}`, {
+      'a.txt': text,
+    })
+    const sha = await sha256Of(text)
+    // A run claimed it, finished it, then stopped before its checkpoint said
+    // so; the same bytes have been pushed again since.
+    await exec(
+      `insert into purge_runs (id, trigger, started_by, state, lease_until, checkpoint_json,
+         counts_json, started_at)
+       values (?, 'weekly', null, 'running', ?, ?, '{}', ?)`,
+      crypto.randomUUID(),
+      t0 + HOUR,
+      JSON.stringify({ step: 'blobs', claimed: [sha] }),
+      t0 - HOUR,
+    )
+    await purgeAt(t0 + 2 * HOUR)
+    expect(await blobRow(sha)).toMatchObject({ state: 'live' })
+    expect(await stored(`blobs/${sha}`)).toBe(true)
+  })
+
+  it('finishes a claim no checkpoint names, at the next run', async () => {
+    const { tag } = fresh()
+    const t0 = Date.UTC(2026, 10, 3, 9)
+    const text = `orphaned claim ${tag}`
+    const sha = await sha256Of(text)
+    await exec(
+      `insert into blobs (sha256, size, ref_count, state, first_seen_at, reclaim_started_at)
+       values (?, ?, 0, 'reclaiming', ?, ?)`,
+      sha,
+      text.length,
+      t0 - DAY,
+      t0 - 10 * MINUTE,
+    )
+    await env.BLOBS.put(`blobs/${sha}`, text)
+    await purgeAt(t0)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await stored(`blobs/${sha}`)).toBe(false)
+  })
+
+  it('keeps the hold of an upload still writing when its push expires, and lets it go after', async () => {
+    const { tag, name } = fresh()
+    const t0 = Date.UTC(2026, 10, 4, 9)
+    const text = `late upload ${tag}`
+    const sha = (await sha256Of(text)) as Sha256
+    const staged = await stageAt(t0, await agent(owner), `${ws.name}/${name}`, {
+      'late.txt': text,
+    })
+    const holder = { kind: 'push' as const, id: staged.pushId! }
+    // A minute before the push expires, its upload takes its hold.
+    await at(
+      t0 + DAY - MINUTE,
+      await agent(owner),
+      Effect.flatMap(TreeStore, (s) => s.holdBlob(holder, sha, text.length)),
+    )
+    await env.BLOBS.put(`blobs/${sha}`, text)
+    await purgeAt(t0 + DAY + MINUTE)
+    expect(await blobRow(sha)).toMatchObject({ state: 'live' })
+    expect(await stored(`blobs/${sha}`)).toBe(true)
+    await purgeAt(t0 + DAY + 2 * HOUR)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await stored(`blobs/${sha}`)).toBe(false)
+    void store
+  })
+})

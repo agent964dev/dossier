@@ -84,7 +84,7 @@ export class PurgeBudget extends Context.Reference<PurgeBudget>()(
 export const LEASE_MS = 10 * 60 * 1000
 
 /** A claim older than this was left by a run or a reclaim that stopped. */
-export const STALE_CLAIM_MS = 60 * 60 * 1000
+export const STALE_CLAIM_MS = 5 * 60 * 1000
 
 /** Blobs claimed at once. */
 const CLAIM_BATCH = 50
@@ -209,9 +209,33 @@ export const PurgeLive: Layer.Layer<
         },
       })
 
-    /** Deletes a claimed blob's objects, then its rows. */
-    const reclaimOne = (system: SystemStore, sha256: Sha256) =>
+    /**
+     * Deletes a claimed blob's objects, then its rows. A run deletes only
+     * while it still holds its lease: a run another took over stops here,
+     * so two never finish one claim around a new upload of the same bytes.
+     */
+    const reclaimOne = (
+      system: SystemStore,
+      sha256: Sha256,
+      runId: string | null = null,
+    ) =>
       Effect.gen(function* () {
+        if (runId !== null) {
+          const now = yield* Clock.currentTimeMillis
+          const ours = yield* d1('check its lease', () =>
+            DB.prepare(
+              `select 1 as one from purge_runs where id = ? and state = 'running'
+                 and lease_until > ?`,
+            )
+              .bind(runId, now)
+              .first(),
+          )
+          if (ours === null) {
+            return yield* Effect.fail(
+              dossierError('conflict', 'Another purge run took over this one.'),
+            )
+          }
+        }
         yield* r2('delete', () => BLOBS.delete(objectsOf(sha256)))
         yield* system.finishBlob(sha256)
       })
@@ -387,30 +411,27 @@ export const PurgeLive: Layer.Layer<
                 .all<{ sha256: Sha256 }>(),
             )
             for (const { sha256 } of still.results) {
-              yield* reclaimOne(system, sha256)
+              yield* reclaimOne(system, sha256, runId)
               spend(perBlob)
               tally.blobs += 1
             }
             yield* save({ step: 'blobs', claimed: [] })
           }
-          // Claims a stopped run or reclaim left more than an hour ago.
+          // Claims a stopped run or reclaim left behind, whether or not a
+          // checkpoint names them. A claimed blob is one nothing references
+          // or holds, and no hold can be taken on it, so it is finished,
+          // never handed back to live: a claim handed back while another
+          // actor was about to delete its bytes would lose them.
           if (!(yield* fits(SYSTEM_STATEMENTS.staleClaims))) return false
           spend(SYSTEM_STATEMENTS.staleClaims)
           const now = yield* Clock.currentTimeMillis
           for (const sha256 of yield* system.staleClaims(
             now - STALE_CLAIM_MS,
           )) {
-            if (!(yield* fits(1 + perBlob))) return false
-            spend(1)
-            const there = yield* r2('read', () => BLOBS.head(blobKey(sha256)))
-            if (there === null) {
-              yield* reclaimOne(system, sha256)
-              spend(perBlob)
-              tally.blobs += 1
-            } else {
-              spend(SYSTEM_STATEMENTS.releaseClaim)
-              yield* system.releaseClaim(sha256)
-            }
+            if (!(yield* fits(perBlob))) return false
+            yield* reclaimOne(system, sha256, runId)
+            spend(perBlob)
+            tally.blobs += 1
           }
           for (;;) {
             const cost =
@@ -421,7 +442,7 @@ export const PurgeLive: Layer.Layer<
             if (claimed.length === 0) return true
             yield* save({ step: 'blobs', claimed })
             for (const sha256 of claimed) {
-              yield* reclaimOne(system, sha256)
+              yield* reclaimOne(system, sha256, runId)
               spend(perBlob)
               tally.blobs += 1
             }

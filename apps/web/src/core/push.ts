@@ -240,8 +240,11 @@ const holdsForms = (path: string) =>
     path.endsWith('/_layout.html') ||
     !path.split('/').some(isKitName))
 
-/** The rows of `push_forms` for the pushed pages and layouts. */
-const formRowsOf = (files: readonly PushFile[]) =>
+/**
+ * The rows of `push_forms` for the pushed pages and layouts: each form as
+ * its file declares it, by the file that holds it.
+ */
+export const formRowsOf = (files: readonly PushFile[]) =>
   files.flatMap(({ path, analysis }) =>
     holdsForms(path)
       ? analysis.forms.flatMap((form) => {

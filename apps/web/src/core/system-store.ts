@@ -84,7 +84,7 @@ export const RECORD_BATCH = 2000
  * caller can keep a run within its budget.
  */
 export const SYSTEM_STATEMENTS = {
-  expireStagedPushes: 6,
+  expireStagedPushes: 7,
   purgeDeletedNodes: 13 + 18 + 11,
   purgeRecords: 7,
   claimBlobs: 1,
@@ -141,6 +141,9 @@ const DOOMED_WORKSPACES = `with doomed(id) as (
   )`
 
 /** The staged pushes of the batch `?1` whose expiry `?2` has passed. */
+/** How long an upload may still be writing after its push expired. */
+export const UPLOAD_GRACE_MS = 60 * 60 * 1000
+
 const EXPIRED_PUSHES = `with doomed(id) as (
     select p.id from pushes p join json_each(?1) j on j.value = p.id
     where p.state = 'staged' and p.expires_at <= ?2
@@ -194,12 +197,27 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
         now,
         limit,
       )
-      if (found.length === 0) return 0
-      const binds = [JSON.stringify(found), now]
+      // An upload still writing its bytes keeps its hold for a while after
+      // its push expires, so the bytes are never reclaimed under it; the
+      // holds of pushes that expired earlier go once that while is over.
+      const settled = now - UPLOAD_GRACE_MS
+      const earlier = {
+        sql: `delete from blob_holds where holder_kind = 'push'
+                and created_at <= ?1
+                and holder_id in (select id from pushes where state = 'expired')`,
+        binds: [settled],
+      }
+      if (found.length === 0) {
+        yield* batch('let go of expired pushes’ holds', [earlier])
+        return 0
+      }
+      const binds = [JSON.stringify(found), now, settled]
       const changes = yield* batch('expire pushes', [
+        earlier,
         {
           sql: `${EXPIRED_PUSHES} delete from blob_holds
-                where holder_kind = 'push' and holder_id in (select id from doomed)`,
+                where holder_kind = 'push' and holder_id in (select id from doomed)
+                  and (verified = 1 or created_at <= ?3)`,
           binds,
         },
         ...['push_files', 'push_folders', 'push_forms'].map((table) => ({
@@ -213,7 +231,7 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
           binds,
         },
       ])
-      return changes[4] ?? 0
+      return changes[5] ?? 0
     })
 
   /** One batch of deleted nodes, deepest first, with what hangs off them. */

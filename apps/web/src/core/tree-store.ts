@@ -221,6 +221,26 @@ export interface RestorePlan {
   readonly empty: readonly NodeRow[]
   /** A deleted tree, live again with its root. */
   readonly tree: boolean
+  /**
+   * The forms of each page or layout brought back, as its content declares
+   * them where it stands now.
+   */
+  readonly forms: readonly {
+    readonly node: NodeRow
+    readonly rows: readonly NewFormRow[]
+  }[]
+}
+
+/** A form as a push stages it, by the file that holds it. */
+export interface NewFormRow {
+  readonly target: string
+  readonly key: string
+  readonly kind: string
+  readonly closesAt: number | null
+  readonly closed: number
+  readonly line: number
+  readonly title: string | null
+  readonly schema: string
 }
 
 /** What every data version records beside its content. */
@@ -390,6 +410,11 @@ export interface ChangeSet {
     node: Granted<'write'>,
     to: string,
     folders: readonly string[],
+    /**
+     * A page's comments folder renamed with its page: the thread paths its
+     * entries name (`replyTo`, `resolves`, `reopens`) follow.
+     */
+    refs?: { readonly from: string; readonly to: string },
   ) => void
   /**
    * A new authored version of an existing file, as a move's rewritten
@@ -412,6 +437,8 @@ export interface ChangeSet {
     root: Granted<'write'>,
     to: Membership,
     name: string,
+    /** Where the tree was when the move read it; it must still be there. */
+    was: { readonly workspaceId: string; readonly name: string },
   ) => void
   /**
    * Fails the change if any live answer of `owner` in the folder `own`,
@@ -2092,6 +2119,14 @@ export const TreeStoreLive: Layer.Layer<
                           and ${under('n.path', '?')})`,
               binds: [tid(), base, path, path, path, path],
             })
+            // The whole tree: a move writes no version, but moves its
+            // sequence.
+            if (path === '') {
+              heads.push({
+                sql: '(select authored_seq from trees where id = ?) <= ?',
+                binds: [tid(), base],
+              })
+            }
           },
 
           createTree: (member, name) => {
@@ -2600,6 +2635,8 @@ export const TreeStoreLive: Layer.Layer<
           restore: (node, made) => {
             const t = tid()
             bases.push(everyBasis(node.basis, person.id))
+            // What it brings back is stored again, history included.
+            if (made.revive.length > 0) grows = true
             if (
               made.revive.some((r) => r.node.origin === 'authored') ||
               made.remove.some((r) => r.origin === 'authored')
@@ -2665,6 +2702,30 @@ export const TreeStoreLive: Layer.Layer<
                 binds: [t],
               })
             }
+            // Files the point did not hold go first, so nothing the restore
+            // brings back meets them at a path.
+            writes.push(
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select lower(hex(randomblob(16))), n.id, ?1,
+                        (select coalesce(max(r.revision), 0) + 1 from node_versions r
+                           where r.node_id = n.id),
+                        case when n.origin = 'authored'
+                          then (select authored_seq from trees where id = ?1) end,
+                        'deleted', null, null, null, null, ?3, ?4, null, null, null, ?5
+                      from json_each(?2) j
+                        join nodes n on n.id = json_extract(j.value, '$.node')`,
+                binds: [t, remove, person.id, keyId, now],
+              },
+              {
+                sql: `update nodes set deleted_at = ?3, current_version_id =
+                        (select v.id from node_versions v where v.node_id = nodes.id
+                           order by v.revision desc limit 1)
+                      where tree_id = ?1 and id in
+                        (select json_extract(j.value, '$.node') from json_each(?2) j)`,
+                binds: [t, remove, now],
+              },
+            )
             writes.push(
               {
                 sql: `update nodes set deleted_at = null
@@ -2705,38 +2766,25 @@ export const TreeStoreLive: Layer.Layer<
                 binds: [t, revive],
               },
               {
-                // The forms of a page or layout are those of the version
-                // whose content it takes again, by its new version.
+                // The forms its content declares where it stands now, by
+                // its new version.
                 sql: `insert into forms (host_version_id, host_node_id, tree_id, target_path,
                         form_key, kind, closes_at, closed, line, title, schema_json)
-                      select n.current_version_id, f.host_node_id, f.tree_id, f.target_path,
-                        f.form_key, f.kind, f.closes_at, f.closed, f.line, f.title,
-                        f.schema_json
-                      from json_each(?1) j
-                        join forms f on f.host_version_id = json_extract(j.value, '$.from')
-                        join nodes n on n.id = json_extract(j.value, '$.node')
-                      where true on conflict do nothing`,
-                binds: [revive],
-              },
-              {
-                sql: `insert into node_versions (${VERSION_COLUMNS})
-                      select lower(hex(randomblob(16))), n.id, ?1,
-                        (select coalesce(max(r.revision), 0) + 1 from node_versions r
-                           where r.node_id = n.id),
-                        case when n.origin = 'authored'
-                          then (select authored_seq from trees where id = ?1) end,
-                        'deleted', null, null, null, null, ?3, ?4, null, null, null, ?5
+                      select n.current_version_id, n.id, ?1,
+                        json_extract(f.value, '$.target'), json_extract(f.value, '$.key'),
+                        json_extract(f.value, '$.kind'), json_extract(f.value, '$.closesAt'),
+                        json_extract(f.value, '$.closed'), json_extract(f.value, '$.line'),
+                        json_extract(f.value, '$.title'), json_extract(f.value, '$.schema')
                       from json_each(?2) j
-                        join nodes n on n.id = json_extract(j.value, '$.node')`,
-                binds: [t, remove, person.id, keyId, now],
-              },
-              {
-                sql: `update nodes set deleted_at = ?3, current_version_id =
-                        (select v.id from node_versions v where v.node_id = nodes.id
-                           order by v.revision desc limit 1)
-                      where tree_id = ?1 and id in
-                        (select json_extract(j.value, '$.node') from json_each(?2) j)`,
-                binds: [t, remove, now],
+                        join nodes n on n.id = json_extract(j.value, '$.node')
+                        join json_each(json_extract(j.value, '$.rows')) f
+                      where true on conflict do nothing`,
+                binds: [
+                  t,
+                  JSON.stringify(
+                    made.forms.map((f) => ({ node: f.node.id, rows: f.rows })),
+                  ),
+                ],
               },
               {
                 sql: `update nodes set deleted_at = ?3
@@ -2748,7 +2796,7 @@ export const TreeStoreLive: Layer.Layer<
             outcomes.push(liveUnderLive(t))
           },
 
-          move: (node, to, folders) => {
+          move: (node, to, folders, refs) => {
             const t = tid()
             authoredTouched = true
             bases.push(everyBasis(node.basis, person.id))
@@ -2813,6 +2861,18 @@ export const TreeStoreLive: Layer.Layer<
                       where id = ?1`,
                 binds: [node.id, segments.at(-1) ?? to, t, parentPath(to)],
               },
+              ...(refs === undefined
+                ? []
+                : (['replyTo', 'resolves', 'reopens'] as const).map((key) => ({
+                    sql: `${subtree}
+                          update node_versions
+                          set json_value = json_set(json_value, '$.${key}',
+                            ?4 || substr(json_extract(json_value, '$.${key}'), length(?3) + 1))
+                          where node_id in (select id from sub) and json_value is not null
+                            and substr(json_extract(json_value, '$.${key}'), 1, length(?3) + 1)
+                              = ?3 || '/'`,
+                    binds: [t, node.id, refs.from, refs.to],
+                  }))),
               {
                 // Forms that send inside what moved follow it.
                 sql: `update forms set target_path = ?2 || substr(target_path, length(?3) + 1)
@@ -2903,8 +2963,14 @@ export const TreeStoreLive: Layer.Layer<
             )
           },
 
-          moveTree: (root, to, name) => {
+          moveTree: (root, to, name, was) => {
             const t = tid()
+            // Still where the move read it, and live.
+            stateGuards.push({
+              sql: `exists (select 1 from trees where id = ? and workspace_id = ?
+                      and name = ? and deleted_at is null)`,
+              binds: [t, was.workspaceId, was.name],
+            })
             // A composed page holds its tree's names: a new sequence keeps
             // the cache from serving the old ones.
             authoredTouched = true

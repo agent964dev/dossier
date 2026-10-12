@@ -31,6 +31,14 @@ const DAY = 86_400_000
 const LOGGED = `('push', 'delete', 'restore', 'move', 'withdrawal')`
 
 /**
+ * Where the node `x` stood when its version `v` was written: a push's files
+ * are counted where they were then, never where a later move took them.
+ */
+const PATH_THEN = `coalesce((select pa.old_path from path_aliases pa
+    where pa.node_id = x.id and pa.moved_at_seq > v.authored_seq
+    order by pa.moved_at_seq limit 1), x.path)`
+
+/**
  * A version `v` the push `v.push_id` wrote itself, at its own sequence: a
  * restore or a move's rewrite keeps the push of the content it copies, at a
  * later sequence.
@@ -169,7 +177,7 @@ export const makeHistory = (deps: HistoryDeps) => {
       const changedHere = folder
         ? `(select count(*) from node_versions v join nodes x on x.id = v.node_id
              where v.push_id = e.push_id and ${OWN_SEQ}
-               and ${underParam('x.path', 2)})`
+               and ${underParam(PATH_THEN, 2)})`
         : `(select count(*) from node_versions v where v.push_id = e.push_id
              and ${OWN_SEQ} and v.node_id = ?3)`
       const rows = yield* query(() =>
@@ -178,12 +186,14 @@ export const makeHistory = (deps: HistoryDeps) => {
              e.actor_id as actorId, e.detail, u.email, u.name,
              p.number, p.message, p.path as pushPath, ${changedHere} as files,
              (n.id is not null and n.deleted_at is not null and n.deleted_at > ?5
-               and (select v.state from node_versions v
-                      where v.id = n.current_version_id) = 'deleted') as restorable,
+               and (n.kind = 'folder' or (select v.state from node_versions v
+                      where v.id = n.current_version_id) = 'deleted')) as restorable,
              case when e.type = 'delete' then (select lp.number || ' ' || coalesce(lp.message, '')
-               from node_versions lv join nodes x on x.id = lv.node_id
+               from nodes x join node_versions lv on lv.id = (select l2.id from node_versions l2
+                   where l2.node_id = x.id and l2.state = 'live' and l2.created_at <= e.created_at
+                   order by l2.revision desc limit 1)
                  join pushes lp on lp.id = lv.push_id
-               where lv.tree_id = e.tree_id and lv.state = 'live' and lv.created_at <= e.created_at
+               where x.tree_id = e.tree_id
                  and (e.path = '' or x.path = e.path or substr(x.path, 1, length(e.path) + 1) = e.path || '/')
                order by lp.number desc limit 1) end as deletedFrom,
              case when e.type = 'delete' then (select count(*) from node_versions dv
@@ -358,11 +368,11 @@ export const makeHistory = (deps: HistoryDeps) => {
       const folder = i.node.kind === 'folder'
       const rows = yield* query(() =>
         DB.prepare(
-          `select v.*, n.path as nodePath, n.name as nodeName from node_versions v
-             join nodes n on n.id = v.node_id
-           where v.push_id = ?1 and ${OWN_SEQ}
-             and ${folder ? underParam('n.path', 2) : 'n.id = ?3'}
-           order by n.path`,
+          `select * from (select v.*, ${PATH_THEN} as nodePath, x.name as nodeName
+             from node_versions v join nodes x on x.id = v.node_id
+             where v.push_id = ?1 and ${OWN_SEQ}
+               and ${folder ? underParam(PATH_THEN, 2) : 'x.id = ?3'})
+           order by nodePath`,
         )
           .bind(
             ...(folder ? [i.push.id, i.node.path] : [i.push.id, '', i.node.id]),
@@ -438,6 +448,22 @@ export const makeHistory = (deps: HistoryDeps) => {
         files,
       }
     })
+
+  /** The newest push that changed something at or below a folder, then. */
+  const latestPushUnder = (node: NodeRow) =>
+    Effect.map(
+      query(() =>
+        DB.prepare(
+          `select p.number from pushes p where p.tree_id = ?1 and p.state = 'committed'
+             and exists (select 1 from node_versions v join nodes x on x.id = v.node_id
+               where v.push_id = p.id and ${OWN_SEQ} and ${underParam(PATH_THEN, 2)})
+           order by p.number desc limit 1`,
+        )
+          .bind(node.treeId, node.path)
+          .first<{ number: number }>(),
+      ),
+      (row) => (row === null ? null : (row.number as PushNumber)),
+    )
 
   /** The newest version of a node at or before an authored sequence. */
   const versionAtSeq = (nodeId: string, seq: number) =>
@@ -543,12 +569,19 @@ export const makeHistory = (deps: HistoryDeps) => {
                and v.authored_seq > ?3 and (?4 is null or v.authored_seq <= ?4))
            order by n.path`,
         )
-          .bind(i.node.treeId, i.node.path, i.from, i.to)
+          // Either way round: the files changed between the two.
+          .bind(
+            i.node.treeId,
+            i.node.path,
+            i.to === null ? i.from : Math.min(i.from, i.to),
+            i.to === null ? null : Math.max(i.from, i.to),
+          )
           .all<Record<string, unknown>>(),
       )
       const parts: string[] = []
       let shown = 0
-      for (const row of rows.results) {
+      let left = 0
+      for (const [index, row] of rows.results.entries()) {
         const node = nodeOfRow(row)
         const before = yield* versionAtSeq(node.id, i.from)
         const after =
@@ -564,7 +597,10 @@ export const makeHistory = (deps: HistoryDeps) => {
         ) {
           continue
         }
-        if (shown >= COUNTED_FILES) break
+        if (shown >= COUNTED_FILES) {
+          left = rows.results.length - index
+          break
+        }
         shown += 1
         const diff = yield* fileDiff({
           node,
@@ -575,6 +611,11 @@ export const makeHistory = (deps: HistoryDeps) => {
           diff.binary
             ? `Binary file ${node.path} changed\n`
             : (diff.patch ?? ''),
+        )
+      }
+      if (left > 0) {
+        parts.push(
+          `${left} more changed ${left === 1 ? 'file is' : 'files are'} not shown; diff them one at a time.\n`,
         )
       }
       return parts.join('')
@@ -596,6 +637,7 @@ export const makeHistory = (deps: HistoryDeps) => {
     log,
     pushOf,
     seqOfPush,
+    latestPushUnder,
     pushDetail,
     versionAtSeq,
     versionAtTime,
