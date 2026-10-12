@@ -390,6 +390,27 @@ const withoutNulls = (values: Readonly<Record<string, unknown>>): JsonObject =>
     Object.entries(values).filter(([, value]) => value !== null),
   ) as JsonObject
 
+/**
+ * A merge patch applied to nothing, as RFC 7396 says: a null removes its
+ * key at every depth, an object is merged into an empty one, anything else
+ * (arrays included) stands as it is.
+ */
+const intoNothing = (patch: Readonly<Record<string, unknown>>): JsonObject =>
+  Object.fromEntries(
+    Object.entries(patch).flatMap(([key, value]) =>
+      value === null
+        ? []
+        : [
+            [
+              key,
+              typeof value === 'object' && !Array.isArray(value)
+                ? intoNothing(value as Record<string, unknown>)
+                : value,
+            ],
+          ],
+    ),
+  ) as JsonObject
+
 const parseJson = (text: string | null): unknown => {
   if (text === null) return null
   try {
@@ -1471,7 +1492,8 @@ export const DataLive: Layer.Layer<
       }) as ReturnType<DataService['withdraw']>
 
     /** The forms in the tree as it stands that send to a target. */
-    const formsTargeting = (treeId: TreeId, targets: readonly string[]) =>
+    /** Every form of the tree as it stands now. */
+    const currentForms = (treeId: TreeId) =>
       query(() =>
         DB.prepare(
           `select f.kind, f.target_path as target, f.closes_at as closesAt,
@@ -1480,9 +1502,9 @@ export const DataLive: Layer.Layer<
              f.line, f.title, f.tree_id as treeId
            from forms f join nodes n on n.id = f.host_node_id
              and n.current_version_id = f.host_version_id and n.deleted_at is null
-           where f.tree_id = ? and f.target_path in (select value from json_each(?))`,
+           where f.tree_id = ?`,
         )
-          .bind(treeId, JSON.stringify(targets))
+          .bind(treeId)
           .all<{
             kind: FormRow['kind']
             target: string
@@ -1535,7 +1557,7 @@ export const DataLive: Layer.Layer<
             const reads =
               node !== null &&
               (yield* access.require('read', node).pipe(Effect.isSuccess))
-            return reads ? doc : { ...doc, data: withoutNulls(i.patch) }
+            return reads ? doc : { ...doc, data: intoNothing(i.patch) }
           })
         const replay = () =>
           Effect.gen(function* () {
@@ -1569,7 +1591,7 @@ export const DataLive: Layer.Layer<
             ),
           )
         }
-        const values = patch as JsonObject
+        const written = patch as JsonObject
         const isFolder = i.path.endsWith('/')
         const bareTarget = bare(i.path)
         const segments = bareTarget.split('/')
@@ -1696,31 +1718,44 @@ export const DataLive: Layer.Layer<
             }
             under = yield* access.require('respond', above)
           }
-          // Forms that send here: a shared file, a person's file in its
-          // folder, or an entry in its writer's folder.
-          const parent = folderOf(path)
-          const forms = (yield* formsTargeting(tree.id, [
-            path,
-            `${parent}/`,
-            `${folderOf(parent)}/`,
-          ])).filter((row) =>
+          // Every form whose answers hold this path: under a folder target at
+          // any depth, a shared file, or a shared file's uploads.
+          const holding = (yield* currentForms(tree.id)).filter((row) =>
             row.kind === 'shared'
-              ? row.targetPath === path
-              : row.kind === 'person'
-                ? row.targetPath === `${parent}/` &&
-                  path.slice(parent.length + 1).toLowerCase() ===
-                    `${email}.json`
-                : row.targetPath === `${folderOf(parent)}/` &&
-                  parent.split('/').at(-1)?.toLowerCase() === email,
+              ? row.targetPath === path ||
+                path.startsWith(
+                  `${row.targetPath.replace(/\.json$/i, '')}.files/`,
+                )
+              : path.startsWith(row.targetPath),
           )
-          if (forms.length > 0) {
+          let values = written
+          if (holding.length > 0) {
             const now = yield* Clock.currentTimeMillis
-            const open = forms.filter((row) => !isClosed(row, now))
+            const open = holding.filter((row) => !isClosed(row, now))
             if (open.length === 0) {
-              return yield* Effect.fail(closedError(forms[0]!))
+              return yield* Effect.fail(closedError(holding[0]!))
+            }
+            // Only the shape a form stores: the shared file itself, a
+            // person's own file, or an entry in their own folder.
+            const stores = open.filter((row) => {
+              if (row.kind === 'shared') return row.targetPath === path
+              const rest = path.slice(row.targetPath.length).toLowerCase()
+              return row.kind === 'person'
+                ? rest === `${email}.json`
+                : rest.startsWith(`${email}/`) &&
+                    !rest.slice(email.length + 1).includes('/') &&
+                    rest.endsWith('.json')
+            })
+            if (stores.length === 0) {
+              return yield* Effect.fail(
+                forbidden(
+                  path,
+                  "This folder holds a form's answers, which are stored only as the form stores them.",
+                ),
+              )
             }
             const check = validateValues(
-              open.map((row) => row.schema),
+              stores.map((row) => row.schema),
               values,
             )
             if (!check.ok) {
@@ -1734,6 +1769,53 @@ export const DataLive: Layer.Layer<
                 ),
               )
             }
+            // Every upload named is one of the writer's own for the form,
+            // recorded as the stored file is, whatever the write says.
+            const rebuilt: Record<string, Json> = { ...values }
+            for (const [field, value] of Object.entries(values)) {
+              const row = stores.find((r) =>
+                r.schema.fields.some(
+                  (f) => f.name === field && f.type === 'file',
+                ),
+              )
+              if (row === undefined || value === null) continue
+              const own = ownFolder(row, email)
+              const list = Array.isArray(value) ? value : [value]
+              const stored: Json[] = []
+              for (const item of list) {
+                const file =
+                  isUploadValue(item) &&
+                  !item.file
+                    .split('/')
+                    .some(
+                      (part) => part === '..' || part === '.' || part === '',
+                    )
+                    ? yield* liveData(tree.id, `${own}/${item.file}`)
+                    : null
+                if (
+                  file === null ||
+                  file.node.ownerId !== person.id ||
+                  file.version.blobSha256 === null
+                ) {
+                  return yield* Effect.fail(
+                    dossierError(
+                      'invalid',
+                      'This file was not uploaded with this form. Choose the file again.',
+                      null,
+                      field,
+                    ),
+                  )
+                }
+                stored.push({
+                  file: (item as { file: string }).file,
+                  name: file.node.name,
+                  size: file.version.size ?? 0,
+                  type: file.version.contentType ?? 'application/octet-stream',
+                })
+              }
+              rebuilt[field] = Array.isArray(value) ? stored : stored[0]!
+            }
+            values = rebuilt as JsonObject
           }
           // An early refusal; the batch's storage guard decides.
           yield* limits.requireStorage(
@@ -1769,7 +1851,7 @@ export const DataLive: Layer.Layer<
                   })
                   version = cs.putData(node, {
                     ...provenance,
-                    json: i.replace ? values : withoutNulls(values),
+                    json: i.replace ? values : intoNothing(values),
                   })
                 }
                 cs.operation({

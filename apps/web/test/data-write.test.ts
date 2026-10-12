@@ -8,6 +8,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { Data, type Caller } from '../src/core/index.ts'
 import { exec, rows } from './support/d1.ts'
 import {
+  formRef,
   liveValue,
   pageWith,
   pushForms,
@@ -15,6 +16,7 @@ import {
   repush,
   seqOf,
   versionsAt,
+  uploadAs,
   type FormTree,
 } from './support/forms.ts'
 import { harness } from './support/harness.ts'
@@ -45,6 +47,10 @@ const FILES = {
   'closed.html': pageWith(
     '<form action="closed.json" data-closed><input name="state"></form>',
     'Closed',
+  ),
+  'late.html': pageWith(
+    '<form action="late/" data-closed><input name="note"></form>',
+    'Late',
   ),
   'notes.json': '{"authored":true}',
   '_theme.css': ':root { --accent: red }',
@@ -425,6 +431,120 @@ describe('a write', () => {
         patch: { a: 1 },
       }),
     ).toMatchObject({ code: 'forbidden' })
+  })
+})
+
+describe('a write into a form target', () => {
+  it('keeps a closed person form closed whatever shape the write takes', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const email = owner.email.toLowerCase()
+    for (const path of [
+      'late/',
+      `late/${email}.json`,
+      `late/${email}/x.json`,
+    ]) {
+      expect(
+        await writeFailure(browser, tree, {
+          path,
+          patch: { nonexistent: 'bypass' },
+        }),
+        path,
+      ).toMatchObject({ code: 'closed' })
+    }
+    expect(
+      await rows(
+        "select path from nodes where tree_id = ? and path like 'late/%'",
+        tree.treeId,
+      ),
+    ).toEqual([])
+  })
+
+  it('refuses a shape an open form does not store: an entry under a person form, a file under its uploads', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const email = owner.email.toLowerCase()
+    for (const path of [
+      'questions/answers/',
+      `questions/answers/${email}/`,
+      `questions/answers/${email}/files/x.json`,
+      'questions/answers/other.json',
+      'ideas/x.json',
+      `ideas/${email}.json`,
+    ]) {
+      expect(
+        await writeFailure(browser, tree, {
+          path,
+          patch: { role: 'x', idea: 'x' },
+        }),
+        path,
+      ).toMatchObject({ code: 'forbidden' })
+    }
+  })
+})
+
+describe('a first write', () => {
+  it('removes nulls at every depth, as a merge patch into nothing does', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const doc = await writeAs(browser, tree, {
+      path: 'nested.json',
+      patch: { a: { gone: null, keep: 1, deeper: { also: null } }, top: null },
+    })
+    expect(doc.data).toEqual({ a: { keep: 1, deeper: {} } })
+    expect(await liveValue(tree.treeId, 'nested.json')).toEqual({
+      value: { a: { keep: 1, deeper: {} } },
+      owner: null,
+    })
+  })
+})
+
+describe('an upload named by a write', () => {
+  it('must be one of the writer own uploads for the form, recorded as stored', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const email = owner.email.toLowerCase()
+    const path = `questions/answers/${email}.json`
+    const forged = {
+      file: 'files/someone-else.pdf',
+      name: 'cv.pdf',
+      size: 10,
+      type: 'application/pdf',
+    }
+    expect(
+      await writeFailure(browser, tree, {
+        page: 'questions/index.html',
+        path,
+        patch: { role: 'Driver', cv: forged },
+      }),
+    ).toMatchObject({ code: 'invalid', path: 'cv' })
+    const form = await formRef(
+      tree,
+      'questions/index.html',
+      'questions/answers/',
+    )
+    const stored = await uploadAs(browser, tree, {
+      page: 'questions/index.html',
+      form,
+      field: 'cv',
+      name: 'cv.pdf',
+      bytes: '%PDF real',
+    })
+    const doc = await writeAs(browser, tree, {
+      page: 'questions/index.html',
+      path,
+      patch: {
+        role: 'Driver',
+        cv: {
+          file: stored.file,
+          name: 'renamed.exe',
+          size: 1,
+          type: 'text/html',
+        },
+      },
+    })
+    expect((doc.data as { cv: unknown }).cv).toEqual({
+      file: stored.file,
+      name: stored.name,
+      size: stored.size,
+      type: stored.type,
+    })
   })
 })
 
