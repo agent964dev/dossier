@@ -548,6 +548,10 @@ export interface TreeStoreService {
     readonly scope: string
     readonly opId: OpId
   }) => Effect.Effect<OperationResult | null, DossierError<'unavailable'>>
+  /** A node by its ID, live or deleted, or null. */
+  readonly nodeById: (
+    id: NodeId,
+  ) => Effect.Effect<NodeRow | null, DossierError<'unavailable'>>
   /** The deepest live node at or above a tree path, or null. */
   readonly nearest: (
     treeId: TreeId,
@@ -3242,6 +3246,15 @@ export const TreeStoreLive: Layer.Layer<
         }
       })
 
+    const nodeById: TreeStoreService['nodeById'] = (id) =>
+      read(() =>
+        database
+          .select()
+          .from(schema.nodes)
+          .where(eq(schema.nodes.id, id))
+          .get(),
+      ).pipe(Effect.map((row) => (row ?? null) as NodeRow | null))
+
     const nearest: TreeStoreService['nearest'] = (treeId, path) =>
       Effect.gen(function* () {
         const paths = ancestorPaths(path.replace(/^\/+|\/+$/g, ''))
@@ -3432,6 +3445,7 @@ export const TreeStoreLive: Layer.Layer<
       fileAt,
       forms,
       operationResult,
+      nodeById,
       nearest,
       treeNamed,
       change,

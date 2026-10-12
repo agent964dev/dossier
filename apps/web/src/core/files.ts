@@ -7,6 +7,7 @@ import {
   type EventSeq,
   type LinkRef,
   type LogLine,
+  type NodeId,
   type PushFile,
   type PushNumber,
   type Sha256,
@@ -424,9 +425,24 @@ export const FilesLive: Layer.Layer<
           cursor,
           retentionDays,
         })
+        // A move names where the node went only to whoever reads it there.
+        const lines = yield* Effect.forEach(page.lines, (line, n) =>
+          Effect.gen(function* () {
+            const id = page.nodes[n]
+            if (line.kind !== 'move' || line.to === null || id == null) {
+              return line
+            }
+            const node = yield* store.nodeById(id as NodeId)
+            const reads =
+              node !== null &&
+              node.deletedAt === null &&
+              (yield* access.require('read', node).pipe(Effect.isSuccess))
+            return reads ? line : { ...line, to: null }
+          }),
+        )
         return {
           path: located.node.path,
-          lines: page.lines,
+          lines,
           next: page.next,
           retentionDays,
         }

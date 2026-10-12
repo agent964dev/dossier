@@ -258,6 +258,8 @@ export const makeHistory = (deps: HistoryDeps) => {
       const more = rows.results.length > LOG_PAGE
       return {
         lines,
+        /** Each line's node, when it names one: for what a line may show. */
+        nodes: page.map((row) => row.nodeId),
         next: more ? String(page.at(-1)?.seq ?? '') : null,
       }
     })

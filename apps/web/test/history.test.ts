@@ -260,6 +260,34 @@ describe('history', () => {
     expect(mine.lines[0]!.by).toBe(t.owner.email)
   })
 
+  it('names where a node moved only to someone who reads it there', async () => {
+    const t = await acme()
+    const lina = await person('lina')
+    const qs = await nodeAt(t.tree, 'questions')
+    await share(t.tree, qs!.id, 'email', lina.email, 'write', t.owner)
+    await files(t.ownerAgent).run(h(1), (x) =>
+      x.mv({
+        from: t.at('questions/index.html'),
+        to: t.at('private/questions.html'),
+      }),
+    )
+    const theirs = await files(await agent(lina)).run(h(2), (x) =>
+      x.log({ ref: t.at('questions/'), cursor: null }),
+    )
+    expect(theirs.lines[0]).toMatchObject({
+      kind: 'move',
+      path: 'questions/index.html',
+      to: null,
+    })
+    const mine = await files(t.ownerAgent).run(h(2), (x) =>
+      x.log({ ref: t.at('questions/'), cursor: null }),
+    )
+    expect(mine.lines[0]).toMatchObject({
+      kind: 'move',
+      to: 'private/questions.html',
+    })
+  })
+
   it('pages 50 lines at a time, newest first', async () => {
     const t = await acme()
     const f = files(t.ownerAgent)
