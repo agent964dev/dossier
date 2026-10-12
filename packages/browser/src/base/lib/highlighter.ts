@@ -23,16 +23,20 @@ const GRAMMARS: Readonly<Record<string, BaseGrammar>> =
 
 export const THEME_NAME = 'dossier'
 
-/** GitHub light, then GitHub dark, for each variable. */
+/**
+ * GitHub light, then GitHub dark, for each variable, with comments,
+ * keywords and functions taken darker (light) or lighter (dark) so they
+ * read at 4.5:1 on a diff's tinted lines and changed words too.
+ */
 const DEFAULTS: Readonly<Record<string, readonly [string, string]>> = {
   foreground: ['#1f2328', '#e6edf3'],
   background: ['#f6f8fa', '#161b22'],
   'token-constant': ['#0550ae', '#79c0ff'],
   'token-string': ['#0a3069', '#a5d6ff'],
-  'token-comment': ['#59636e', '#8b949e'],
-  'token-keyword': ['#cf222e', '#ff7b72'],
+  'token-comment': ['#4b535d', '#b1bac4'],
+  'token-keyword': ['#a0111f', '#ffa198'],
   'token-parameter': ['#953800', '#ffa657'],
-  'token-function': ['#8250df', '#d2a8ff'],
+  'token-function': ['#622cbc', '#d2a8ff'],
   'token-string-expression': ['#116329', '#7ee787'],
   'token-punctuation': ['#1f2328', '#e6edf3'],
   'token-link': ['#0a3069', '#a5d6ff'],
