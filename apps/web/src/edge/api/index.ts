@@ -3,13 +3,17 @@ import { HttpApiBuilder, HttpServer } from '@effect/platform'
 import { Context, Layer } from 'effect'
 
 import {
+  Background,
+  backgroundInline,
   CurrentCaller,
   visitor,
+  type BackgroundService,
   type Caller,
   type CoreRuntime,
 } from '../../core/index.ts'
 import { DataApiLive } from './data.ts'
 import { DeviceLive } from './device.ts'
+import { EventsLive } from './events.ts'
 import { FilesLive } from './files.ts'
 import { MeLive } from './me.ts'
 import { PushesLive } from './pushes.ts'
@@ -17,7 +21,11 @@ import { ReadLive } from './read.ts'
 import { SystemLive } from './system.ts'
 import { ViewLive } from './view.ts'
 
-export type ApiHandler = (request: Request, caller: Caller) => Promise<Response>
+export type ApiHandler = (
+  request: Request,
+  caller: Caller,
+  background: BackgroundService,
+) => Promise<Response>
 
 const handlers = new WeakMap<CoreRuntime, Promise<ApiHandler>>()
 
@@ -33,18 +41,23 @@ const build = async (runtime: CoreRuntime): Promise<ApiHandler> => {
       ViewLive,
       ReadLive,
       DataApiLive,
+      EventsLive,
     ]),
     Layer.provide(Layer.succeedContext(core.context)),
-    // Every request passes its own caller; this one only satisfies the build.
+    // Every request passes its own caller and background; these only
+    // satisfy the build.
     Layer.provide(Layer.succeed(CurrentCaller, visitor('build'))),
+    Layer.provide(Layer.succeed(Background, backgroundInline)),
   )
   const { handler } = HttpApiBuilder.toWebHandler(
     Layer.mergeAll(api, HttpServer.layerContext),
   )
-  return (request, caller) =>
+  return (request, caller, background) =>
     handler(
       request,
-      Context.make(CurrentCaller, caller) as Context.Context<never>,
+      Context.make(CurrentCaller, caller).pipe(
+        Context.add(Background, background),
+      ) as Context.Context<never>,
     )
 }
 

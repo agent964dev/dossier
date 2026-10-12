@@ -152,6 +152,22 @@ export default defineConfig(async () => {
       // workerd plus D1 migrations per file is slow on shared CI runners.
       testTimeout: 30_000,
       hookTimeout: 60_000,
+      projects: [
+        {
+          extends: true as const,
+          test: {
+            name: 'web',
+            include: ['test/**/*.test.ts'],
+            exclude: ['test/hub/**'],
+          },
+        },
+        // Real upgrades and the real tree hub, whose sockets live across
+        // requests: its files share one Worker's storage.
+        {
+          extends: true as const,
+          test: { name: 'hub', include: ['test/hub/**/*.test.ts'] },
+        },
+      ],
     },
   }
 })

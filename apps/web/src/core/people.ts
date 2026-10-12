@@ -23,6 +23,7 @@ import {
   type Granted,
   type Membership,
 } from './access.ts'
+import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
@@ -262,7 +263,7 @@ export interface PeopleService {
   }) => Effect.Effect<
     { readonly sharesRemoved: number },
     AdminFail | Fail<'conflict'>,
-    CurrentCaller
+    CurrentCaller | Background
   >
   /** The person must be a member of the workspace. */
   readonly addToTeam: (i: {
@@ -304,7 +305,7 @@ export interface PeopleService {
   readonly deleteAccount: () => Effect.Effect<
     void,
     Fail<'sign_in_required' | 'last_admin' | 'conflict' | 'unavailable'>,
-    CurrentCaller
+    CurrentCaller | Background
   >
 
   // Super admins.

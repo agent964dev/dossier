@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import type { Caller, CoreRuntime } from '../core/index.ts'
+import type { BackgroundService, Caller, CoreRuntime } from '../core/index.ts'
 
 /** The request a screen renders for: who asks, and the services to ask. */
 export interface ScreenScope {
   readonly caller: Caller
   readonly runtime: CoreRuntime
+  /** Where work after a commit runs: the request's waitUntil. */
+  readonly background: BackgroundService
   /** Set when a screen's read failed because Dossier is unavailable. */
   unavailable: boolean
   /** Set when an action ended the session, so its cookie is cleared. */

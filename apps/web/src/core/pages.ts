@@ -4,6 +4,7 @@ import {
   isNodeName,
   MAX_DEPTH,
   type AuthoredSeq,
+  type EventSeq,
   type DossierError,
   type ErrorCode,
   type LinkRef,
@@ -844,6 +845,8 @@ export const PagesLive: Layer.Layer<
               role: highest(roles),
               path: resolved.node.path,
               email: person.email,
+              // Read before the handle was issued, so no later event is missed.
+              events: tree.eventSeq as EventSeq,
             } satisfies ViewGrant
           }
           console.error('The tree kept moving while a view was issued', {

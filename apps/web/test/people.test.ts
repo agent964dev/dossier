@@ -11,6 +11,7 @@ import {
   TreeStore,
   type Caller,
   type CoreServices,
+  type Background,
   type CurrentCaller,
   type PeopleService,
 } from '../src/core/index.ts'
@@ -51,14 +52,14 @@ const as = <A, E>(
   caller: Caller,
   use: (
     people: PeopleService,
-  ) => Effect.Effect<A, E, CoreServices | CurrentCaller>,
+  ) => Effect.Effect<A, E, CoreServices | CurrentCaller | Background>,
 ) => runAs(caller, Effect.flatMap(People, use))
 
 const refusal = <A, E>(
   caller: Caller,
   use: (
     people: PeopleService,
-  ) => Effect.Effect<A, E, CoreServices | CurrentCaller>,
+  ) => Effect.Effect<A, E, CoreServices | CurrentCaller | Background>,
 ) => failureAs(caller, Effect.flatMap(People, use))
 
 const userIdOf = async (email: string) =>
@@ -202,7 +203,7 @@ describe('admins only', () => {
     const adminKey = await agent(admin)
     const calls: ((
       p: PeopleService,
-    ) => Effect.Effect<unknown, unknown, CurrentCaller>)[] = [
+    ) => Effect.Effect<unknown, unknown, CurrentCaller | Background>)[] = [
       (p) => p.members(ws.name),
       (p) => p.invite({ workspace: ws.name, email: 'a@b.co', teamIds: [] }),
       (p) => p.cancelInvitation({ workspace: ws.name, email: 'a@b.co' }),

@@ -14,6 +14,9 @@ import { Cause, Effect, Exit, Option } from 'effect'
 
 import {
   Access,
+  Background,
+  backgroundFor,
+  backgroundInline,
   BaseLayer,
   basePathOf,
   Config,
@@ -23,6 +26,8 @@ import {
   SignIn,
   TreeStore,
   treeRefOf,
+  Watch,
+  type BackgroundService,
   type Caller,
   type Served,
   type CoreRuntime,
@@ -146,11 +151,15 @@ export const acceptsMarkdown = (accept: string | null): boolean =>
 const isHtml = (response: Response) =>
   response.headers.get('content-type')?.includes('text/html') === true
 
-/** Serves one request with the given runtime. */
+/**
+ * Serves one request with the given runtime. Work after a commit runs on
+ * `background`; without one it finishes before the response.
+ */
 export const serve = async (
   request: Request,
   env: Env,
   runtime: CoreRuntime,
+  background: BackgroundService = backgroundInline,
 ): Promise<Response> => {
   // No Dossier response is ever a service worker, on any host.
   if (request.headers.get('service-worker') === 'script') {
@@ -251,11 +260,13 @@ export const serve = async (
         checkProtocol()
         const who = await caller()
         const handler = await apiHandlerFor(runtime)
-        return normalizeApiError(await handler(request, who), requestId)
+        return normalizeApiError(
+          await handler(request, who, background),
+          requestId,
+        )
       }
       case 'upgrade':
-        checkProtocol()
-        throw dossierError('not_found')
+        return upgrade()
       case 'fonts':
       case 'legacy':
         throw dossierError('not_found')
@@ -274,9 +285,35 @@ export const serve = async (
     throw dossierError('not_found')
   }
 
+  /**
+   * A watch of a tree's paths: the access check first, then the tree's hub
+   * answers with the socket, which passes through as it is.
+   */
+  async function upgrade(): Promise<Response> {
+    checkProtocol()
+    const who = await caller()
+    const accepted = await runAs(
+      who,
+      Effect.flatMap(Watch, (watch) =>
+        watch.accept({
+          request,
+          tree: url.searchParams.get('tree') ?? '',
+          paths: url.searchParams.getAll('path'),
+        }),
+      ),
+    )
+    if (isDossierError(accepted)) throw accepted
+    return accepted
+  }
+
   /** A TanStack screen, rendered as the caller. */
   async function screen(who: Caller, status?: number): Promise<Response> {
-    const scope: ScreenScope = { caller: who, runtime, unavailable: false }
+    const scope: ScreenScope = {
+      caller: who,
+      runtime,
+      background,
+      unavailable: false,
+    }
     const response = await screenScope.run(scope, () => tanstack.fetch(request))
     if (scope.endSession === true) setCookie = END_SESSION_COOKIES
     if (kind !== 'screen-call' && scope.unavailable && isHtml(response)) {
@@ -427,10 +464,13 @@ export const serve = async (
   /** Runs an effect as `who`; a typed failure comes back as the value. */
   async function runAs<A, E extends DossierError>(
     who: Caller,
-    effect: Effect.Effect<A, E, CoreServices | CurrentCaller>,
+    effect: Effect.Effect<A, E, CoreServices | CurrentCaller | Background>,
   ): Promise<A | E> {
     const exit = await runtime.runPromiseExit(
-      Effect.provideService(effect, CurrentCaller, who),
+      effect.pipe(
+        Effect.provideService(CurrentCaller, who),
+        Effect.provideService(Background, background),
+      ),
     )
     if (Exit.isSuccess(exit)) return exit.value
     const failure = Cause.failureOption(exit.cause)
@@ -454,5 +494,5 @@ const run = async <A, E>(
 export const dispatch = (
   request: Request,
   env: Env,
-  _ctx: ExecutionContext,
-): Promise<Response> => serve(request, env, runtimeFor(env))
+  ctx: ExecutionContext,
+): Promise<Response> => serve(request, env, runtimeFor(env), backgroundFor(ctx))

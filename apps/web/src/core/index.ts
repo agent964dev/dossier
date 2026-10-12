@@ -1,5 +1,21 @@
 // The only module of core/ the edge and the screens import.
+export {
+  Background,
+  BackgroundInline,
+  backgroundFor,
+  backgroundInline,
+  type BackgroundService,
+} from './background.ts'
 export { Bindings } from './bindings.ts'
+export {
+  ChangeFeed,
+  ChangeFeedLive,
+  ChangeFeedRecorder,
+  type ChangeFeedService,
+  type CloseSockets,
+  type Committed,
+} from './change-feed.ts'
+export { Watch, WATCH_PATHS, type WatchService } from './watch.ts'
 export { Config, type DeploymentConfig } from './config.ts'
 export { CurrentCaller, visitor, type Caller, type Via } from './caller.ts'
 export {

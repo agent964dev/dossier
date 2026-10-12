@@ -131,4 +131,85 @@ describe('the data endpoints', () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ files: [] })
   })
+
+  it('writes page code data, and uploads beside the page, as the viewer', async () => {
+    const body = (extra: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        tree: tree.treeId,
+        page: 'questions/index.html',
+        path: 'layout.json',
+        patch: { n1: { x: 1, y: 2 } },
+        replace: false,
+        opId: crypto.randomUUID(),
+        seq: 1,
+        ...extra,
+      })
+    const written = await browser.fetch('/_/api/data/write', {
+      method: 'POST',
+      purpose: 'write',
+      headers: { 'content-type': 'application/json' },
+      body: body(),
+    })
+    expect(written.status).toBe(200)
+    expect(await written.json()).toMatchObject({
+      path: 'layout.json',
+      data: { n1: { x: 1, y: 2 } },
+      push: 1,
+    })
+    const unsigned = await browser.fetch('/_/api/data/write', {
+      method: 'POST',
+      purpose: 'write',
+      headers: { 'content-type': 'application/json', 'dossier-csrf': '0' },
+      body: body(),
+    })
+    expect(unsigned.status).toBe(401)
+    expect(await unsigned.json()).toMatchObject({
+      error: { code: 'sign_in_required' },
+    })
+
+    const bytes = 'a picture'
+    const email = (await callerOf(browser)).person!.email.toLowerCase()
+    const params = new URLSearchParams({
+      tree: tree.treeId,
+      page: 'questions/index.html',
+      seq: '1',
+      name: 'photo.png',
+      type: 'image/png',
+      size: String(bytes.length),
+      sha256: await sha256Of(bytes),
+      opId: crypto.randomUUID(),
+    })
+    const uploaded = await browser.fetch(`/_/api/data/upload?${params}`, {
+      method: 'PUT',
+      purpose: 'write',
+      headers: { 'content-length': String(bytes.length) },
+      body: bytes,
+    })
+    expect(uploaded.status).toBe(201)
+    expect(await uploaded.json()).toEqual({
+      path: `questions/index.uploads/${email}/photo.png`,
+      file: 'photo.png',
+      name: 'photo.png',
+      size: bytes.length,
+      type: 'image/png',
+    })
+  })
+
+  it('answers the events of a tree to its viewer, from a cursor', async () => {
+    const start = await browser.fetch(`/_/api/events?tree=${tree.treeId}`, {
+      purpose: 'read',
+    })
+    expect(start.status).toBe(200)
+    const { next } = (await start.json()) as { next: number }
+    const since = await browser.fetch(
+      `/_/api/events?tree=${tree.treeId}&after=${next - 1}`,
+      { purpose: 'read' },
+    )
+    expect(since.status).toBe(200)
+    expect(await since.json()).toMatchObject({
+      events: [{ seq: next }],
+      next,
+      more: false,
+    })
+  })
 })

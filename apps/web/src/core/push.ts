@@ -29,6 +29,7 @@ import {
 } from '@dossier/html'
 import { Clock, Context, Data, Effect, Layer, Random } from 'effect'
 
+import type { Background } from './background.ts'
 import { Access, type Granted } from './access.ts'
 import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
@@ -143,7 +144,7 @@ export interface PushService {
       | 'blob_reclaiming'
       | 'unavailable'
     >,
-    CurrentCaller
+    CurrentCaller | Background
   >
 }
 

@@ -16,6 +16,7 @@ import { Effect } from 'effect'
 
 import {
   Push,
+  type Background,
   type Caller,
   type CommitResult,
   type CoreServices,
@@ -255,7 +256,7 @@ export const pushAll = async (
 /** Runs as the caller and answers the failure, for refusals. */
 export const failureAs = <A, E>(
   caller: Caller,
-  effect: Effect.Effect<A, E, CoreServices | CurrentCaller>,
+  effect: Effect.Effect<A, E, CoreServices | CurrentCaller | Background>,
 ): Promise<E> => runAs(caller, Effect.flip(effect))
 
 export const nodeAt = async (treeId: string, path: string) =>

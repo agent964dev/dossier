@@ -1,6 +1,7 @@
 import {
   dossierError,
   type AuthoredSeq,
+  type EventsResponse,
   type DossierError,
   type EventSeq,
   type EventType,
@@ -15,7 +16,7 @@ import {
   type TreeId,
   type VersionId,
 } from '@dossier/contracts'
-import type { JsonObject } from '@dossier/contracts/bridge'
+import { pathsMeet, type JsonObject } from '@dossier/contracts/bridge'
 import {
   MARKDOWN_VERSION,
   toMarkdown,
@@ -33,8 +34,10 @@ import {
   type Membership,
   type Role,
 } from './access.ts'
+import type { Background } from './background.ts'
 import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
+import { ChangeFeed, type CloseSockets, type Committed } from './change-feed.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { newId, newTreeId } from './ids.ts'
 import { bytesText, Limits } from './limits.ts'
@@ -44,12 +47,13 @@ import {
   underscoreSplit,
   type KitFound,
 } from './lookup.ts'
-import type {
-  MissingNode,
-  NodeRow,
-  TreeRow,
-  VersionRow,
-  WorkspaceRow,
+import {
+  ancestorPaths,
+  type MissingNode,
+  type NodeRow,
+  type TreeRow,
+  type VersionRow,
+  type WorkspaceRow,
 } from './rows.ts'
 
 /** A node a path names, as a CLI argument or a push names it. */
@@ -241,6 +245,10 @@ export interface ChangeSet {
     pushId: PushId,
   ) => void
   readonly grant: (on: Granted<'share'> | NodeHandle, share: NewShare) => void
+  /**
+   * Also records whose watching sockets close after the commit: the person
+   * an email share names, or every socket on the tree for any other share.
+   */
   readonly revoke: (on: Granted<'share'>, shareId: ShareId) => void
   /**
    * A data folder or file at `node.path`; folders missing on the way are
@@ -383,7 +391,22 @@ export interface TreeStoreService {
     readonly scope: string
     readonly opId: OpId
   }) => Effect.Effect<OperationResult | null, DossierError<'unavailable'>>
-  /** One D1 batch: the change and its events, or nothing. */
+  /** The deepest live node at or above a tree path, or null. */
+  readonly nearest: (
+    treeId: TreeId,
+    path: string,
+  ) => Effect.Effect<NodeRow | null, DossierError<'unavailable'>>
+  /** A live tree by its ID or as '<workspace>/<tree>', or null. */
+  readonly treeNamed: (
+    tree: string,
+  ) => Effect.Effect<
+    { readonly tree: TreeRow; readonly workspace: WorkspaceRow } | null,
+    DossierError<'unavailable'>
+  >
+  /**
+   * One D1 batch: the change and its events, or nothing. Once committed, the
+   * change is published to whoever follows the tree, in the background.
+   */
   readonly change: <A, E>(
     treeId: TreeId | null,
     plan: (cs: ChangeSet) => Effect.Effect<A, E>,
@@ -394,6 +417,19 @@ export interface TreeStoreService {
       readonly treeId: TreeId
     },
     E | ChangeFailure,
+    CurrentCaller | Background
+  >
+  /**
+   * The tree's events after a cursor that the caller may read now, with a
+   * cursor that moves past those it may not.
+   */
+  readonly events: (i: {
+    readonly tree: string
+    readonly after: number | null
+    readonly path: string | null
+  }) => Effect.Effect<
+    EventsResponse,
+    DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
 }
@@ -428,7 +464,22 @@ const isKitPath = (path: string): boolean =>
 interface Statement {
   readonly sql: string
   readonly binds: readonly unknown[]
+  /** Reads the statement's rows once the batch has run. */
+  readonly rows?: (rows: readonly unknown[]) => void
 }
+
+/** At most this many events a page of the events route. */
+const EVENTS_PAGE = 500
+
+/** Event types written by people's data, which always name the writer. */
+const DATA_EVENTS: ReadonlySet<string> = new Set([
+  'submission',
+  'entry',
+  'withdrawal',
+  'data_write',
+])
+
+const TREE_ID = /^[a-z0-9]{20}$/
 
 interface HandleValue {
   readonly handle: true
@@ -819,7 +870,7 @@ export const linkPathOf = (path: string, folder: boolean): string => {
 export const TreeStoreLive: Layer.Layer<
   TreeStore,
   never,
-  Bindings | Access | BaseLayer | Limits
+  Bindings | Access | BaseLayer | Limits | ChangeFeed
 > = Layer.effect(
   TreeStore,
   Effect.gen(function* () {
@@ -827,6 +878,7 @@ export const TreeStoreLive: Layer.Layer<
     const bindings = yield* Bindings
     const access = yield* Access
     const limits = yield* Limits
+    const feed = yield* ChangeFeed
     const { DB, BLOBS } = bindings
     const database = db(bindings)
 
@@ -1578,6 +1630,8 @@ export const TreeStoreLive: Layer.Layer<
           readonly condition: Statement
         }[] = []
         const events: NewEvent[] = []
+        /** Whose sockets the revoked shares close, as the batch read them. */
+        const closing: (CloseSockets | null)[] = []
         let authored = 0
         let pushCount = 0
         /** The change stores new bytes, so the workspace's storage counts. */
@@ -1723,10 +1777,33 @@ export const TreeStoreLive: Layer.Layer<
 
           revoke: (on, shareId) => {
             bases.push(everyBasis(on.basis, person.id))
-            writes.push({
-              sql: 'delete from shares where id = ? and node_id = ?',
-              binds: [shareId, on.id],
-            })
+            writes.push(
+              {
+                // Read before the row goes: whose sockets to close.
+                sql: `select s.target_kind as kind,
+                        (select u.id from "user" u where lower(u.email) = s.target) as person
+                      from shares s where s.id = ? and s.node_id = ?`,
+                binds: [shareId, on.id],
+                rows: (rows) => {
+                  for (const row of rows as {
+                    kind: string
+                    person: PersonId | null
+                  }[]) {
+                    closing.push(
+                      row.kind === 'email'
+                        ? row.person === null
+                          ? null
+                          : { people: [row.person] }
+                        : { all: true },
+                    )
+                  }
+                },
+              },
+              {
+                sql: 'delete from shares where id = ? and node_id = ?',
+                binds: [shareId, on.id],
+              },
+            )
           },
 
           createData: (holder, node) => {
@@ -2097,6 +2174,7 @@ export const TreeStoreLive: Layer.Layer<
             DB.batch(statements.map((s) => DB.prepare(s.sql).bind(...s.binds))),
           catch: (error) => failureOf(error, storageBytes),
         })
+        statements.forEach((s, i) => s.rows?.(results[i]?.results ?? []))
         const last = results[results.length - 1]?.results[0] as
           | { authoredSeq: number; eventSeq: number }
           | undefined
@@ -2119,12 +2197,177 @@ export const TreeStoreLive: Layer.Layer<
             }),
           )
         })
+        yield* feed.published({
+          treeId: t,
+          seq: last.eventSeq as EventSeq,
+          authoredSeq: last.authoredSeq as AuthoredSeq,
+          events: events.map((e, i) => ({
+            seq: (last.eventSeq - (events.length - 1 - i)) as EventSeq,
+            type: e.type,
+            path: e.path,
+          })),
+          close: closeOf(closing),
+        } satisfies Committed)
         return {
           ...result,
           seq: last.eventSeq as EventSeq,
           authoredSeq: last.authoredSeq as AuthoredSeq,
           treeId: t,
         }
+      })
+
+    const nearest: TreeStoreService['nearest'] = (treeId, path) =>
+      Effect.gen(function* () {
+        const paths = ancestorPaths(path.replace(/^\/+|\/+$/g, ''))
+        const row = yield* read(() =>
+          database
+            .select()
+            .from(schema.nodes)
+            .where(
+              and(
+                eq(schema.nodes.treeId, treeId),
+                isNull(schema.nodes.deletedAt),
+                sql`${schema.nodes.path} in (${sql.join(
+                  paths.map((p) => sql`${p}`),
+                  sql`, `,
+                )})`,
+              ),
+            )
+            .orderBy(sql`${schema.nodes.depth} desc`)
+            .limit(1)
+            .get(),
+        )
+        return (row ?? null) as NodeRow | null
+      })
+
+    const treeNamed: TreeStoreService['treeNamed'] = (name) =>
+      Effect.gen(function* () {
+        if (TREE_ID.test(name)) return yield* treeById(name as TreeId)
+        const [ws = '', tr = '', ...rest] = name.split('/')
+        if (rest.length > 0) return null
+        const found = yield* workspace(ws)
+        if (found === null) return null
+        const row = yield* tree(found, tr)
+        return row === null ? null : { tree: row, workspace: found }
+      })
+
+    const events: TreeStoreService['events'] = (i) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const found = yield* treeNamed(i.tree)
+        const deny = (treeId: TreeId | null) =>
+          access
+            .require('read', {
+              missing: true,
+              treeId,
+              path: i.path ?? '',
+            })
+            .pipe(
+              Effect.flatMap(() => Effect.fail(dossierError('not_found'))),
+              Effect.mapError((e) =>
+                e.code === 'sign_in_required'
+                  ? (e as DossierError<'sign_in_required'>)
+                  : dossierError('not_found'),
+              ),
+            )
+        if (found === null) return yield* deny(null)
+        const t = found.tree
+        const readable = yield* access.readable(t.id)
+        // The caller follows a path it may read, or, without one, anything
+        // in the tree it may read.
+        if (i.path !== null) {
+          const node = yield* nearest(t.id, i.path)
+          if (node === null) return yield* deny(t.id)
+          yield* access
+            .require('read', node)
+            .pipe(
+              Effect.mapError((e) =>
+                e.code === 'sign_in_required'
+                  ? (e as DossierError<'sign_in_required'>)
+                  : dossierError('not_found'),
+              ),
+            )
+        } else {
+          const any = yield* read(() =>
+            database
+              .select({ one: sql<number>`1` })
+              .from(schema.nodes)
+              .where(and(readable.where, isNull(schema.nodes.deletedAt)))
+              .limit(1)
+              .all(),
+          )
+          if (any.length === 0) return yield* deny(t.id)
+        }
+        if (i.after === null) {
+          return {
+            events: [],
+            next: t.eventSeq as EventSeq,
+            more: false,
+          } satisfies EventsResponse
+        }
+        const e = schema.events
+        const member = sql`exists (select 1 from workspace_members m
+          where m.workspace_id = ${t.workspaceId} and m.user_id = ${caller.person?.id ?? ''})`
+        const rows = yield* read(() =>
+          database
+            .select({
+              seq: e.seq,
+              type: e.type,
+              path: e.path,
+              at: e.createdAt,
+              actorId: e.actorId,
+              nodeId: e.nodeId,
+              push: schema.pushes.number,
+              email: schema.user.email,
+              name: schema.user.name,
+              member: sql<number>`${member}`,
+              visible: sql<number | null>`case when ${schema.nodes.id} is null
+                then null when ${readable.where} then 1 else 0 end`,
+            })
+            .from(e)
+            .leftJoin(schema.nodes, eq(schema.nodes.id, e.nodeId))
+            .leftJoin(schema.pushes, eq(schema.pushes.id, e.pushId))
+            .leftJoin(schema.user, eq(schema.user.id, e.actorId))
+            .where(and(eq(e.treeId, t.id), sql`${e.seq} > ${i.after}`))
+            .orderBy(e.seq)
+            .limit(EVENTS_PAGE)
+            .all(),
+        )
+        const out: EventsResponse['events'][number][] = []
+        for (const row of rows) {
+          let visible = row.visible === 1
+          if (row.visible === null) {
+            // No node: the folder the path lies in decides.
+            const folder = yield* nearest(t.id, parentPath(row.path))
+            visible =
+              folder !== null &&
+              (yield* access.require('read', folder).pipe(Effect.isSuccess)) ===
+                true
+          }
+          if (!visible) continue
+          if (i.path !== null && !pathsMeet(row.path, i.path)) continue
+          const named =
+            DATA_EVENTS.has(row.type) ||
+            row.member === 1 ||
+            (caller.person !== null && caller.person.id === row.actorId)
+          out.push({
+            seq: row.seq as EventSeq,
+            type: row.type as EventType,
+            path: row.path,
+            at: new Date(row.at).toISOString(),
+            by:
+              row.actorId === null
+                ? null
+                : ((named ? row.email : row.name) ?? null),
+            push: (row.push ?? null) as PushNumber | null,
+          })
+        }
+        const last = rows.at(-1)
+        return {
+          events: out,
+          next: (last?.seq ?? i.after) as EventSeq,
+          more: rows.length === EVENTS_PAGE,
+        } satisfies EventsResponse
       })
 
     return {
@@ -2145,7 +2388,21 @@ export const TreeStoreLive: Layer.Layer<
       fileAt,
       forms,
       operationResult,
+      nearest,
+      treeNamed,
       change,
+      events,
     } satisfies TreeStoreService
   }),
 )
+
+/** One close for every revoked share: everyone, or the people named. */
+const closeOf = (
+  closing: readonly (CloseSockets | null)[],
+): CloseSockets | null => {
+  if (closing.some((c) => c !== null && 'all' in c)) return { all: true }
+  const people = closing.flatMap((c) =>
+    c !== null && 'people' in c ? c.people : [],
+  )
+  return people.length === 0 ? null : { people: [...new Set(people)] }
+}

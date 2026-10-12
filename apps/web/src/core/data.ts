@@ -18,11 +18,13 @@ import {
   type Sha256,
   type TreeId,
   type UploadResult,
+  type WritePayload,
 } from '@dossier/contracts'
 import type { Json, JsonObject } from '@dossier/contracts/bridge'
 import {
   acceptsFile,
   validateSend,
+  validateValues,
   type FieldEntry,
   type FieldType,
   type UploadValue,
@@ -30,6 +32,7 @@ import {
 import { Clock, Context, Effect, Layer } from 'effect'
 
 import { Access, type Granted } from './access.ts'
+import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { newId } from './ids.ts'
@@ -40,6 +43,7 @@ import {
   blobKey,
   TreeStore,
   type ChangeSet,
+  type DocRow,
   type FormRow,
   type NodeHandle,
   type VersionHandle,
@@ -165,7 +169,7 @@ export interface DataService {
       | 'rate_limited'
       | 'unavailable'
     >,
-    CurrentCaller
+    CurrentCaller | Background
   >
   readonly upload: (
     i: UploadInput,
@@ -183,7 +187,7 @@ export interface DataService {
       | 'blob_reclaiming'
       | 'unavailable'
     >,
-    CurrentCaller
+    CurrentCaller | Background
   >
   readonly withdraw: (i: {
     readonly treeId: TreeId
@@ -195,15 +199,40 @@ export interface DataService {
     DossierError<
       'not_found' | 'forbidden' | 'sign_in_required' | 'unavailable'
     >,
-    CurrentCaller
+    CurrentCaller | Background
   >
-  /** Never not_found: missing and unreadable read as nothing. */
+  /**
+   * Page code's write: an RFC 7396 merge into a data file the caller owns or
+   * a shared one it may answer into, the whole value of its own file, or a
+   * new entry in its own folder for a folder path.
+   */
+  readonly write: (
+    i: WritePayload,
+  ) => Effect.Effect<
+    DocWire,
+    DossierError<
+      | 'forbidden'
+      | 'invalid'
+      | 'not_mergeable'
+      | 'closed'
+      | 'too_large'
+      | 'rate_limited'
+      | 'sign_in_required'
+      | 'not_found'
+      | 'unavailable'
+    >,
+    CurrentCaller | Background
+  >
+  /**
+   * Never not_found: missing and unreadable read as nothing. Authored files
+   * too; too_large for a folder past the caps.
+   */
   readonly read: (i: {
     readonly treeId: TreeId
     readonly path: string
   }) => Effect.Effect<
     DataReadResult,
-    DossierError<'unavailable'>,
+    DossierError<'too_large' | 'unavailable'>,
     CurrentCaller
   >
   /**
@@ -224,7 +253,7 @@ export interface DataService {
   readonly withdrawMine: () => Effect.Effect<
     MineCounts & { readonly trees: number },
     DossierError<'sign_in_required' | 'unavailable'>,
-    CurrentCaller
+    CurrentCaller | Background
   >
   readonly mineCounts: () => Effect.Effect<
     MineCounts,
@@ -259,6 +288,14 @@ const WRITE_TRIES = 4
 /** No new try starts once this much time has gone. */
 const WRITE_BUDGET_MS = 10_000
 const MiB = 1024 * 1024
+/** A text file's content is read up to this size. */
+const READ_TEXT_BYTES = MiB
+/** A folder read gives at most this many files, and this much content. */
+const READ_FOLDER_FILES = 1_000
+const READ_FOLDER_BYTES = 10 * MiB
+/** Text by its name, whatever type it was pushed with. */
+const TEXT_FILE =
+  /\.(md|markdown|csv|tsv|txt|svg|js|mjs|css|json|html?|xml|ya?ml)$/i
 
 const sizeText = (bytes: number) =>
   bytes >= MiB
@@ -853,8 +890,199 @@ export const DataLive: Layer.Layer<
         return yield* retrying(once)
       }) as ReturnType<DataService['send']>
 
+    /**
+     * The page the person saw, at the sequence they saw it, with respond on
+     * it: what an upload from page code needs, which no form names.
+     */
+    const checkPage = (i: {
+      readonly treeId: TreeId
+      readonly page: string
+      readonly seq: AuthoredSeq
+    }) =>
+      Effect.gen(function* () {
+        const found = yield* store.treeById(i.treeId)
+        if (found === null) return yield* Effect.fail(notFound(i.page))
+        const seen = yield* store.fileAt(found.tree.id, i.page, i.seq)
+        if (seen === null || seen.node.origin !== 'authored') {
+          return yield* Effect.fail(notFound(i.page))
+        }
+        const page = yield* access
+          .require('respond', seen.node)
+          .pipe(
+            Effect.mapError((e) =>
+              dossierError(e.code, e.message, e.fix, i.page),
+            ),
+          )
+        return {
+          tree: found.tree,
+          page,
+          seenPush: yield* pushNumberOf(seen.version),
+        }
+      })
+
+    /**
+     * Page code's upload: stored beside the page as
+     * `<page name>.uploads/<email>/<name>`, owned by the uploader, under a
+     * name no other upload holds, so an upload never changes another.
+     */
+    const uploadBeside = (i: UploadInput) =>
+      Effect.gen(function* () {
+        const person = yield* signedIn('Sign in to send this.', i.as)
+        const email = person.email.toLowerCase()
+        const own = `${i.page.replace(/\.html$/i, '')}.uploads/${email}`
+        const scope = `${i.treeId}:${own}`
+        const key = { principal: person.id, scope, opId: i.opId }
+        const recorded = () =>
+          Effect.gen(function* () {
+            const first = yield* store.operationResult(key)
+            if (first === null) return null
+            if (first.state === 'withdrawn') {
+              return yield* Effect.fail(notFound(null))
+            }
+            const raw = yield* versionById(first.version.id)
+            if (raw === null) return yield* Effect.fail(notFound(null))
+            const { path, version } = versionOfRaw(raw)
+            return {
+              path,
+              file: path.slice(own.length + 1),
+              name: path.slice(path.lastIndexOf('/') + 1),
+              size: version.size ?? 0,
+              type: version.contentType ?? 'application/octet-stream',
+            } satisfies UploadResult
+          })
+        const early = yield* recorded()
+        if (early !== null) return early
+        yield* limits.take('send', person.id)
+        const limit = yield* limits.current()
+        if (i.size > limit.uploadBytes) {
+          return yield* Effect.fail(
+            dossierError(
+              'too_large',
+              `This file is ${sizeText(i.size)}; an upload may be at most ${sizeText(limit.uploadBytes)}.`,
+              'A super admin can raise it.',
+            ),
+          )
+        }
+        const { tree, page, seenPush } = yield* checkPage(i)
+        const name = safeName(i.name)
+        if (!isTreePath(`${own}/${name}`)) {
+          return yield* Effect.fail(
+            dossierError(
+              'invalid',
+              'This file cannot be stored under its name.',
+            ),
+          )
+        }
+        const ownNode = yield* liveNode(tree.id, own)
+        if (
+          ownNode !== null &&
+          (ownNode.kind !== 'folder' ||
+            ownNode.origin !== 'data' ||
+            ownNode.ownerId !== person.id)
+        ) {
+          return yield* Effect.fail(
+            dossierError('forbidden', undefined, null, own),
+          )
+        }
+        // Each request holds its own bytes, so two tries of one op ID never
+        // let go of each other's hold.
+        const holder = {
+          kind: 'upload',
+          id: `${person.id}:${i.opId}:${crypto.randomUUID()}`,
+        } as const
+        // The hold comes first, so a purge never takes the bytes being written.
+        yield* store.holdBlob(holder, i.sha256, i.size)
+        yield* Effect.tryPromise({
+          try: async () => {
+            const sized = new FixedLengthStream(i.size)
+            const piped = i.body.pipeTo(sized.writable)
+            await Promise.all([
+              BLOBS.put(blobKey(i.sha256), sized.readable, {
+                sha256: i.sha256,
+              }),
+              piped,
+            ])
+          },
+          catch: () =>
+            dossierError(
+              'invalid',
+              'The file does not match its size or SHA-256.',
+              'Send the file again.',
+            ),
+        }).pipe(Effect.tapError(() => store.dropHold(holder, i.sha256)))
+        yield* store.confirmHold(holder, i.sha256, i.size)
+        const type = i.type.trim() === '' ? 'application/octet-stream' : i.type
+        const dot = name.lastIndexOf('.')
+        const [base, ext] =
+          dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
+        const once = Effect.gen(function* () {
+          // Another try of this op ID stored it meanwhile: answer with that.
+          const again = yield* recorded()
+          if (again !== null) return again
+          // A name no live node holds: cv.pdf, then cv-2.pdf, cv-3.pdf …
+          let path = `${own}/${name}`
+          for (let n = 2; (yield* liveNode(tree.id, path)) !== null; n += 1) {
+            path = `${own}/${base}-${n}${ext}`
+          }
+          const folder = yield* liveNode(tree.id, own)
+          yield* store.change(tree.id, (cs) =>
+            Effect.sync(() => {
+              cs.guardHead('', tree.authoredSeq as AuthoredSeq)
+              if (folder === null) {
+                cs.createData(page, {
+                  path: own,
+                  kind: 'folder',
+                  owner: person.id,
+                })
+              }
+              const node = cs.createData(page, {
+                path,
+                kind: 'file',
+                owner: person.id,
+              })
+              const version = cs.putData(node, {
+                seenPush,
+                opId: i.opId,
+                blob: {
+                  sha256: i.sha256,
+                  size: i.size,
+                  contentType: type,
+                  hold: holder,
+                },
+              })
+              cs.operation({
+                principal: person.id,
+                scope,
+                opId: i.opId,
+                result: version,
+              })
+              cs.event({ type: 'data_write', path, node })
+              return {}
+            }),
+          )
+          return path
+        })
+        const stored = yield* retrying(once).pipe(
+          Effect.tapError(() => store.releaseHold(holder, i.sha256)),
+        )
+        if (typeof stored !== 'string') {
+          yield* store.releaseHold(holder, i.sha256)
+          return stored
+        }
+        const path = stored
+        return {
+          path,
+          file: path.slice(own.length + 1),
+          name: path.slice(path.lastIndexOf('/') + 1),
+          size: i.size,
+          type,
+        } satisfies UploadResult
+      })
+
     const upload: DataService['upload'] = (i) =>
       Effect.gen(function* () {
+        // Page code's upload names no form: it is stored beside the page.
+        if (i.form === null && i.field === null) return yield* uploadBeside(i)
         const person = yield* signedIn('Sign in to send this.', i.as)
         if (i.form === null || i.field === null) {
           return yield* Effect.fail(
@@ -1224,29 +1452,467 @@ export const DataLive: Layer.Layer<
           )
       }) as ReturnType<DataService['withdraw']>
 
+    /** The forms in the tree as it stands that send to a target. */
+    const formsTargeting = (treeId: TreeId, targets: readonly string[]) =>
+      query(() =>
+        DB.prepare(
+          `select f.kind, f.target_path as target, f.closes_at as closesAt,
+             f.closed, f.schema_json as schema, f.form_key as formKey,
+             f.host_version_id as hostVersionId, f.host_node_id as hostNodeId,
+             f.line, f.title, f.tree_id as treeId
+           from forms f join nodes n on n.id = f.host_node_id
+             and n.current_version_id = f.host_version_id and n.deleted_at is null
+           where f.tree_id = ? and f.target_path in (select value from json_each(?))`,
+        )
+          .bind(treeId, JSON.stringify(targets))
+          .all<{
+            kind: FormRow['kind']
+            target: string
+            closesAt: number | null
+            closed: number
+            schema: string
+            formKey: string
+            hostVersionId: string
+            hostNodeId: string
+            line: number
+            title: string | null
+            treeId: string
+          }>(),
+      ).pipe(
+        Effect.map((rows) =>
+          rows.results.map((row): FormRow => ({
+            hostVersionId: row.hostVersionId as FormRow['hostVersionId'],
+            hostNodeId: row.hostNodeId as NodeId,
+            treeId: row.treeId as TreeId,
+            targetPath: row.target,
+            formKey: row.formKey,
+            kind: row.kind,
+            closesAt: row.closesAt,
+            closed: row.closed === 1,
+            line: row.line,
+            title: row.title,
+            schema: JSON.parse(row.schema) as FormRow['schema'],
+          })),
+        ),
+      )
+
+    const forbidden = (path: string, message?: string) =>
+      dossierError('forbidden', message, null, path)
+
+    const write: DataService['write'] = (i) =>
+      Effect.gen(function* () {
+        const person = yield* signedIn('Sign in to save this.', i.as)
+        const email = person.email.toLowerCase()
+        const scope = `${i.tree}:${i.path}`
+        const key = { principal: person.id, scope, opId: i.opId }
+        /**
+         * The stored file as the writer may read it. A respond holder who
+         * cannot read a shared file gets back only what this write wrote,
+         * never other people's values.
+         */
+        const answerOf = (path: string, version: VersionRow) =>
+          Effect.gen(function* () {
+            const doc = yield* docOf(path, version)
+            const node = yield* folderOrFile(i.tree, path)
+            const reads =
+              node !== null &&
+              (yield* access.require('read', node).pipe(Effect.isSuccess))
+            return reads ? doc : { ...doc, data: withoutNulls(i.patch) }
+          })
+        const replay = () =>
+          Effect.gen(function* () {
+            const first = yield* store.operationResult(key)
+            if (first === null) return null
+            if (first.state === 'withdrawn') {
+              return yield* Effect.fail(notFound(i.path))
+            }
+            const raw = yield* versionById(first.version.id)
+            if (raw === null) return yield* Effect.fail(notFound(i.path))
+            const stored = versionOfRaw(raw)
+            return yield* answerOf(stored.path, stored.version)
+          })
+        // A retry after a lost answer is answered before anything is counted.
+        const early = yield* replay()
+        if (early !== null) return early
+        yield* limits.take('send', person.id)
+        const { dataFileBytes } = yield* limits.current()
+        const patch = i.patch as unknown
+        if (
+          typeof patch !== 'object' ||
+          patch === null ||
+          Array.isArray(patch)
+        ) {
+          return yield* Effect.fail(
+            dossierError(
+              'not_mergeable',
+              'A write is a JSON object of the values to change.',
+              null,
+              i.path,
+            ),
+          )
+        }
+        const values = patch as JsonObject
+        const isFolder = i.path.endsWith('/')
+        const bareTarget = bare(i.path)
+        const segments = bareTarget.split('/')
+        if (
+          i.path === '' ||
+          !isTreePath(bareTarget) ||
+          (!isFolder && !/\.json$/i.test(bareTarget))
+        ) {
+          return yield* Effect.fail(
+            forbidden(
+              i.path,
+              'Page code writes only .json data files, or a new entry in a folder.',
+            ),
+          )
+        }
+        if (segments.some((segment) => segment.startsWith('_'))) {
+          return yield* Effect.fail(
+            forbidden(i.path, 'Page code never writes a _ file.'),
+          )
+        }
+        // A name holding '@' is someone's own: only the caller's may be named.
+        const stem = (segment: string, last: boolean) =>
+          last && !isFolder ? segment.replace(/\.json$/i, '') : segment
+        if (
+          segments.some(
+            (segment, n) =>
+              segment.includes('@') &&
+              stem(segment, n === segments.length - 1).toLowerCase() !== email,
+          )
+        ) {
+          return yield* Effect.fail(
+            forbidden(i.path, "This is another person's file."),
+          )
+        }
+        const checked = yield* checkPage({
+          treeId: i.tree,
+          page: i.page,
+          seq: i.seq,
+        }).pipe(
+          Effect.mapError((e) =>
+            e.code === 'not_found' || e.code === 'forbidden'
+              ? forbidden(i.page, 'This page cannot write here.')
+              : e,
+          ),
+        )
+        const { tree, seenPush } = checked
+
+        const once = Effect.gen(function* () {
+          const again = yield* replay()
+          if (again !== null) return again
+          let path: string
+          let entryFolder: string | null = null
+          if (isFolder) {
+            const last = segments[segments.length - 1] ?? ''
+            entryFolder =
+              last.toLowerCase() === email
+                ? bareTarget
+                : `${bareTarget}/${email}`
+            const stamp = entryStamp(yield* Clock.currentTimeMillis)
+            path = `${entryFolder}/${stamp}.json`
+            for (let n = 2; (yield* liveNode(tree.id, path)) !== null; n += 1) {
+              path = `${entryFolder}/${stamp}-${n}.json`
+            }
+            if (!isTreePath(path)) {
+              return yield* Effect.fail(
+                dossierError('invalid', 'This entry cannot be stored here.'),
+              )
+            }
+          } else {
+            path = bareTarget
+          }
+          const existing = yield* folderOrFile(tree.id, path)
+          let owner: string | null
+          if (existing !== null) {
+            if (
+              existing.kind !== 'file' ||
+              existing.origin !== 'data' ||
+              (existing.ownerId !== null && existing.ownerId !== person.id)
+            ) {
+              return yield* Effect.fail(forbidden(path))
+            }
+            owner = existing.ownerId
+          } else {
+            const name = path.slice(path.lastIndexOf('/') + 1)
+            const ownsName =
+              name.toLowerCase() === `${email}.json` ||
+              entryFolder !== null ||
+              folderOf(path).split('/').at(-1)?.toLowerCase() === email
+            owner = ownsName ? person.id : null
+          }
+          if (i.replace && owner !== person.id) {
+            return yield* Effect.fail(
+              forbidden(path, 'Only your own file can be replaced whole.'),
+            )
+          }
+          // The writer's own folder, when the entry or file sits in one.
+          const ownFolderPath =
+            entryFolder ??
+            (owner !== null &&
+            folderOf(path).split('/').at(-1)?.toLowerCase() === email
+              ? folderOf(path)
+              : null)
+          const ownNode =
+            ownFolderPath === null
+              ? null
+              : yield* folderOrFile(tree.id, ownFolderPath)
+          if (
+            ownNode !== null &&
+            (ownNode.kind !== 'folder' ||
+              ownNode.origin !== 'data' ||
+              (ownNode.ownerId !== null && ownNode.ownerId !== person.id))
+          ) {
+            return yield* Effect.fail(forbidden(path))
+          }
+          // Respond on the file, or on the closest folder above a new one.
+          let granted: Granted<'respond'> | null = null
+          let under: Granted<'respond'> | null = null
+          if (existing !== null) {
+            granted = yield* access.require('respond', existing)
+          } else {
+            const above = yield* store.nearest(tree.id, folderOf(path))
+            if (above === null || above.kind !== 'folder') {
+              return yield* Effect.fail(forbidden(path))
+            }
+            under = yield* access.require('respond', above)
+          }
+          // Forms that send here: a shared file, a person's file in its
+          // folder, or an entry in its writer's folder.
+          const parent = folderOf(path)
+          const forms = (yield* formsTargeting(tree.id, [
+            path,
+            `${parent}/`,
+            `${folderOf(parent)}/`,
+          ])).filter((row) =>
+            row.kind === 'shared'
+              ? row.targetPath === path
+              : row.kind === 'person'
+                ? row.targetPath === `${parent}/` &&
+                  path.slice(parent.length + 1).toLowerCase() ===
+                    `${email}.json`
+                : row.targetPath === `${folderOf(parent)}/` &&
+                  parent.split('/').at(-1)?.toLowerCase() === email,
+          )
+          if (forms.length > 0) {
+            const now = yield* Clock.currentTimeMillis
+            const open = forms.filter((row) => !isClosed(row, now))
+            if (open.length === 0) {
+              return yield* Effect.fail(closedError(forms[0]!))
+            }
+            const check = validateValues(
+              open.map((row) => row.schema),
+              values,
+            )
+            if (!check.ok) {
+              const [problem] = check.problems
+              return yield* Effect.fail(
+                dossierError(
+                  'invalid',
+                  problem?.message ?? 'This value is not valid.',
+                  null,
+                  problem?.field ?? null,
+                ),
+              )
+            }
+          }
+          const provenance = { seenPush, opId: i.opId }
+          const done = yield* store
+            .change(tree.id, (cs) =>
+              Effect.sync(() => {
+                // The forms checked above are the tree's forms as it stands.
+                cs.guardHead('', tree.authoredSeq as AuthoredSeq)
+                let version: VersionHandle
+                let node: NodeHandle | Granted<'respond'>
+                if (granted !== null) {
+                  node = granted
+                  version = i.replace
+                    ? cs.putData(granted, { ...provenance, json: values })
+                    : cs.mergeJson(granted, values, provenance)
+                } else {
+                  // The writer's own folder is theirs, made before the file.
+                  if (ownFolderPath !== null && ownNode === null) {
+                    cs.createData(under!, {
+                      path: ownFolderPath,
+                      kind: 'folder',
+                      owner: person.id,
+                    })
+                  }
+                  node = cs.createData(under!, {
+                    path,
+                    kind: 'file',
+                    owner: owner === null ? null : person.id,
+                  })
+                  version = cs.putData(node, {
+                    ...provenance,
+                    json: i.replace ? values : withoutNulls(values),
+                  })
+                }
+                cs.operation({
+                  principal: person.id,
+                  scope,
+                  opId: i.opId,
+                  result: version,
+                })
+                cs.event({
+                  type: entryFolder !== null ? 'entry' : 'data_write',
+                  path,
+                  node,
+                })
+                return { version }
+              }),
+            )
+            .pipe(
+              Effect.mapError((error) =>
+                // Only the data file's own limit is reworded; the
+                // workspace's storage limit speaks for itself.
+                error.code === 'too_large' &&
+                error.message === DATA_FILE_TOO_LARGE
+                  ? tooLargeData(dataFileBytes)
+                  : error.code === 'blob_reclaiming'
+                    ? dossierError('unavailable')
+                    : error,
+              ),
+            )
+          const raw = yield* versionById(versionIdOf(done.version))
+          if (raw === null)
+            return yield* Effect.fail(dossierError('unavailable'))
+          const stored = versionOfRaw(raw)
+          return yield* answerOf(stored.path, stored.version)
+        })
+        return yield* retrying(once)
+      }) as ReturnType<DataService['write']>
+
+    /** What a read gives of a file's content. */
+    const contentOf = (doc: DocRow) =>
+      Effect.gen(function* () {
+        const { node, version } = doc
+        if (node.origin === 'data') {
+          return version.blobSha256 === null
+            ? parseJson(version.jsonValue)
+            : null
+        }
+        const json = /\.json$/i.test(node.path)
+        const text =
+          json ||
+          (version.contentType ?? '').startsWith('text/') ||
+          TEXT_FILE.test(node.path)
+        if (!text || (version.size ?? 0) > READ_TEXT_BYTES) return null
+        const granted = yield* access.require('read', node).pipe(Effect.option)
+        if (granted._tag === 'None') return null
+        const file = yield* store.read(granted.value).pipe(Effect.option)
+        if (file._tag === 'None') return null
+        const body = file.value.body
+        const bytes =
+          typeof body === 'string'
+            ? body
+            : yield* query(() => new Response(body).text())
+        if (!json) return bytes
+        try {
+          return JSON.parse(bytes) as unknown
+        } catch {
+          return bytes
+        }
+      })
+
+    /** The bytes a file's content adds to a folder read. */
+    const readBytes = (doc: DocRow) => {
+      const { node, version } = doc
+      if (node.origin === 'data') {
+        return version.blobSha256 === null ? (version.size ?? 0) : 0
+      }
+      const text =
+        /\.json$/i.test(node.path) ||
+        (version.contentType ?? '').startsWith('text/') ||
+        TEXT_FILE.test(node.path)
+      return text && (version.size ?? 0) <= READ_TEXT_BYTES
+        ? (version.size ?? 0)
+        : 0
+    }
+
+    const wireOf = (doc: DocRow) =>
+      Effect.map(contentOf(doc), (data): DocWire => ({
+        path: doc.node.path,
+        data,
+        by: doc.by,
+        at: new Date(doc.version.createdAt).toISOString(),
+        push: doc.push,
+      }))
+
     const read: DataService['read'] = (i) =>
       Effect.gen(function* () {
         const folder = i.path === '' || i.path.endsWith('/')
         const path = bare(i.path)
+        const row = yield* folderOrFile(i.treeId, path)
         if (folder) {
-          const row = yield* folderOrFile(i.treeId, path)
           if (row === null || row.kind !== 'folder') return { files: [] }
           const granted = yield* access.require('read', row).pipe(Effect.option)
           if (granted._tag === 'None') return { files: [] }
-          const docs = yield* store.docs(granted.value, { origin: 'data' })
+          const prefix = path === '' ? '' : `${path}/`
+          const docs = (yield* store.docs(granted.value, {
+            origin: 'any',
+          })).filter(
+            (doc) =>
+              !doc.node.path
+                .slice(prefix.length)
+                .split('/')
+                .some((segment) => segment.startsWith('_')),
+          )
+          const bytes = docs.reduce((sum, doc) => sum + readBytes(doc), 0)
+          if (docs.length > READ_FOLDER_FILES || bytes > READ_FOLDER_BYTES) {
+            return yield* Effect.fail(
+              dossierError(
+                'too_large',
+                `This folder holds ${docs.length.toLocaleString('en-US')} files and ${sizeText(bytes)} to read; a read takes at most ${READ_FOLDER_FILES.toLocaleString('en-US')} files and ${sizeText(READ_FOLDER_BYTES)}.`,
+                'Read a smaller folder.',
+                i.path,
+              ),
+            )
+          }
           return {
-            files: yield* Effect.forEach(docs, (doc) =>
-              docOf(doc.node.path, doc.version),
-            ),
+            files: yield* Effect.forEach(docs, wireOf, { concurrency: 8 }),
           }
         }
-        const file = yield* liveData(i.treeId, path)
-        if (file === null) return { file: null }
-        const granted = yield* access
-          .require('read', file.node)
-          .pipe(Effect.option)
+        if (row === null || row.kind !== 'file') return { file: null }
+        const granted = yield* access.require('read', row).pipe(Effect.option)
         if (granted._tag === 'None') return { file: null }
-        return { file: yield* docOf(path, file.version) }
+        const doc = yield* docRowOf(granted.value)
+        return { file: doc === null ? null : yield* wireOf(doc) }
+      })
+
+    /** One file as a read names it, by the rule of TreeStore.docs. */
+    const docRowOf = (node: NodeRow) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const raw = yield* query(() =>
+          DB.prepare(
+            `select v.*, u.email, u.name, p.number as pushNumber,
+               exists (select 1 from workspace_members m join trees t
+                 on t.workspace_id = m.workspace_id
+                 where t.id = v.tree_id and m.user_id = ?2) as member
+             from node_versions v join "user" u on u.id = v.author_id
+               left join pushes p on p.id = v.push_id
+             where v.id = ?1 and v.state = 'live'`,
+          )
+            .bind(node.currentVersionId, caller.person?.id ?? '')
+            .first<Record<string, unknown>>(),
+        )
+        if (raw === null) return null
+        const { version } = versionOfRaw({ ...raw, path: node.path })
+        const data = node.origin === 'data'
+        const named =
+          data ||
+          raw.member === 1 ||
+          (caller.person !== null && caller.person.id === version.authorId)
+        return {
+          node,
+          version,
+          by: (named ? raw.email : raw.name) as string,
+          push: ((data ? version.seenPushNumber : raw.pushNumber) ??
+            0) as PushNumber,
+          value: null,
+        } satisfies DocRow
       })
 
     /** Whether the caller reads the answers a target collects. */
@@ -1720,6 +2386,7 @@ export const DataLive: Layer.Layer<
       withdraw,
       withdrawMine,
       mineCounts,
+      write,
       read,
       pageForms,
       responses,

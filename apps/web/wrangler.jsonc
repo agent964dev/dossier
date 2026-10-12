@@ -37,6 +37,11 @@
   "r2_buckets": [
     { "binding": "BLOBS", "bucket_name": "dossier-next-production" },
   ],
+  // One hub per tree relays change hints to the sockets watching it.
+  "durable_objects": {
+    "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TreeHub"] }],
   "env": {
     "dev": {
       "name": "dossier-next-dev",
@@ -62,6 +67,9 @@
         },
       ],
       "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "dossier-next-dev" }],
+      "durable_objects": {
+        "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
+      },
     },
   },
 }

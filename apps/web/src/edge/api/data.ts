@@ -82,5 +82,8 @@ export const DataApiLive = HttpApiBuilder.group(
         Effect.flatMap(Data, (data) =>
           data.read({ treeId: urlParams.tree, path: urlParams.path }),
         ),
+      )
+      .handle('write', ({ payload }) =>
+        Effect.flatMap(Data, (data) => data.write(payload)),
       ),
 )

@@ -5,7 +5,7 @@ import {
 } from '@dossier/contracts'
 import { Cause, Effect, Exit, Option } from 'effect'
 
-import { CurrentCaller, type CoreServices } from '../core/index.ts'
+import { Background, CurrentCaller, type CoreServices } from '../core/index.ts'
 import { screenScope } from '../edge/screens.ts'
 import type { ScreenFailure } from './failure.ts'
 
@@ -17,14 +17,21 @@ export { isScreenFailure, type ScreenFailure } from './failure.ts'
  * plain error page.
  */
 export const runScreen = async <A>(
-  effect: Effect.Effect<A, DossierError, CoreServices | CurrentCaller>,
+  effect: Effect.Effect<
+    A,
+    DossierError,
+    CoreServices | CurrentCaller | Background
+  >,
 ): Promise<A | ScreenFailure> => {
   const scope = screenScope.getStore()
   if (scope === undefined) {
     throw new Error('A screen ran outside a Dossier request')
   }
   const exit = await scope.runtime.runPromiseExit(
-    Effect.provideService(effect, CurrentCaller, scope.caller),
+    effect.pipe(
+      Effect.provideService(CurrentCaller, scope.caller),
+      Effect.provideService(Background, scope.background),
+    ),
   )
   if (Exit.isSuccess(exit)) return exit.value
   const failure = Cause.failureOption(exit.cause)

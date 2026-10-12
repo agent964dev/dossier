@@ -4,6 +4,7 @@ import { Auth, AuthLive } from '../ports/auth.ts'
 import { Access, AccessLive } from './access.ts'
 import { BaseLayer, BaseLayerLive } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
+import { ChangeFeed, ChangeFeedLive } from './change-feed.ts'
 import { Config, ConfigLive } from './config.ts'
 import { Data, DataLive } from './data.ts'
 import { Files, FilesLive } from './files.ts'
@@ -15,6 +16,7 @@ import { Push, PushLive } from './push.ts'
 import { Settings, SettingsLive } from './settings.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
 import { TreeStore, TreeStoreLive } from './tree-store.ts'
+import { Watch, WatchLive } from './watch.ts'
 
 /** Every service the edge and the screens reach. */
 export type CoreServices =
@@ -33,12 +35,16 @@ export type CoreServices =
   | PageCache
   | Data
   | Settings
+  | ChangeFeed
+  | Watch
 
 /** The seams a test may replace. */
 export interface Overrides {
   readonly auth?: Layer.Layer<Auth, never, Bindings | Config>
   readonly base?: Layer.Layer<BaseLayer>
   readonly pageCache?: Layer.Layer<PageCache>
+  /** Where commits are published; the tree hubs by default. */
+  readonly changeFeed?: Layer.Layer<ChangeFeed>
 }
 
 /** The one composition, for production and tests alike. */
@@ -50,7 +56,10 @@ export const makeLayer = (
   const config = ConfigLive.pipe(Layer.provideMerge(bindings))
   const base = overrides.base ?? BaseLayerLive.pipe(Layer.provide(bindings))
   const settings = SettingsLive.pipe(Layer.provideMerge(config))
+  const feed =
+    overrides.changeFeed ?? ChangeFeedLive.pipe(Layer.provide(bindings))
   const trees = TreeStoreLive.pipe(
+    Layer.provideMerge(feed),
     Layer.provideMerge(AccessLive),
     Layer.provideMerge(LimitsLive.pipe(Layer.provideMerge(settings))),
     Layer.provideMerge(base),
@@ -64,6 +73,7 @@ export const makeLayer = (
     PeopleLive.pipe(Layer.provide(DataLive)),
     PagesLive.pipe(Layer.provideMerge(FilesLive)),
     DataLive,
+    WatchLive,
   ).pipe(Layer.provideMerge(auth))
 }
 

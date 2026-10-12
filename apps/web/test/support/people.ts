@@ -3,6 +3,8 @@ import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 
 import {
+  Background,
+  backgroundInline,
   CurrentCaller,
   SignIn,
   type Caller,
@@ -23,11 +25,20 @@ export const fresh = (domain = 'gmail.com', local = 'person') => {
 export const run = <A, E>(effect: Effect.Effect<A, E, CoreServices>) =>
   harness.runtime().runPromise(effect)
 
-/** Runs an effect as `caller`. */
+/**
+ * Runs an effect as `caller`. Work after a commit finishes before it
+ * returns, as if no response were waiting.
+ */
 export const runAs = <A, E>(
   caller: Caller,
-  effect: Effect.Effect<A, E, CoreServices | CurrentCaller>,
-) => run(Effect.provideService(effect, CurrentCaller, caller))
+  effect: Effect.Effect<A, E, CoreServices | CurrentCaller | Background>,
+) =>
+  run(
+    effect.pipe(
+      Effect.provideService(CurrentCaller, caller),
+      Effect.provideService(Background, backgroundInline),
+    ),
+  )
 
 /** The caller a screen of this browser would run as. */
 export const callerOf = async (browser: Browser): Promise<Caller> => {

@@ -8,10 +8,12 @@ interface __BaseEnv_Env {
 	PUBLIC_ORIGIN: string;
 	DEPLOYMENT_NAME: string;
 	CONTENT_HOST: string;
+	TREE_HUB: DurableObjectNamespace<import("./src/worker").TreeHub>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/worker");
+		durableNamespaces: "TreeHub";
 	}
 	interface DevEnv {
 		BLOBS: R2Bucket;
@@ -20,6 +22,7 @@ declare namespace Cloudflare {
 		PUBLIC_ORIGIN: string;
 		DEPLOYMENT_NAME: string;
 		CONTENT_HOST: string;
+		TREE_HUB: DurableObjectNamespace<import("./src/worker").TreeHub>;
 	}
 	interface Env extends __BaseEnv_Env {}
 }
