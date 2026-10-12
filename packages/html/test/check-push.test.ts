@@ -616,3 +616,21 @@ describe('a page’s comments folder', () => {
     ])
   })
 })
+
+describe('a page’s comments folder in a push', () => {
+  it('holds no authored file', () => {
+    expect(pathProblems('plan.comments/readme.txt')).toEqual([
+      expect.objectContaining({
+        code: 'comments_folder',
+        path: 'plan.comments/readme.txt',
+        fix: 'Move it out of plan.comments/.',
+      }),
+    ])
+    expect(pathProblems('a/index.comments/x/y.json')[0]?.code).toBe(
+      'comments_folder',
+    )
+    // A file named like a folder, or a folder only ending in .comments.d, is fine.
+    expect(pathProblems('notes.comments')).toEqual([])
+    expect(pathProblems('my.comments.d/a.txt')).toEqual([])
+  })
+})

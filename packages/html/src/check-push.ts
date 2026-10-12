@@ -44,6 +44,8 @@ export type PushProblemCode =
   | 'forms_need_ids'
   /** Deeper than MAX_DEPTH. */
   | 'too_deep'
+  /** An authored file inside a page's comments folder, which holds only comments. */
+  | 'comments_folder'
   /** A segment isNodeName refuses. */
   | 'bad_name'
 export interface PushProblem {
@@ -489,6 +491,24 @@ export const pathProblems = (path: string): readonly PushProblem[] => {
         ),
       )
     }
+  }
+  const comments = segments.findIndex(
+    (segment, n) =>
+      n < segments.length - 1 &&
+      segment.endsWith('.comments') &&
+      segment !== '.comments',
+  )
+  if (comments >= 0) {
+    const folder = segments.slice(0, comments + 1).join('/')
+    found.push(
+      problem(
+        'comments_folder',
+        path,
+        null,
+        `${path} is inside ${folder}/, a page's comments folder, which holds only the comments people write.`,
+        `Move it out of ${folder}/.`,
+      ),
+    )
   }
   if (segments.length > MAX_DEPTH) {
     found.push(
