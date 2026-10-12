@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "31c82eb8-5d04-4809-9898-7ecf9a5d123a",
-  "prevId": "70fe9da0-245c-4ccf-905f-ed20904b57c7",
+  "id": "b8e7c034-6b64-4b5d-af01-80ef67653449",
+  "prevId": "b99f42e1-b066-4167-9c23-913aa822a249",
   "tables": {
     "account": {
       "name": "account",
@@ -1834,6 +1834,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "host_path": {
+          "name": "host_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "reads": {
           "name": "reads",
           "type": "integer",
@@ -1875,14 +1882,15 @@
         }
       },
       "compositePrimaryKeys": {
-        "page_needs_tree_id_page_path_need_path_kind_pk": {
+        "page_needs_tree_id_page_path_need_path_kind_host_path_pk": {
           "columns": [
             "tree_id",
             "page_path",
             "need_path",
-            "kind"
+            "kind",
+            "host_path"
           ],
-          "name": "page_needs_tree_id_page_path_need_path_kind_pk"
+          "name": "page_needs_tree_id_page_path_need_path_kind_host_path_pk"
         }
       },
       "uniqueConstraints": {},
