@@ -13,6 +13,7 @@ import { LookSettings, LookSettingsLive } from './look.ts'
 import { PageCache, PageCacheLive } from './page-cache.ts'
 import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
+import { Purge, PurgeLive } from './purge.ts'
 import { Push, PushLive } from './push.ts'
 import { Settings, SettingsLive } from './settings.ts'
 import { Shares, SharesLive } from './shares.ts'
@@ -41,6 +42,7 @@ export type CoreServices =
   | Watch
   | LookSettings
   | Shares
+  | Purge
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -72,15 +74,19 @@ export const makeLayer = (
     Layer.provideMerge(config),
   )
   const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(trees))
-  const people = PeopleLive.pipe(Layer.provide(DataLive))
+  // A withdrawal hands the bytes it released to the purge.
+  const data = DataLive.pipe(Layer.provideMerge(PurgeLive))
+  const people = PeopleLive.pipe(Layer.provide(data))
   const shares = SharesLive.pipe(Layer.provideMerge(people))
+  // Deleting a comment from a listing blanks it through Data.
+  const files = FilesLive.pipe(Layer.provide(data))
   return Layer.mergeAll(
     SignInLive,
     PushLive.pipe(Layer.provide(shares)),
     shares,
     LookSettingsLive.pipe(Layer.provide(people)),
-    PagesLive.pipe(Layer.provideMerge(FilesLive), Layer.provide(DataLive)),
-    DataLive,
+    PagesLive.pipe(Layer.provideMerge(files), Layer.provide(data)),
+    data,
     WatchLive,
   ).pipe(Layer.provideMerge(auth))
 }

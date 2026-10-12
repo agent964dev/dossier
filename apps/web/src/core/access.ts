@@ -357,6 +357,11 @@ interface TreeFacts {
   readonly stamp: string
   /** A suspended or deleted workspace reads as missing. */
   readonly state: 'live' | 'suspended' | 'deleted'
+  /**
+   * The tree alone is deleted, in a live workspace: its write holders may
+   * still read its history and restore it.
+   */
+  readonly treeOnlyDeleted: boolean
   /** The caller's role in the tree's workspace, if any. */
   readonly memberRole: 'admin' | 'member' | null
   /** The caller's teams in the tree's workspace. */
@@ -413,6 +418,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
              case when w.deleted_at is not null or t.deleted_at is not null then 'deleted'
                when w.suspended_at is not null then 'suspended'
                else 'live' end as state,
+             (t.deleted_at is not null and w.deleted_at is null
+               and w.suspended_at is null) as treeOnlyDeleted,
              (select role from workspace_members m
                where m.workspace_id = t.workspace_id and m.user_id = ?2
                  and (?3 is null or m.grant_order <= ?3)) as memberRole,
@@ -424,7 +431,12 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
            where t.id = ?1`,
         )
           .bind(treeId, caller.person?.id ?? '', asOf)
-          .first<Omit<TreeFacts, 'teams'> & { teamsJson: string | null }>(),
+          .first<
+            Omit<TreeFacts, 'teams' | 'treeOnlyDeleted'> & {
+              teamsJson: string | null
+              treeOnlyDeleted: number
+            }
+          >(),
       ).pipe(
         Effect.map((row): TreeFacts | null =>
           row === null
@@ -434,6 +446,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                 workspaceName: row.workspaceName,
                 stamp: row.stamp,
                 state: row.state,
+                treeOnlyDeleted: row.treeOnlyDeleted === 1,
                 memberRole: row.memberRole,
                 teams: JSON.parse(row.teamsJson ?? '[]') as TeamId[],
               },
@@ -594,6 +607,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       node: NodeRow,
       asOf: number | null = null,
       throughPageShares = true,
+      /** History and restore of a deleted node, in a deleted tree too. */
+      deleted = false,
     ) =>
       Effect.gen(function* () {
         const none = {
@@ -607,17 +622,33 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         if (caller.via.kind === 'handle' && caller.via.treeId !== node.treeId) {
           return none
         }
-        const facts = yield* treeFacts(caller, node.treeId, asOf)
+        const raw = yield* treeFacts(caller, node.treeId, asOf)
+        // A deleted tree's history stays its write holders'.
+        const facts =
+          raw !== null && deleted && raw.treeOnlyDeleted
+            ? { ...raw, state: 'live' as const }
+            : raw
         // A suspended or deleted workspace reads as missing, for everyone.
         if (facts === null || facts.state !== 'live') return { ...none, facts }
         const paths = ancestorPaths(node.path)
+        // A deleted node keeps the grants of the folders it was deleted in,
+        // deleted with it or not: by its own line of folders.
         const ancestors = yield* query(() =>
-          DB.prepare(
-            `select id from nodes where tree_id = ? and deleted_at is null
-               and path in (${paths.map(() => '?').join(', ')})`,
-          )
-            .bind(node.treeId, ...paths)
-            .all<{ id: NodeId }>(),
+          deleted && node.deletedAt !== null
+            ? DB.prepare(
+                `with recursive up(id, parent) as (
+                   select id, parent_id from nodes where id = ? and tree_id = ?
+                   union all select n.id, n.parent_id from nodes n join up on n.id = up.parent)
+                 select id from up`,
+              )
+                .bind(node.id, node.treeId)
+                .all<{ id: NodeId }>()
+            : DB.prepare(
+                `select id from nodes where tree_id = ? and deleted_at is null
+                   and path in (${paths.map(() => '?').join(', ')})`,
+              )
+                .bind(node.treeId, ...paths)
+                .all<{ id: NodeId }>(),
         )
         const ids = ancestors.results.map((row) => row.id)
         if (
@@ -728,8 +759,17 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         if (action === 'withdraw-own' && node.deletedAt !== null) {
           return yield* denied(caller, node.path)
         }
-        const { grants, owns, facts } = yield* grantsOn(node)
-        if (facts !== null && facts.state !== 'live') {
+        // A deleted node is asked about only by history and restore.
+        const history =
+          node.deletedAt !== null &&
+          (action === 'read-history' || action === 'write')
+        const { grants, owns, facts } = yield* grantsOn(
+          node,
+          null,
+          true,
+          history,
+        )
+        if (facts !== null && facts.state !== 'live' && !history) {
           // People withdraw what they wrote wherever it sits, so deleting
           // an account leaves nothing of theirs in a closed workspace.
           if (

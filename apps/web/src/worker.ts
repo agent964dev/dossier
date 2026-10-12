@@ -1,4 +1,6 @@
+import { runtimeFor } from './core/index.ts'
 import { dispatch } from './edge/dispatch.ts'
+import { runScheduled } from './jobs/scheduled.ts'
 
 export { TreeHub } from './hub/tree-hub.ts'
 
@@ -7,4 +9,5 @@ export { TreeHub } from './hub/tree-hub.ts'
 // aborted request that first builds Better Auth can leave the isolate hanging.
 export default {
   fetch: dispatch,
+  scheduled: (controller, env) => runScheduled(controller, runtimeFor(env)),
 } satisfies ExportedHandler<Env>

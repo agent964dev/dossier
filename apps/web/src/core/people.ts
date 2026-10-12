@@ -754,6 +754,7 @@ export const PeopleLive: Layer.Layer<
           createdAt: at,
           suspendedAt: null,
           deletedAt: null,
+          purgedAt: null,
         } satisfies WorkspaceRow
         // Decided again as the batch commits: the credential still works,
         // the person has not deleted their account, and the deployment
@@ -2113,6 +2114,7 @@ export const PeopleLive: Layer.Layer<
           DB.prepare(
             `update workspaces set deleted_at = null
              where id = ?1 and deleted_at is not null and deleted_at >= ?2
+               and purged_at is null
                and exists (select 1 from workspace_members m
                  join people p on p.user_id = m.user_id and p.deleted_at is null
                  where m.workspace_id = ?1 and m.role = 'admin')`,

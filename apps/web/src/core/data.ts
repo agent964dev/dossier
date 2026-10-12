@@ -45,7 +45,7 @@ import {
   underColumn,
   type Granted,
 } from './access.ts'
-import type { Background } from './background.ts'
+import { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import {
@@ -58,6 +58,7 @@ import {
 import { newId } from './ids.ts'
 import { composedLayouts } from './lookup.ts'
 import { Limits } from './limits.ts'
+import { Purge } from './purge.ts'
 import type { NodeRow, TreeRow, VersionRow } from './rows.ts'
 import {
   blobKey,
@@ -496,13 +497,14 @@ const isRace = (error: { readonly code: string }) =>
 export const DataLive: Layer.Layer<
   Data,
   never,
-  TreeStore | Access | Bindings | Limits
+  TreeStore | Access | Bindings | Limits | Purge
 > = Layer.effect(
   Data,
   Effect.gen(function* () {
     const store = yield* TreeStore
     const access = yield* Access
     const limits = yield* Limits
+    const purge = yield* Purge
     const bindings = yield* Bindings
     const { DB, BLOBS } = bindings
     const context = yield* Effect.context<Bindings>()
@@ -820,6 +822,31 @@ export const DataLive: Layer.Layer<
           yield* Effect.sleep(20 * 2 ** tried)
         }
       })
+
+    /** The hashes of every version of these nodes: what withdrawing them releases. */
+    const blobsOf = (nodeIds: readonly string[]) =>
+      nodeIds.length === 0
+        ? Effect.succeed([] as Sha256[])
+        : query(() =>
+            DB.prepare(
+              `select distinct blob_sha256 as sha from node_versions
+               where node_id in (select value from json_each(?))
+                 and blob_sha256 is not null`,
+            )
+              .bind(JSON.stringify(nodeIds))
+              .all<{ sha: Sha256 }>(),
+          ).pipe(Effect.map((rows) => rows.results.map((r) => r.sha)))
+
+    /**
+     * After a committed withdrawal, in the background: the bytes nothing
+     * else references go at once.
+     */
+    const reclaimReleased = (shas: readonly Sha256[]) =>
+      shas.length === 0
+        ? Effect.void
+        : Effect.flatMap(Background, (background) =>
+            background.run(purge.reclaim(shas)),
+          )
 
     const tooLargeData = (limit: number) =>
       dossierError(
@@ -1662,6 +1689,10 @@ export const DataLive: Layer.Layer<
               .pipe(Effect.option)
             if (ok._tag === 'Some') folders.push(ok.value)
           }
+          const released = yield* blobsOf([
+            file.node.id,
+            ...uploads.map((u) => u.id),
+          ])
           yield* store.change(i.treeId, (cs) =>
             Effect.sync(() => {
               // An answer written since this read that names one of these
@@ -1685,8 +1716,9 @@ export const DataLive: Layer.Layer<
               return {}
             }),
           )
+          return released
         })
-        yield* retrying(once).pipe(
+        const released = yield* retrying(once).pipe(
           Effect.mapError((error) =>
             error.code === 'blob_reclaiming'
               ? notFound(i.path)
@@ -1698,6 +1730,7 @@ export const DataLive: Layer.Layer<
                 : error,
           ),
         )
+        yield* reclaimReleased(released)
       }) as ReturnType<DataService['withdraw']>
 
     /** The forms in the tree as it stands that send to a target. */
@@ -3164,6 +3197,11 @@ export const DataLive: Layer.Layer<
           // Files go before the folders that hold them, which go last.
           for (let at = 0; at < granted.length; at += WITHDRAW_CHUNK) {
             const chunk = granted.slice(at, at + WITHDRAW_CHUNK)
+            const released = yield* blobsOf(
+              chunk
+                .filter((g) => g.file && g.comment === null)
+                .map((g) => g.node.id),
+            ).pipe(Effect.mapError(() => dossierError('unavailable')))
             yield* retrying(
               store.change(treeId, (cs) =>
                 Effect.sync(() => {
@@ -3199,6 +3237,7 @@ export const DataLive: Layer.Layer<
                 return dossierError('unavailable')
               }),
             )
+            yield* reclaimReleased(released)
           }
           trees += 1
         }

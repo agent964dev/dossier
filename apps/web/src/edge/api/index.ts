@@ -16,6 +16,7 @@ import { DeviceLive } from './device.ts'
 import { EventsLive } from './events.ts'
 import { ExportLive } from './export.ts'
 import { FilesLive } from './files.ts'
+import { HistoryLive } from './history.ts'
 import { MeLive } from './me.ts'
 import { PushesLive } from './pushes.ts'
 import { ReadLive } from './read.ts'
@@ -46,6 +47,7 @@ const build = async (runtime: CoreRuntime): Promise<ApiHandler> => {
       EventsLive,
       SharesApiLive,
       ExportLive,
+      HistoryLive,
     ]),
     Layer.provide(Layer.succeedContext(core.context)),
     // Every request passes its own caller and background; these only

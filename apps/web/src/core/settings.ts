@@ -126,6 +126,66 @@ export const settingsSaved = (): void => {
 /** Moves with every save in this isolate; caches of settings compare it. */
 export const settingsGeneration = (): number => generation
 
+interface PurgeRow {
+  readonly trigger: string
+  readonly state: 'running' | 'done' | 'partial' | 'failed'
+  readonly startedAt: number
+  readonly finishedAt: number | null
+  readonly counts: string
+  readonly error: string | null
+}
+
+const UTC = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZone: 'UTC',
+})
+
+const counted = (n: number, one: string, many: string) =>
+  `${n} ${n === 1 ? one : many}`
+
+/** The newest purge: fine unless it failed, with its time and counts. */
+export const purgeHealth = (row: PurgeRow | null): HealthCheck => {
+  if (row === null) {
+    return { name: 'Purge', ok: true, detail: 'No purge has run yet.' }
+  }
+  const when = `${UTC.format(row.finishedAt ?? row.startedAt)} UTC`
+  const who = row.trigger === 'manual' ? 'Purge now' : 'The weekly purge'
+  if (row.state === 'running') {
+    return { name: 'Purge', ok: true, detail: `${who} is running.` }
+  }
+  if (row.state === 'failed') {
+    return {
+      name: 'Purge',
+      ok: false,
+      detail: `${who} failed at ${when}: ${row.error ?? 'no reason given.'}`,
+    }
+  }
+  let c: Record<string, unknown> = {}
+  try {
+    c = JSON.parse(row.counts) as Record<string, unknown>
+  } catch {
+    c = {}
+  }
+  const n = (key: string) => (typeof c[key] === 'number' ? c[key] : 0)
+  const removed = [
+    counted(n('nodes'), 'file or folder', 'files and folders'),
+    counted(n('versions'), 'version', 'versions'),
+    counted(n('trees'), 'tree', 'trees'),
+    counted(n('workspaces'), 'workspace', 'workspaces'),
+    counted(n('blobs'), 'stored file', 'stored files'),
+  ].join(', ')
+  const rest = row.state === 'partial' ? ' The next run goes on.' : ''
+  return {
+    name: 'Purge',
+    ok: true,
+    detail: `${who} finished at ${when} and removed ${removed}.${rest}`,
+  }
+}
+
 /** The file the base layer always holds, read to check Static Assets. */
 const HEALTH_KEY = 'health/probe'
 
@@ -176,6 +236,23 @@ export const SettingsLive: Layer.Layer<Settings, never, Bindings | Config> =
           ),
         )
 
+      // Read straight from the newest run, so Settings needs no Purge.
+      const purgeCheck: Effect.Effect<HealthCheck> = Effect.tryPromise(() =>
+        DB.prepare(
+          `select trigger, state, started_at as startedAt,
+             finished_at as finishedAt, counts_json as counts, error
+           from purge_runs order by rowid desc limit 1`,
+        ).first<PurgeRow>(),
+      ).pipe(
+        Effect.map(purgeHealth),
+        Effect.catchAll((error) =>
+          Effect.sync(() => {
+            console.error('The Purge health check failed', error)
+            return { name: 'Purge', ok: false, detail: 'Did not answer.' }
+          }),
+        ),
+      )
+
       const health = () =>
         Effect.gen(function* () {
           const checks = yield* Effect.all(
@@ -199,6 +276,7 @@ export const SettingsLive: Layer.Layer<Settings, never, Bindings | Config> =
                   ? null
                   : `Static Assets answered ${response.status}.`
               }),
+              purgeCheck,
             ],
             { concurrency: 'unbounded' },
           )

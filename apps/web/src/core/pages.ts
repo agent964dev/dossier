@@ -611,12 +611,15 @@ export const PagesLive: Layer.Layer<
               }
               const caller = yield* CurrentCaller
               switch (resolved.kind) {
-                case 'redirect':
+                case 'redirect': {
+                  // A moved tree's old link leads to where it is now.
+                  const place = resolved.place ?? ref
                   return {
                     kind: 'redirect',
-                    to: `/${encodeURIComponent(ref.workspace)}/${encodeURIComponent(ref.tree)}/${resolved.to}`,
+                    to: `/${encodeURIComponent(place.workspace)}/${encodeURIComponent(place.tree)}/${resolved.to}`,
                     status: 301,
                   } satisfies Served
+                }
                 case 'folder':
                   return { kind: 'listing', ref } satisfies Served
                 case 'page':
@@ -1220,7 +1223,12 @@ export const PagesLive: Layer.Layer<
         if (analysis === null) return null
         const chain = yield* composedLayouts({
           treeId,
-          page: { node: target.node, version: target.version, analysis },
+          page: {
+            node: target.node,
+            version: target.version,
+            analysis,
+            ...(target.path === undefined ? {} : { path: target.path }),
+          },
           at: seq,
         }).pipe(Effect.provide(context))
         return { analysis, chain }
@@ -1235,6 +1243,8 @@ export const PagesLive: Layer.Layer<
         readonly name: string
       }
       readonly node: NodeRow
+      /** The page's path at the key's sequence. */
+      readonly path: string
       readonly version: VersionRow
       readonly analysis: HtmlAnalysis
       readonly chain: readonly LayoutLink[]
@@ -1243,9 +1253,10 @@ export const PagesLive: Layer.Layer<
       Effect.gen(function* () {
         const hit = yield* cache.get(i.key)
         if (hit !== null) return hit
-        const folder = folderOf(i.node.path)
+        // A page pinned before a move composes where it stood then.
+        const folder = folderOf(i.path)
         const page: Source = {
-          source: yield* textOf(i.node.path, i.version),
+          source: yield* textOf(i.path, i.version),
           analysis: i.analysis,
           folder,
         }
@@ -1254,7 +1265,7 @@ export const PagesLive: Layer.Layer<
         const hosts = new Map<Source, NodeRow>([[page, i.node]])
         for (const link of i.chain) {
           const layout: Source = {
-            source: yield* textOf(i.node.path, link.version),
+            source: yield* textOf(i.path, link.version),
             analysis: link.analysis,
             folder: link.folder,
           }
@@ -1287,7 +1298,7 @@ export const PagesLive: Layer.Layer<
               v: 1,
               origin: config.origin.origin,
               tree: i.tree,
-              path: `/${i.node.path}`,
+              path: `/${i.path}`,
               link: linkOf(i.tree.workspace, i.tree.name, i.linkPath),
               push,
               seq: i.key.seq,
@@ -1510,7 +1521,7 @@ export const PagesLive: Layer.Layer<
           host: i.host,
           treeId: i.treeId,
           seq: i.seq,
-          path: target.node.path,
+          path: target.path ?? target.node.path,
           composer: `${COMPOSER_VERSION}.${ANALYZER_VERSION}`,
           base: base.version,
         }
@@ -1527,6 +1538,7 @@ export const PagesLive: Layer.Layer<
             name: found.tree.name,
           },
           node: target.node,
+          path: target.path ?? target.node.path,
           version: target.version,
           analysis,
           chain,
@@ -1730,6 +1742,7 @@ export const PagesLive: Layer.Layer<
             },
             tree,
             node: page.node,
+            path: page.path ?? page.node.path,
             version: page.version,
             analysis: parts.analysis!,
             chain: parts.chain,

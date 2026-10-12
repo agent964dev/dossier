@@ -25,7 +25,7 @@ import {
   type FormSchema,
   type HtmlAnalysis,
 } from '@dossier/html'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, isNull, sql, type SQL } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
 
 import { db, schema } from '../db/client.ts'
@@ -41,6 +41,7 @@ import type { Background } from './background.ts'
 import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { ChangeFeed, type CloseSockets, type Committed } from './change-feed.ts'
+import { makeSystemStore, SystemJob, type SystemStore } from './system-store.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { openCursor, sealCursor } from './cursors.ts'
 import { callerRefOf, callersCte, visibleEventSql } from './event-visibility.ts'
@@ -49,7 +50,9 @@ import { bytesText, Limits } from './limits.ts'
 import type { PageNeedRow } from './page-needs.ts'
 import {
   analysisOf,
+  authoredFileAt as lookupFileAt,
   lookupUnderscore,
+  pathAtSql,
   underscoreSplit,
   type KitFound,
 } from './lookup.ts'
@@ -90,12 +93,18 @@ export type Resolved =
       readonly tree: TreeRow
       /** The link's path inside the tree, encoded: 'questions/', 'plan'. */
       readonly linkPath: string
+      /**
+       * The file's tree path at the sequence asked: where it stood then,
+       * which differs from `node.path` when it has moved since.
+       */
+      readonly path?: string
     }
   | {
       readonly kind: 'file'
       readonly node: NodeRow
       readonly version: VersionRow
       readonly tree: TreeRow
+      readonly path?: string
     }
   /** A folder without index.html. */
   | { readonly kind: 'folder'; readonly node: NodeRow; readonly tree: TreeRow }
@@ -105,6 +114,11 @@ export type Resolved =
       readonly tree: TreeRow
       /** The link's path inside the tree, encoded. */
       readonly to: string
+      /**
+       * A tree that moved to another workspace or name: where its link is
+       * now. Absent for a redirect inside the tree as it was asked.
+       */
+      readonly place?: { readonly workspace: string; readonly tree: string }
     }
   /**
    * A `_` path: every candidate the lookup reaches, closest first. The
@@ -166,6 +180,8 @@ export interface NewEvent {
   readonly path: string
   readonly node?: NodeRow | NodeHandle
   readonly pushId?: PushId
+  /** A move's new path; a restore's point, "push 9" or an ISO time. */
+  readonly detail?: string
 }
 
 export interface NewShare {
@@ -188,6 +204,23 @@ export interface NewDataNode {
   readonly kind: 'file' | 'folder'
   /** The writer it belongs to; null for a shared file nobody owns. */
   readonly owner: PersonId | null
+}
+
+/** What a restore makes of each node, as Files read the tree. */
+export interface RestorePlan {
+  /** Files given back the content of an earlier version, live again. */
+  readonly revive: readonly {
+    readonly node: NodeRow
+    readonly from: VersionRow
+  }[]
+  /** Live files the point did not hold, deleted. */
+  readonly remove: readonly NodeRow[]
+  /** Deleted folders the revived files sit in, live again. */
+  readonly folders: readonly NodeRow[]
+  /** Authored folders the change leaves with no live file below, deleted. */
+  readonly empty: readonly NodeRow[]
+  /** A deleted tree, live again with its root. */
+  readonly tree: boolean
 }
 
 /** What every data version records beside its content. */
@@ -330,10 +363,55 @@ export interface ChangeSet {
    * 'withdrawn' version left, the node deleted, its operations reduced to
    * 'withdrawn', and its blobs' references counted down. A folder of the
    * writer's goes only when the change leaves it empty.
+   *
+   * 'deleted': a write holder's delete, a change in history like a push. A
+   * 'deleted' version for the file, or for every live file below a folder,
+   * and every node below the folder deleted with it; all earlier versions
+   * stay, so it can be restored until the purge. The tree root takes the
+   * tree with it.
    */
   readonly markDeleted: (
-    node: Granted<'withdraw-own'>,
-    mode: 'withdrawn',
+    node: Granted<'write' | 'delete-data' | 'withdraw-own'>,
+    mode: 'withdrawn' | 'deleted',
+  ) => void
+  /**
+   * Makes files and folders match an earlier point: new versions holding
+   * the content of the versions given, deleted nodes live again, and files
+   * the point did not hold deleted. Copies no bytes. Fails the change when
+   * anything it read has changed, or a version it copies is gone.
+   */
+  readonly restore: (node: Granted<'write'>, plan: RestorePlan) => void
+  /**
+   * The only writer of nodes.path: the node and everything below it move to
+   * `to`, a path alias kept for each, and form targets inside follow.
+   * `folders`: the folders on the way to create first, outermost first.
+   */
+  readonly move: (
+    node: Granted<'write'>,
+    to: string,
+    folders: readonly string[],
+  ) => void
+  /**
+   * A new authored version of an existing file, as a move's rewritten
+   * links make: its forms rows are the previous version's, and the hold
+   * on its bytes goes with the commit.
+   */
+  readonly putVersion: (
+    file: Granted<'write'>,
+    version: {
+      readonly sha256: Sha256
+      readonly size: number
+      readonly contentType: string
+      readonly hold: { readonly kind: 'move'; readonly id: string }
+      /** The version it replaces, which must still be current. */
+      readonly previous: VersionId
+    },
+  ) => void
+  /** The tree to another workspace or name; its old link stays as an alias. */
+  readonly moveTree: (
+    root: Granted<'write'>,
+    to: Membership,
+    name: string,
   ) => void
   /**
    * Fails the change if any live answer of `owner` in the folder `own`,
@@ -375,9 +453,15 @@ export interface TreeStoreService {
     workspace: WorkspaceRow,
     name: string,
   ) => Effect.Effect<TreeRow | null>
-  /** The node a path names: a folder, a file, or the page `path.html`. */
+  /**
+   * The node a path names: a folder, a file, or the page `path.html`. With
+   * `deleted`, for history and restore only: the newest deleted node at the
+   * path when no live one holds it, and a deleted tree by its name when no
+   * live tree has it.
+   */
   readonly locate: (
     ref: LinkRef,
+    opts?: { readonly deleted?: boolean },
   ) => Effect.Effect<Located | MissingNode, DossierError<'unavailable'>>
   /**
    * What a link names, live or at an authored sequence: every file of one
@@ -492,6 +576,11 @@ export interface TreeStoreService {
     E | ChangeFailure,
     CurrentCaller | Background
   >
+  /**
+   * What removes rows and bytes. Only a job the Worker runs itself holds a
+   * SystemJob; no request does.
+   */
+  readonly system: Effect.Effect<SystemStore, never, SystemJob>
   /**
    * The tree's events after a cursor that the caller may read now, with a
    * cursor that moves past those it may not.
@@ -908,7 +997,8 @@ const stagedWrites = (i: {
     },
     {
       sql: `update pushes set state = 'committed', tree_id = ?1, committed_at = ?3,
-              number = (select push_count from trees where id = ?1)
+              number = (select push_count from trees where id = ?1),
+              authored_seq = (select authored_seq from trees where id = ?1)
             where id = ?2`,
       binds,
     },
@@ -946,6 +1036,24 @@ const highestParam = (text: string): number => {
 
 const joinPath = (folder: string, name: string) =>
   folder === '' ? name : `${folder}/${name}`
+
+/** A nodes row read with plain SQL, as Drizzle would give it. */
+export const nodeOfRaw = (row: Record<string, unknown>): NodeRow =>
+  ({
+    id: row.id,
+    treeId: row.tree_id,
+    parentId: row.parent_id,
+    name: row.name,
+    path: row.path,
+    depth: row.depth,
+    kind: row.kind,
+    origin: row.origin,
+    ownerId: row.owner_id,
+    currentVersionId: row.current_version_id,
+    createdAt: row.created_at,
+    deletedAt: row.deleted_at,
+    underscoreFrom: row.underscore_from ?? null,
+  }) as NodeRow
 
 /** A page file's path as its link names it: 'a/index.html' → 'a/', 'a/b.html' → 'a/b'. */
 const pageLinkPath = (path: string): string => {
@@ -1054,7 +1162,7 @@ export const TreeStoreLive: Layer.Layer<
           )
     }
 
-    const locate = (ref: LinkRef) =>
+    const locate = (ref: LinkRef, opts: { readonly deleted?: boolean } = {}) =>
       Effect.gen(function* () {
         const missing = (treeId: TreeId | null): MissingNode => ({
           missing: true,
@@ -1063,8 +1171,94 @@ export const TreeStoreLive: Layer.Layer<
         })
         const ws = yield* workspace(ref.workspace)
         if (ws === null) return missing(null)
-        const found = yield* tree(ws, ref.tree)
+        const found =
+          (yield* tree(ws, ref.tree)) ??
+          (opts.deleted === true ? yield* deletedTree(ws, ref.tree) : null)
         if (found === null) return missing(null)
+        // A deleted tree's nodes are all deleted: only history reaches them.
+        if (found.deletedAt !== null || opts.deleted === true) {
+          const live =
+            found.deletedAt === null ? yield* locateLive(ref, found) : null
+          if (live !== null) return live
+          return (yield* locateDeleted(ref, found)) ?? missing(found.id)
+        }
+        return (yield* locateLive(ref, found)) ?? missing(found.id)
+      })
+
+    /** The newest deleted tree of a name in a workspace. */
+    const deletedTree = (ws: WorkspaceRow, name: string) =>
+      read(() =>
+        database
+          .select()
+          .from(schema.trees)
+          .where(
+            and(
+              eq(schema.trees.workspaceId, ws.id),
+              eq(schema.trees.name, name),
+              sql`${schema.trees.deletedAt} is not null`,
+            ),
+          )
+          .orderBy(sql`${schema.trees.deletedAt} desc`)
+          .limit(1)
+          .get(),
+      ).pipe(
+        Effect.map((row) => (row ?? null) as TreeRow | null),
+        Effect.orDie,
+      )
+
+    /** The newest deleted node a path names, as locate reads a path. */
+    const locateDeleted = (ref: LinkRef, found: TreeRow) =>
+      Effect.gen(function* () {
+        const candidates =
+          ref.folder || ref.path === ''
+            ? [ref.path]
+            : [ref.path, `${ref.path}.html`]
+        for (const path of candidates) {
+          const node = yield* read(() =>
+            database
+              .select()
+              .from(schema.nodes)
+              .where(
+                and(
+                  eq(schema.nodes.treeId, found.id),
+                  eq(schema.nodes.path, path),
+                  sql`${schema.nodes.deletedAt} is not null`,
+                ),
+              )
+              .orderBy(sql`${schema.nodes.deletedAt} desc`)
+              .limit(1)
+              .get(),
+          )
+          if (node === undefined) continue
+          const row = node as NodeRow
+          if (row.kind === 'folder') {
+            return { kind: 'folder', node: row, tree: found } satisfies Located
+          }
+          if (ref.folder) continue
+          const id = row.currentVersionId
+          const version =
+            id === null
+              ? undefined
+              : yield* read(() =>
+                  database
+                    .select()
+                    .from(schema.nodeVersions)
+                    .where(eq(schema.nodeVersions.id, id))
+                    .get(),
+                )
+          if (version === undefined) continue
+          return {
+            kind: 'file',
+            node: row,
+            version: version as VersionRow,
+            tree: found,
+          } satisfies Located
+        }
+        return null
+      })
+
+    const locateLive = (ref: LinkRef, found: TreeRow) =>
+      Effect.gen(function* () {
         // `a/b` names the folder a/b, the file a/b, or the page a/b.html.
         const candidates =
           ref.folder || ref.path === ''
@@ -1086,7 +1280,7 @@ export const TreeStoreLive: Layer.Layer<
             tree: found,
           } satisfies Located
         }
-        return missing(found.id)
+        return null
       })
 
     const treeById = (treeId: TreeId) =>
@@ -1132,45 +1326,24 @@ export const TreeStoreLive: Layer.Layer<
      * file is read as it is now.
      */
     const fileAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
-      Effect.gen(function* () {
-        if (at === undefined) return yield* liveFile(treeId, path)
-        const authored = yield* authoredFileAt(treeId, path, at)
-        if (authored !== null) return authored
-        const live = yield* liveFile(treeId, path)
-        return live !== null && live.node.origin === 'data' ? live : null
-      })
+      Effect.map(fileThen(treeId, path, at), (found) =>
+        found === null ? null : { node: found.node, version: found.version },
+      )
 
-    const authoredFileAt = (treeId: TreeId, path: string, at: AuthoredSeq) =>
+    /** As fileAt, with the file's path at the sequence. */
+    const fileThen = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
       Effect.gen(function* () {
-        const row = yield* read(() =>
-          database
-            .select({ node: schema.nodes, version: schema.nodeVersions })
-            .from(schema.nodeVersions)
-            .innerJoin(
-              schema.nodes,
-              eq(schema.nodes.id, schema.nodeVersions.nodeId),
-            )
-            .where(
-              and(
-                eq(schema.nodes.treeId, treeId),
-                eq(schema.nodes.path, path),
-                eq(schema.nodes.kind, 'file'),
-                eq(schema.nodes.origin, 'authored'),
-                sql`${schema.nodeVersions.authoredSeq} <= ${at}`,
-              ),
-            )
-            .orderBy(
-              sql`${schema.nodeVersions.authoredSeq} desc`,
-              sql`${schema.nodeVersions.revision} desc`,
-            )
-            .limit(1)
-            .get(),
+        const live = () =>
+          Effect.map(liveFile(treeId, path), (found) =>
+            found === null ? null : { ...found, path: found.node.path },
+          )
+        if (at === undefined) return yield* live()
+        const authored = yield* lookupFileAt({ treeId, path, at }).pipe(
+          Effect.provide(context),
         )
-        if (row === undefined || row.version.state !== 'live') return null
-        return {
-          node: row.node as NodeRow,
-          version: row.version as VersionRow,
-        }
+        if (authored !== null) return authored
+        const now = yield* live()
+        return now !== null && now.node.origin === 'data' ? now : null
       })
 
     /**
@@ -1183,40 +1356,48 @@ export const TreeStoreLive: Layer.Layer<
           const node = yield* liveNode(treeId, path)
           return node !== null && node.kind === 'folder' ? node : null
         }
+        const n = schema.nodes
+        // The folder that stood at the path then, by its path then.
+        const then = pathAtSql(sql`${n.id}`, sql`${n.path}`, at)
         const node = yield* read(() =>
           database
             .select()
-            .from(schema.nodes)
+            .from(n)
             .where(
               and(
-                eq(schema.nodes.treeId, treeId),
-                eq(schema.nodes.path, path),
-                eq(schema.nodes.kind, 'folder'),
+                eq(n.treeId, treeId),
+                eq(n.kind, 'folder'),
+                sql`(${n.path} = ${path} or ${n.id} in (select pa.node_id
+                  from path_aliases pa where pa.tree_id = ${treeId}
+                    and pa.old_path = ${path} and pa.moved_at_seq > ${at}))`,
+                sql`${then} = ${path}`,
               ),
             )
-            .orderBy(
-              sql`${schema.nodes.deletedAt} is not null`,
-              sql`${schema.nodes.createdAt} desc`,
-            )
+            .orderBy(sql`${n.deletedAt} is not null`, sql`${n.createdAt} desc`)
             .limit(1)
             .get(),
         )
         if (node === undefined) return null
         if (path === '') return node as NodeRow
+        // A file that stood below it then, live at that sequence.
+        const thenFile = pathAtSql(sql`f.id`, sql`f.path`, at)
+        const below = (p: SQL) =>
+          sql`substr(${p}, 1, length(${path}) + 1) = ${`${path}/`}`
         const held = yield* read(() =>
-          DB.prepare(
-            `select 1 as held from nodes n
-               where n.tree_id = ?1 and n.kind = 'file' and n.origin = 'authored'
-                 and substr(n.path, 1, length(?2) + 1) = ?2 || '/'
-                 and (select v.state from node_versions v
-                        where v.node_id = n.id and v.authored_seq <= ?3
-                        order by v.authored_seq desc, v.revision desc limit 1) = 'live'
-               limit 1`,
-          )
-            .bind(treeId, path, at)
-            .first<{ held: number }>(),
+          database.all<{ held: number }>(
+            sql`select 1 as held from nodes f
+              where f.tree_id = ${treeId} and f.kind = 'file' and f.origin = 'authored'
+                and (${below(sql`f.path`)} or f.id in (select pa.node_id
+                  from path_aliases pa where pa.tree_id = ${treeId}
+                    and pa.moved_at_seq > ${at} and ${below(sql`pa.old_path`)}))
+                and ${below(thenFile)}
+                and (select v.state from node_versions v
+                       where v.node_id = f.id and v.authored_seq <= ${at}
+                       order by v.authored_seq desc, v.revision desc limit 1) = 'live'
+              limit 1`,
+          ),
         )
-        return held === null ? null : (node as NodeRow)
+        return held.length === 0 ? null : (node as NodeRow)
       })
 
     const resolve = (ref: LinkRef | TreeRef, at?: AuthoredSeq) =>
@@ -1227,6 +1408,19 @@ export const TreeStoreLive: Layer.Layer<
         } else {
           const ws = yield* workspace(ref.workspace)
           found = ws === null ? null : yield* tree(ws, ref.tree)
+          // An old link of a tree that moved: the same path where it is now.
+          if (found === null && at === undefined) {
+            const moved = yield* movedTree(ref.workspace, ref.tree)
+            if (moved !== null) {
+              return {
+                kind: 'redirect',
+                node: moved.root,
+                tree: moved.tree,
+                to: linkPathOf(ref.path, ref.folder || ref.path === ''),
+                place: moved.place,
+              } satisfies Resolved
+            }
+          }
         }
         const missing = (): MissingNode => ({
           missing: true,
@@ -1252,12 +1446,19 @@ export const TreeStoreLive: Layer.Layer<
           } satisfies Resolved
         }
         const asked = linkPathOf(ref.path, ref.folder || ref.path === '')
-        const page = (file: { node: NodeRow; version: VersionRow }) => {
-          const linkPath = linkPathOf(pageLinkPath(file.node.path), false)
+        // The file's path at the sequence asked decides its link there.
+        const page = (file: {
+          node: NodeRow
+          version: VersionRow
+          path: string
+        }) => {
+          const linkPath = linkPathOf(pageLinkPath(file.path), false)
           return linkPath === asked
             ? ({
                 kind: 'page',
-                ...file,
+                node: file.node,
+                version: file.version,
+                path: file.path,
                 tree: t,
                 linkPath,
               } satisfies Resolved)
@@ -1268,40 +1469,117 @@ export const TreeStoreLive: Layer.Layer<
                 to: linkPath,
               } satisfies Resolved)
         }
-        if (ref.folder || ref.path === '') {
-          const folder = yield* folderAt(t.id, ref.path, at)
-          if (folder === null) return missing()
-          const index = yield* fileAt(
-            t.id,
-            joinPath(ref.path, 'index.html'),
-            at,
-          )
-          if (index !== null && index.node.origin === 'authored') {
-            return page(index)
+        const answer = yield* Effect.gen(function* () {
+          if (ref.folder || ref.path === '') {
+            const folder = yield* folderAt(t.id, ref.path, at)
+            if (folder === null) return missing()
+            const index = yield* fileThen(
+              t.id,
+              joinPath(ref.path, 'index.html'),
+              at,
+            )
+            if (index !== null && index.node.origin === 'authored') {
+              return page(index)
+            }
+            return { kind: 'folder', node: folder, tree: t } satisfies Resolved
           }
-          return { kind: 'folder', node: folder, tree: t } satisfies Resolved
-        }
-        const html = yield* fileAt(t.id, `${ref.path}.html`, at)
-        // People's data is never a page, whatever its name.
-        if (html !== null && html.node.origin === 'authored') return page(html)
-        const folder = yield* folderAt(t.id, ref.path, at)
-        if (folder !== null) {
+          const html = yield* fileThen(t.id, `${ref.path}.html`, at)
+          // People's data is never a page, whatever its name.
+          if (html !== null && html.node.origin === 'authored') {
+            return page(html)
+          }
+          const folder = yield* folderAt(t.id, ref.path, at)
+          if (folder !== null) {
+            return {
+              kind: 'redirect',
+              node: folder,
+              tree: t,
+              to: linkPathOf(ref.path, true),
+            } satisfies Resolved
+          }
+          const file = yield* fileThen(t.id, ref.path, at)
+          if (file === null) return missing()
+          if (
+            file.node.origin === 'authored' &&
+            file.node.name.endsWith('.html')
+          ) {
+            return page(file)
+          }
           return {
-            kind: 'redirect',
-            node: folder,
+            kind: 'file',
+            node: file.node,
+            version: file.version,
+            path: file.path,
             tree: t,
-            to: linkPathOf(ref.path, true),
           } satisfies Resolved
+        })
+        // Now, a path a move left leads to where its node is; a live node
+        // at the path always wins, and a pinned sequence never redirects.
+        if (!('missing' in answer) || at !== undefined) return answer
+        return (yield* movedFrom(t, ref)) ?? answer
+      })
+
+    /**
+     * Where a node that left this path lives now: the newest move away from
+     * the path (or, for a page link, its `.html` file) whose node is live.
+     */
+    const movedFrom = (t: TreeRow, ref: LinkRef | TreeRef) =>
+      Effect.gen(function* () {
+        const candidates =
+          ref.folder || ref.path === ''
+            ? [ref.path]
+            : [`${ref.path}.html`, ref.path]
+        for (const path of candidates) {
+          const row = yield* read(() =>
+            DB.prepare(
+              `select n.* from path_aliases pa join nodes n on n.id = pa.node_id
+               where pa.tree_id = ? and pa.old_path = ? and n.deleted_at is null
+               order by pa.moved_at_seq desc limit 1`,
+            )
+              .bind(t.id, path)
+              .first<Record<string, unknown>>(),
+          )
+          if (row === null) continue
+          const node = nodeOfRaw(row)
+          const to =
+            node.kind === 'folder'
+              ? linkPathOf(node.path, true)
+              : node.origin === 'authored' && node.name.endsWith('.html')
+                ? linkPathOf(pageLinkPath(node.path), false)
+                : linkPathOf(node.path, false)
+          return { kind: 'redirect', node, tree: t, to } satisfies Resolved
         }
-        const file = yield* fileAt(t.id, ref.path, at)
-        if (file === null) return missing()
-        if (
-          file.node.origin === 'authored' &&
-          file.node.name.endsWith('.html')
-        ) {
-          return page(file)
-        }
-        return { kind: 'file', ...file, tree: t } satisfies Resolved
+        return null
+      })
+
+    /**
+     * A tree that moved to another workspace or name, by its old link: its
+     * root as it is now, and where its link went.
+     */
+    const movedTree = (workspaceName: string, treeName: string) =>
+      Effect.gen(function* () {
+        const row = yield* read(() =>
+          DB.prepare(
+            `select t.id as treeId, w.name as workspace, t.name as tree
+             from tree_aliases a join trees t on t.id = a.tree_id
+               join workspaces w on w.id = t.workspace_id
+             where a.workspace_name = ? and a.tree_name = ?
+               and t.deleted_at is null and w.deleted_at is null`,
+          )
+            .bind(workspaceName, treeName)
+            .first<{ treeId: TreeId; workspace: string; tree: string }>(),
+        )
+        if (row === null) return null
+        const found = yield* treeById(row.treeId)
+        if (found === null) return null
+        const root = yield* liveNode(found.tree.id, '')
+        return root === null
+          ? null
+          : {
+              tree: found.tree,
+              root,
+              place: { workspace: row.workspace, tree: row.tree },
+            }
       })
 
     const analysis = (sha256: Sha256) =>
@@ -1741,9 +2019,66 @@ export const TreeStoreLive: Layer.Layer<
         /** Whose sockets the revoked shares close, as the batch read them. */
         const closing: (CloseSockets | null)[] = []
         let authored = 0
+        /** A step changed authored files: the sequence moves once. */
+        let authoredTouched = false
         let pushCount = 0
         /** The change stores new bytes, so the workspace's storage counts. */
         let grows = false
+
+        /** Nothing live sits under a file or a deleted folder. */
+        const liveUnderLive = (t: TreeId): Statement => ({
+          sql: `not exists (select 1 from nodes c join nodes p on p.id = c.parent_id
+                  where c.tree_id = ? and c.deleted_at is null
+                    and (p.kind <> 'folder' or p.deleted_at is not null))`,
+          binds: [t],
+        })
+
+        /** A write holder's delete of a node and everything below it. */
+        const deletedWrites = (
+          t: TreeId,
+          node: Granted<'write' | 'delete-data' | 'withdraw-own'>,
+        ) => {
+          bases.push(everyBasis(node.basis, person.id))
+          stateGuards.push({
+            sql: `exists (select 1 from nodes where id = ? and path = ?
+                    and deleted_at is null)`,
+            binds: [node.id, node.path],
+          })
+          if (node.origin === 'authored') authoredTouched = true
+          // ?1 tree · ?2 node · ?3 its path · ?4 now · ?5 author · ?6 key
+          const below = `(n.id = ?2 or ${under('n.path', '?3')})`
+          const binds = [t, node.id, node.path, now, person.id, keyId]
+          writes.push(
+            {
+              sql: `insert into node_versions (${VERSION_COLUMNS})
+                    select lower(hex(randomblob(16))), n.id, ?1,
+                      (select coalesce(max(r.revision), 0) + 1 from node_versions r
+                         where r.node_id = n.id),
+                      case when n.origin = 'authored'
+                        then (select authored_seq from trees where id = ?1) end,
+                      'deleted', null, null, null, null, ?5, ?6, null, null, null, ?4
+                    from nodes n where n.tree_id = ?1 and n.deleted_at is null
+                      and n.kind = 'file' and ${below}`,
+              binds,
+            },
+            {
+              sql: `update nodes set deleted_at = ?4, current_version_id =
+                      case when kind = 'file' then (select v.id from node_versions v
+                        where v.node_id = nodes.id order by v.revision desc limit 1)
+                      else current_version_id end
+                    where tree_id = ?1 and deleted_at is null
+                      and (id = ?2 or ${under('path', '?3')})`,
+              binds: binds.slice(0, 4),
+            },
+          )
+          // The tree root takes the tree with it.
+          if (node.depth === 0) {
+            writes.push({
+              sql: 'update trees set deleted_at = ? where id = ?',
+              binds: [now, t],
+            })
+          }
+        }
 
         const cs: ChangeSet = {
           guardHead: (path, base) => {
@@ -2204,7 +2539,10 @@ export const TreeStoreLive: Layer.Layer<
 
           markDeleted: (node, mode) => {
             const t = tid()
-            if (mode !== 'withdrawn') throw new Error(`no ${mode} mode yet`)
+            if (mode === 'deleted') {
+              deletedWrites(t, node)
+              return
+            }
             bases.push(everyBasis(node.basis, person.id))
             if (node.kind === 'folder') {
               // A writer's own folder goes once nothing lives in it, after
@@ -2251,6 +2589,335 @@ export const TreeStoreLive: Layer.Layer<
                         result_version_id = null
                       where result_node_id = ?`,
                 binds: [node.id],
+              },
+            )
+          },
+
+          restore: (node, made) => {
+            const t = tid()
+            bases.push(everyBasis(node.basis, person.id))
+            if (
+              made.revive.some((r) => r.node.origin === 'authored') ||
+              made.remove.some((r) => r.origin === 'authored')
+            ) {
+              authoredTouched = true
+            }
+            const revive = JSON.stringify(
+              made.revive.map((r) => ({
+                node: r.node.id,
+                from: r.from.id,
+                expect: r.node.currentVersionId,
+                live: r.node.deletedAt === null ? 1 : 0,
+              })),
+            )
+            const remove = JSON.stringify(
+              made.remove.map((n) => ({
+                node: n.id,
+                expect: n.currentVersionId,
+              })),
+            )
+            const folders = JSON.stringify(made.folders.map((f) => f.id))
+            const empty = JSON.stringify(made.empty.map((f) => f.id))
+            // Everything is as it was read, and every version copied is
+            // still there: a purge that got there first fails the change.
+            stateGuards.push(
+              {
+                sql: `not exists (select 1 from json_each(?) j
+                        left join nodes n on n.id = json_extract(j.value, '$.node')
+                        left join node_versions pv
+                          on pv.id = json_extract(j.value, '$.from')
+                          and pv.node_id = n.id and pv.state = 'live'
+                        where n.id is null or pv.id is null or n.tree_id <> ?
+                          or n.current_version_id is not json_extract(j.value, '$.expect')
+                          or (n.deleted_at is null) <> json_extract(j.value, '$.live'))`,
+                binds: [revive, t],
+              },
+              {
+                sql: `not exists (select 1 from json_each(?) j
+                        left join nodes n on n.id = json_extract(j.value, '$.node')
+                        where n.id is null or n.deleted_at is not null or n.tree_id <> ?
+                          or n.current_version_id is not json_extract(j.value, '$.expect'))`,
+                binds: [remove, t],
+              },
+              {
+                sql: `not exists (select 1 from json_each(?) j
+                        left join nodes n on n.id = j.value
+                        where n.id is null or n.deleted_at is null or n.tree_id <> ?)`,
+                binds: [folders, t],
+              },
+            )
+            // Their bytes are still there and nobody is reclaiming them.
+            blobGuards.push({
+              sql: `not exists (select 1 from json_each(?) j
+                      join node_versions pv on pv.id = json_extract(j.value, '$.from')
+                      left join blobs b on b.sha256 = pv.blob_sha256
+                      where pv.blob_sha256 is not null
+                        and (b.sha256 is null or b.state <> 'live'))`,
+              binds: [revive],
+            })
+            if (made.tree) {
+              writes.push({
+                sql: 'update trees set deleted_at = null where id = ?',
+                binds: [t],
+              })
+            }
+            writes.push(
+              {
+                sql: `update nodes set deleted_at = null
+                      where tree_id = ?1 and id in (select value from json_each(?2))`,
+                binds: [t, folders],
+              },
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select lower(hex(randomblob(16))), n.id, ?1,
+                        (select coalesce(max(r.revision), 0) + 1 from node_versions r
+                           where r.node_id = n.id),
+                        case when n.origin = 'authored'
+                          then (select authored_seq from trees where id = ?1) end,
+                        'live', pv.blob_sha256, pv.json_value, pv.size, pv.content_type,
+                        pv.author_id, pv.key_id, null, pv.seen_push_number, null, ?3
+                      from json_each(?2) j
+                        join nodes n on n.id = json_extract(j.value, '$.node')
+                        join node_versions pv on pv.id = json_extract(j.value, '$.from')`,
+                // The content stays its writer's: the restore event names
+                // who restored it.
+                binds: [t, revive, now],
+              },
+              {
+                sql: `update blobs set ref_count = ref_count +
+                        (select count(*) from json_each(?1) j
+                          join node_versions pv on pv.id = json_extract(j.value, '$.from')
+                          where pv.blob_sha256 = blobs.sha256)
+                      where sha256 in (select pv.blob_sha256 from json_each(?1) j
+                        join node_versions pv on pv.id = json_extract(j.value, '$.from'))`,
+                binds: [revive],
+              },
+              {
+                sql: `update nodes set deleted_at = null, current_version_id =
+                        (select v.id from node_versions v where v.node_id = nodes.id
+                           order by v.revision desc limit 1)
+                      where tree_id = ?1 and id in
+                        (select json_extract(j.value, '$.node') from json_each(?2) j)`,
+                binds: [t, revive],
+              },
+              {
+                // The forms of a page or layout are those of the version
+                // whose content it takes again, by its new version.
+                sql: `insert into forms (host_version_id, host_node_id, tree_id, target_path,
+                        form_key, kind, closes_at, closed, line, title, schema_json)
+                      select n.current_version_id, f.host_node_id, f.tree_id, f.target_path,
+                        f.form_key, f.kind, f.closes_at, f.closed, f.line, f.title,
+                        f.schema_json
+                      from json_each(?1) j
+                        join forms f on f.host_version_id = json_extract(j.value, '$.from')
+                        join nodes n on n.id = json_extract(j.value, '$.node')
+                      where true on conflict do nothing`,
+                binds: [revive],
+              },
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select lower(hex(randomblob(16))), n.id, ?1,
+                        (select coalesce(max(r.revision), 0) + 1 from node_versions r
+                           where r.node_id = n.id),
+                        case when n.origin = 'authored'
+                          then (select authored_seq from trees where id = ?1) end,
+                        'deleted', null, null, null, null, ?3, ?4, null, null, null, ?5
+                      from json_each(?2) j
+                        join nodes n on n.id = json_extract(j.value, '$.node')`,
+                binds: [t, remove, person.id, keyId, now],
+              },
+              {
+                sql: `update nodes set deleted_at = ?3, current_version_id =
+                        (select v.id from node_versions v where v.node_id = nodes.id
+                           order by v.revision desc limit 1)
+                      where tree_id = ?1 and id in
+                        (select json_extract(j.value, '$.node') from json_each(?2) j)`,
+                binds: [t, remove, now],
+              },
+              {
+                sql: `update nodes set deleted_at = ?3
+                      where tree_id = ?1 and deleted_at is null
+                        and id in (select value from json_each(?2))`,
+                binds: [t, empty, now],
+              },
+            )
+            outcomes.push(liveUnderLive(t))
+          },
+
+          move: (node, to, folders) => {
+            const t = tid()
+            authoredTouched = true
+            bases.push(everyBasis(node.basis, person.id))
+            // Still live where Access saw it.
+            stateGuards.push({
+              sql: `exists (select 1 from nodes where id = ? and path = ?
+                      and deleted_at is null)`,
+              binds: [node.id, node.path],
+            })
+            const segments = to.split('/')
+            for (const folder of folders) {
+              const depth = folder.split('/').length
+              writes.push({
+                sql: `insert into nodes (${NODE_COLUMNS})
+                      select lower(hex(randomblob(16))), ?1,
+                        (select p.id from nodes p where p.tree_id = ?1 and p.path = ?2
+                           and p.deleted_at is null),
+                        ?3, ?4, ?5, 'folder', 'authored', null, null, ?6, null
+                      where not exists (select 1 from nodes n where n.tree_id = ?1
+                        and n.path = ?4 and n.deleted_at is null)`,
+                binds: [
+                  t,
+                  parentPath(folder),
+                  folder.split('/').at(-1) ?? folder,
+                  folder,
+                  depth,
+                  now,
+                ],
+              })
+            }
+            // The node and what lies below it by its folders, deleted nodes
+            // included: their history goes with them.
+            const subtree = `with recursive sub(id) as (select ?2
+              union all select c.id from nodes c join sub on c.parent_id = sub.id)`
+            writes.push(
+              {
+                sql: `${subtree}
+                      insert into path_aliases (tree_id, old_path, node_id, moved_at_seq,
+                        created_at)
+                      select ?1, n.path, n.id, (select authored_seq from trees where id = ?1),
+                        ?3
+                      from nodes n where n.id in (select id from sub)`,
+                binds: [t, node.id, now],
+              },
+              {
+                sql: `${subtree}
+                      update nodes set path = ?3 || substr(path, length(?4) + 1),
+                        depth = depth + ?5
+                      where id in (select id from sub)`,
+                binds: [
+                  t,
+                  node.id,
+                  to,
+                  node.path,
+                  segments.length - node.depth,
+                ],
+              },
+              {
+                sql: `update nodes set name = ?2,
+                        parent_id = (select p.id from nodes p where p.tree_id = ?3
+                          and p.path = ?4 and p.deleted_at is null and p.kind = 'folder')
+                      where id = ?1`,
+                binds: [node.id, segments.at(-1) ?? to, t, parentPath(to)],
+              },
+              {
+                // Forms that send inside what moved follow it.
+                sql: `update forms set target_path = ?2 || substr(target_path, length(?3) + 1)
+                      where tree_id = ?1 and (target_path = ?3
+                        or substr(target_path, 1, length(?3) + 1) = ?3 || '/')`,
+                binds: [t, to, node.path],
+              },
+            )
+            outcomes.push(
+              {
+                sql: `exists (select 1 from nodes n join nodes p on p.id = n.parent_id
+                        where n.id = ? and n.path = ? and n.deleted_at is null
+                          and p.kind = 'folder' and p.deleted_at is null)`,
+                binds: [node.id, to],
+              },
+              liveUnderLive(t),
+            )
+          },
+
+          putVersion: (file, version) => {
+            const t = tid()
+            grows = true
+            authoredTouched = true
+            bases.push(everyBasis(file.basis, person.id))
+            stateGuards.push({
+              sql: `exists (select 1 from nodes where id = ? and deleted_at is null
+                      and current_version_id = ?)`,
+              binds: [file.id, version.previous],
+            })
+            blobGuards.push({
+              sql: `exists (select 1 from blobs where sha256 = ? and state = 'live')
+                    and exists (select 1 from blob_holds where holder_kind = ?
+                      and holder_id = ? and sha256 = ? and verified = 1)`,
+              binds: [
+                version.sha256,
+                version.hold.kind,
+                version.hold.id,
+                version.sha256,
+              ],
+            })
+            const versionId = newId() as VersionId
+            writes.push(
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select ?1, ?2, ?3,
+                        (select coalesce(max(r.revision), 0) + 1 from node_versions r
+                           where r.node_id = ?2),
+                        (select authored_seq from trees where id = ?3), 'live', ?4, null,
+                        (select size from blobs where sha256 = ?4), ?5,
+                        (select author_id from node_versions where id = ?6),
+                        (select key_id from node_versions where id = ?6), null,
+                        null, null, ?7`,
+                // Only its links changed: the page stays its pusher's, and
+                // the move event names who moved it.
+                binds: [
+                  versionId,
+                  file.id,
+                  t,
+                  version.sha256,
+                  version.contentType,
+                  version.previous,
+                  now,
+                ],
+              },
+              {
+                sql: 'update blobs set ref_count = ref_count + 1 where sha256 = ?',
+                binds: [version.sha256],
+              },
+              {
+                sql: 'update nodes set current_version_id = ? where id = ?',
+                binds: [versionId, file.id],
+              },
+              {
+                sql: `insert into forms (host_version_id, host_node_id, tree_id, target_path,
+                        form_key, kind, closes_at, closed, line, title, schema_json)
+                      select ?1, host_node_id, tree_id, target_path, form_key, kind,
+                        closes_at, closed, line, title, schema_json
+                      from forms where host_version_id = ?2
+                      on conflict do nothing`,
+                binds: [versionId, version.previous],
+              },
+              {
+                sql: `delete from blob_holds where holder_kind = ? and holder_id = ?
+                        and sha256 = ?`,
+                binds: [version.hold.kind, version.hold.id, version.sha256],
+              },
+            )
+          },
+
+          moveTree: (root, to, name) => {
+            const t = tid()
+            // A composed page holds its tree's names: a new sequence keeps
+            // the cache from serving the old ones.
+            authoredTouched = true
+            bases.push(everyBasis(root.basis, person.id))
+            bases.push(everyBasis([to.basis], person.id))
+            writes.push(
+              {
+                sql: `insert into tree_aliases (workspace_name, tree_name, tree_id, created_at)
+                      select w.name, t.name, t.id, ?2 from trees t
+                        join workspaces w on w.id = t.workspace_id where t.id = ?1
+                      on conflict (workspace_name, tree_name)
+                        do update set tree_id = excluded.tree_id,
+                          created_at = excluded.created_at`,
+                binds: [t, now],
+              },
+              {
+                sql: 'update trees set workspace_id = ?, name = ? where id = ?',
+                binds: [to.workspace.id, name, t],
               },
             )
           },
@@ -2457,7 +3124,12 @@ export const TreeStoreLive: Layer.Layer<
           {
             sql: `update trees set authored_seq = authored_seq + ?, event_seq = event_seq + ?,
                       push_count = push_count + ? where id = ?`,
-            binds: [authored, events.length, pushCount, t],
+            binds: [
+              authored === 0 && authoredTouched ? 1 : authored,
+              events.length,
+              pushCount,
+              t,
+            ],
           },
           ...writes,
           ...(outcomes.length === 0
@@ -2478,11 +3150,11 @@ export const TreeStoreLive: Layer.Layer<
             : []),
           ...events.map((e, i) => ({
             sql: `insert into events (tree_id, seq, type, node_id, path, actor_id, push_id,
-                      created_at)
+                      created_at, detail)
                     values (?1, (select event_seq from trees where id = ?1) - ?2, ?3,
                       coalesce(?4, (select id from nodes where tree_id = ?1 and path = ?5
                                       and deleted_at is null)),
-                      ?5, ?6, ?7, ?8)`,
+                      ?5, ?6, ?7, ?8, ?9)`,
             binds: [
               t,
               events.length - 1 - i,
@@ -2496,6 +3168,7 @@ export const TreeStoreLive: Layer.Layer<
               person.id,
               e.pushId ?? null,
               now,
+              e.detail ?? null,
             ],
           })),
           ...mentioned.map((m) => ({
@@ -2762,6 +3435,7 @@ export const TreeStoreLive: Layer.Layer<
       treeNamed,
       change,
       events,
+      system: Effect.map(SystemJob, () => makeSystemStore(bindings)),
     } satisfies TreeStoreService
   }),
 )

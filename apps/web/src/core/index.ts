@@ -72,7 +72,18 @@ export {
   type StageInput,
   type StageResult,
 } from './push.ts'
-export { entryWire, Files, type FilesService, type Listing } from './files.ts'
+export {
+  entryWire,
+  Files,
+  type ChangeResult,
+  type DiffResult,
+  type FilesService,
+  type Listing,
+  type LogPage,
+  type MoveResult,
+  type PushDetail,
+  type RestorePoint,
+} from './files.ts'
 export {
   dataText,
   folderText,
@@ -182,6 +193,12 @@ export {
   type SharesService,
 } from './shares.ts'
 export { newVisitorSecret, sha256Hex } from './ids.ts'
+export {
+  Purge,
+  type PurgeOutcome,
+  type PurgeRun,
+  type PurgeService,
+} from './purge.ts'
 export {
   mentionedAt,
   mentionedInTree,

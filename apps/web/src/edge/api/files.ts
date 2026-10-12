@@ -54,5 +54,18 @@ export const FilesLive = HttpApiBuilder.group(DossierApi, 'files', (handlers) =>
           },
         })
       }),
+    )
+    .handle('rm', ({ payload }) =>
+      Effect.gen(function* () {
+        const ref = yield* targetOf(payload.path)
+        return yield* (yield* Files).rm({ ref })
+      }),
+    )
+    .handle('mv', ({ payload }) =>
+      Effect.gen(function* () {
+        const from = yield* targetOf(payload.from)
+        const to = yield* targetOf(payload.to)
+        return yield* (yield* Files).mv({ from, to })
+      }),
     ),
 )

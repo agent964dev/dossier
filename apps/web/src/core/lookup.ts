@@ -91,27 +91,77 @@ export const underscoreSplit = (
 }
 
 /**
+ * A node's path at an authored sequence: where it stood before every move
+ * since, or its path now. A move writes a path alias for each node it takes
+ * along, keyed by the sequence the move took effect at.
+ */
+export const pathAtSql = (id: SQL, path: SQL, at: AuthoredSeq): SQL =>
+  sql`coalesce((select pa.old_path from path_aliases pa where pa.node_id = ${id}
+    and pa.moved_at_seq > ${at} order by pa.moved_at_seq limit 1), ${path})`
+
+/** SQL for where a path's `_` part starts, as nodes.underscore_from has it. */
+const underscoreOf = (path: SQL): SQL => sql`case
+    when substr(${path}, 1, 1) = '_' then ''
+    when instr(${path}, '/_') > 0 then substr(${path}, 1, instr(${path}, '/_') - 1)
+    else null end`
+
+/** Which authored files a lookup asks for: by path, or by `_` folder. */
+type Match =
+  | { readonly paths: readonly string[] }
+  | { readonly underscoreFrom: readonly string[] }
+
+const inList = (column: SQL, values: readonly string[]): SQL =>
+  sql`${column} in (${sql.join(
+    values.map((v) => sql`${v}`),
+    sql`, `,
+  )})`
+
+/**
  * The condition, over `nodes` joined to `node_versions`, for the authored
- * files whose path matches `paths` as they stood at a sequence (null: now):
- * per path, the newest version at or before it, when that one is live.
+ * files matching as they stood at a sequence (null: now): per path, the
+ * newest version at or before it, when that one is live. At a sequence a
+ * node is matched by its path then, so a page pinned before a move finds
+ * its files where they were.
  */
 const authoredWhere = (
   treeId: TreeId,
-  paths: SQL,
+  match: Match,
   at: AuthoredSeq | null,
 ): SQL => {
   const n = schema.nodes
   const v = schema.nodeVersions
-  const file = sql`${n.treeId} = ${treeId} and ${n.kind} = 'file' and ${n.origin} = 'authored' and ${paths}`
+  const file = sql`${n.treeId} = ${treeId} and ${n.kind} = 'file' and ${n.origin} = 'authored'`
   if (at === null) {
-    return sql`${file} and ${n.deletedAt} is null
+    const on =
+      'paths' in match
+        ? inArray(n.path, [...match.paths])
+        : inArray(n.underscoreFrom, [...match.underscoreFrom])
+    return sql`${file} and ${on} and ${n.deletedAt} is null
       and ${v.id} = ${n.currentVersionId} and ${v.state} = 'live'`
   }
-  return sql`${file} and ${v.authoredSeq} <= ${at} and ${v.state} = 'live'
+  const then = pathAtSql(sql`${n.id}`, sql`${n.path}`, at)
+  // The path or `_` folder now, or an old path a move left since: the
+  // indexes find these, and the path then decides.
+  const near =
+    'paths' in match
+      ? sql`(${inList(sql`${n.path}`, match.paths)} or ${n.id} in (
+          select pa.node_id from path_aliases pa where pa.tree_id = ${treeId}
+            and pa.moved_at_seq > ${at} and ${inList(sql`pa.old_path`, match.paths)}))
+          and ${inList(then, match.paths)}`
+      : sql`(${inList(sql`${n.underscoreFrom}`, match.underscoreFrom)} or ${n.id} in (
+          select pa.node_id from path_aliases pa where pa.tree_id = ${treeId}
+            and pa.moved_at_seq > ${at}
+            and ${inList(underscoreOf(sql`pa.old_path`), match.underscoreFrom)}))
+          and ${inList(underscoreOf(then), match.underscoreFrom)}`
+  const then2 = pathAtSql(sql`n2.id`, sql`n2.path`, at)
+  return sql`${file} and ${near} and ${v.authoredSeq} <= ${at} and ${v.state} = 'live'
     and not exists (
       select 1 from node_versions v2 join nodes n2 on n2.id = v2.node_id
-      where n2.tree_id = ${treeId} and n2.path = ${n.path}
-        and n2.kind = 'file' and n2.origin = 'authored'
+      where n2.tree_id = ${treeId} and n2.kind = 'file' and n2.origin = 'authored'
+        and (n2.path = ${then} or n2.id in (select pa2.node_id from path_aliases pa2
+          where pa2.tree_id = ${treeId} and pa2.moved_at_seq > ${at}
+            and pa2.old_path = ${then}))
+        and ${then2} = ${then}
         and v2.authored_seq <= ${at}
         and (v2.authored_seq > ${v.authoredSeq}
           or (v2.authored_seq = ${v.authoredSeq} and v2.revision > ${v.revision})))`
@@ -125,18 +175,31 @@ export const authoredAt = (i: {
   readonly treeId: TreeId
   readonly paths: readonly string[]
   readonly at: AuthoredSeq | null
-}): SQL =>
-  i.paths.length === 0
-    ? sql`0`
-    : authoredWhere(i.treeId, inArray(schema.nodes.path, [...i.paths]), i.at)
+}): SQL => (i.paths.length === 0 ? sql`0` : authoredWhere(i.treeId, i, i.at))
+
+/** An authored file a lookup found, with its path at the sequence asked. */
+export interface FoundFile {
+  readonly node: NodeRow
+  readonly version: VersionRow
+  /** Where the file stood at that sequence; its path now when live. */
+  readonly path: string
+}
 
 /** The authored files a condition finds, with their versions. */
-const filesWhere = (condition: SQL) =>
+const filesWhere = (condition: SQL, at: AuthoredSeq | null) =>
   Effect.gen(function* () {
     const bindings = yield* Bindings
+    const n = schema.nodes
     const rows = yield* Effect.tryPromise(() =>
       db(bindings)
-        .select({ node: schema.nodes, version: schema.nodeVersions })
+        .select({
+          node: schema.nodes,
+          version: schema.nodeVersions,
+          path:
+            at === null
+              ? sql<string>`${n.path}`
+              : sql<string>`${pathAtSql(sql`${n.id}`, sql`${n.path}`, at)}`,
+        })
         .from(schema.nodes)
         .innerJoin(
           schema.nodeVersions,
@@ -148,19 +211,34 @@ const filesWhere = (condition: SQL) =>
       Effect.tapError((error) => Effect.logError('A kit read failed', error)),
       Effect.orDie,
     )
-    return rows.map((row) => ({
+    return rows.map((row): FoundFile => ({
       node: row.node as NodeRow,
       version: row.version as VersionRow,
+      path: row.path,
     }))
   })
+
+/**
+ * The authored file at a path as it stood at a sequence (null: now), by its
+ * path then, or null.
+ */
+export const authoredFileAt = (i: {
+  readonly treeId: TreeId
+  readonly path: string
+  readonly at: AuthoredSeq | null
+}): Effect.Effect<FoundFile | null, never, Bindings> =>
+  Effect.map(
+    filesWhere(authoredAt({ ...i, paths: [i.path] }), i.at),
+    (rows) => rows[0] ?? null,
+  )
 
 /**
  * The closest candidate first. Every candidate is one name below a folder on
  * the same line up to the root, so the longer path is the closer one.
  */
-const closestFirst = <T extends { readonly node: NodeRow }>(
+const closestFirst = <T extends { readonly path: string }>(
   rows: readonly T[],
-): T[] => [...rows].sort((a, b) => b.node.path.length - a.node.path.length)
+): T[] => [...rows].sort((a, b) => b.path.length - a.path.length)
 
 /**
  * The analysis of a blob, as stored for this analyzer, or built from its
@@ -253,10 +331,12 @@ export const lookupUnderscore = (i: {
     const paths = foldersUp(i.folder).map((folder) => joinPath(folder, i.rest))
     const rows = yield* filesWhere(
       authoredAt({ treeId: i.treeId, paths, at: i.at }),
+      i.at,
     )
     const found: KitFound[] = closestFirst(rows).map((row) => ({
       kind: 'tree',
-      ...row,
+      node: row.node,
+      version: row.version,
     }))
     if (base.has(i.rest)) found.push({ kind: 'base', path: i.rest })
     return found
@@ -280,6 +360,7 @@ export const layoutChain = (i: {
         paths: folders.map((folder) => joinPath(folder, '_layout.html')),
         at: i.at,
       }),
+      i.at,
     )
     const chain: LayoutLink[] = []
     for (const row of closestFirst(rows)) {
@@ -287,8 +368,10 @@ export const layoutChain = (i: {
       const analysis = sha === null ? null : yield* analysisOf(sha as Sha256)
       if (analysis === null) continue
       chain.push({
-        ...row,
-        folder: parentOf(row.node.path),
+        node: row.node,
+        version: row.version,
+        // Where it stood at the sequence: a pinned page composes there.
+        folder: parentOf(row.path),
         complete: analysis.complete,
         analysis,
       })
@@ -308,6 +391,8 @@ export const composedLayouts = (i: {
     readonly node: NodeRow
     readonly version: VersionRow
     readonly analysis: HtmlAnalysis
+    /** The page's path at the sequence, when it has moved since. */
+    readonly path?: string
   }
   readonly at: AuthoredSeq
 }): Effect.Effect<readonly LayoutLink[], never, Bindings> =>
@@ -315,7 +400,7 @@ export const composedLayouts = (i: {
     ? Effect.succeed([])
     : layoutChain({
         treeId: i.treeId,
-        folder: parentOf(i.page.node.path),
+        folder: parentOf(i.page.path ?? i.page.node.path),
         at: i.at,
       })
 
@@ -343,24 +428,22 @@ export const kitAt = (i: {
   Effect.gen(function* () {
     const base = yield* BaseLayer
     const folders = foldersUp(i.folder)
+    const at = i.at ?? null
     const rows = yield* filesWhere(
-      authoredWhere(
-        i.treeId,
-        inArray(schema.nodes.underscoreFrom, [...folders]),
-        i.at ?? null,
-      ),
+      authoredWhere(i.treeId, { underscoreFrom: folders }, at),
+      at,
     )
     const items: KitItem[] = []
     const seen = new Set<string>()
+    const fromOf = (path: string) => underscoreSplit(path)?.from ?? ''
     // The folders are all on one line up to the root: the longer is closer.
     const ordered = [...rows].sort(
       (a, b) =>
-        (b.node.underscoreFrom ?? '').length -
-          (a.node.underscoreFrom ?? '').length ||
-        (a.node.path < b.node.path ? -1 : a.node.path > b.node.path ? 1 : 0),
+        fromOf(b.path).length - fromOf(a.path).length ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
     )
     for (const row of ordered) {
-      const split = underscoreSplit(row.node.path)
+      const split = underscoreSplit(row.path)
       if (split === null || seen.has(split.rest)) continue
       seen.add(split.rest)
       items.push({

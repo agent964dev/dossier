@@ -100,6 +100,7 @@ describe('deployment settings', () => {
       'Database',
       'File storage',
       'Base layer',
+      'Purge',
     ])
   })
 

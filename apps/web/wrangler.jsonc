@@ -42,6 +42,8 @@
     "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TreeHub"] }],
+  // The weekly purge: Sunday 03:17 UTC.
+  "triggers": { "crons": ["17 3 * * SUN"] },
   "env": {
     "dev": {
       "name": "dossier-next-dev",
@@ -70,6 +72,7 @@
       "durable_objects": {
         "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
       },
+      "triggers": { "crons": ["17 3 * * SUN"] },
     },
   },
 }

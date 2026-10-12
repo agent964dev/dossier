@@ -254,6 +254,8 @@ export const workspaces = sqliteTable(
     suspendedAt: integer('suspended_at'),
     /** The name stays taken. */
     deletedAt: integer('deleted_at'),
+    /** Its trees are purged; the row stays, so the name stays taken. */
+    purgedAt: integer('purged_at'),
   },
   (t) => [
     uniqueIndex('workspaces_name_unique').on(t.name),
@@ -547,6 +549,8 @@ export const pushes = sqliteTable(
     baseSeq: integer('base_seq'),
     /** Set at commit. */
     number: integer('number'),
+    /** The tree's authored sequence the push took effect at; set at commit. */
+    authoredSeq: integer('authored_seq'),
     message: text('message'),
     force: integer('force', { mode: 'boolean' }).notNull().default(false),
     authorId: text('author_id')
@@ -718,6 +722,8 @@ export const events = sqliteTable(
     /** Null where the event hides its actor. */
     actorId: text('actor_id').references(() => user.id),
     pushId: text('push_id').references(() => pushes.id),
+    /** A move's new path; a restore's point, "push 9" or an ISO time. */
+    detail: text('detail'),
     createdAt: integer('created_at').notNull(),
   },
   (t) => [
@@ -1032,5 +1038,84 @@ export const mentions = sqliteTable(
     index('mentions_email_idx').on(t.email, t.createdAt),
     index('mentions_page_idx').on(t.pageNodeId),
     index('mentions_comment_idx').on(t.commentNodeId),
+  ],
+)
+
+/**
+ * Where a moved node was: one row for every node a move takes along, the
+ * moved node and everything below it, deleted nodes included. A frame pinned
+ * before the move still finds each at its old path, and an old link
+ * redirects to where the node is now. A path left twice keeps both rows.
+ */
+export const pathAliases = sqliteTable(
+  'path_aliases',
+  {
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** The node's path before the move. */
+    oldPath: text('old_path').notNull(),
+    nodeId: text('node_id')
+      .notNull()
+      .references(() => nodes.id),
+    /**
+     * The tree's authored sequence the move took effect at: a frame pinned
+     * below it finds the node at old_path.
+     */
+    movedAtSeq: integer('moved_at_seq').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.treeId, t.oldPath, t.movedAtSeq, t.nodeId] }),
+    index('path_aliases_node_idx').on(t.nodeId, t.movedAtSeq),
+  ],
+)
+
+/** A tree's old workspace and name, after it moved to another workspace. */
+export const treeAliases = sqliteTable(
+  'tree_aliases',
+  {
+    workspaceName: text('workspace_name').notNull(),
+    treeName: text('tree_name').notNull(),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceName, t.treeName] }),
+    index('tree_aliases_tree_idx').on(t.treeId),
+  ],
+)
+
+/** Each purge: its lease, where it got to, and what it removed. */
+export const purgeRuns = sqliteTable(
+  'purge_runs',
+  {
+    id: text('id').primaryKey(),
+    trigger: text('trigger').notNull(),
+    /** The super admin who pressed Purge now; null for the weekly run. */
+    startedBy: text('started_by').references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    state: text('state').notNull(),
+    /** Another run waits while a lease is live. */
+    leaseUntil: integer('lease_until').notNull(),
+    checkpointJson: text('checkpoint_json').notNull().default('{}'),
+    countsJson: text('counts_json').notNull().default('{}'),
+    error: text('error'),
+    startedAt: integer('started_at').notNull(),
+    finishedAt: integer('finished_at'),
+  },
+  (t) => [
+    index('purge_runs_started_idx').on(t.startedAt),
+    check(
+      'purge_runs_trigger_check',
+      sql`${t.trigger} in ('weekly', 'manual')`,
+    ),
+    check(
+      'purge_runs_state_check',
+      sql`${t.state} in ('running', 'done', 'partial', 'failed')`,
+    ),
   ],
 )

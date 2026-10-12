@@ -12,6 +12,7 @@ import {
   AgentKeyId,
   AgentKeySecret,
   AuthoredSeq,
+  EventSeq,
   NodeId,
   OpId,
   PushId,
@@ -221,6 +222,116 @@ export class PushesGroup extends HttpApiGroup.make('pushes')
       .addSuccess(CommitResponse),
   ) {}
 
+/** One line of a folder's or a file's history, newest first. */
+export const LogLine = Schema.Struct({
+  kind: Schema.Literal('push', 'delete', 'restore', 'move', 'withdrawal'),
+  seq: EventSeq,
+  /** ISO 8601. */
+  at: Schema.String,
+  /**
+   * The author's email to members of the tree's workspace and to the
+   * author, the author's name to anyone else; a withdrawal names its writer.
+   */
+  by: Schema.NullOr(Schema.String),
+  /** The event's path in the tree. */
+  path: Schema.String,
+  /**
+   * A push: its number, message and the files it changed under the folder
+   * asked about. A deletion: the push its content came from, and the files
+   * the deletion took.
+   */
+  push: Schema.NullOr(
+    Schema.Struct({
+      number: PushNumber,
+      message: Schema.NullOr(Schema.String),
+      files: Schema.Int,
+    }),
+  ),
+  /** A move: the new path · a restore: "push 9" or the time restored to. */
+  to: Schema.NullOr(Schema.String),
+  /** A deletion whose versions are still within the retention period. */
+  restorable: Schema.Boolean,
+})
+export type LogLine = typeof LogLine.Type
+
+export const LogResponse = Schema.Struct({
+  /** The folder's or file's tree path. */
+  path: Schema.String,
+  lines: Schema.Array(LogLine),
+  /** The cursor of the next, older page; null on the last. */
+  next: Schema.NullOr(Schema.String),
+  retentionDays: Schema.Int,
+})
+export type LogResponse = typeof LogResponse.Type
+
+export const PushFile = Schema.Struct({
+  /** Inside the tree. */
+  path: Schema.String,
+  change: Schema.Literal('added', 'changed', 'deleted'),
+  /** A text file, whose lines are counted. */
+  text: Schema.Boolean,
+  added: Schema.NullOr(Schema.Int),
+  removed: Schema.NullOr(Schema.Int),
+  /** The file's lines after the push, or before it for a deletion. */
+  lines: Schema.NullOr(Schema.Int),
+})
+export type PushFile = typeof PushFile.Type
+
+export const PushDetailResponse = Schema.Struct({
+  number: PushNumber,
+  message: Schema.NullOr(Schema.String),
+  /** ISO 8601. */
+  at: Schema.String,
+  /** As LogLine.by. */
+  by: Schema.String,
+  files: Schema.Array(PushFile),
+})
+export type PushDetailResponse = typeof PushDetailResponse.Type
+
+export const DiffResponse = Schema.Struct({
+  path: Schema.String,
+  /** "push 11", "deleted", or null when the file was absent. */
+  from: Schema.NullOr(Schema.String),
+  to: Schema.NullOr(Schema.String),
+  /** A binary file, or one too large to show. */
+  binary: Schema.Boolean,
+  before: Schema.NullOr(Schema.String),
+  after: Schema.NullOr(Schema.String),
+  /** A unified patch; a folder's holds every text file changed. */
+  patch: Schema.NullOr(Schema.String),
+})
+export type DiffResponse = typeof DiffResponse.Type
+
+export const RestoreTo = Schema.Union(
+  Schema.Struct({ push: PushNumber }),
+  /** ISO 8601. */
+  Schema.Struct({ at: Schema.String }),
+)
+export type RestoreTo = typeof RestoreTo.Type
+
+/** What a delete or a restore changed. */
+export const ChangeResponse = Schema.Struct({
+  path: Schema.String,
+  link: Schema.String,
+  seq: EventSeq,
+  /** Tree paths of the files it changed. */
+  changed: Schema.Array(Schema.String),
+})
+export type ChangeResponse = typeof ChangeResponse.Type
+
+export const MoveResponse = Schema.Struct({
+  /** '<workspace>/<tree>/<path>' before and after. */
+  from: Schema.String,
+  to: Schema.String,
+  link: Schema.String,
+  seq: EventSeq,
+  /** Tree paths of the files whose links the move rewrote. */
+  rewritten: Schema.Array(Schema.String),
+  /** A tree moved to another workspace: the team shares it lost. */
+  revokedTeamShares: Schema.Array(Schema.String),
+})
+export type MoveResponse = typeof MoveResponse.Type
+
 export class FilesGroup extends HttpApiGroup.make('files')
   // not_found | sign_in_required
   .add(
@@ -240,6 +351,19 @@ export class FilesGroup extends HttpApiGroup.make('files')
     HttpApiEndpoint.get('file', '/file')
       .setUrlParams(Schema.Struct({ path: Schema.String }))
       .addSuccess(HttpApiSchema.Uint8Array()),
+  )
+  // not_found | sign_in_required | forbidden | conflict
+  .add(
+    HttpApiEndpoint.post('rm', '/rm')
+      .setPayload(Schema.Struct({ path: Schema.String }))
+      .addSuccess(ChangeResponse),
+  )
+  // not_found | sign_in_required | forbidden | invalid | conflict |
+  // policy_rejected
+  .add(
+    HttpApiEndpoint.post('mv', '/mv')
+      .setPayload(Schema.Struct({ from: Schema.String, to: Schema.String }))
+      .addSuccess(MoveResponse),
   ) {}
 
 export const ViewGrantSchema = Schema.Struct({
@@ -650,6 +774,49 @@ export class ExportGroup extends HttpApiGroup.make('export')
       .addSuccess(HttpApiSchema.Uint8Array()),
   ) {}
 
+export class HistoryGroup extends HttpApiGroup.make('history')
+  // not_found | sign_in_required | forbidden
+  .add(
+    HttpApiEndpoint.get('log', '/log')
+      .setUrlParams(
+        Schema.Struct({
+          path: Schema.String,
+          cursor: Schema.optional(Schema.String),
+        }),
+      )
+      .addSuccess(LogResponse),
+  )
+  // path: the folder to show the push under · not_found | sign_in_required
+  // | forbidden
+  .add(
+    HttpApiEndpoint.get('push', '/push')
+      .setUrlParams(
+        Schema.Struct({ path: Schema.String, number: Schema.NumberFromString }),
+      )
+      .addSuccess(PushDetailResponse),
+  )
+  // A file: its versions at those pushes. A folder: from and to required,
+  // one patch of every text file changed between them. not_found |
+  // sign_in_required | forbidden | invalid
+  .add(
+    HttpApiEndpoint.get('diff', '/diff')
+      .setUrlParams(
+        Schema.Struct({
+          path: Schema.String,
+          from: Schema.optional(Schema.NumberFromString),
+          to: Schema.optional(Schema.NumberFromString),
+        }),
+      )
+      .addSuccess(DiffResponse),
+  )
+  // not_found | sign_in_required | forbidden | invalid | conflict |
+  // blob_reclaiming
+  .add(
+    HttpApiEndpoint.post('restore', '/restore')
+      .setPayload(Schema.Struct({ path: Schema.String, to: RestoreTo }))
+      .addSuccess(ChangeResponse),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -662,5 +829,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(EventsGroup)
   .add(SharesGroup)
   .add(ExportGroup)
+  .add(HistoryGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

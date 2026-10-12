@@ -1,25 +1,43 @@
 import {
   dossierError,
   type AuthoredSeq,
+  type DiffResponse,
   type DossierError,
   type EntryWire,
+  type EventSeq,
   type LinkRef,
+  type LogLine,
+  type PushFile,
+  type PushNumber,
   type Sha256,
   type TreeId,
 } from '@dossier/contracts'
 import { Context, Effect, Layer } from 'effect'
 
 import { Access, type RoleSet } from './access.ts'
+import type { Background } from './background.ts'
 import type { BaseLayer } from './base-layer.ts'
-import type { Bindings } from './bindings.ts'
+import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
+import { ChangeFeed } from './change-feed.ts'
+import { makeChanges } from './changes.ts'
+import { Config } from './config.ts'
+import { makeHistory } from './history.ts'
 import {
   kitAt,
   lookupUnderscore,
   underscoreSplit,
   type KitItem,
 } from './lookup.ts'
-import type { MissingNode, NodeRow, TreeRow, WorkspaceRow } from './rows.ts'
+import type {
+  MissingNode,
+  NodeRow,
+  PushRow,
+  TreeRow,
+  WorkspaceRow,
+} from './rows.ts'
+import { Data } from './data.ts'
+import { Settings } from './settings.ts'
 import { TreeStore, type Entry, type FileBody } from './tree-store.ts'
 
 export interface Listing {
@@ -33,6 +51,51 @@ export interface Listing {
 
 type ReadFailure = DossierError<
   'not_found' | 'sign_in_required' | 'unavailable'
+>
+
+/** Where a restore takes a file or folder back to. */
+export type RestorePoint =
+  | { readonly push: PushNumber }
+  /** Epoch milliseconds: versions created at or before it. */
+  | { readonly at: number }
+
+export interface LogPage {
+  /** The folder's or file's tree path. */
+  readonly path: string
+  readonly lines: readonly LogLine[]
+  readonly next: string | null
+  readonly retentionDays: number
+}
+
+export interface PushDetail {
+  readonly push: PushRow
+  /** As LogLine.by. */
+  readonly by: string
+  readonly files: readonly PushFile[]
+}
+
+export type DiffResult = DiffResponse
+
+export interface ChangeResult {
+  readonly path: string
+  readonly link: string
+  readonly seq: EventSeq
+  /** Tree paths of the files the change touched. */
+  readonly changed: readonly string[]
+}
+
+export interface MoveResult {
+  /** '<workspace>/<tree>/<path>'. */
+  readonly from: string
+  readonly to: string
+  readonly link: string
+  readonly seq: EventSeq
+  readonly rewritten: readonly string[]
+  readonly revokedTeamShares: readonly string[]
+}
+
+type HistoryFail = DossierError<
+  'not_found' | 'sign_in_required' | 'forbidden' | 'unavailable'
 >
 
 export interface FilesService {
@@ -61,6 +124,69 @@ export interface FilesService {
       'not_found' | 'sign_in_required' | 'forbidden' | 'unavailable'
     >,
     CurrentCaller
+  >
+  /**
+   * Pushes, deletions, restores, moves and withdrawals at or below a folder,
+   * or of a file, newest first, 50 a page. Write holders only.
+   */
+  readonly log: (i: {
+    readonly ref: LinkRef
+    readonly cursor: string | null
+  }) => Effect.Effect<LogPage, HistoryFail, CurrentCaller>
+  /** The files a push changed under the folder, with line counts for text. */
+  readonly pushDetail: (i: {
+    readonly ref: LinkRef
+    readonly number: PushNumber
+  }) => Effect.Effect<PushDetail, HistoryFail, CurrentCaller>
+  /**
+   * A file's two versions and their patch: `to` defaults to the current
+   * version, `from` to the one before it. A folder needs both pushes.
+   */
+  readonly diff: (i: {
+    readonly ref: LinkRef
+    readonly from: PushNumber | null
+    readonly to: PushNumber | null
+  }) => Effect.Effect<
+    DiffResult,
+    HistoryFail | DossierError<'invalid'>,
+    CurrentCaller
+  >
+  /** A file or folder made to match an earlier point; copies no bytes. */
+  readonly restore: (i: {
+    readonly ref: LinkRef
+    readonly to: RestorePoint
+  }) => Effect.Effect<
+    ChangeResult,
+    HistoryFail | DossierError<'invalid' | 'conflict' | 'blob_reclaiming'>,
+    CurrentCaller | Background
+  >
+  /** A deletion: a change in history, restorable within the retention. */
+  readonly rm: (i: {
+    readonly ref: LinkRef
+  }) => Effect.Effect<
+    ChangeResult,
+    HistoryFail | DossierError<'conflict'>,
+    CurrentCaller | Background
+  >
+  /** A new path for a node in its tree, or a tree root in another workspace. */
+  readonly mv: (i: {
+    readonly from: LinkRef
+    readonly to: LinkRef
+  }) => Effect.Effect<
+    MoveResult,
+    | HistoryFail
+    | DossierError<
+        'invalid' | 'conflict' | 'policy_rejected' | 'blob_reclaiming'
+      >,
+    CurrentCaller | Background
+  >
+  readonly moveTree: (i: {
+    readonly tree: LinkRef
+    readonly to: { readonly workspace: string; readonly tree: string }
+  }) => Effect.Effect<
+    MoveResult,
+    HistoryFail | DossierError<'conflict' | 'invalid'>,
+    CurrentCaller | Background
   >
 }
 
@@ -106,13 +232,23 @@ const readOnly = <A, R>(
 export const FilesLive: Layer.Layer<
   Files,
   never,
-  TreeStore | Access | Bindings | BaseLayer
+  | TreeStore
+  | Access
+  | Bindings
+  | BaseLayer
+  | Settings
+  | Data
+  | ChangeFeed
+  | Config
 > = Layer.effect(
   Files,
   Effect.gen(function* () {
     const store = yield* TreeStore
     const access = yield* Access
     const context = yield* Effect.context<Bindings | BaseLayer>()
+
+    /** History is write holders': a reader is told it is not theirs. */
+    const narrowHistory = (error: DossierError) => Effect.fail(error)
 
     /** Missing and unreadable answer alike. */
     const denied = (missing: MissingNode) =>
@@ -246,6 +382,184 @@ export const FilesLive: Layer.Layer<
         return { folder, items }
       })
 
-    return { ls, content, kit }
+    const { DB, BLOBS } = yield* Bindings
+    const settings = yield* Settings
+    const config = yield* Config
+    const history = makeHistory({ DB, BLOBS })
+    const changes = makeChanges({
+      DB,
+      BLOBS,
+      origin: config.origin,
+      store,
+      access,
+      data: yield* Data,
+      feed: yield* ChangeFeed,
+      history,
+    })
+
+    /**
+     * What history asks about: a folder, a file or a page by its link path,
+     * live or deleted, read-history checked.
+     */
+    const historyNode = (ref: LinkRef) =>
+      Effect.gen(function* () {
+        const located = yield* store.locate(ref, { deleted: true })
+        if ('missing' in located) return yield* denied(located)
+        yield* access.require('read-history', located.node)
+        return located
+      })
+
+    const retention = () =>
+      Effect.map(settings.current(), (s) => s.retentionDays)
+
+    const log: FilesService['log'] = ({ ref, cursor }) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const located = yield* historyNode(ref)
+        const retentionDays = yield* retention()
+        const page = yield* history.log({
+          caller,
+          tree: located.tree,
+          node: located.node,
+          cursor,
+          retentionDays,
+        })
+        return {
+          path: located.node.path,
+          lines: page.lines,
+          next: page.next,
+          retentionDays,
+        }
+      }).pipe(Effect.catchTag('DossierError', narrowHistory)) as ReturnType<
+        FilesService['log']
+      >
+
+    const pushDetail: FilesService['pushDetail'] = ({ ref, number }) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const located = yield* historyNode(ref)
+        const push = yield* history.pushOf(located.tree.id, number)
+        if (push === null) {
+          return yield* Effect.fail(
+            dossierError(
+              'not_found',
+              `There is no push ${number} in ${located.tree.name}.`,
+              null,
+              ref.path,
+            ),
+          )
+        }
+        return yield* history.pushDetail({
+          caller,
+          tree: located.tree,
+          node: located.node,
+          push,
+        })
+      }).pipe(Effect.catchTag('DossierError', narrowHistory)) as ReturnType<
+        FilesService['pushDetail']
+      >
+
+    const diff: FilesService['diff'] = ({ ref, from, to }) =>
+      Effect.gen(function* () {
+        const located = yield* historyNode(ref)
+        const { node, tree } = located
+        const seqOf = (number: PushNumber) =>
+          Effect.gen(function* () {
+            const push = yield* history.pushOf(tree.id, number)
+            if (push === null) {
+              return yield* Effect.fail(
+                dossierError(
+                  'invalid',
+                  `There is no push ${number} in ${tree.name}.`,
+                  `See the pushes with dossier log ${ref.workspace}/${tree.name}.`,
+                ),
+              )
+            }
+            return yield* history.seqOfPush(push)
+          })
+        if (node.kind === 'folder') {
+          // Without pushes: what the latest push changed here.
+          let fromSeq: number
+          let toSeq: number | null
+          if (from === null && to === null) {
+            const latest = yield* history.log({
+              caller: yield* CurrentCaller,
+              tree,
+              node,
+              cursor: null,
+              retentionDays: yield* retention(),
+            })
+            const push = latest.lines.find((l) => l.push !== null)?.push
+            if (push === undefined || push === null) {
+              return {
+                path: node.path,
+                from: null,
+                to: null,
+                binary: false,
+                before: null,
+                after: null,
+                patch: '',
+              }
+            }
+            toSeq = yield* seqOf(push.number)
+            fromSeq = toSeq - 1
+          } else if (from === null) {
+            return yield* Effect.fail(
+              dossierError(
+                'invalid',
+                'A folder’s diff needs the push to start from.',
+                `Give two pushes: dossier diff ${ref.workspace}/${tree.name}/${node.path} 11 12.`,
+              ),
+            )
+          } else {
+            fromSeq = yield* seqOf(from)
+            toSeq = to === null ? null : yield* seqOf(to)
+          }
+          const patch = yield* history.folderDiff({
+            node,
+            from: fromSeq,
+            to: toSeq,
+          })
+          return {
+            path: node.path,
+            from: from === null ? null : `push ${from}`,
+            to: to === null ? null : `push ${to}`,
+            binary: false,
+            before: null,
+            after: null,
+            patch,
+          }
+        }
+        const toVersion =
+          to === null
+            ? yield* history.current(node)
+            : yield* history.versionAtSeq(node.id, yield* seqOf(to))
+        const fromVersion =
+          from === null
+            ? toVersion === null
+              ? null
+              : yield* history.previousOf(toVersion)
+            : yield* history.versionAtSeq(node.id, yield* seqOf(from))
+        return yield* history.fileDiff({
+          node,
+          from: fromVersion,
+          to: toVersion,
+        })
+      }).pipe(Effect.catchTag('DossierError', narrowHistory)) as ReturnType<
+        FilesService['diff']
+      >
+
+    return {
+      ls,
+      content,
+      kit,
+      log,
+      pushDetail,
+      diff,
+      restore: changes.restore as FilesService['restore'],
+      rm: changes.rm as FilesService['rm'],
+      mv: changes.mv as FilesService['mv'],
+      moveTree: changes.moveTree as FilesService['moveTree'],
+    }
   }),
 )
