@@ -304,6 +304,11 @@ const denied = (caller: Caller, path: string | null) =>
 interface TreeFacts {
   readonly workspaceId: WorkspaceId
   readonly workspaceName: string
+  /**
+   * Changes whenever a push lands or a share is made, removed or changed:
+   * what a request may keep of the tree's page shares.
+   */
+  readonly stamp: string
   /** A suspended or deleted workspace reads as missing. */
   readonly state: 'live' | 'suspended' | 'deleted'
   /** The caller's role in the tree's workspace, if any. */
@@ -330,6 +335,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
   Effect.gen(function* () {
     const { DB, DEPLOYMENT_NAME } = yield* Bindings
     const deployment = DEPLOYMENT_NAME ?? 'this deployment'
+    /** Page shares as a request found them, by the request's caller. */
+    const pageShareCache = new WeakMap<
+      Caller,
+      Map<string, readonly PageShare[]>
+    >()
 
     const query = <A>(run: () => Promise<A>) =>
       Effect.tryPromise(run).pipe(
@@ -352,6 +362,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       query(() =>
         DB.prepare(
           `select t.workspace_id as workspaceId, w.name as workspaceName,
+             t.authored_seq || ':' || (select count(*) || ':' || coalesce(max(grant_order), 0)
+               from shares where tree_id = t.id) as stamp,
              case when w.deleted_at is not null or t.deleted_at is not null then 'deleted'
                when w.suspended_at is not null then 'suspended'
                else 'live' end as state,
@@ -374,6 +386,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             : {
                 workspaceId: row.workspaceId,
                 workspaceName: row.workspaceName,
+                stamp: row.stamp,
                 state: row.state,
                 memberRole: row.memberRole,
                 teams: JSON.parse(row.teamsJson ?? '[]') as TeamId[],
@@ -436,10 +449,28 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       asOf: number | null,
     ) =>
       Effect.gen(function* () {
+        // One lookup per request and state of the tree, however many checks.
+        const key = `${treeId}:${asOf}:${facts.stamp}`
+        const kept = pageShareCache.get(caller)?.get(key)
+        if (kept !== undefined) return kept
+        const found = yield* pageSharesNow(caller, facts, treeId, asOf)
+        const forCaller = pageShareCache.get(caller) ?? new Map()
+        forCaller.set(key, found)
+        pageShareCache.set(caller, forCaller)
+        return found
+      })
+
+    const pageSharesNow = (
+      caller: Caller,
+      facts: TreeFacts,
+      treeId: TreeId,
+      asOf: number | null,
+    ) =>
+      Effect.gen(function* () {
         const rows = yield* query(() =>
           DB.prepare(
             `select s.id, s.target_kind as targetKind, s.target, s.role, 0 as onData,
-               n.id as pageId
+               n.id as pageId, n.path as pagePath
              from shares s join nodes n on n.id = s.node_id
              where s.tree_id = ? and n.deleted_at is null and n.kind = 'file'
                and n.origin = 'authored' and n.underscore_from is null
@@ -447,32 +478,23 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                and (? is null or s.grant_order <= ?)`,
           )
             .bind(treeId, asOf, asOf)
-            .all<ShareRow & { pageId: NodeId }>(),
+            .all<ShareRow & { pageId: NodeId; pagePath: string }>(),
         )
         const found: PageShare[] = []
         for (const row of rows.results) {
           const grant = grantOf(caller, facts, row)
           if (grant === null) continue
-          const targets: { target: string; kind: string }[] = []
-          for (const page of [1, 0] as const) {
-            const c = composing(page)
-            targets.push(
-              ...(yield* query(() =>
-                db({ DB }).all<{ target: string; kind: string }>(
-                  sql`select distinct fm.target_path as target, fm.kind as kind
-                    from nodes p ${c.from}
-                    join forms fm on fm.host_version_id = hv.id
-                    where p.id = ${row.pageId} and ${c.where}`,
-                ),
-              )),
-            )
-          }
+          const targets = yield* query(() =>
+            db({ DB }).all<{ target: string; kind: string }>(
+              pageTargetsSql(treeId, row.pagePath),
+            ),
+          )
           found.push({
             grant,
             pageId: row.pageId,
             targets: targets.map((t) => ({
               path: t.target.replace(/\/$/, ''),
-              kind: t.kind === 'shared' ? 'json' : 'folder',
+              kind: t.kind === 'json' ? 'json' : 'folder',
             })),
           })
         }
@@ -561,7 +583,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           const grant = grantOf(caller, facts, share)
           if (grant !== null) grants.push(grant)
         }
-        if (node.origin === 'data') {
+        // What page shares carry follows the pages as they are now, so it
+        // never counts toward what was readable at an earlier grant order.
+        if (node.origin === 'data' && asOf === null) {
           grants.push(
             ...throughPages(
               node,
@@ -595,9 +619,15 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const { grants, owns, facts, inScope } = yield* grantsOn(node, asOf)
         const roles = roleSetOf(grants, owns)
+        // What is carried follows the pages as they are now: never what was
+        // readable at an earlier grant order, where a dependency a later
+        // push added would reach back to versions nobody issued.
         const reads =
           readsBy(roles, node.origin) ||
-          (inScope && facts !== null && (yield* carries(node, asOf)))
+          (asOf === null &&
+            inScope &&
+            facts !== null &&
+            (yield* carries(node, null)))
         return { ...roles, reads } satisfies RoleSet
       })
 
@@ -646,21 +676,28 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         // folder, or ownership; authored files through any grant.
         // What page shares, respondents' forms and comments carry is read
         // by the one read rule.
+        const direct = readsBy(roles, node.origin)
+        // A `_` file is read through any node it is reached from; that
+        // reach is named first, as it was before anything was carried.
+        if (!direct && action === 'read' && node.origin === 'authored') {
+          const reach = yield* reached(node)
+          if (reach !== null) {
+            return { ...node, basis: [reach] } as unknown as Granted<A>
+          }
+        }
+        // What is carried is read only, as reach is: any other action on a
+        // node read only that way is refused as missing.
         const carried =
-          !readsBy(roles, node.origin) &&
+          !direct &&
+          action === 'read' &&
           inScope &&
           (yield* carries(node, null))
-        const reads = readsBy(roles, node.origin) || carried
+        const reads = direct || carried
         // Answering into a shared file needs respond, not read: the form
         // that targets it already says it is there.
         const answers =
           action === 'respond' && data && roles.caps.has('respond')
-        if (!reads && !answers) {
-          // A `_` file is read through any node it is reached from.
-          const reach = action === 'read' ? yield* reached(node) : null
-          if (reach === null) return yield* denied(caller, node.path)
-          return { ...node, basis: [reach] } as unknown as Granted<A>
-        }
+        if (!reads && !answers) return yield* denied(caller, node.path)
         if (
           caller.via.kind === 'agent' &&
           caller.via.readOnly &&
@@ -881,6 +918,20 @@ export const lit = (value: string | number | null): SQL =>
       : sql.raw(`'${value.replaceAll("'", "''")}'`)
 
 /**
+ * `sql` with every run of white space in its text made one space: the read
+ * rule is long, repeated in every query that lists what a caller reads, and
+ * a statement has a size limit.
+ */
+const tight = (strings: TemplateStringsArray, ...values: unknown[]): SQL =>
+  sql(
+    Object.assign(
+      strings.map((part) => part.replace(/\s+/g, ' ')),
+      { raw: strings.raw },
+    ) as unknown as TemplateStringsArray,
+    ...(values as never[]),
+  )
+
+/**
  * Who asks, as SQL values: one caller's facts as bound literals, or many
  * callers' as the columns of a table, so one rule serves both.
  */
@@ -927,15 +978,15 @@ export const grantOn =
     asOf: number | null = null,
   ) =>
   (column: (name: 'tree_id' | 'path' | 'origin') => SQL): SQL =>
-    sql`${column('tree_id')} = ${lit(treeId)} and ${f.within(column('path'))} and (${f.admin} = 1 or exists (
+    tight`${column('tree_id')} = ${lit(treeId)} and ${f.within(column('path'))} and (${f.admin} = 1 or exists (
       select 1 from shares s join nodes a on a.id = s.node_id and a.deleted_at is null
       where s.tree_id = ${lit(treeId)}
         and (s.target_kind = 'anyone'
           or (s.target_kind = 'email' and s.target = ${f.email})
           or (s.target_kind = 'workspace' and s.target = ${lit(workspaceId)} and ${f.member} = 1)
           or (s.target_kind = 'team' and s.target in (select value from json_each(${f.teams}))))
-        and ${asOf === null ? sql`1` : sql`s.grant_order <= ${lit(asOf)}`}
-        and ${underColumn(column('path'), sql`a.path`)}
+        and ${asOf === null ? tight`1` : tight`s.grant_order <= ${lit(asOf)}`}
+        and ${underColumn(column('path'), tight`a.path`)}
         and (s.role <> 'respond' or ${column('origin')} = 'authored')
         and (s.target_kind <> 'anyone' or ${column('origin')} = 'authored'
           or a.origin = 'data')))`
@@ -947,9 +998,9 @@ export const reachFrom = (
   from: SQL,
 ): SQL => {
   const r = (name: 'tree_id' | 'path' | 'origin') => sql.raw(`r.${name}`)
-  return sql`exists (select 1 from nodes r
+  return tight`exists (select 1 from nodes r
     where r.tree_id = ${lit(treeId)} and r.deleted_at is null
-      and ${underColumn(sql`r.path`, from)}
+      and ${underColumn(tight`r.path`, from)}
       and ${grants(r)})`
 }
 
@@ -963,7 +1014,7 @@ export const readableOn =
   (treeId: TreeId, workspaceId: string, f: CallerFacts) =>
   (column: NodeColumn): SQL => {
     const grants = grantOn(treeId, workspaceId, f)
-    return sql`${column('tree_id')} = ${lit(treeId)} and ((${grants(column)})
+    return tight`${column('tree_id')} = ${lit(treeId)} and ((${grants(column)})
       or (${column('origin')} = 'data' and ${f.person} is not null
         and ${column('owner_id')} = ${f.person}
         and ${f.within(column('path'))})
@@ -972,129 +1023,58 @@ export const readableOn =
       or (${carriedOn(treeId, workspaceId, f)(column)}))`
   }
 
-/** The folder a path sits in, in SQL: 'a/b/c.html' → 'a/b', 'c.html' → ''. */
-const folderSql = (path: SQL): SQL =>
-  sql`rtrim(rtrim(${path}, replace(${path}, '/', '')), '/')`
-
 /** A share's target is the caller, counting grants at or below `asOf`. */
 const reachesCaller = (
   workspaceId: string,
   f: CallerFacts,
   asOf: number | null,
 ): SQL =>
-  sql`(s.target_kind = 'anyone'
+  tight`(s.target_kind = 'anyone'
     or (s.target_kind = 'email' and s.target = ${f.email})
     or (s.target_kind = 'workspace' and s.target = ${lit(workspaceId)} and ${f.member} = 1)
     or (s.target_kind = 'team' and s.target in (select value from json_each(${f.teams}))))
-    and ${asOf === null ? sql`1` : sql`s.grant_order <= ${lit(asOf)}`}`
+    and ${asOf === null ? tight`1` : tight`s.grant_order <= ${lit(asOf)}`}`
 
-/** A share `s` on a live page `p` of the tree that reaches the caller. */
-const sharedPage = (
+/**
+ * A share `s` reaching the caller on a live page `p`, and what the page
+ * carries as `pn` (page_needs) of the kinds given.
+ */
+const pageCarries = (kinds: SQL): SQL =>
+  tight`from shares s
+    join nodes p on p.id = s.node_id and p.deleted_at is null and p.kind = 'file'
+      and p.origin = 'authored' and p.underscore_from is null
+      and substr(p.path, -5) = '.html'
+    join page_needs pn on pn.tree_id = s.tree_id and pn.page_path = p.path
+      and pn.kind ${kinds}`
+
+/**
+ * The authored node `as` that a shared page renders with, then what more
+ * the arm joins, selecting `select`.
+ */
+const neededArm = (
   treeId: TreeId,
   workspaceId: string,
   f: CallerFacts,
   asOf: number | null,
-): SQL =>
-  sql`s.tree_id = ${lit(treeId)} and p.deleted_at is null and p.kind = 'file'
-    and p.origin = 'authored' and p.underscore_from is null
-    and substr(p.path, -5) = '.html' and ${reachesCaller(workspaceId, f, asOf)}`
-
-/**
- * The version `hv` of the page `p` itself (`page` 1, read from its own
- * folder), or of a tree layout composed into it now (`page` 0, from the
- * layout's folder): none for a complete page, else the `_layout.html` of its
- * folder and each folder above, up to the first complete one.
- */
-const composing = (page: 0 | 1): { from: SQL; where: SQL; folder: SQL } =>
-  page === 1
-    ? {
-        from: sql`join node_versions hv on hv.id = p.current_version_id and hv.state = 'live'`,
-        where: sql`1`,
-        folder: folderSql(sql`p.path`),
-      }
-    : {
-        // A layout's folder is where its `_` part starts.
-        from: sql`join node_versions pv on pv.id = p.current_version_id
-          join html_files pf on pf.sha256 = pv.blob_sha256 and pf.complete = 0
-          join nodes l on ${liveLayoutNode('l', sql`p.tree_id`)}
-            and ${above(sql`l.underscore_from`, sql`p.path`)}
-          join node_versions hv on hv.id = l.current_version_id and hv.state = 'live'
-          join html_files lf on lf.sha256 = hv.blob_sha256
-            and not exists (select 1 from nodes l2
-            join node_versions v2 on v2.id = l2.current_version_id and v2.state = 'live'
-            join html_files f2 on f2.sha256 = v2.blob_sha256 and f2.complete = 1
-            where ${liveLayoutNode('l2', sql`p.tree_id`)}
-              and length(l2.underscore_from) > length(l.underscore_from)
-              and ${above(sql`l2.underscore_from`, sql`p.path`)})`,
-        where: sql`1`,
-        folder: sql`l.underscore_from`,
-      }
-
-/** A folder holds a file path somewhere below it, the root included. */
-const above = (folder: SQL, path: SQL): SQL =>
-  sql`(${folder} = '' or substr(${path}, 1, length(${folder}) + 1) = ${folder} || '/')`
-
-/** A live `_layout.html` node, under an alias. */
-const liveLayoutNode = (l: string, treeId: SQL): SQL => {
-  const L = sql.raw(l)
-  return sql`${L}.tree_id = ${treeId} and ${L}.deleted_at is null and ${L}.kind = 'file'
-    and ${L}.origin = 'authored' and ${L}.name = '_layout.html'`
+  arm: { readonly as: string; readonly joins: SQL; readonly select: SQL },
+): SQL => {
+  const N = sql.raw(arm.as)
+  return tight`select ${arm.select} ${pageCarries(tight`= 'render'`)}
+    join nodes ${N} on ${N}.tree_id = s.tree_id and ${N}.path = pn.need_path
+      and ${N}.deleted_at is null and ${N}.origin = 'authored'
+    ${arm.joins}
+    where s.tree_id = ${lit(treeId)} and ${reachesCaller(workspaceId, f, asOf)}
+      and ${N}.id <> p.id and ${f.within(tight`${N}.path`)}`
 }
 
 /**
- * The authored nodes page shares carry: the files a shared page and its
- * layouts render with, as the link route reads a path (the exact path,
- * else the page of that name; a folder as the folder alone). A layout's
- * inline styles and scripts are read from the page's folder, so only the
- * page's own count.
- */
-const neededArms = (
-  treeId: TreeId,
-  workspaceId: string,
-  f: CallerFacts,
-  asOf: number | null,
-  /** The node carried, and what more the arm joins and selects. */
-  arm: { readonly as: string; readonly joins: SQL; readonly select: SQL },
-): SQL[] =>
-  ([1, 0] as const).map((page) => {
-    const c = composing(page)
-    const N = sql.raw(arm.as)
-    return sql`select ${arm.select} from shares s
-      join nodes p on p.id = s.node_id and ${sharedPage(treeId, workspaceId, f, asOf)}
-      ${c.from}
-      join render_paths rp on rp.sha256 = hv.blob_sha256 and rp.folder = ${c.folder}
-        and (${lit(page)} = 1 or rp.inline = 0)
-      join nodes ${N} on ${N}.tree_id = ${lit(treeId)} and ${N}.deleted_at is null
-        and ${N}.origin = 'authored'
-        and (${N}.path = rp.path || '.html'
-          or (substr(rp.path, -1) = '/' and ${N}.kind = 'folder' and ${N}.path || '/' = rp.path)
-          or (${N}.path = rp.path and not exists (select 1 from nodes y
-            where y.tree_id = ${lit(treeId)} and y.path = rp.path || '.html'
-              and y.deleted_at is null and y.origin = 'authored')))
-      ${arm.joins}
-      where ${N}.id <> p.id and ${f.within(sql`${N}.path`)}`
-  })
-
-/** People's data in the form targets of a version `hv`, as `x`. */
-const inTargets = (shared: boolean): SQL =>
-  shared
-    ? sql`join forms fm on fm.host_version_id = hv.id and fm.kind = 'shared'
-        join nodes x on x.tree_id = p.tree_id and x.path = fm.target_path
-          and x.origin = 'data' and x.kind = 'file' and x.owner_id is null`
-    : sql`join forms fm on fm.host_version_id = hv.id
-        join nodes x on x.tree_id = p.tree_id and x.origin = 'data'
-          and ((substr(fm.target_path, -1) = '/'
-              and ${underColumn(sql`x.path`, sql`rtrim(fm.target_path, '/')`)})
-            or x.path = fm.target_path)`
-
-/**
- * Every node the read rule carries beyond grants, ownership and reach, as
- * one set: the files shared pages render with; the data in a page's form
- * targets for a private read or write share on it; for a private respond
- * share, the shared files (nobody's own) the forms of its page, or of the
- * pages in and layouts above its folder, write; and the data in the
- * comments folder of a page the caller reads. Flat selects, so the rule
- * stays within SQLite's expression depth.
+ * Every node the read rule carries beyond grants, ownership and reach: the
+ * files shared pages render with, and the `_` files reached from them; the
+ * data in a page's form targets for a private read or write share on it;
+ * for a private respond share, the shared files (nobody's own) that forms
+ * of its page, or of the pages in and layouts above its folder, write; and
+ * the data in the comments folder of a page the caller reads. Each is a
+ * flat select of its own, so the rule stays light for SQLite.
  */
 const carriedArms = (
   treeId: TreeId,
@@ -1102,73 +1082,75 @@ const carriedArms = (
   f: CallerFacts,
   asOf: number | null,
 ): SQL[] => {
-  const page = sharedPage(treeId, workspaceId, f, asOf)
-  const targetArms = ([1, 0] as const).flatMap((host) => {
-    const c = composing(host)
-    return [
-      sql`select x.id from shares s join nodes p on p.id = s.node_id and ${page}
-        ${c.from}
-        ${inTargets(false)}
-        where s.role <> 'respond'
-          and s.target_kind <> 'anyone' and ${f.within(sql`x.path`)}`,
-      sql`select x.id from shares s join nodes p on p.id = s.node_id and ${page}
-        ${c.from}
-        ${inTargets(true)}
-        where s.role = 'respond'
-          and s.target_kind <> 'anyone' and ${f.within(sql`x.path`)}`,
-    ]
-  })
+  const T = lit(treeId)
+  const caller = reachesCaller(workspaceId, f, asOf)
   // The data in a page's comments folder, for a page `q` the caller reads:
   // `cf` is the folder and `x` what lies in it.
-  const inComments = sql`join nodes cf on cf.tree_id = q.tree_id
+  const inComments = tight`join nodes cf on cf.tree_id = q.tree_id
       and cf.path = substr(q.path, 1, length(q.path) - 5) || '.comments'
       and cf.deleted_at is null and cf.kind = 'folder'
     join nodes x on x.tree_id = q.tree_id and x.origin = 'data'
-      and ${underColumn(sql`x.path`, sql`cf.path`)}`
-  const commentsOf = (readsPage: SQL) =>
-    sql`select x.id from nodes q ${inComments}
-      where q.tree_id = ${lit(treeId)} and q.deleted_at is null and q.kind = 'file'
-        and q.origin = 'authored' and substr(q.path, -5) = '.html'
-        and ${f.within(sql`x.path`)} and ${readsPage}`
+      and ${underColumn(tight`x.path`, tight`cf.path`)}`
+  const page = tight`q.tree_id = ${T} and q.deleted_at is null and q.kind = 'file'
+    and q.origin = 'authored' and substr(q.path, -5) = '.html'`
   return [
-    ...neededArms(treeId, workspaceId, f, asOf, {
+    neededArm(treeId, workspaceId, f, asOf, {
       as: 'x',
-      joins: sql``,
-      select: sql`x.id`,
+      joins: tight``,
+      select: tight`x.id`,
     }),
-    // A page the caller reads through a grant: as an admin, or a share on
-    // it or a folder above (a page is authored, so every role reads it).
-    commentsOf(sql`${f.admin} = 1 and ${f.within(sql`q.path`)}`),
-    sql`select x.id from nodes q ${inComments}
-      join shares s on s.tree_id = q.tree_id and ${reachesCaller(workspaceId, f, asOf)}
+    // The `_` files reached from a node a page share carries, as from any
+    // node the caller reads.
+    neededArm(treeId, workspaceId, f, asOf, {
+      as: 'r',
+      joins: tight`join nodes k on k.tree_id = r.tree_id and k.origin = 'authored'
+        and k.underscore_from is not null
+        and ${underColumn(tight`r.path`, tight`k.underscore_from`)}`,
+      select: tight`k.id`,
+    }),
+    tight`select x.id ${pageCarries(tight`in ('folder', 'json')`)}
+      join nodes x on x.tree_id = s.tree_id and x.origin = 'data'
+        and ((pn.kind = 'folder' and ${underColumn(tight`x.path`, tight`pn.need_path`)})
+          or (pn.kind = 'json' and x.path = pn.need_path))
+      where s.tree_id = ${T} and ${caller} and s.role <> 'respond'
+        and s.target_kind <> 'anyone' and ${f.within(tight`x.path`)}`,
+    tight`select x.id ${pageCarries(tight`= 'json'`)}
+      join nodes x on x.tree_id = s.tree_id and x.path = pn.need_path
+        and x.origin = 'data' and x.kind = 'file' and x.owner_id is null
+      where s.tree_id = ${T} and ${caller} and s.role = 'respond'
+        and s.target_kind <> 'anyone' and ${f.within(tight`x.path`)}`,
+    tight`select x.id from shares s join nodes a on a.id = s.node_id
+      join forms fm on fm.tree_id = s.tree_id and fm.kind = 'shared'
+      join nodes h on h.id = fm.host_node_id and h.current_version_id = fm.host_version_id
+        and h.deleted_at is null
+      join nodes x on x.tree_id = s.tree_id and x.path = fm.target_path
+        and x.origin = 'data' and x.kind = 'file' and x.owner_id is null
+      where s.tree_id = ${T} and a.deleted_at is null and a.kind = 'folder'
+        and s.role = 'respond' and s.target_kind <> 'anyone' and ${caller}
+        and (${underColumn(tight`h.path`, tight`a.path`)}
+          or (h.name = '_layout.html'
+            and ${underColumn(tight`a.path`, tight`h.underscore_from`)}))
+        and ${f.within(tight`x.path`)}`,
+    // Comments on a page the caller reads through a grant: as an admin, or
+    // a share on it or a folder above (a page is authored: every role reads
+    // it), or through what a page share carries.
+    tight`select x.id from nodes q ${inComments}
+      where ${page} and ${f.admin} = 1 and ${f.within(tight`q.path`)}
+        and ${f.within(tight`x.path`)}`,
+    tight`select x.id from nodes q ${inComments}
+      join shares s on s.tree_id = q.tree_id and ${caller}
       join nodes a on a.id = s.node_id and a.deleted_at is null
-        and ${underColumn(sql`q.path`, sql`a.path`)}
-      where q.tree_id = ${lit(treeId)} and q.deleted_at is null and q.kind = 'file'
-        and q.origin = 'authored' and substr(q.path, -5) = '.html'
-        and ${f.within(sql`q.path`)} and ${f.within(sql`x.path`)}`,
-    ...neededArms(treeId, workspaceId, f, asOf, {
+        and ${underColumn(tight`q.path`, tight`a.path`)}
+      where ${page} and ${f.within(tight`q.path`)} and ${f.within(tight`x.path`)}`,
+    tight`${neededArm(treeId, workspaceId, f, asOf, {
       as: 'q',
       joins: inComments,
-      select: sql`x.id`,
-    }).map((arm) => sql`${arm} and ${f.within(sql`x.path`)}`),
-    ...targetArms,
-    sql`select x.id from shares s join nodes a on a.id = s.node_id
-        join forms fm on fm.tree_id = s.tree_id and fm.kind = 'shared'
-        join nodes h on h.id = fm.host_node_id and h.current_version_id = fm.host_version_id
-          and h.deleted_at is null
-        join nodes x on x.tree_id = s.tree_id and x.path = fm.target_path
-          and x.origin = 'data' and x.kind = 'file' and x.owner_id is null
-        where s.tree_id = ${lit(treeId)} and a.deleted_at is null and a.kind = 'folder'
-          and s.role = 'respond' and s.target_kind <> 'anyone'
-          and ${reachesCaller(workspaceId, f, asOf)}
-          and (${underColumn(sql`h.path`, sql`a.path`)}
-            or (h.name = '_layout.html'
-              and ${underColumn(sql`a.path`, sql`h.underscore_from`)}))
-          and ${f.within(sql`x.path`)}`,
+      select: tight`x.id`,
+    })} and substr(q.path, -5) = '.html' and ${f.within(tight`x.path`)}`,
   ]
 }
 
-/** The node is in what the read rule carries (carriedIds). */
+/** The node is in what the read rule carries (carriedArms). */
 export const carriedOn =
   (
     treeId: TreeId,
@@ -1179,21 +1161,29 @@ export const carriedOn =
   (column: NodeColumn): SQL =>
     anyOf(
       carriedArms(treeId, workspaceId, f, asOf).map(
-        (arm) => sql`${column('id')} in (${arm})`,
+        (arm) => tight`${column('id')} in (${arm})`,
       ),
     )
+
+/**
+ * The places a share on a page writes to through its forms, as the read
+ * rule reads them: for the derived grants on people's data there.
+ */
+export const pageTargetsSql = (treeId: TreeId, pagePath: string): SQL =>
+  tight`select need_path as target, kind from page_needs
+    where tree_id = ${treeId} and page_path = ${pagePath} and kind in ('folder', 'json')`
 
 /**
  * Conditions joined by `or` as a balanced tree, so many of them add only
  * their logarithm to SQLite's expression depth.
  */
 const anyOf = (parts: readonly SQL[]): SQL => {
-  if (parts.length === 0) return sql`0`
-  if (parts.length === 1) return sql`(${parts[0]!})`
+  if (parts.length === 0) return tight`0`
+  if (parts.length === 1) return tight`(${parts[0]!})`
   const half = Math.ceil(parts.length / 2)
-  return sql`(${anyOf(parts.slice(0, half))} or ${anyOf(parts.slice(half))})`
+  return tight`(${anyOf(parts.slice(0, half))} or ${anyOf(parts.slice(half))})`
 }
 
 /** `column` is the path `prefix` or lies below it. */
 export const underColumn = (column: SQL, prefix: SQL): SQL =>
-  sql`(${prefix} = '' or ${column} = ${prefix} or substr(${column}, 1, length(${prefix}) + 1) = ${prefix} || '/')`
+  tight`(${prefix} = '' or ${column} = ${prefix} or substr(${column}, 1, length(${prefix}) + 1) = ${prefix} || '/')`

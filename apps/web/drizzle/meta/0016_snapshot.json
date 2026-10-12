@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d6c0590c-48c1-4889-9fe6-1eea1c410949",
+  "id": "1d9637d9-9098-4776-922e-a1d0ea0bdc4b",
   "prevId": "8d2a45c2-5871-4d36-b07d-e09760f2a8b2",
   "tables": {
     "account": {
@@ -1095,30 +1095,6 @@
         }
       }
     },
-    "html_files": {
-      "name": "html_files",
-      "columns": {
-        "sha256": {
-          "name": "sha256",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "complete": {
-          "name": "complete",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "invitations": {
       "name": "invitations",
       "columns": {
@@ -1701,6 +1677,82 @@
         "operations_result_state_check": {
           "name": "operations_result_state_check",
           "value": "\"operations\".\"result_state\" in ('stored', 'withdrawn')"
+        }
+      }
+    },
+    "page_needs": {
+      "name": "page_needs",
+      "columns": {
+        "tree_id": {
+          "name": "tree_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "page_path": {
+          "name": "page_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "need_path": {
+          "name": "need_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "page_needs_need_idx": {
+          "name": "page_needs_need_idx",
+          "columns": [
+            "tree_id",
+            "need_path"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "page_needs_tree_id_trees_id_fk": {
+          "name": "page_needs_tree_id_trees_id_fk",
+          "tableFrom": "page_needs",
+          "tableTo": "trees",
+          "columnsFrom": [
+            "tree_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "page_needs_tree_id_page_path_need_path_kind_pk": {
+          "columns": [
+            "tree_id",
+            "page_path",
+            "need_path",
+            "kind"
+          ],
+          "name": "page_needs_tree_id_page_path_need_path_kind_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "page_needs_kind_check": {
+          "name": "page_needs_kind_check",
+          "value": "\"page_needs\".\"kind\" in ('render', 'folder', 'json')"
         }
       }
     },
@@ -2439,54 +2491,6 @@
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "render_paths": {
-      "name": "render_paths",
-      "columns": {
-        "sha256": {
-          "name": "sha256",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "folder": {
-          "name": "folder",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "path": {
-          "name": "path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "inline": {
-          "name": "inline",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "render_paths_sha256_folder_path_inline_pk": {
-          "columns": [
-            "sha256",
-            "folder",
-            "path",
-            "inline"
-          ],
-          "name": "render_paths_sha256_folder_path_inline_pk"
-        }
-      },
       "uniqueConstraints": {},
       "checkConstraints": {}
     },

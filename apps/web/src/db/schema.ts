@@ -944,28 +944,30 @@ export const seenBy = sqliteTable(
 )
 
 /**
- * What an HTML file renders with, by its bytes and the folder it is read
- * from: the tree paths a page shared on its own carries. Written by pushes.
+ * What each page of a tree carries now, by tree path: the files it and its
+ * layouts render with, and its forms' targets. Rewritten whole by every
+ * push, inside its batch; the read rule joins it.
  */
-export const renderPaths = sqliteTable(
-  'render_paths',
+export const pageNeeds = sqliteTable(
+  'page_needs',
   {
-    sha256: text('sha256').notNull(),
-    /** The folder the file's URLs resolve from, '' for the root. */
-    folder: text('folder').notNull(),
-    /** A tree path; a folder's ends with '/'. */
-    path: text('path').notNull(),
-    /** Named in an inline style or module script. */
-    inline: integer('inline', { mode: 'boolean' }).notNull(),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    pagePath: text('page_path').notNull(),
+    needPath: text('need_path').notNull(),
+    /** 'render', or 'folder' and 'json' for a form's target. */
+    kind: text('kind').notNull(),
   },
-  (t) => [primaryKey({ columns: [t.sha256, t.folder, t.path, t.inline] })],
+  (t) => [
+    primaryKey({ columns: [t.treeId, t.pagePath, t.needPath, t.kind] }),
+    index('page_needs_need_idx').on(t.treeId, t.needPath),
+    check(
+      'page_needs_kind_check',
+      sql`${t.kind} in ('render', 'folder', 'json')`,
+    ),
+  ],
 )
-
-/** Whether an HTML file's bytes are a complete document, for the read rule. */
-export const htmlFiles = sqliteTable('html_files', {
-  sha256: text('sha256').primaryKey(),
-  complete: integer('complete', { mode: 'boolean' }).notNull(),
-})
 
 /** Views of public pages, counted per UTC day. */
 export const pageViews = sqliteTable(

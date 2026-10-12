@@ -946,9 +946,9 @@ export const PagesLive: Layer.Layer<
             const page = resolved.kind === 'page'
             // Public pages count views: one per load, never a renewal.
             const counted = page && !renewal && (yield* isPublic(resolved.node))
-            const seen = [
-              // Seen by moves at most once an hour per person and page.
-              ...(page && person !== null
+            // Seen by moves at most once an hour per person and page.
+            const seen =
+              page && person !== null
                 ? [
                     DB.prepare(
                       `insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?)
@@ -956,21 +956,24 @@ export const PagesLive: Layer.Layer<
                      where seen_by.last_seen_at < excluded.last_seen_at - ?`,
                     ).bind(resolved.node.id, person.id, now, HOUR),
                   ]
-                : []),
-              ...(counted
-                ? [
-                    DB.prepare(
-                      `insert into page_views (node_id, day, count) values (?, ?, 1)
-                       on conflict (node_id, day) do update set count = count + 1`,
-                    ).bind(
-                      resolved.node.id,
-                      new Date(now).toISOString().slice(0, 10),
-                    ),
-                  ]
-                : []),
-            ]
+                : []
             const h = yield* issue(owner, tree, seq, nodeIds, seen)
             if (h.moved) continue
+            // Counted once the view stands, so a view that started again
+            // counts once.
+            if (counted) {
+              yield* query(() =>
+                DB.prepare(
+                  `insert into page_views (node_id, day, count) values (?, ?, 1)
+                   on conflict (node_id, day) do update set count = count + 1`,
+                )
+                  .bind(
+                    resolved.node.id,
+                    new Date(now).toISOString().slice(0, 10),
+                  )
+                  .run(),
+              )
+            }
             return {
               handle: h.handle,
               expiresAt: new Date(h.expiresAt).toISOString(),

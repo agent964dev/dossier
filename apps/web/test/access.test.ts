@@ -5,7 +5,6 @@ import { Effect, FastCheck as fc } from 'effect'
 import { analyze, ANALYZER_VERSION } from '@dossier/html'
 import { describe, expect, it } from 'vitest'
 
-import { renderPathsOf } from '../src/core/page-needs.ts'
 import { db, schema } from '../src/db/client.ts'
 import {
   Access,
@@ -587,23 +586,18 @@ const plantTree = async (
         `insert into analyses (sha256, analyzer, version, json, created_at)
          values (?, 'html', ?, ?, ?)`,
       ).bind(sha, ANALYZER_VERSION, JSON.stringify(analyze(page.html)), now),
-      env.DB.prepare(
-        'insert into html_files (sha256, complete) values (?, ?) on conflict do nothing',
-      ).bind(sha, analyze(page.html).complete ? 1 : 0),
-      // What it renders with, as a push records it.
-      ...renderPathsOf(
-        analyze(page.html),
-        path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '',
-      ).map((r) =>
+      // What the page carries, as a push records it.
+      ...[
+        ...page.needs.map((need) => ({ need, kind: 'render' })),
+        ...page.targets.map((t) => ({
+          need: t.path,
+          kind: t.kind === 'shared' ? 'json' : 'folder',
+        })),
+      ].map(({ need, kind }) =>
         env.DB.prepare(
-          `insert into render_paths (sha256, folder, path, inline)
+          `insert into page_needs (tree_id, page_path, need_path, kind)
            values (?, ?, ?, ?) on conflict do nothing`,
-        ).bind(
-          sha,
-          path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '',
-          r.path,
-          r.inline ? 1 : 0,
-        ),
+        ).bind(treeId, path, need, kind),
       ),
       ...page.targets.map((target) =>
         env.DB.prepare(
@@ -791,7 +785,11 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
     const first = path.split('/').findIndex((name) => name.startsWith('_'))
     if (first < 0 || origin(path) !== 'authored') continue
     const from = path.split('/').slice(0, first).join('/')
-    if (all.some((other) => isUnder(other, from) && direct(other))) {
+    // Reach starts from any authored node the caller reads by a grant or
+    // through what a page share carries, never from data.
+    const reaches = (other: string) =>
+      direct(other) || (origin(other) === 'authored' && throughPages(other))
+    if (all.some((other) => isUnder(other, from) && reaches(other))) {
       readable.add(path)
     }
   }
@@ -1748,6 +1746,9 @@ describe('the list check', () => {
       'a/b/c.html',
       'a/d.txt',
       'e.comments/m.json',
+      // Reached from f/g.txt, which the page carries.
+      'f/_old',
+      'f/_old/_z.txt',
       'f/g.txt',
     ])
   })
@@ -1901,4 +1902,30 @@ describe('the list check', () => {
     // Eighty trees against real D1 take most of the default timeout when the
     // workspace's suites run in parallel.
   }, 90_000)
+})
+
+describe('what a shared page renders with, as the link route reads it', () => {
+  it('takes the page of a name over a file of the same name', async () => {
+    const admin = await person('admin')
+    const ws = await workspace(admin)
+    const outsider = await person('outsider')
+    const pushed = await pushAll(await agent(admin), `${ws.name}/embeds`, {
+      'host.html':
+        '<!doctype html><title>Host</title><iframe src="embed"></iframe>',
+      'embed.html': '<!doctype html><title>Embed page</title>',
+      embed: 'the file named embed',
+    })
+    if (!('treeId' in pushed)) throw new Error('no tree')
+    await share(
+      pushed.treeId,
+      (await nodeAt(pushed.treeId, 'host.html'))!.id,
+      'email',
+      outsider.email,
+      'read',
+      admin,
+    )
+    const reader = await agent(outsider)
+    expect(await attempt(reader, `${ws.name}/embeds/embed.html`)).toBe('ok')
+    expect(await attempt(reader, `${ws.name}/embeds/embed`)).toBe('not_found')
+  })
 })

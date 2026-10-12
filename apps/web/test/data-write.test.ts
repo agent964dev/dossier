@@ -740,3 +740,35 @@ describe('a read', () => {
     expect(await read('nowhere/')).toEqual({ files: [] })
   })
 })
+
+describe('a respondent through a page share alone', () => {
+  it('writes the first value of a shared file the page’s form targets, and reads it back', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const who = await person('page-respondent')
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'status.html'))!.id,
+      'email',
+      who.email.toLowerCase(),
+      'respond',
+      owner,
+    )
+    const caller = await sessionFor(who)
+    const doc = await writeAs(caller, tree, {
+      page: 'status.html',
+      path: 'status.json',
+      patch: { state: 'open' },
+    })
+    expect(doc.data).toEqual({ state: 'open' })
+    expect((await liveValue(tree.treeId, 'status.json'))?.value).toEqual({
+      state: 'open',
+    })
+    // A file no form of the page writes stays out of reach, as if missing.
+    const refused = await writeFailure(caller, tree, {
+      page: 'status.html',
+      path: 'other.json',
+      patch: { state: 'open' },
+    })
+    expect(refused.code).toBe('not_found')
+  })
+})

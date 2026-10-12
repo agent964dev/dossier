@@ -1493,6 +1493,40 @@ export const DataLive: Layer.Layer<
 
     /** The forms in the tree as it stands that send to a target. */
     /** Every form of the tree as it stands now. */
+    /**
+     * The forms of a page as it is now, its own and its composed layouts',
+     * whose answers hold the path: under a folder target, a shared file, or
+     * a shared file's uploads.
+     */
+    const formsHolding = (
+      tree: TreeRow,
+      page: { readonly node: NodeRow; readonly version: VersionRow },
+      path: string,
+    ) =>
+      Effect.gen(function* () {
+        const hosts = yield* hostsOf(
+          tree,
+          page,
+          tree.authoredSeq as AuthoredSeq,
+        )
+        const held = []
+        for (const host of hosts) {
+          for (const row of yield* store.forms({
+            hostVersionId: host.version.id,
+          })) {
+            const holds =
+              row.kind === 'shared'
+                ? row.targetPath === path ||
+                  path.startsWith(
+                    `${row.targetPath.replace(/\.json$/i, '')}.files/`,
+                  )
+                : path.startsWith(row.targetPath)
+            if (holds) held.push(row)
+          }
+        }
+        return held
+      })
+
     const currentForms = (treeId: TreeId) =>
       query(() =>
         DB.prepare(
@@ -1716,7 +1750,21 @@ export const DataLive: Layer.Layer<
             if (above === null || above.kind !== 'folder') {
               return yield* Effect.fail(forbidden(path))
             }
-            under = yield* access.require('respond', above)
+            const onFolder = yield* access
+              .require('respond', above)
+              .pipe(Effect.either)
+            if (onFolder._tag === 'Right') {
+              under = onFolder.right
+            } else {
+              // A respondent through the page alone answers where a form of
+              // the page, or of a layout composed into it, writes.
+              const page = yield* store.fileAt(tree.id, i.page)
+              const writesHere =
+                page !== null &&
+                (yield* formsHolding(tree, page, path)).length > 0
+              if (!writesHere) return yield* Effect.fail(onFolder.left)
+              under = yield* access.require('respond', page.node)
+            }
           }
           // Every form whose answers hold this path: under a folder target at
           // any depth, a shared file, or a shared file's uploads.

@@ -43,6 +43,7 @@ import { openCursor, sealCursor } from './cursors.ts'
 import { callerRefOf, callersCte, visibleEventSql } from './event-visibility.ts'
 import { newId, newTreeId } from './ids.ts'
 import { bytesText, Limits } from './limits.ts'
+import type { PageNeed } from './page-needs.ts'
 import {
   analysisOf,
   lookupUnderscore,
@@ -260,6 +261,15 @@ export interface ChangeSet {
    */
   readonly revoke: (on: Granted<'share'>, shareId: ShareId) => void
   /**
+   * Removes whatever share the target holds on the node when the batch
+   * runs, closing sockets as `revoke` does: a share another change made
+   * since it was read goes too.
+   */
+  readonly revokeTarget: (
+    on: Granted<'share'>,
+    target: Omit<NewShare, 'role'>,
+  ) => void
+  /**
    * A data folder or file at `node.path`; folders missing on the way are
    * created as data folders nobody owns. `under` is what the writer holds.
    */
@@ -303,6 +313,8 @@ export interface ChangeSet {
   readonly operation: (op: NewOperation) => void
   /** The forms the push staged, for the versions it leaves current. */
   readonly putForms: (pushId: PushId) => void
+  /** What every page of the tree carries now, replacing what was there. */
+  readonly putPageNeeds: (needs: readonly PageNeed[]) => void
   /** Required: a change with no event never commits. */
   readonly event: (e: NewEvent) => void
 }
@@ -1804,6 +1816,14 @@ export const TreeStoreLive: Layer.Layer<
             const t = tid()
             if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
             const node = nodeIdSql(on, t)
+            // A team deleted since the share was asked for gets nothing.
+            if (share.targetKind === 'team') {
+              stateGuards.push({
+                sql: `exists (select 1 from teams tt join trees tr on tr.workspace_id = tt.workspace_id
+                        where tt.id = ? and tr.id = ?)`,
+                binds: [share.target, t],
+              })
+            }
             writes.push(
               {
                 // A role changed in place is lost access for its target
@@ -1879,6 +1899,37 @@ export const TreeStoreLive: Layer.Layer<
               {
                 sql: 'delete from shares where id = ? and node_id = ?',
                 binds: [shareId, on.id],
+              },
+            )
+          },
+
+          revokeTarget: (on, target) => {
+            bases.push(everyBasis(on.basis, person.id))
+            writes.push(
+              {
+                // Read before the row goes: whose sockets to close.
+                sql: `select s.target_kind as kind,
+                        (select u.id from "user" u where lower(u.email) = s.target) as person
+                      from shares s where s.node_id = ? and s.target_kind = ? and s.target = ?`,
+                binds: [on.id, target.targetKind, target.target],
+                rows: (rows) => {
+                  for (const row of rows as {
+                    kind: string
+                    person: PersonId | null
+                  }[]) {
+                    closing.push(
+                      row.kind === 'email'
+                        ? row.person === null
+                          ? null
+                          : { people: [row.person] }
+                        : { all: true },
+                    )
+                  }
+                },
+              },
+              {
+                sql: 'delete from shares where node_id = ? and target_kind = ? and target = ?',
+                binds: [on.id, target.targetKind, target.target],
               },
             )
           },
@@ -2174,6 +2225,23 @@ export const TreeStoreLive: Layer.Layer<
                 now,
               ],
             })
+          },
+
+          putPageNeeds: (needs) => {
+            const t = tid()
+            writes.push({
+              sql: 'delete from page_needs where tree_id = ?',
+              binds: [t],
+            })
+            for (let at = 0; at < needs.length; at += 200) {
+              writes.push({
+                sql: `insert into page_needs (tree_id, page_path, need_path, kind)
+                      select ?, json_extract(j.value, '$.page'), json_extract(j.value, '$.need'),
+                        json_extract(j.value, '$.kind')
+                      from json_each(?) j where true on conflict do nothing`,
+                binds: [t, JSON.stringify(needs.slice(at, at + 200))],
+              })
+            }
           },
 
           putForms: (pushId) => {

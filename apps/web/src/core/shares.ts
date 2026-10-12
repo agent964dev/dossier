@@ -394,7 +394,9 @@ export const SharesLive: Layer.Layer<
           yield* store
             .change(tree.id, (cs) =>
               Effect.sync(() => {
-                if (existing !== undefined) cs.revoke(node, existing.id)
+                // Whatever the target holds when the batch runs goes, so a
+                // share another change made meanwhile never outlives this one.
+                cs.revokeTarget(node, wanted)
                 if (role !== null) {
                   cs.grant(node, { ...wanted, role })
                 }

@@ -5,7 +5,13 @@ import { Effect, TestClock, TestContext } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { Push, Shares, type Role } from '../src/core/index.ts'
-import { count, exec, failingStatements, rows } from './support/d1.ts'
+import {
+  beforeBatch,
+  count,
+  exec,
+  failingStatements,
+  rows,
+} from './support/d1.ts'
 import { harness, ORIGIN, testRuntime } from './support/harness.ts'
 import { keySecretFor } from './support/keys.ts'
 import { runAs } from './support/people.ts'
@@ -639,5 +645,72 @@ describe('shared with me', () => {
       'shared/': false,
       'read/': false,
     })
+  })
+})
+
+describe('races around a share', () => {
+  it('removes the target’s share even when another change replaced it after it was read', async () => {
+    const w = await world()
+    const path = `${w.ws.name}/acme/questions/`
+    const target = { kind: 'email', email: w.sara.email } as const
+    await setAs(w.adminAgent, path, target, 'read')
+    // Between the read and the batch, someone else gives Sara write.
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => /delete from shares/i.test(sql),
+            async () => {
+              await exec(
+                "delete from shares where tree_id = ? and target_kind = 'email' and target = ?",
+                w.treeId,
+                w.sara.email.toLowerCase(),
+              )
+              await share(
+                w.treeId,
+                await w.node('questions'),
+                'email',
+                w.sara.email.toLowerCase(),
+                'write',
+                w.admin,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    await setAs(w.adminAgent, path, target, null)
+    harness.reset()
+    expect(
+      await count(
+        'shares',
+        "tree_id = ? and target_kind = 'email' and target = ?",
+        w.treeId,
+        w.sara.email.toLowerCase(),
+      ),
+    ).toBe(0)
+  })
+
+  it('grants nothing to a team deleted between a push’s stage and its commit', async () => {
+    const admin = await person('admin')
+    const ws = await workspace(admin)
+    const adminAgent = await agent(admin)
+    const sales = await team(ws, 'Sales', [])
+    const files = { 'index.html': '<title>Home</title>' }
+    const staged = await stage(adminAgent, `${ws.name}/t`, files, {
+      share: [{ target: { kind: 'team', team: 'Sales' }, role: 'read' }],
+    })
+    if (staged.pushId === null) throw new Error('nothing staged')
+    await upload(adminAgent, staged.pushId, files, staged.missing)
+    await exec('delete from teams where id = ?', sales.id)
+    const failed = await failureAs(
+      adminAgent,
+      Effect.flatMap(Push, (push) => push.commit(staged.pushId!)),
+    )
+    expect(failed.code).toBe('conflict')
+    expect(
+      await count('shares', "target_kind = 'team' and target = ?", sales.id),
+    ).toBe(0)
   })
 })
