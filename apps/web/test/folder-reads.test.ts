@@ -99,6 +99,13 @@ describe('the kit folder', () => {
       expect(read.right.entries.map((e) => e.path)).toEqual(
         listed.entries.map((e) => e.path),
       )
+      // What the agent reads names the files ls lists.
+      for (const entry of listed.entries) {
+        expect(read.right.text).toContain(entry.name)
+      }
+      if (listed.entries.length === 0) {
+        expect(read.right.text).toBe('Nothing here yet.\n')
+      }
       const opened = await runAs(
         caller,
         Effect.flatMap(Pages, (pages) =>

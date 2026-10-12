@@ -234,12 +234,15 @@ export const folderText = (i: {
   readonly kit: readonly KitItemWire[] | null
   readonly now: number
 }): string => {
-  const shown = i.entries.filter((entry) => entry.kind !== 'kit')
+  // Inside a `_` folder its files are the kit's, listed as ls lists them
+  // (only write holders get them); elsewhere the kit has its own section.
+  const inKit = i.path.split('/').some((s) => s.startsWith('_'))
+  const shown = i.entries.filter((entry) => inKit || entry.kind !== 'kit')
   if (shown.length === 0) return 'Nothing here yet.\n'
   const sections: [string, Entry['kind'][]][] = [
     ['Pages', ['page']],
     ['Folders', ['folder']],
-    ['Files', ['attachment']],
+    ['Files', ['attachment', 'kit']],
     ['Data', ['data']],
   ]
   const out = [`# ${folderTitle(i.tree, i.path)}`]
