@@ -58,6 +58,7 @@ describe('CLI 0.2.x', () => {
         ...(method === 'POST' ? { body: '<p>a page</p>' } : {}),
       })
       expect(response.status, what).toBe(404)
+      expect(response.statusText, what).toBe('Not Found')
       expect(response.headers.get('content-type'), what).toContain(
         'application/json',
       )
@@ -92,6 +93,7 @@ describe('CLI 0.2.x', () => {
         headers: { authorization: 'Bearer ds_x' },
       })
       expect(response.status, path).toBe(410)
+      expect(response.statusText, path).toBe('Gone')
       expect(await response.json(), path).toEqual(UPGRADE_BODY)
       expectLegacyHeaders(response, path)
     }

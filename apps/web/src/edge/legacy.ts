@@ -56,6 +56,7 @@ export const legacyResponse = (request: Request): Response => {
   if (cli && request.method === 'GET' && wantsHtml(request)) {
     return new Response(UPGRADE_PAGE, {
       status: 404,
+      statusText: 'Not Found',
       headers: {
         ...HEADERS,
         'content-type': 'text/html; charset=utf-8',
@@ -64,8 +65,11 @@ export const legacyResponse = (request: Request): Response => {
       },
     })
   }
+  // CLI 0.2.x prints the status and its text before the message.
+  const gone = !cli && !under(pathname, '/api')
   return new Response(BODY, {
-    status: cli || under(pathname, '/api') ? 404 : 410,
+    status: gone ? 410 : 404,
+    statusText: gone ? 'Gone' : 'Not Found',
     headers: { ...HEADERS, 'content-type': 'application/json' },
   })
 }
