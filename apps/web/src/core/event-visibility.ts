@@ -86,6 +86,15 @@ export const meetsSql = (a: SQL, b: SQL): SQL => {
  * there, or it is a push and a node it versioned is readable there, or it has
  * no node and the folder its path lies in is readable. A push of a folder
  * above what someone reads is seen through what it changed there.
+ *
+ * The path the event recorded must also be one the caller sees now, as the
+ * history requires of its lines: where the node they read stands now or a
+ * folder above it, or else a place whose nearest live node they read. So an
+ * event of a node that moved names an old place only to readers of that
+ * place. The first two checks answer 1 when the node read still stands at
+ * or below the recorded path, 0 when it has moved elsewhere since, and NULL
+ * when the caller reads none of it; only a 0 (or a node-less event) asks
+ * about the nearest node, and the read rule is written three times as before.
  */
 export const visibleEventSql = (
   treeId: TreeId,
@@ -94,15 +103,20 @@ export const visibleEventSql = (
 ): SQL => {
   const read = readableOn(treeId, workspaceId, csFacts)(nodeColumn)
   const at = (p: SQL) => sql`(${path} is null or ${meetsSql(p, path)})`
-  return sql`(exists (select 1 from nodes where nodes.id = e.node_id and ${read}
-        and ${at(sql`e.path`)})
-    or (e.type = 'push' and e.push_id is not null and exists (
-        select 1 from node_versions v join nodes on nodes.id = v.node_id
-        where v.push_id = e.push_id and ${read} and ${at(sql`nodes.path`)}))
-    or (e.node_id is null and ${at(sql`e.path`)} and coalesce((
+  const stands = underColumn(sql`nodes.path`, sql`e.path`)
+  return sql`(case coalesce(
+      (select ${stands} from nodes where nodes.id = e.node_id and ${read}
+        and ${at(sql`e.path`)}),
+      (case when e.type = 'push' and e.push_id is not null then (
+        select max(${stands}) from node_versions v join nodes on nodes.id = v.node_id
+        where v.push_id = e.push_id and ${read} and ${at(sql`nodes.path`)}) end),
+      (case when e.node_id is null and ${at(sql`e.path`)} then 0 end))
+    when 1 then 1
+    when 0 then coalesce((
         select case when ${read} then 1 else 0 end from nodes
         where nodes.tree_id = ${treeId} and nodes.deleted_at is null
-          and (nodes.path = ''
+          and (nodes.path = '' or nodes.path = e.path
             or substr(e.path, 1, length(nodes.path) + 1) = nodes.path || '/')
-        order by nodes.depth desc limit 1), 0) = 1))`
+        order by nodes.depth desc limit 1), 0)
+    else 0 end) = 1`
 }
