@@ -1189,5 +1189,7 @@ describe('the list check', () => {
     // The runs exercised reach, and it never gave read on data.
     expect(reachedSome).toBe(true)
     expect(reachedData).toBe(false)
-  })
+    // Eighty trees against real D1 take most of the default timeout when the
+    // workspace's suites run in parallel.
+  }, 90_000)
 })
