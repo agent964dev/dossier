@@ -275,6 +275,8 @@ export const workspaceMembers = sqliteTable(
       .references(() => user.id, { onDelete: 'cascade' }),
     role: text('role').notNull(),
     createdAt: integer('created_at').notNull(),
+    /** Set by a trigger from grant_clock when the row is written or its role changes. */
+    grantOrder: integer('grant_order'),
   },
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.userId] }),
@@ -574,6 +576,8 @@ export const shares = sqliteTable(
       .notNull()
       .references(() => user.id),
     createdAt: integer('created_at').notNull(),
+    /** Set by a trigger from grant_clock when the row is written or its role changes. */
+    grantOrder: integer('grant_order'),
   },
   (t) => [
     uniqueIndex('shares_node_target_unique').on(
@@ -710,6 +714,36 @@ export const viewHandleNodes = sqliteTable(
     createdAt: integer('created_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.handleHash, t.seq, t.nodeId] })],
+)
+
+/**
+ * When a sequence was first issued to a handle, in grant order: grants with
+ * an order at or below it existed then. Written once, never moved.
+ */
+export const viewHandleFirsts = sqliteTable(
+  'view_handle_firsts',
+  {
+    handleHash: text('handle_hash')
+      .notNull()
+      .references(() => viewHandles.hashSha256, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    grantOrder: integer('grant_order').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.handleHash, t.seq] })],
+)
+
+/**
+ * One row counting grant writes in commit order. Triggers on shares and
+ * workspace members move it in the transaction that writes the grant.
+ */
+export const grantClock = sqliteTable(
+  'grant_clock',
+  {
+    id: integer('id').primaryKey(),
+    value: integer('value').notNull(),
+  },
+  (t) => [check('grant_clock_one_row', sql`${t.id} = 1`)],
 )
 
 /** Who opened a page, and about when they last did. */

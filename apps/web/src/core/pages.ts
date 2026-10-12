@@ -640,6 +640,11 @@ export const PagesLive: Layer.Layer<
                                  where hash_sha256 = ?1 and expires_at <= ?2)`,
                 ).bind(row.hash, now),
                 DB.prepare(
+                  `delete from view_handle_firsts where handle_hash = ?1
+                     and exists (select 1 from view_handles
+                                 where hash_sha256 = ?1 and expires_at <= ?2)`,
+                ).bind(row.hash, now),
+                DB.prepare(
                   'delete from view_handles where hash_sha256 = ? and expires_at <= ?',
                 ).bind(row.hash, now),
               )
@@ -662,6 +667,17 @@ export const PagesLive: Layer.Layer<
               ),
             )
           }
+          // The first issuance of this sequence to the handle, in grant
+          // order, under the same conditions as the nodes; never moved.
+          statements.push(
+            DB.prepare(
+              `insert into view_handle_firsts (handle_hash, seq, grant_order, created_at)
+               select ?1, ?2, (select value from grant_clock where id = 1), ?3 where exists
+                 (select 1 from view_handles where hash_sha256 = ?1 and expires_at > ?3)
+                 and (select authored_seq from trees where id = ?4) = ?2
+               on conflict do nothing`,
+            ).bind(hash, seq, now, tree.id),
+          )
           for (const nodeId of nodeIds) {
             statements.push(
               DB.prepare(
@@ -861,16 +877,19 @@ export const PagesLive: Layer.Layer<
      * read through a grant held when the sequence was first issued to this
      * handle, or one the caller writes: history is for write holders.
      */
-    /** When a view first issued this sequence to the handle, or null. */
+    /**
+     * The grant order when a view first issued this sequence to the handle,
+     * or null when none did: written once, in the issuing batch.
+     */
     const firstIssued = (handleHash: string, seq: AuthoredSeq) =>
       query(() =>
         DB.prepare(
-          `select min(created_at) as at from view_handle_nodes
+          `select grant_order as grantOrder from view_handle_firsts
            where handle_hash = ? and seq = ?`,
         )
           .bind(handleHash, seq)
-          .first<{ at: number | null }>(),
-      ).pipe(Effect.map((row) => row?.at ?? null))
+          .first<{ grantOrder: number }>(),
+      ).pipe(Effect.map((row) => row?.grantOrder ?? null))
 
     const opensAt = (
       handleHash: string,

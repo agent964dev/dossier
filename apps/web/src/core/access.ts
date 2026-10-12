@@ -119,13 +119,15 @@ export interface AccessService {
   ) => Effect.Effect<RoleSet, never, CurrentCaller>
   /**
    * Whether the caller reads the node now through grants that already
-   * existed at `at` (epoch ms): shares, and the workspace standing behind a
-   * workspace share or an admin's write, created no later than then. A grant
-   * made after `at`, or removed and made again, does not count.
+   * existed at grant order `order`: shares, and the workspace standing
+   * behind a workspace share or an admin's write, written (or last given a
+   * new role) at or before it. Orders follow commits (`grant_clock`), so a
+   * grant committed later never counts, whatever its request's clock said;
+   * one removed and made again, or changed in role, counts as new.
    */
   readonly readsAsOf: (
     node: NodeRow,
-    at: number,
+    order: number,
   ) => Effect.Effect<boolean, never, CurrentCaller>
   /** Agrees with require('read') on every node of the tree. */
   readonly readable: (
@@ -257,7 +259,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           `select t.workspace_id as workspaceId,
              (select role from workspace_members m
                where m.workspace_id = t.workspace_id and m.user_id = ?2
-                 and (?3 is null or m.created_at <= ?3)) as memberRole
+                 and (?3 is null or m.grant_order <= ?3)) as memberRole
            from trees t join workspaces w on w.id = t.workspace_id
            where t.id = ?1 and t.deleted_at is null and w.deleted_at is null`,
         )
@@ -265,7 +267,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           .first<TreeFacts>(),
       )
 
-    /** The caller's roles on a node, counting only grants made by `asOf`. */
+    /** The caller's roles on a node, counting only grants at or below order `asOf`. */
     const roleAt = (node: NodeRow, asOf: number | null) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
@@ -301,7 +303,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                 DB.prepare(
                   `select id, target_kind as targetKind, target, role from shares
                    where node_id in (${ids.map(() => '?').join(', ')})
-                     and (? is null or created_at <= ?)`,
+                     and (? is null or grant_order <= ?)`,
                 )
                   .bind(...ids, asOf, asOf)
                   .all<{
@@ -430,7 +432,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               and (s.target_kind = 'anyone'
                 or (s.target_kind = 'email' and s.target = ${email})
                 or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1))
-              and ${asOf === null ? sql`1` : sql`s.created_at <= ${asOf}`}
+              and ${asOf === null ? sql`1` : sql`s.grant_order <= ${asOf}`}
               and ${underColumn(column('path'), sql`a.path`)}
               and (s.role <> 'respond' or ${column('origin')} = 'authored'))`
         }
@@ -470,16 +472,16 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           : ({ kind: 'reach', from: split.from } satisfies Basis)
       })
 
-    const readsAsOf = (node: NodeRow, at: number) =>
+    const readsAsOf = (node: NodeRow, order: number) =>
       Effect.gen(function* () {
-        const roles = yield* roleAt(node, at)
+        const roles = yield* roleAt(node, order)
         if (
           roles.caps.has('read') ||
           (roles.caps.has('read-authored') && node.origin === 'authored')
         ) {
           return true
         }
-        return (yield* reached(node, at)) !== null
+        return (yield* reached(node, order)) !== null
       })
 
     const readable = (treeId: TreeId) =>

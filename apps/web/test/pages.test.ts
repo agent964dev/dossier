@@ -19,6 +19,7 @@ import { callerOf, fresh, run, runAs } from './support/people.ts'
 import {
   agent,
   failureAs,
+  join,
   nodeAt,
   pushAll,
   ref,
@@ -895,6 +896,178 @@ describe('what a handle may recover', () => {
 
     const kept = await atTime(frame(a.handle, w.treeId, a.seq, 'lazy.js'))
     expect(kept).toMatchObject({ kind: 'file' })
+    expect(await atTime(frame(b.handle, w.treeId, b.seq, 'lazy.js'))).toBe(
+      'not_found',
+    )
+  })
+
+  it('never counts a grant committed after a later push, whatever time it carries', async () => {
+    const w = await world()
+    const page = {
+      'module.html':
+        '<!doctype html><title>Module</title><script type="module">import("./lazy.js")</script>',
+      'lazy.js': 'export const v = 1',
+    }
+    await w.repush(page)
+    const root = (await nodeAt(w.treeId, ''))!
+    const moduleNode = (await nodeAt(w.treeId, 'module.html'))!
+    const { caller: reader } = await someone()
+    await share(
+      w.treeId,
+      moduleNode.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const startedAt = Date.now()
+    const grant = await atTime(view(reader, w.treeId, 'module'))
+    await w.repush({ ...page, 'lazy.js': 'export const v = 2' })
+    // A share whose request began before the view commits only now, with
+    // the time it took at its start.
+    await exec(
+      `insert into shares (id, tree_id, node_id, target_kind, target, role, created_by, created_at)
+       values (?, ?, ?, 'email', ?, 'read', ?, ?)`,
+      crypto.randomUUID(),
+      w.treeId,
+      root.id,
+      reader.person!.email,
+      w.owner.person!.id,
+      startedAt - 1000,
+    )
+    expect(
+      await atTime(frame(grant.handle, w.treeId, grant.seq, 'lazy.js')),
+    ).toBe('not_found')
+  })
+
+  it('keeps the first issuance of a sequence when a slower view of it commits later', async () => {
+    const w = await world()
+    const page = {
+      'module.html':
+        '<!doctype html><title>Module</title><script type="module">import("./lazy.js")</script>',
+      'lazy.js': 'export const v = 1',
+    }
+    await w.repush(page)
+    const root = (await nodeAt(w.treeId, ''))!
+    const moduleNode = (await nodeAt(w.treeId, 'module.html'))!
+    const plan = (await nodeAt(w.treeId, 'plan.html'))!
+    const { caller: reader } = await someone()
+    await share(
+      w.treeId,
+      plan.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    await share(
+      w.treeId,
+      moduleNode.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const slowAt = Date.now()
+    let fast: { handle: string; seq: number } | null = null
+    // A slow view reads the clock and pauses; meanwhile the reader is given
+    // the tree and a faster view in another tab, of another page, issues the same
+    // sequence first.
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (query) => /insert into view_handle_nodes/.test(query),
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 5))
+              await share(
+                w.treeId,
+                root.id,
+                'email',
+                reader.person!.email,
+                'read',
+                w.owner.person!,
+              )
+              await new Promise((resolve) => setTimeout(resolve, 5))
+              fast = await run(
+                Effect.gen(function* () {
+                  yield* TestClock.setTime(Date.now())
+                  return yield* view(reader, w.treeId, 'plan')
+                }).pipe(Effect.provide(TestContext.TestContext)),
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const slow = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(slowAt)
+        return yield* view(reader, w.treeId, 'module')
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    )
+    harness.reset()
+    expect(fast).not.toBeNull()
+    expect(slow.handle).toBe(fast!.handle)
+    await w.repush({ ...page, 'lazy.js': 'export const v = 2' })
+    // The tree share existed when the sequence was first issued.
+    expect(
+      await atTime(frame(slow.handle, w.treeId, slow.seq, 'lazy.js')),
+    ).toMatchObject({ kind: 'file' })
+  })
+
+  it('counts a share whose role changed after the view, and a membership joined after it, as new', async () => {
+    const w = await world()
+    const page = {
+      'module.html':
+        '<!doctype html><title>Module</title><script type="module">import("./lazy.js")</script>',
+      'lazy.js': 'export const v = 1',
+    }
+    await w.repush(page)
+    const root = (await nodeAt(w.treeId, ''))!
+    const moduleNode = (await nodeAt(w.treeId, 'module.html'))!
+    // One reader's tree share changes role in place after the view.
+    const { caller: changed } = await someone()
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      changed.person!.email,
+      'respond',
+      w.owner.person!,
+    )
+    // Another reaches the tree through a workspace share, but joins the
+    // workspace only after the view.
+    const { caller: joiner } = await someone()
+    await share(
+      w.treeId,
+      moduleNode.id,
+      'email',
+      joiner.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    await share(
+      w.treeId,
+      root.id,
+      'workspace',
+      w.ws.id,
+      'read',
+      w.owner.person!,
+    )
+    const a = await atTime(view(changed, w.treeId, 'module'))
+    const b = await atTime(view(joiner, w.treeId, 'module'))
+    await exec(
+      `update shares set role = 'read' where node_id = ? and target = ?`,
+      root.id,
+      changed.person!.email,
+    )
+    await join(w.ws, joiner.person!)
+    await w.repush({ ...page, 'lazy.js': 'export const v = 2' })
+    expect(await atTime(frame(a.handle, w.treeId, a.seq, 'lazy.js'))).toBe(
+      'not_found',
+    )
     expect(await atTime(frame(b.handle, w.treeId, b.seq, 'lazy.js'))).toBe(
       'not_found',
     )
