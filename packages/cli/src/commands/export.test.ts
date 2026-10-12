@@ -179,6 +179,14 @@ describe('dossier export', () => {
     expect(await filesIn(cli.dir)).toEqual(['elsewhere', 'out'])
   })
 
+  it('saves a file whose name is as long as the file system allows', async () => {
+    const name = `${'n'.repeat(250)}.html`
+    const cli = await setUp(() => exported([PAGE]))
+    expect(await cli.run(['export', 'agent964/acme/plan', '-o', name])).toBe(0)
+    expect(await readFile(join(cli.dir, name), 'utf8')).toBe(PAGE)
+    expect(await filesIn(cli.dir)).toEqual([name])
+  })
+
   it('streams a large answer to disk and gives its size', async () => {
     const chunk = new Uint8Array(100_000).fill(0x61)
     const cli = await setUp(() => exported(Array(23).fill(chunk)))

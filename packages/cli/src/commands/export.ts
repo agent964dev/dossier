@@ -133,7 +133,9 @@ const saveStream = async (
   }
   signal.addEventListener('abort', stop, { once: true })
   const folder = dirname(path)
-  const temporary = join(folder, `.${basename(path)}.${randomUUID()}.tmp`)
+  // A short name of its own: the saved name may already be as long as a
+  // file name can be.
+  const temporary = join(folder, `.dossier-export-${randomUUID()}.tmp`)
   let bytes = 0
   let saved = false
   try {
