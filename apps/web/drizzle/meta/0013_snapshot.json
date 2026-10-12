@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "bff67415-d694-4a36-88f8-d86d2221be56",
+  "id": "b583a2e1-bace-43ce-a96d-7de18e5ecc51",
   "prevId": "ddce9c1e-bd45-4e92-8fc3-3f7df658d692",
   "tables": {
     "account": {
@@ -532,6 +532,10 @@
         "change_guard_admins": {
           "name": "change_guard_admins",
           "value": "\"change_guards\".\"reason\" <> 'admins' or \"change_guards\".\"ok\" = 1"
+        },
+        "change_guard_storage": {
+          "name": "change_guard_storage",
+          "value": "\"change_guards\".\"reason\" <> 'storage' or \"change_guards\".\"ok\" = 1"
         }
       }
     },

@@ -78,7 +78,8 @@ CREATE TABLE `__new_change_guards` (
 	CONSTRAINT "change_guard_state" CHECK("__new_change_guards"."reason" <> 'state' or "__new_change_guards"."ok" = 1),
 	CONSTRAINT "change_guard_mergeable" CHECK("__new_change_guards"."reason" <> 'mergeable' or "__new_change_guards"."ok" = 1),
 	CONSTRAINT "change_guard_size" CHECK("__new_change_guards"."reason" <> 'size' or "__new_change_guards"."ok" = 1),
-	CONSTRAINT "change_guard_admins" CHECK("__new_change_guards"."reason" <> 'admins' or "__new_change_guards"."ok" = 1)
+	CONSTRAINT "change_guard_admins" CHECK("__new_change_guards"."reason" <> 'admins' or "__new_change_guards"."ok" = 1),
+	CONSTRAINT "change_guard_storage" CHECK("__new_change_guards"."reason" <> 'storage' or "__new_change_guards"."ok" = 1)
 );
 --> statement-breakpoint
 INSERT INTO `__new_change_guards`("id", "reason", "ok") SELECT "id", "reason", "ok" FROM `change_guards`;--> statement-breakpoint
@@ -95,4 +96,34 @@ BEGIN
   UPDATE `grant_clock` SET `value` = `value` + 1 WHERE `id` = 1;
   UPDATE `team_members` SET `grant_order` = (SELECT `value` FROM `grant_clock` WHERE `id` = 1)
   WHERE `team_id` = NEW.`team_id` AND `user_id` = NEW.`user_id`;
+END;
+--> statement-breakpoint
+-- A grant whose row is changed to reach someone or something else is a new
+-- grant too, so it takes a new order rather than keeping its old one.
+CREATE TRIGGER `team_members_grant_order_on_identity`
+AFTER UPDATE OF `team_id`, `user_id` ON `team_members`
+WHEN NEW.`team_id` IS NOT OLD.`team_id` OR NEW.`user_id` IS NOT OLD.`user_id`
+BEGIN
+  UPDATE `grant_clock` SET `value` = `value` + 1 WHERE `id` = 1;
+  UPDATE `team_members` SET `grant_order` = (SELECT `value` FROM `grant_clock` WHERE `id` = 1)
+  WHERE `team_id` = NEW.`team_id` AND `user_id` = NEW.`user_id`;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `workspace_members_grant_order_on_identity`
+AFTER UPDATE OF `workspace_id`, `user_id` ON `workspace_members`
+WHEN NEW.`workspace_id` IS NOT OLD.`workspace_id` OR NEW.`user_id` IS NOT OLD.`user_id`
+BEGIN
+  UPDATE `grant_clock` SET `value` = `value` + 1 WHERE `id` = 1;
+  UPDATE `workspace_members` SET `grant_order` = (SELECT `value` FROM `grant_clock` WHERE `id` = 1)
+  WHERE `workspace_id` = NEW.`workspace_id` AND `user_id` = NEW.`user_id`;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `shares_grant_order_on_identity`
+AFTER UPDATE OF `node_id`, `target_kind`, `target` ON `shares`
+WHEN NEW.`node_id` IS NOT OLD.`node_id` OR NEW.`target_kind` IS NOT OLD.`target_kind`
+  OR NEW.`target` IS NOT OLD.`target`
+BEGIN
+  UPDATE `grant_clock` SET `value` = `value` + 1 WHERE `id` = 1;
+  UPDATE `shares` SET `grant_order` = (SELECT `value` FROM `grant_clock` WHERE `id` = 1)
+  WHERE `id` = NEW.`id`;
 END;

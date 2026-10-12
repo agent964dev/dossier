@@ -767,6 +767,7 @@ export const changeGuards = sqliteTable(
     ),
     check('change_guard_size', sql`${t.reason} <> 'size' or ${t.ok} = 1`),
     check('change_guard_admins', sql`${t.reason} <> 'admins' or ${t.ok} = 1`),
+    check('change_guard_storage', sql`${t.reason} <> 'storage' or ${t.ok} = 1`),
   ],
 )
 

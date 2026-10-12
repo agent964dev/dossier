@@ -245,6 +245,38 @@ const decodeNotice = (value: string): unknown => {
   }
 }
 
+/**
+ * The statements that close an account: its agent keys revoked, its device
+ * logins denied, every session and Google account deleted, the person marked
+ * deleted, and the history written with `detail`.
+ */
+export const closeStatements = (
+  DB: D1Database,
+  personId: string,
+  at: number,
+  detail: { readonly [count: string]: number },
+): readonly D1PreparedStatement[] => [
+  DB.prepare(
+    `update agent_keys set revoked_at = ?2
+     where user_id = ?1 and revoked_at is null`,
+  ).bind(personId, at),
+  DB.prepare(
+    `update device_code set status = 'denied'
+     where user_id = ? and status in ('pending', 'approved')`,
+  ).bind(personId),
+  DB.prepare('delete from session where user_id = ?').bind(personId),
+  // Their Google details go with the accounts.
+  DB.prepare('delete from account where user_id = ?').bind(personId),
+  DB.prepare(
+    `update people set deleted_at = ?2
+     where user_id = ?1 and deleted_at is null`,
+  ).bind(personId, at),
+  DB.prepare(
+    `insert into person_history (id, user_id, kind, detail_json, created_at)
+     values (?, ?, 'deleted', ?, ?)`,
+  ).bind(newId(), personId, JSON.stringify(detail), at),
+]
+
 export const SignInLive: Layer.Layer<
   SignIn,
   never,
@@ -1059,34 +1091,7 @@ export const SignInLive: Layer.Layer<
           }
           yield* query(() =>
             DB.batch([
-              DB.prepare(
-                `update agent_keys set revoked_at = ?2
-                 where user_id = ?1 and revoked_at is null`,
-              ).bind(person.id, at),
-              DB.prepare(
-                `update device_code set status = 'denied'
-                 where user_id = ? and status in ('pending', 'approved')`,
-              ).bind(person.id),
-              DB.prepare('delete from session where user_id = ?').bind(
-                person.id,
-              ),
-              // Their Google details go with the accounts.
-              DB.prepare('delete from account where user_id = ?').bind(
-                person.id,
-              ),
-              DB.prepare(
-                `update people set deleted_at = ?2
-                 where user_id = ?1 and deleted_at is null`,
-              ).bind(person.id, at),
-              DB.prepare(
-                `insert into person_history (id, user_id, kind, detail_json, created_at)
-                 values (?, ?, 'deleted', ?, ?)`,
-              ).bind(
-                newId(),
-                person.id,
-                JSON.stringify({ ...detail, ...counts }),
-                at,
-              ),
+              ...closeStatements(DB, person.id, at, { ...detail, ...counts }),
             ]),
           )
           return counts

@@ -40,7 +40,7 @@ import {
   type SettingKey,
   type WorkspaceCreation,
 } from './settings.ts'
-import { SignIn } from './sign-in.ts'
+import { closeStatements } from './sign-in.ts'
 import {
   ancestorPaths,
   type NodeRow,
@@ -303,7 +303,7 @@ export interface PeopleService {
   >
   readonly deleteAccount: () => Effect.Effect<
     void,
-    Fail<'sign_in_required' | 'last_admin' | 'unavailable'>,
+    Fail<'sign_in_required' | 'last_admin' | 'conflict' | 'unavailable'>,
     CurrentCaller
   >
 
@@ -433,7 +433,7 @@ const CREATIONS: ReadonlySet<string> = new Set([
 export const PeopleLive: Layer.Layer<
   People,
   never,
-  Bindings | Access | TreeStore | Settings | Data | SignIn | Config
+  Bindings | Access | TreeStore | Settings | Data | Config
 > = Layer.effect(
   People,
   Effect.gen(function* () {
@@ -442,7 +442,6 @@ export const PeopleLive: Layer.Layer<
     const store = yield* TreeStore
     const settings = yield* Settings
     const data = yield* Data
-    const signIn = yield* SignIn
     const config = yield* Config
     const database = db(bindings)
     const DB = bindings.DB
@@ -465,9 +464,57 @@ export const PeopleLive: Layer.Layer<
     /** Settings are screen actions of a person in a browser. */
     const browserPerson = Effect.flatMap(person, (who) =>
       who.via.kind === 'browser'
-        ? Effect.succeed(who)
+        ? Effect.succeed({ person: who.person, sessionId: who.via.sessionId })
         : Effect.fail(notFound(null)),
     )
+
+    /**
+     * The guard rows of an action taken on someone's authority: the batch
+     * fails unless, as it commits, the session still lives and `holds` is
+     * true, so authority lost between the check and the batch writes
+     * nothing.
+     */
+    const onAuthority = (
+      who: { readonly sessionId: string },
+      holds: string,
+      binds: readonly unknown[],
+      at: number,
+    ) => {
+      const guardId = newId()
+      return {
+        first: DB.prepare(
+          `insert into change_guards (id, reason, ok)
+           select ?, 'basis', coalesce((exists (select 1 from session
+             where id = ? and expires_at > ?) and (${holds})), 0)`,
+        ).bind(guardId, who.sessionId, at, ...binds),
+        last: DB.prepare('delete from change_guards where id = ?').bind(
+          guardId,
+        ),
+      }
+    }
+
+    const isBasisGuard = (error: unknown) =>
+      String(error instanceof Error ? error.message : error).includes(
+        'change_guard_basis',
+      )
+
+    /** Runs a batch on the authority of a still-live check. */
+    const guardedBatch = <R, O = never>(
+      guard: {
+        readonly first: D1PreparedStatement
+        readonly last: D1PreparedStatement
+      },
+      statements: readonly D1PreparedStatement[],
+      refused: () => R,
+      other: (error: unknown) => O | null = () => null,
+    ) =>
+      Effect.tryPromise({
+        try: () => DB.batch([guard.first, ...statements, guard.last]),
+        catch: (error): R | O | DossierError<'unavailable'> =>
+          isBasisGuard(error)
+            ? refused()
+            : (other(error) ?? unavailable(error)),
+      }).pipe(Effect.map((results) => results.slice(1, -1)))
 
     /** The live workspace by name, or null. */
     const workspaceNamed = (name: string) =>
@@ -485,7 +532,7 @@ export const PeopleLive: Layer.Layer<
      */
     const adminOf = (name: string, opts: { readonly reads?: boolean } = {}) =>
       Effect.gen(function* () {
-        const { person: me } = yield* browserPerson
+        const { person: me, sessionId } = yield* browserPerson
         const workspace = yield* workspaceNamed(name)
         if (workspace === null) return yield* Effect.fail(notFound(name))
         const row = yield* first<{ role: string }>(
@@ -503,8 +550,38 @@ export const PeopleLive: Layer.Layer<
             ),
           )
         }
-        return { workspace, me }
+        return { workspace, me, sessionId }
       })
+
+    /**
+     * An admin's batch: it writes only if, as it commits, the caller still
+     * administers the workspace and the workspace is neither suspended nor
+     * deleted.
+     */
+    const adminBatch = <O = never>(
+      ctx: {
+        readonly workspace: WorkspaceRow
+        readonly me: Person
+        readonly sessionId: string
+      },
+      statements: readonly D1PreparedStatement[],
+      other: (error: unknown) => O | null = () => null,
+    ) =>
+      Effect.flatMap(Clock.currentTimeMillis, (at) =>
+        guardedBatch(
+          onAuthority(
+            ctx,
+            `select 1 from workspace_members m join workspaces w on w.id = m.workspace_id
+             where m.workspace_id = ? and m.user_id = ? and m.role = 'admin'
+               and w.deleted_at is null and w.suspended_at is null`,
+            [ctx.workspace.id, ctx.me.id],
+            at,
+          ),
+          statements,
+          () => notFound(ctx.workspace.name),
+          other,
+        ),
+      )
 
     const isSuperAdminId = (id: string) =>
       first<{ one: number }>(
@@ -523,13 +600,35 @@ export const PeopleLive: Layer.Layer<
       })
 
     /** A super admin in a browser; anyone else learns nothing. */
-    const superAdmin = Effect.gen(function* () {
-      const { person: me } = yield* browserPerson
-      if (!(yield* isSuperAdminId(me.id))) {
+    const superAdminCtx = Effect.gen(function* () {
+      const who = yield* browserPerson
+      if (!(yield* isSuperAdminId(who.person.id))) {
         return yield* Effect.fail(notFound(null))
       }
-      return me
+      return who
     })
+    const superAdmin = Effect.map(superAdminCtx, (who) => who.person)
+
+    /** A super admin's batch: it writes only while they still are one. */
+    const superBatch = <O = never>(
+      statements: readonly D1PreparedStatement[],
+      other: (error: unknown) => O | null = () => null,
+    ) =>
+      Effect.gen(function* () {
+        const who = yield* superAdminCtx
+        const at = yield* Clock.currentTimeMillis
+        return yield* guardedBatch(
+          onAuthority(
+            who,
+            'select 1 from super_admins where user_id = ?',
+            [who.person.id],
+            at,
+          ),
+          statements,
+          () => notFound(null),
+          other,
+        )
+      })
 
     const saveSetting = (key: SettingKey, value: unknown, by: string) =>
       Effect.map(Clock.currentTimeMillis, (at) =>
@@ -542,9 +641,7 @@ export const PeopleLive: Layer.Layer<
       )
 
     const runSaved = (statements: readonly D1PreparedStatement[]) =>
-      query(() => DB.batch([...statements])).pipe(
-        Effect.tap(() => Effect.sync(settingsSaved)),
-      )
+      superBatch(statements).pipe(Effect.tap(() => Effect.sync(settingsSaved)))
 
     const mayCreateWorkspace = () =>
       Effect.gen(function* () {
@@ -889,7 +986,8 @@ export const PeopleLive: Layer.Layer<
 
     const invite: PeopleService['invite'] = (i) =>
       Effect.gen(function* () {
-        const { workspace, me } = yield* adminOf(i.workspace)
+        const ctx = yield* adminOf(i.workspace)
+        const { workspace, me } = ctx
         const email = i.email.trim().toLowerCase()
         if (!EMAIL.test(email) || email.length > 254) {
           return yield* Effect.fail(
@@ -920,15 +1018,6 @@ export const PeopleLive: Layer.Layer<
             )
           }
         }
-        // Someone who signed in and has not deleted their account.
-        const existing = yield* first<{ id: string; member: number }>(
-          DB.prepare(
-            `select u.id, exists (select 1 from workspace_members m
-                 where m.workspace_id = ?2 and m.user_id = u.id) as member
-             from "user" u join people p on p.user_id = u.id
-             where u.email = ?1 and p.deleted_at is null`,
-          ).bind(email, workspace.id),
-        )
         const already = () =>
           dossierError(
             'conflict',
@@ -936,55 +1025,61 @@ export const PeopleLive: Layer.Layer<
             null,
             'email',
           )
-        if (existing?.member === 1) return yield* Effect.fail(already())
-        const at = yield* Clock.currentTimeMillis
-        if (existing !== null) {
-          yield* Effect.tryPromise({
-            try: () =>
-              DB.batch([
-                DB.prepare(
-                  `insert into workspace_members (workspace_id, user_id, role, created_at)
-                   values (?, ?, 'member', ?)`,
-                ).bind(workspace.id, existing.id, at),
-                ...teamIds.map((teamId) =>
-                  DB.prepare(
-                    `insert into team_members (team_id, user_id, created_at)
-                     values (?, ?, ?) on conflict do nothing`,
-                  ).bind(teamId, existing.id, at),
-                ),
-                DB.prepare(
-                  'delete from invitations where workspace_id = ? and email = ?',
-                ).bind(workspace.id, email),
-              ]),
-            catch: (error) =>
-              isUnique(error) ? already() : unavailable(error),
-          })
-          return { joined: true }
-        }
-        yield* query(() =>
+        const member = yield* first<{ one: number }>(
           DB.prepare(
-            `insert into invitations (workspace_id, email, team_ids_json, invited_by, created_at)
-             values (?, ?, ?, ?, ?)
-             on conflict (workspace_id, email) do update set
-               team_ids_json = excluded.team_ids_json, invited_by = excluded.invited_by,
-               created_at = excluded.created_at`,
-          )
-            .bind(workspace.id, email, JSON.stringify(teamIds), me.id, at)
-            .run(),
+            `select 1 as one from workspace_members m join "user" u on u.id = m.user_id
+             where m.workspace_id = ? and u.email = ?`,
+          ).bind(workspace.id, email),
         )
-        return { joined: false }
+        if (member !== null) return yield* Effect.fail(already())
+        const at = yield* Clock.currentTimeMillis
+        // Decided in the batch: someone who signed in and has not deleted
+        // their account joins at once; anyone else is invited.
+        const joined = `exists (select 1 from workspace_members m join "user" u on u.id = m.user_id
+          where m.workspace_id = ?1 and u.email = ?2)`
+        const results = yield* adminBatch(
+          ctx,
+          [
+            DB.prepare(
+              `insert into workspace_members (workspace_id, user_id, role, created_at)
+               select ?1, u.id, 'member', ?3 from "user" u
+               join people p on p.user_id = u.id and p.deleted_at is null
+               where u.email = ?2`,
+            ).bind(workspace.id, email, at),
+            DB.prepare(
+              `insert into team_members (team_id, user_id, created_at)
+               select t.id, m.user_id, ?3 from teams t
+               join workspace_members m on m.workspace_id = t.workspace_id
+               join "user" u on u.id = m.user_id and u.email = ?2
+               where t.workspace_id = ?1 and t.id in (select value from json_each(?4))
+               on conflict do nothing`,
+            ).bind(workspace.id, email, at, JSON.stringify(teamIds)),
+            DB.prepare(
+              `insert into invitations (workspace_id, email, team_ids_json, invited_by, created_at)
+               select ?1, ?2, ?4, ?5, ?3 where not ${joined}
+               on conflict (workspace_id, email) do update set
+                 team_ids_json = excluded.team_ids_json, invited_by = excluded.invited_by,
+                 created_at = excluded.created_at`,
+            ).bind(workspace.id, email, at, JSON.stringify(teamIds), me.id),
+            DB.prepare(
+              `delete from invitations where workspace_id = ?1 and email = ?2 and ${joined}`,
+            ).bind(workspace.id, email),
+            DB.prepare(`select ${joined} as joined`).bind(workspace.id, email),
+          ],
+          (error) => (isUnique(error) ? already() : null),
+        )
+        const row = results[4]?.results[0] as { joined: number } | undefined
+        return { joined: row?.joined === 1 }
       })
 
     const cancelInvitation: PeopleService['cancelInvitation'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
-        yield* query(() =>
+        const ctx = yield* adminOf(i.workspace)
+        yield* adminBatch(ctx, [
           DB.prepare(
             'delete from invitations where workspace_id = ? and email = ?',
-          )
-            .bind(workspace.id, i.email.trim().toLowerCase())
-            .run(),
-        )
+          ).bind(ctx.workspace.id, i.email.trim().toLowerCase()),
+        ])
       })
 
     /** A member's row in the workspace, or not_found. */
@@ -1022,23 +1117,39 @@ export const PeopleLive: Layer.Layer<
       ).bind(workspace.id, userId),
     ]
 
+    /** An admin's membership change, which must leave the workspace an admin. */
+    const adminGuarded = (
+      ctx: {
+        readonly workspace: WorkspaceRow
+        readonly me: Person
+        readonly sessionId: string
+      },
+      statements: readonly D1PreparedStatement[],
+    ) =>
+      adminBatch(
+        ctx,
+        [...statements, ...keepsAdmin(DB, newId(), ctx.workspace.id)],
+        (error) =>
+          isAdminsGuard(error) ? lastAdmin(ctx.workspace.name) : null,
+      )
+
     const setRole: PeopleService['setRole'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
-        yield* memberOf(workspace, i.userId)
+        const ctx = yield* adminOf(i.workspace)
+        yield* memberOf(ctx.workspace, i.userId)
         const role = i.role === 'admin' ? 'admin' : 'member'
-        yield* guarded(workspace, [
+        yield* adminGuarded(ctx, [
           DB.prepare(
             'update workspace_members set role = ? where workspace_id = ? and user_id = ?',
-          ).bind(role, workspace.id, i.userId),
+          ).bind(role, ctx.workspace.id, i.userId),
         ])
       })
 
     const removeMember: PeopleService['removeMember'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
-        yield* memberOf(workspace, i.userId)
-        yield* guarded(workspace, leaving(workspace, i.userId))
+        const ctx = yield* adminOf(i.workspace)
+        yield* memberOf(ctx.workspace, i.userId)
+        yield* adminGuarded(ctx, leaving(ctx.workspace, i.userId))
       })
 
     const leave: PeopleService['leave'] = (i) =>
@@ -1139,39 +1250,37 @@ export const PeopleLive: Layer.Layer<
 
     const createTeam: PeopleService['createTeam'] = (i) =>
       Effect.gen(function* () {
-        const { workspace, me } = yield* adminOf(i.workspace)
+        const ctx = yield* adminOf(i.workspace)
         const name = yield* teamName(i.name)
         const id = newId() as TeamId
         const at = yield* Clock.currentTimeMillis
-        yield* Effect.tryPromise({
-          try: () =>
+        yield* adminBatch(
+          ctx,
+          [
             DB.prepare(
               `insert into teams (id, workspace_id, name, created_by, created_at)
                values (?, ?, ?, ?, ?)`,
-            )
-              .bind(id, workspace.id, name, me.id, at)
-              .run(),
-          catch: (error) =>
-            isUnique(error) ? nameTaken(name) : unavailable(error),
-        })
+            ).bind(id, ctx.workspace.id, name, ctx.me.id, at),
+          ],
+          (error) => (isUnique(error) ? nameTaken(name) : null),
+        )
         return { id, name }
       })
 
     const renameTeam: PeopleService['renameTeam'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
-        yield* teamIn(workspace, i.teamId)
+        const ctx = yield* adminOf(i.workspace)
+        yield* teamIn(ctx.workspace, i.teamId)
         const name = yield* teamName(i.name)
-        yield* Effect.tryPromise({
-          try: () =>
+        yield* adminBatch(
+          ctx,
+          [
             DB.prepare(
               'update teams set name = ? where id = ? and workspace_id = ?',
-            )
-              .bind(name, i.teamId, workspace.id)
-              .run(),
-          catch: (error) =>
-            isUnique(error) ? nameTaken(name) : unavailable(error),
-        })
+            ).bind(name, i.teamId, ctx.workspace.id),
+          ],
+          (error) => (isUnique(error) ? nameTaken(name) : null),
+        )
       })
 
     /** One tree's shares to a team go in one change, an event per share. */
@@ -1233,7 +1342,8 @@ export const PeopleLive: Layer.Layer<
 
     const deleteTeam: PeopleService['deleteTeam'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
+        const ctx = yield* adminOf(i.workspace)
+        const { workspace } = ctx
         const found = yield* teamIn(workspace, i.teamId)
         let removed = 0
         for (let tried = 1; ; tried += 1) {
@@ -1266,30 +1376,32 @@ export const PeopleLive: Layer.Layer<
           // Shares on deleted nodes go with the team, and a share made to
           // it meanwhile stops the deletion, to be revoked on the next try.
           const guardId = newId()
-          const done = yield* Effect.tryPromise({
-            try: () =>
-              DB.batch([
-                DB.prepare(
-                  `delete from shares where target_kind = 'team' and target = ?
-                     and node_id in (select id from nodes where deleted_at is not null)`,
-                ).bind(found.id),
-                DB.prepare(
-                  `insert into change_guards (id, reason, ok)
-                   select ?, 'state', not exists (select 1 from shares
-                     where target_kind = 'team' and target = ?)`,
-                ).bind(guardId, found.id),
-                DB.prepare('delete from teams where id = ?').bind(found.id),
-                DB.prepare('delete from change_guards where id = ?').bind(
-                  guardId,
-                ),
-              ]),
-            catch: (error) => error,
-          }).pipe(
+          const moved = { code: 'moved' } as const
+          const done = yield* adminBatch(
+            ctx,
+            [
+              DB.prepare(
+                `delete from shares where target_kind = 'team' and target = ?
+                   and node_id in (select id from nodes where deleted_at is not null)`,
+              ).bind(found.id),
+              DB.prepare(
+                `insert into change_guards (id, reason, ok)
+                 select ?, 'state', not exists (select 1 from shares
+                   where target_kind = 'team' and target = ?)`,
+              ).bind(guardId, found.id),
+              DB.prepare('delete from teams where id = ?').bind(found.id),
+              DB.prepare('delete from change_guards where id = ?').bind(
+                guardId,
+              ),
+            ],
+            (error) =>
+              String(error).includes('change_guard_state') ? moved : null,
+          ).pipe(
             Effect.as(true),
             Effect.catchAll((error) =>
-              String(error).includes('change_guard_state')
+              error === moved
                 ? Effect.succeed(false)
-                : Effect.fail(unavailable(error)),
+                : Effect.fail(error as Exclude<typeof error, typeof moved>),
             ),
           )
           if (done) return { sharesRemoved: removed }
@@ -1326,17 +1438,16 @@ export const PeopleLive: Layer.Layer<
 
     const addToTeam: PeopleService['addToTeam'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
+        const ctx = yield* adminOf(i.workspace)
+        const { workspace } = ctx
         const found = yield* teamIn(workspace, i.teamId)
         const at = yield* Clock.currentTimeMillis
-        const results = yield* query(() =>
-          DB.batch([
-            joinTeam(workspace, found.id, at)(i.userId),
-            DB.prepare(
-              'select 1 from team_members where team_id = ? and user_id = ?',
-            ).bind(found.id, i.userId),
-          ]),
-        )
+        const results = yield* adminBatch(ctx, [
+          joinTeam(workspace, found.id, at)(i.userId),
+          DB.prepare(
+            'select 1 from team_members where team_id = ? and user_id = ?',
+          ).bind(found.id, i.userId),
+        ])
         if ((results[1]?.results.length ?? 0) === 0) {
           return yield* Effect.fail(notMember(workspace))
         }
@@ -1344,36 +1455,33 @@ export const PeopleLive: Layer.Layer<
 
     const removeFromTeam: PeopleService['removeFromTeam'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
-        const found = yield* teamIn(workspace, i.teamId)
-        yield* query(() =>
+        const ctx = yield* adminOf(i.workspace)
+        const found = yield* teamIn(ctx.workspace, i.teamId)
+        yield* adminBatch(ctx, [
           DB.prepare(
             'delete from team_members where team_id = ? and user_id = ?',
-          )
-            .bind(found.id, i.userId)
-            .run(),
-        )
+          ).bind(found.id, i.userId),
+        ])
       })
 
     const moveToTeam: PeopleService['moveToTeam'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
+        const ctx = yield* adminOf(i.workspace)
+        const { workspace } = ctx
         const from = yield* teamIn(workspace, i.from)
         const to = yield* teamIn(workspace, i.to)
         if (from.id === to.id) return
         const at = yield* Clock.currentTimeMillis
-        const results = yield* query(() =>
-          DB.batch([
-            joinTeam(workspace, to.id, at)(i.userId),
-            DB.prepare(
-              `delete from team_members where team_id = ?1 and user_id = ?2
-                 and exists (select 1 from team_members where team_id = ?3 and user_id = ?2)`,
-            ).bind(from.id, i.userId, to.id),
-            DB.prepare(
-              'select 1 from team_members where team_id = ? and user_id = ?',
-            ).bind(to.id, i.userId),
-          ]),
-        )
+        const results = yield* adminBatch(ctx, [
+          joinTeam(workspace, to.id, at)(i.userId),
+          DB.prepare(
+            `delete from team_members where team_id = ?1 and user_id = ?2
+               and exists (select 1 from team_members where team_id = ?3 and user_id = ?2)`,
+          ).bind(from.id, i.userId, to.id),
+          DB.prepare(
+            'select 1 from team_members where team_id = ? and user_id = ?',
+          ).bind(to.id, i.userId),
+        ])
         if ((results[2]?.results.length ?? 0) === 0) {
           return yield* Effect.fail(notMember(workspace))
         }
@@ -1390,7 +1498,8 @@ export const PeopleLive: Layer.Layer<
 
     const deleteWorkspace: PeopleService['deleteWorkspace'] = (i) =>
       Effect.gen(function* () {
-        const { workspace } = yield* adminOf(i.workspace)
+        const ctx = yield* adminOf(i.workspace)
+        const { workspace } = ctx
         if (i.confirm.trim() !== workspace.name) {
           return yield* Effect.fail(
             dossierError(
@@ -1402,13 +1511,11 @@ export const PeopleLive: Layer.Layer<
           )
         }
         const at = yield* Clock.currentTimeMillis
-        yield* query(() =>
+        yield* adminBatch(ctx, [
           DB.prepare(
             'update workspaces set deleted_at = ? where id = ? and deleted_at is null',
-          )
-            .bind(at, workspace.id)
-            .run(),
-        )
+          ).bind(at, workspace.id),
+        ])
       })
 
     // The person.
@@ -1493,50 +1600,103 @@ export const PeopleLive: Layer.Layer<
               : lastSuperAdmin(),
           )
         }
-        // Each step finishes what an interrupted earlier press left.
-        const withdrawn = yield* data.withdrawMine()
-        const guardId = newId()
-        yield* Effect.tryPromise({
-          try: () =>
-            DB.batch([
-              DB.prepare('delete from team_members where user_id = ?').bind(
-                me.id,
+        // Each step finishes what an interrupted earlier press left. The
+        // closing batch holds only while nothing of theirs lives, so an
+        // answer sent meanwhile is withdrawn on the next round.
+        const totals = { submissions: 0, entries: 0, uploads: 0 }
+        for (let tried = 1; ; tried += 1) {
+          const withdrawn = yield* data.withdrawMine()
+          totals.submissions += withdrawn.submissions
+          totals.entries += withdrawn.entries
+          totals.uploads += withdrawn.uploads
+          const at = yield* Clock.currentTimeMillis
+          const held = yield* first<{ keys: number; sessions: number }>(
+            DB.prepare(
+              `select
+                 (select count(*) from agent_keys where user_id = ?1 and revoked_at is null) as keys,
+                 (select count(*) from session where user_id = ?1) as sessions`,
+            ).bind(me.id),
+          )
+          const adminsId = newId()
+          const leftId = newId()
+          const outcome = yield* Effect.tryPromise({
+            try: () =>
+              DB.batch([
+                // Read before the person goes: every live workspace they
+                // administer keeps another admin, and the deployment another
+                // super admin if they are one.
+                DB.prepare(
+                  `insert into change_guards (id, reason, ok)
+                   select ?1, 'admins', not exists (
+                       select 1 from workspace_members m
+                       join workspaces w on w.id = m.workspace_id
+                       where m.user_id = ?2 and m.role = 'admin' and w.deleted_at is null
+                         and not exists (select 1 from workspace_members o
+                           where o.workspace_id = m.workspace_id and o.role = 'admin'
+                             and o.user_id <> ?2))
+                     and (not exists (select 1 from super_admins where user_id = ?2)
+                       or exists (select 1 from super_admins where user_id <> ?2))`,
+                ).bind(adminsId, me.id),
+                DB.prepare(
+                  `insert into change_guards (id, reason, ok)
+                   select ?, 'state', not exists (select 1 from nodes
+                     where owner_id = ? and origin = 'data' and kind = 'file'
+                       and deleted_at is null)`,
+                ).bind(leftId, me.id),
+                DB.prepare('delete from team_members where user_id = ?').bind(
+                  me.id,
+                ),
+                DB.prepare(
+                  'delete from workspace_members where user_id = ?',
+                ).bind(me.id),
+                DB.prepare('delete from super_admins where user_id = ?').bind(
+                  me.id,
+                ),
+                ...closeStatements(DB, me.id, at, {
+                  ...totals,
+                  keys: held?.keys ?? 0,
+                  sessions: held?.sessions ?? 0,
+                }),
+                DB.prepare('delete from change_guards where id in (?, ?)').bind(
+                  adminsId,
+                  leftId,
+                ),
+              ]),
+            catch: (error) => error,
+          }).pipe(
+            Effect.as('closed' as const),
+            Effect.catchAll((error) =>
+              isAdminsGuard(error)
+                ? Effect.succeed('blocked' as const)
+                : String(error).includes('change_guard_state')
+                  ? Effect.succeed('answered' as const)
+                  : Effect.fail(unavailable(error)),
+            ),
+          )
+          if (outcome === 'closed') return
+          if (outcome === 'blocked') {
+            const now = yield* blockerOf(me.id)
+            return yield* Effect.fail(
+              now?.kind === 'last_super_admin'
+                ? lastSuperAdmin()
+                : dossierError(
+                    'last_admin',
+                    `You're the last admin of ${now?.kind === 'last_admin' ? now.workspace : 'a workspace'}. Hand over admin to another member first. Then you can delete your answers and account.`,
+                    null,
+                    now?.kind === 'last_admin' ? now.workspace : null,
+                  ),
+            )
+          }
+          if (tried >= 3) {
+            return yield* Effect.fail(
+              dossierError(
+                'conflict',
+                'New answers kept arriving while your account was being deleted.',
+                'Press Delete again.',
               ),
-              DB.prepare(
-                'delete from workspace_members where user_id = ?',
-              ).bind(me.id),
-              DB.prepare('delete from super_admins where user_id = ?').bind(
-                me.id,
-              ),
-              // Every workspace with members keeps an admin, and the
-              // deployment a super admin.
-              DB.prepare(
-                `insert into change_guards (id, reason, ok)
-                 select ?, 'admins', not exists (select 1 from workspaces w
-                   where w.deleted_at is null
-                     and exists (select 1 from workspace_members m where m.workspace_id = w.id)
-                     and not exists (select 1 from workspace_members m
-                       where m.workspace_id = w.id and m.role = 'admin'))
-                   and (select count(*) from super_admins) >= 1`,
-              ).bind(guardId),
-              DB.prepare('delete from change_guards where id = ?').bind(
-                guardId,
-              ),
-            ]),
-          catch: (error) =>
-            isAdminsGuard(error)
-              ? dossierError(
-                  'last_admin',
-                  'Another admin left meanwhile. Hand over admin to another member first.',
-                  null,
-                )
-              : unavailable(error),
-        })
-        yield* signIn.closeAccount({
-          submissions: withdrawn.submissions,
-          entries: withdrawn.entries,
-          uploads: withdrawn.uploads,
-        })
+            )
+          }
+        }
       })
 
     // Super admins.
@@ -1640,24 +1800,21 @@ export const PeopleLive: Layer.Layer<
           )
         }
         const at = yield* Clock.currentTimeMillis
-        yield* query(() =>
+        yield* superBatch([
           DB.prepare(
             `insert into workspace_creators (entry, kind, added_by, created_at)
              values (?, ?, ?, ?) on conflict do nothing`,
-          )
-            .bind(value, kind, me.id, at)
-            .run(),
-        )
+          ).bind(value, kind, me.id, at),
+        ])
       })
 
     const removeCreator: PeopleService['removeCreator'] = (entry) =>
       Effect.gen(function* () {
-        yield* superAdmin
-        yield* query(() =>
-          DB.prepare('delete from workspace_creators where entry = ?')
-            .bind(entry.trim().toLowerCase())
-            .run(),
-        )
+        yield* superBatch([
+          DB.prepare('delete from workspace_creators where entry = ?').bind(
+            entry.trim().toLowerCase(),
+          ),
+        ])
       })
 
     const setLimits: PeopleService['setLimits'] = (input) =>
@@ -1731,46 +1888,41 @@ export const PeopleLive: Layer.Layer<
           )
         }
         const at = yield* Clock.currentTimeMillis
-        yield* query(() =>
+        // Only someone still signed up, decided in the batch.
+        yield* superBatch([
           DB.prepare(
             `insert into super_admins (user_id, added_by, created_at)
-             values (?, ?, ?) on conflict do nothing`,
-          )
-            .bind(found.id, me.id, at)
-            .run(),
-        )
+             select ?1, ?2, ?3 where exists (select 1 from people
+               where user_id = ?1 and deleted_at is null)
+             on conflict do nothing`,
+          ).bind(found.id, me.id, at),
+        ])
       })
 
     const removeSuperAdmin: PeopleService['removeSuperAdmin'] = (userId) =>
       Effect.gen(function* () {
-        yield* superAdmin
         const guardId = newId()
-        yield* Effect.tryPromise({
-          try: () =>
-            DB.batch([
-              DB.prepare('delete from super_admins where user_id = ?').bind(
-                userId,
-              ),
-              DB.prepare(
-                `insert into change_guards (id, reason, ok)
-                 select ?, 'admins', (select count(*) from super_admins) >= 1`,
-              ).bind(guardId),
-              DB.prepare('delete from change_guards where id = ?').bind(
-                guardId,
-              ),
-            ]),
-          catch: (error) =>
-            isAdminsGuard(error) ? lastSuperAdmin() : unavailable(error),
-        })
+        yield* superBatch(
+          [
+            DB.prepare('delete from super_admins where user_id = ?').bind(
+              userId,
+            ),
+            DB.prepare(
+              `insert into change_guards (id, reason, ok)
+               select ?, 'admins', (select count(*) from super_admins) >= 1`,
+            ).bind(guardId),
+            DB.prepare('delete from change_guards where id = ?').bind(guardId),
+          ],
+          (error) => (isAdminsGuard(error) ? lastSuperAdmin() : null),
+        )
       })
 
     /** Sets or clears a workspace's suspension; not_found if nothing moved. */
     const mark = (statement: (at: number) => D1PreparedStatement) =>
       Effect.gen(function* () {
-        yield* superAdmin
         const at = yield* Clock.currentTimeMillis
-        const result = yield* query(() => statement(at).run())
-        if (result.meta.changes === 0) {
+        const [result] = yield* superBatch([statement(at)])
+        if ((result?.meta.changes ?? 0) === 0) {
           return yield* Effect.fail(notFound(null))
         }
       })
@@ -1812,11 +1964,26 @@ export const PeopleLive: Layer.Layer<
             ),
           )
         }
-        yield* query(() =>
-          DB.prepare('update workspaces set deleted_at = null where id = ?')
-            .bind(id)
-            .run(),
-        )
+        // It comes back only with an admin, who keeps a write holder on
+        // every tree; within the retention period as the batch sees it.
+        const [restored] = yield* superBatch([
+          DB.prepare(
+            `update workspaces set deleted_at = null
+             where id = ?1 and deleted_at is not null and deleted_at >= ?2
+               and exists (select 1 from workspace_members m
+                 join people p on p.user_id = m.user_id and p.deleted_at is null
+                 where m.workspace_id = ?1 and m.role = 'admin')`,
+          ).bind(id, at - retentionDays * DAY),
+        ])
+        if ((restored?.meta.changes ?? 0) === 0) {
+          return yield* Effect.fail(
+            dossierError(
+              'conflict',
+              `${row.name} has no admin left, so it cannot be restored.`,
+              null,
+            ),
+          )
+        }
       })
 
     return {

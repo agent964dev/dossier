@@ -37,7 +37,7 @@ import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { newId, newTreeId } from './ids.ts'
-import { Limits } from './limits.ts'
+import { bytesText, Limits } from './limits.ts'
 import {
   analysisOf,
   lookupUnderscore,
@@ -573,7 +573,14 @@ const allOf = (parts: readonly Statement[]): Statement =>
 /** A guard row; its CHECK constraint fails the batch when `ok` is not 1. */
 const guardRow = (
   guardId: string,
-  reason: 'head' | 'basis' | 'blob' | 'state' | 'mergeable' | 'size',
+  reason:
+    | 'head'
+    | 'basis'
+    | 'blob'
+    | 'state'
+    | 'mergeable'
+    | 'size'
+    | 'storage',
   condition: Statement,
 ): Statement => ({
   sql: `insert into change_guards (id, reason, ok)
@@ -582,8 +589,20 @@ const guardRow = (
 })
 
 /** What a failed batch means for the person who asked. */
-const failureOf = (error: unknown): ChangeFailure => {
+/** What a change says when a data file would pass its limit. */
+export const DATA_FILE_TOO_LARGE =
+  'This would make the data file larger than a data file may be.'
+
+/** What a failed batch means for the person who asked. */
+const failureOf = (error: unknown, storageBytes: number): ChangeFailure => {
   const text = String(error instanceof Error ? error.message : error)
+  if (text.includes('change_guard_storage')) {
+    return dossierError(
+      'too_large',
+      `This workspace has reached its ${bytesText(storageBytes)} storage limit. A super admin can raise it.`,
+      null,
+    )
+  }
   if (text.includes('change_guard_head')) {
     return dossierError(
       'stale_head',
@@ -601,7 +620,7 @@ const failureOf = (error: unknown): ChangeFailure => {
   if (text.includes('change_guard_size')) {
     return dossierError(
       'too_large',
-      'This would make the data file larger than a data file may be.',
+      DATA_FILE_TOO_LARGE,
       'A super admin can raise it.',
     )
   }
@@ -1537,7 +1556,7 @@ export const TreeStoreLive: Layer.Layer<
           return yield* Effect.die(new Error('a change needs a person'))
         }
         const now = yield* Clock.currentTimeMillis
-        const { dataFileBytes } = yield* limits.current()
+        const { dataFileBytes, storageBytes } = yield* limits.current()
         const guardId = newId()
         const keyId = caller.via.kind === 'agent' ? caller.via.keyId : null
         let treeId = startTree
@@ -1561,6 +1580,8 @@ export const TreeStoreLive: Layer.Layer<
         const events: NewEvent[] = []
         let authored = 0
         let pushCount = 0
+        /** The change stores new bytes, so the workspace's storage counts. */
+        let grows = false
 
         const cs: ChangeSet = {
           guardHead: (path, base) => {
@@ -1615,6 +1636,7 @@ export const TreeStoreLive: Layer.Layer<
 
           putStaged: (target, pushId) => {
             const t = tid()
+            grows = true
             authored += 1
             pushCount += 1
             if (!isHandle(target)) {
@@ -1763,6 +1785,7 @@ export const TreeStoreLive: Layer.Layer<
 
           putData: (target, version) => {
             const t = tid()
+            grows = true
             const nodeId = isHandle(target) ? handleId(target) : target.id
             if (!isHandle(target)) {
               bases.push(everyBasis(target.basis, person.id))
@@ -1842,6 +1865,7 @@ export const TreeStoreLive: Layer.Layer<
 
           mergeJson: (target, patch, provenance) => {
             const t = tid()
+            grows = true
             const nodeId = isHandle(target) ? handleId(target) : target.id
             if (!isHandle(target)) {
               bases.push(everyBasis(target.basis, person.id))
@@ -2023,6 +2047,19 @@ export const TreeStoreLive: Layer.Layer<
           ...(outcomes.length === 0
             ? []
             : [guardRow(`${guardId}:after`, 'state', allOf(outcomes))]),
+          // Every version stored counts, history included, across the
+          // workspace's trees, as it stands with this change's writes.
+          ...(grows
+            ? [
+                guardRow(`${guardId}:storage`, 'storage', {
+                  sql: `(select coalesce(sum(coalesce(v.size, length(v.json_value), 0)), 0)
+                          from node_versions v join trees t on t.id = v.tree_id
+                          where t.workspace_id = (select workspace_id from trees where id = ?))
+                        <= ?`,
+                  binds: [t, storageBytes],
+                }),
+              ]
+            : []),
           ...events.map((e, i) => ({
             sql: `insert into events (tree_id, seq, type, node_id, path, actor_id, push_id,
                       created_at)
@@ -2058,7 +2095,7 @@ export const TreeStoreLive: Layer.Layer<
         const results = yield* Effect.tryPromise({
           try: () =>
             DB.batch(statements.map((s) => DB.prepare(s.sql).bind(...s.binds))),
-          catch: failureOf,
+          catch: (error) => failureOf(error, storageBytes),
         })
         const last = results[results.length - 1]?.results[0] as
           | { authoredSeq: number; eventSeq: number }

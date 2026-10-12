@@ -61,7 +61,7 @@ export const makeLayer = (
   return Layer.mergeAll(
     SignInLive,
     PushLive,
-    PeopleLive.pipe(Layer.provide(Layer.merge(SignInLive, DataLive))),
+    PeopleLive.pipe(Layer.provide(DataLive)),
     PagesLive.pipe(Layer.provideMerge(FilesLive)),
     DataLive,
   ).pipe(Layer.provideMerge(auth))

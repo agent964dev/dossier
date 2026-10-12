@@ -1,7 +1,7 @@
 import type { Person, PersonId, TeamId } from '@dossier/contracts'
 import { SELF } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
-import { Effect, TestClock, TestContext } from 'effect'
+import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
@@ -15,8 +15,20 @@ import {
   type PeopleService,
 } from '../src/core/index.ts'
 import { signedIn } from './support/browser.ts'
-import { count, exec, failingStatements, rows } from './support/d1.ts'
-import { formRef, pushForms, QUESTIONS, sendAs } from './support/forms.ts'
+import {
+  beforeBatch,
+  count,
+  exec,
+  failingStatements,
+  rows,
+} from './support/d1.ts'
+import {
+  formRef,
+  pushForms,
+  QUESTIONS,
+  sendAs,
+  uploadAs,
+} from './support/forms.ts'
 import { harness, ORIGIN, testRuntime } from './support/harness.ts'
 import { callerOf, fresh, runAs, sessionFor } from './support/people.ts'
 import {
@@ -664,26 +676,23 @@ describe('suspension', () => {
     await as(browser, (p) =>
       p.deleteWorkspace({ workspace: ws.name, confirm: ws.name }),
     )
-    const restored = await runAs(
-      browser,
-      Effect.gen(function* () {
-        const people = yield* People
-        yield* TestClock.setTime(Date.now() + 29 * 86_400_000)
-        yield* people.restoreWorkspace(ws.id as never)
-        return yield* people.myWorkspaces()
-      }).pipe(Effect.provide(TestContext.TestContext)),
-    )
+    // Deleted 29 days ago: within the 30-day retention period.
+    const deletedAgo = (days: number) =>
+      exec(
+        'update workspaces set deleted_at = ? where id = ?',
+        Date.now() - days * 86_400_000,
+        ws.id,
+      )
+    await deletedAgo(29)
+    await as(browser, (p) => p.restoreWorkspace(ws.id as never))
+    const restored = await as(browser, (p) => p.myWorkspaces())
     expect(restored.map((m) => m.workspace.name)).toContain(ws.name)
     await as(browser, (p) =>
       p.deleteWorkspace({ workspace: ws.name, confirm: ws.name }),
     )
-    const late = await failureAs(
-      browser,
-      Effect.gen(function* () {
-        const people = yield* People
-        yield* TestClock.setTime(Date.now() + 31 * 86_400_000)
-        return yield* people.restoreWorkspace(ws.id as never)
-      }).pipe(Effect.provide(TestContext.TestContext)),
+    await deletedAgo(31)
+    const late = await refusal(browser, (p) =>
+      p.restoreWorkspace(ws.id as never),
     )
     expect(late.code).toBe('conflict')
   })
@@ -967,3 +976,314 @@ describe('deleting an account', () => {
 })
 
 void (null as unknown as TeamId)
+
+/** Serves with a database that runs `before` just ahead of a matching batch. */
+const raceBefore = (
+  match: (sql: string) => boolean,
+  before: () => Promise<unknown>,
+) =>
+  harness.use(
+    testRuntime({
+      env: {
+        DB: beforeBatch(env.DB, match, async () => {
+          await before()
+        }),
+      },
+    }),
+  )
+
+describe('changes that race the check before them', () => {
+  it('never lets an admin demoted meanwhile finish a role change', async () => {
+    const { admin, ws, browser } = await adminWorld()
+    const other = await person('other')
+    await join(ws, other, 'admin')
+    const member = await person('member')
+    await join(ws, member)
+    raceBefore(
+      (sql) => sql.startsWith('update workspace_members set role'),
+      () =>
+        exec(
+          "update workspace_members set role = 'member' where workspace_id = ? and user_id = ?",
+          ws.id,
+          admin.id,
+        ),
+    )
+    const failed = await refusal(browser, (p) =>
+      p.setRole({ workspace: ws.name, userId: member.id, role: 'admin' }),
+    )
+    expect(failed.code).toBe('not_found')
+    expect(await roleIn(ws, member.id)).toBe('member')
+    expect(await roleIn(ws, admin.id)).toBe('member')
+  })
+
+  it('never lets an admin demoted meanwhile delete a team', async () => {
+    const { admin, ws, browser } = await adminWorld()
+    const other = await person('other')
+    await join(ws, other, 'admin')
+    const design = await as(browser, (p) =>
+      p.createTeam({ workspace: ws.name, name: 'Design' }),
+    )
+    raceBefore(
+      (sql) => sql.startsWith('delete from teams'),
+      () =>
+        exec(
+          "update workspace_members set role = 'member' where workspace_id = ? and user_id = ?",
+          ws.id,
+          admin.id,
+        ),
+    )
+    const failed = await refusal(browser, (p) =>
+      p.deleteTeam({ workspace: ws.name, teamId: design.id }),
+    )
+    expect(failed.code).toBe('not_found')
+    expect(await count('teams', 'id = ?', design.id)).toBe(1)
+  })
+
+  it('makes no membership when the workspace is deleted between the invitation’s check and its batch', async () => {
+    const { ws, browser } = await adminWorld()
+    const sara = await person('sara')
+    raceBefore(
+      (sql) => sql.includes('insert into workspace_members'),
+      () =>
+        exec(
+          'update workspaces set deleted_at = ? where id = ?',
+          Date.now(),
+          ws.id,
+        ),
+    )
+    await refusal(browser, (p) =>
+      p.invite({ workspace: ws.name, email: sara.email, teamIds: [] }),
+    )
+    expect(await roleIn(ws, sara.id)).toBeNull()
+  })
+
+  it('withdraws an answer sent between the withdrawal and the account’s closing', async () => {
+    const w = await guestWorld()
+    const id = w.guest.person!.id
+    let late = false
+    raceBefore(
+      (sql) => sql.startsWith('delete from session where user_id'),
+      async () => {
+        if (late) return
+        late = true
+        await sendAs(w.guest, w.tree, {
+          page: 'ideas.html',
+          form: await formRef(w.tree, 'ideas.html', 'ideas/'),
+          entries: [['idea', 'Sent late']],
+        })
+      },
+    )
+    await as(w.guest, (p) => p.deleteAccount())
+    harness.reset()
+    expect(late).toBe(true)
+    expect(
+      await count(
+        'nodes',
+        "owner_id = ? and origin = 'data' and deleted_at is null",
+        id,
+      ),
+    ).toBe(0)
+    expect(await count('session', 'user_id = ?', id)).toBe(0)
+  })
+
+  it('deletes an ordinary account in a deployment whose super admins have not signed in', async () => {
+    const w = await guestWorld()
+    await exec('delete from super_admins')
+    await as(w.guest, (p) => p.deleteAccount())
+    expect(await count('session', 'user_id = ?', w.guest.person!.id)).toBe(0)
+  })
+
+  it('leaves someone else’s file in a folder of the person’s alone', async () => {
+    const w = await guestWorld()
+    const id = w.guest.person!.id
+    const folder = `ideas/${w.identity.email}`
+    const other = await person('other')
+    const parent = (await nodeAt(w.tree.treeId, folder))!.id
+    const nodeId = crypto.randomUUID()
+    const versionId = crypto.randomUUID()
+    await env.DB.batch([
+      env.DB.prepare(
+        `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, owner_id,
+           current_version_id, created_at)
+         values (?, ?, ?, 'theirs.json', ?, 3, 'file', 'data', ?, ?, ?)`,
+      ).bind(
+        nodeId,
+        w.tree.treeId,
+        parent,
+        `${folder}/theirs.json`,
+        other.id,
+        versionId,
+        Date.now(),
+      ),
+      env.DB.prepare(
+        `insert into node_versions (id, node_id, tree_id, revision, state, json_value, size,
+           content_type, author_id, created_at)
+         values (?, ?, ?, 1, 'live', '{}', 2, 'application/json', ?, ?)`,
+      ).bind(versionId, nodeId, w.tree.treeId, other.id, Date.now()),
+    ])
+    await as(w.guest, (p) => p.deleteAccount())
+    expect(await count('nodes', 'id = ? and deleted_at is null', nodeId)).toBe(
+      1,
+    )
+    expect(await count('nodes', 'id = ? and deleted_at is null', parent)).toBe(
+      1,
+    )
+    expect(
+      await count(
+        'nodes',
+        "owner_id = ? and origin = 'data' and kind = 'file' and deleted_at is null",
+        id,
+      ),
+    ).toBe(0)
+  })
+
+  it('refuses to restore a workspace that would come back with no admin', async () => {
+    const { admin, ws, browser } = await adminWorld()
+    const chief = await person('chief')
+    await superAdmin(chief)
+    const chiefBrowser = await sessionFor(chief)
+    await as(browser, (p) =>
+      p.deleteWorkspace({ workspace: ws.name, confirm: ws.name }),
+    )
+    // Its only admin deletes their account while it is deleted.
+    await as(browser, (p) => p.deleteAccount())
+    expect(await roleIn(ws, admin.id)).toBeNull()
+    const failed = await refusal(chiefBrowser, (p) =>
+      p.restoreWorkspace(ws.id as never),
+    )
+    expect(failed.code).toBe('conflict')
+    expect(
+      (
+        await rows<{ deleted_at: number | null }>(
+          'select deleted_at from workspaces where id = ?',
+          ws.id,
+        )
+      )[0]?.deleted_at,
+    ).not.toBeNull()
+  })
+})
+
+describe('account deletion racing others', () => {
+  it('keeps an admin when the other admin leaves while one deletes their account', async () => {
+    const { admin, ws, browser } = await adminWorld()
+    const other = await person('other')
+    await join(ws, other, 'admin')
+    const otherBrowser = await sessionFor(other)
+    raceBefore(
+      (sql) => sql.startsWith('delete from session where user_id'),
+      () => as(otherBrowser, (p) => p.leave({ workspace: ws.name })),
+    )
+    const failed = await refusal(browser, (p) => p.deleteAccount())
+    harness.reset()
+    expect(failed.code).toBe('last_admin')
+    expect(await roleIn(ws, admin.id)).toBe('admin')
+    expect(await count('session', 'user_id = ?', admin.id)).toBe(1)
+  })
+
+  it('invites, rather than joins, a person whose account closes between the check and the batch', async () => {
+    const { ws, browser } = await adminWorld()
+    const identity = fresh('gmail.com', 'closing')
+    const target = await callerOf(await signedIn(identity))
+    raceBefore(
+      (sql) => sql.includes('insert into workspace_members'),
+      () =>
+        exec(
+          'update people set deleted_at = ? where user_id = ?',
+          Date.now(),
+          target.person!.id,
+        ),
+    )
+    const result = await as(browser, (p) =>
+      p.invite({ workspace: ws.name, email: identity.email, teamIds: [] }),
+    )
+    harness.reset()
+    expect(result).toEqual({ joined: false })
+    expect(await roleIn(ws, target.person!.id)).toBeNull()
+    expect(
+      await count(
+        'invitations',
+        'workspace_id = ? and email = ?',
+        ws.id,
+        identity.email,
+      ),
+    ).toBe(1)
+  })
+
+  it('withdraws uploads and answers in every tree, a suspended workspace’s included', async () => {
+    const w = await guestWorld()
+    const id = w.guest.person!.id
+    const page = 'questions/index.html'
+    await uploadAs(w.guest, w.tree, {
+      page,
+      form: await formRef(w.tree, page, 'questions/answers/'),
+      field: 'cv',
+      name: 'cv.pdf',
+      bytes: '%PDF-1.4 cv',
+    })
+    // A second workspace, suspended, holds an answer of theirs too.
+    const owner2 = await person('owner2')
+    const ws2 = await workspace(owner2)
+    const tree2 = await pushForms(owner2, ws2, {
+      'questions/index.html': QUESTIONS,
+    })
+    await exec(
+      `insert into shares (id, tree_id, node_id, target_kind, target, role, created_by, created_at)
+       values (?, ?, ?, 'email', ?, 'respond', ?, ?)`,
+      crypto.randomUUID(),
+      tree2.treeId,
+      (await nodeAt(tree2.treeId, ''))!.id,
+      w.identity.email,
+      owner2.id,
+      Date.now(),
+    )
+    await sendAs(w.guest, tree2, {
+      page,
+      form: await formRef(tree2, page, 'questions/answers/'),
+      entries: [['role', 'Driver']],
+    })
+    await exec(
+      'update workspaces set suspended_at = ? where id = ?',
+      Date.now(),
+      ws2.id,
+    )
+    const preview = await as(w.guest, (p) => p.deletionPreview())
+    expect(preview).toMatchObject({ submissions: 2, entries: 2, uploads: 1 })
+    await as(w.guest, (p) => p.deleteAccount())
+    expect(
+      await count(
+        'nodes',
+        "owner_id = ? and origin = 'data' and deleted_at is null",
+        id,
+      ),
+    ).toBe(0)
+    expect(
+      await count(
+        'events',
+        "tree_id = ? and type = 'withdrawal' and actor_id = ?",
+        tree2.treeId,
+        id,
+      ),
+    ).toBe(1)
+  })
+})
+
+describe('configured super admins', () => {
+  it('are super admins again when they come back after deleting their account', async () => {
+    const identity = {
+      sub: `sub-root-${Date.now()}`,
+      email: 'root@example.com',
+      email_verified: true,
+    }
+    const root = await callerOf(await signedIn(identity))
+    expect(await count('super_admins', 'user_id = ?', root.person!.id)).toBe(1)
+    const spare = await person('spare')
+    await superAdmin(spare)
+    await as(root, (p) => p.deleteAccount())
+    expect(await count('super_admins', 'user_id = ?', root.person!.id)).toBe(0)
+    const back = await callerOf(
+      await signedIn({ ...identity, sub: `${identity.sub}-2` }),
+    )
+    expect(back.person?.id).toBe(root.person?.id)
+    expect(await count('super_admins', 'user_id = ?', root.person!.id)).toBe(1)
+  })
+})

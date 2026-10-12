@@ -302,9 +302,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       )
 
     /**
-     * The live tree's workspace, its state, and the caller's role and teams
-     * in it, counting only grants at or below order `asOf`; null when the
-     * tree is gone.
+     * The tree's workspace, whether the two are live, suspended or deleted,
+     * and the caller's role and teams in it, counting only grants at or
+     * below order `asOf`; null when no such tree exists.
      */
     const treeFacts = (
       caller: Caller,
@@ -314,7 +314,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       query(() =>
         DB.prepare(
           `select t.workspace_id as workspaceId, w.name as workspaceName,
-             case when w.deleted_at is not null then 'deleted'
+             case when w.deleted_at is not null or t.deleted_at is not null then 'deleted'
                when w.suspended_at is not null then 'suspended'
                else 'live' end as state,
              (select role from workspace_members m
@@ -325,7 +325,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                where tt.workspace_id = t.workspace_id and tm.user_id = ?2
                  and (?3 is null or tm.grant_order <= ?3)) as teamsJson
            from trees t join workspaces w on w.id = t.workspace_id
-           where t.id = ?1 and t.deleted_at is null`,
+           where t.id = ?1`,
         )
           .bind(treeId, caller.person?.id ?? '', asOf)
           .first<Omit<TreeFacts, 'teams'> & { teamsJson: string | null }>(),

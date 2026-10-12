@@ -43,6 +43,7 @@ import {
   type FormRow,
   type NodeHandle,
   type VersionHandle,
+  DATA_FILE_TOO_LARGE,
 } from './tree-store.ts'
 
 type FormRef = typeof FormRefSchema.Type
@@ -830,7 +831,8 @@ export const DataLive: Layer.Layer<
             .change(tree.id, plan)
             .pipe(
               Effect.mapError((error) =>
-                error.code === 'too_large'
+                error.code === 'too_large' &&
+                error.message === DATA_FILE_TOO_LARGE
                   ? tooLargeData(dataFileBytes)
                   : error,
               ),
@@ -1611,6 +1613,19 @@ export const DataLive: Layer.Layer<
         ),
       )
 
+    /** Something live below the folder belongs to someone else. */
+    const holdsOthers = (folder: NodeRow, personId: string) =>
+      query(() =>
+        DB.prepare(
+          `select 1 as one from nodes c where c.tree_id = ?1 and c.deleted_at is null
+             and substr(c.path, 1, length(?2) + 1) = ?2 || '/'
+             and (c.owner_id is null or c.owner_id <> ?3)
+           limit 1`,
+        )
+          .bind(folder.treeId, folder.path, personId)
+          .first<{ one: number }>(),
+      ).pipe(Effect.map((row) => row !== null))
+
     const countsOf = (
       rows: readonly { readonly kind: string }[],
     ): MineCounts => ({
@@ -1645,6 +1660,13 @@ export const DataLive: Layer.Layer<
             readonly file: boolean
           }[] = []
           for (const row of list) {
+            // A folder of theirs holding someone else's data stays.
+            if (
+              row.kind === 'folder' &&
+              (yield* holdsOthers(row.node, person.id))
+            ) {
+              continue
+            }
             const ok = yield* access
               .require('withdraw-own', row.node)
               .pipe(Effect.option)

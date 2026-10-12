@@ -1079,6 +1079,14 @@ export const PushLive: Layer.Layer<
           )
         }
         const limit = yield* limits.current()
+        // The limits as they stand now, which may have changed since stage.
+        if (verified.length > limit.pushFiles) {
+          return yield* Effect.fail(
+            tooLarge(
+              `This push has ${sizes(verified.length)} files; a push may hold at most ${sizes(limit.pushFiles)} files.`,
+            ),
+          )
+        }
         const total = verified.reduce((sum, f) => sum + f.stored, 0)
         const largest = verified.find((f) => f.stored > limit.fileBytes)
         if (largest !== undefined || total > limit.pushBytes) {

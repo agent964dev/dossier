@@ -3,6 +3,7 @@ import { Effect, TestClock, TestContext } from 'effect'
 import { beforeAll, describe, expect, it } from 'vitest'
 
 import {
+  Data,
   DEFAULT_LIMITS,
   Limits,
   People,
@@ -21,6 +22,7 @@ import {
   ref,
   sha256Of,
   superAdmin,
+  upload,
   workspace,
 } from './support/trees.ts'
 
@@ -204,6 +206,71 @@ describe('deployment settings', () => {
       Effect.flatMap(Limits, (l) => l.storageUsed(ws.id as never)),
     )
     expect(used).toBeGreaterThan(1024)
+    await people((p) => p.setLimits('defaults'))
+  })
+
+  it('charges a send the whole revision it stores, checked in the same batch', async () => {
+    const ws = await workspace(chief)
+    const tree = await pushForms(chief, ws, {
+      'board.html':
+        '<!doctype html><html><head><title>Board</title></head><body><form action="board.json"><input name="status"><input name="owner"></form></body></html>',
+    })
+    const caller = await sessionFor(chief)
+    const form = await formRef(tree, 'board.html', 'board.json')
+    await runAs(
+      caller,
+      Effect.flatMap(Data, (d) =>
+        d.send({
+          treeId: tree.treeId,
+          page: 'board.html',
+          seq: 1,
+          form,
+          entries: [['status', 's'.repeat(400)]],
+          submitter: null,
+          entry: null,
+          opId: crypto.randomUUID(),
+        } as never),
+      ),
+    )
+    const used = await runAs(
+      admin,
+      Effect.flatMap(Limits, (l) => l.storageUsed(ws.id as never)),
+    )
+    // Room for the patch, not for another whole revision of the file.
+    await people((p) => p.setLimits({ storageBytes: used + 100 }))
+    const refused = await sendFailure(caller, tree, {
+      page: 'board.html',
+      form,
+      entries: [['owner', 'Sara']],
+    })
+    expect(refused).toMatchObject({
+      code: 'too_large',
+      message: expect.stringContaining(
+        'storage limit. A super admin can raise it.',
+      ),
+    })
+    await people((p) => p.setLimits('defaults'))
+  })
+
+  it('checks files per push again at commit', async () => {
+    const ws = await workspace(chief)
+    const key = await agent(chief)
+    const files = { 'a.html': '<title>A</title>', 'b.html': '<title>B</title>' }
+    const staged = await runAs(
+      key,
+      await stageAs(key, `${ws.name}/late`, files),
+    )
+    if (staged.pushId === null) throw new Error('nothing staged')
+    await upload(key, staged.pushId, files, staged.missing)
+    await people((p) => p.setLimits({ pushFiles: 1 }))
+    const refused = await failureAs(
+      key,
+      Effect.flatMap(Push, (push) => push.commit(staged.pushId!)),
+    )
+    expect(refused).toMatchObject({
+      code: 'too_large',
+      message: 'This push has 2 files; a push may hold at most 1 files.',
+    })
     await people((p) => p.setLimits('defaults'))
   })
 

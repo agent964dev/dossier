@@ -794,6 +794,71 @@ describe('teams', () => {
   })
 })
 
+describe('grant order', () => {
+  it('stamps a grant anew when an update changes who or what it reaches', async () => {
+    const w = await world()
+    const design = await team(w.ws, 'Design', [w.member])
+    const other = await team(w.ws, 'Other')
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'email',
+      w.outsider.email,
+      'read',
+      w.admin,
+    )
+    const order = async (sql: string, ...binds: unknown[]) =>
+      (await env.DB.prepare(sql)
+        .bind(...binds)
+        .first<{ o: number }>())!.o
+    const changes: [string, string, string, unknown[]][] = [
+      [
+        'team place, person',
+        'select grant_order as o from team_members where team_id = ?',
+        'update team_members set user_id = ? where team_id = ?',
+        [w.creator.id, design.id],
+      ],
+      [
+        'team place, team',
+        'select grant_order as o from team_members where team_id = ?',
+        'update team_members set team_id = ? where team_id = ?',
+        [other.id, design.id],
+      ],
+      [
+        'membership, person',
+        'select grant_order as o from workspace_members where workspace_id = ? and user_id = ?',
+        'update workspace_members set user_id = ? where workspace_id = ? and user_id = ?',
+        [w.outsider.id, w.ws.id, w.member.id],
+      ],
+      [
+        'share, target',
+        "select grant_order as o from shares where tree_id = ? and target_kind = 'email'",
+        "update shares set target = ? where tree_id = ? and target_kind = 'email'",
+        ['someone@example.com', w.treeId],
+      ],
+    ]
+    for (const [what, read, update, binds] of changes) {
+      const readBinds =
+        what === 'team place, person'
+          ? [design.id]
+          : what === 'team place, team'
+            ? [design.id]
+            : what === 'membership, person'
+              ? [w.ws.id, w.member.id]
+              : [w.treeId]
+      const before = await order(read, ...readBinds)
+      await exec(update, ...binds)
+      const afterBinds =
+        what === 'team place, team'
+          ? [other.id]
+          : what === 'membership, person'
+            ? [w.ws.id, w.outsider.id]
+            : readBinds
+      expect(await order(read, ...afterBinds), what).toBeGreaterThan(before)
+    }
+  })
+})
+
 describe('suspended and deleted workspaces', () => {
   const suspend = (w: World) =>
     exec(
