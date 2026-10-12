@@ -149,6 +149,8 @@ export const labelOf = (element: Element): string | null => {
   for (const raw of [
     element.getAttribute('title'),
     element.getAttribute('aria-label'),
+    // An image is named by its alt text, as a screen reader names it.
+    element.localName === 'img' ? element.getAttribute('alt') : null,
     heading?.textContent,
   ]) {
     const text = (raw ?? '').replace(/\s+/g, ' ').trim()

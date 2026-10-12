@@ -12,7 +12,10 @@ export interface CommentEntry {
   readonly text: string
   /** An element id on the page, or null for the whole page. */
   readonly anchor: string | null
-  /** That element's title, aria-label or first heading when written. */
+  /**
+   * That element's title, aria-label, alt text for an image, or first
+   * heading when written.
+   */
   readonly label: string | null
   /**
    * Fractions of the anchored element's box from its left and top edges,

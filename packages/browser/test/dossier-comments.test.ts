@@ -1183,3 +1183,26 @@ describe('changes that cross each other', () => {
     expect(toggle.textContent).toBe(`${TEXT.showResolved} (1)`)
   })
 })
+
+describe('anchor labels', () => {
+  test('names an element by its title, aria-label, an image’s alt, then its first heading', async () => {
+    const element = await mount(
+      `<section id="a" title="Titled"><h2>Heading A</h2></section>
+       <section id="b" aria-label="Labelled"><h2>Heading B</h2></section>
+       <img id="c" alt="Dashboard mockup">
+       <section id="d"><h3>Heading D</h3></section>
+       <figure id="e"><p>No name</p></figure>`,
+    )
+    const options = [
+      ...q<HTMLSelectElement>(mainComposer(element), 'select').options,
+    ].map((o) => [o.value, o.textContent])
+    expect(options).toEqual([
+      ['', TEXT.wholePage],
+      ['a', 'Titled'],
+      ['b', 'Labelled'],
+      ['c', 'Dashboard mockup'],
+      ['d', 'Heading D'],
+      ['e', '#e'],
+    ])
+  })
+})
