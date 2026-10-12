@@ -22,19 +22,25 @@ import { harness, testRuntime } from './harness.ts'
 /** A Queue binding that keeps every message sent to it. */
 export const recordingQueue = () => {
   const sent: WebhookMessage[] = []
+  /** The delay each message was sent with, beside it. */
+  const delays: (number | undefined)[] = []
   let down = false
   const queue = {
     metrics: async () => ({ backlogCount: 0, backlogBytes: 0 }),
-    send: async (body: WebhookMessage) => {
+    send: async (body: WebhookMessage, options?: QueueSendOptions) => {
       if (down) throw new Error('Queue unavailable')
       sent.push(body)
+      delays.push(options?.delaySeconds)
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } }
     },
     sendBatch: async (
       messages: Iterable<MessageSendRequest<WebhookMessage>>,
     ) => {
       if (down) throw new Error('Queue unavailable')
-      for (const m of messages) sent.push(m.body)
+      for (const m of messages) {
+        sent.push(m.body)
+        delays.push(m.delaySeconds)
+      }
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } }
     },
   } as unknown as Queue<WebhookMessage>
@@ -43,7 +49,17 @@ export const recordingQueue = () => {
     /** Everything sent so far, oldest first. */
     sent: () => [...sent],
     /** Takes what was sent, leaving the Queue empty. */
-    take: () => sent.splice(0, sent.length),
+    take: () => {
+      delays.splice(0, delays.length)
+      return sent.splice(0, sent.length)
+    },
+    /** Takes what was sent with each message's delay. */
+    takeWithDelays: () => {
+      const taken = delays.splice(0, delays.length)
+      return sent
+        .splice(0, sent.length)
+        .map((body, i) => ({ body, delaySeconds: taken[i] }))
+    },
     setDown: (value: boolean) => {
       down = value
     },

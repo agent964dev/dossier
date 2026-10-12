@@ -2,7 +2,7 @@
 // message, the consumer's fan-out and deliveries to a receiver that stands
 // in for each test's host, retries and "Failing since", the rechecks, and the
 // five-minute sweep. Times move with TestClock.
-import type { Person } from '@dossier/contracts'
+import type { EventSeq, Person, TreeId } from '@dossier/contracts'
 import { createScheduledController } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { Webhook } from 'standardwebhooks'
@@ -97,6 +97,18 @@ const deliverOf = (
 ): WebhookMessage[] =>
   messages.filter((m) => m.kind === 'deliver' && m.webhookId === webhookId)
 
+/**
+ * Fans the commit's message out at `time` (the first attempt of each
+ * webhook happens there) and answers the retry message the webhook was left.
+ */
+const firstAttemptAt = async (time: number, webhookId: string) => {
+  const result = await consumeAt(runtime, time, queue.take())
+  const retries = queue
+    .takeWithDelays()
+    .filter((m) => m.body.kind === 'deliver' && m.body.webhookId === webhookId)
+  return { result, retries, retry: retries.map((m) => m.body) }
+}
+
 /** A push of one page at `time`; the tree and the push event's seq. */
 const pushPage = async (time: number, s: Space, tree = 'acme', n = 1) => {
   const result = await pushAt(
@@ -164,6 +176,38 @@ describe('after a commit', () => {
 describe('the consumer', () => {
   beforeAll(fresh)
 
+  it('makes each webhook’s first attempt as it fans a commit out, and sends a message only for a retry', async () => {
+    harness.use(runtime)
+    const s = await space()
+    const T = Date.now()
+    const ok = receiver.host()
+    const failing = receiver.host(500)
+    const fine = await addAt(T, s, ok.url)
+    const down = await addAt(T, s, failing.url)
+    queue.take()
+    const { treeId, seq } = await pushPage(T + SECOND, s)
+    const events = queue.take()
+    expect(events).toHaveLength(1)
+    // One Queue crossing: the commit's own message.
+    const fanned = await consumeAt(runtime, T + 2 * SECOND, events)
+    expect(fanned.explicitAcks).toEqual(fanned.ids)
+    expect(ok.received()).toHaveLength(1)
+    expect(failing.received()).toHaveLength(1)
+    expect(await deliveries(fine.webhook.id)).toMatchObject([
+      { state: 'delivered', attempts: 1 },
+    ])
+    expect(await deliveries(down.webhook.id)).toMatchObject([
+      { state: 'pending', attempts: 1, last_error: 'HTTP 500' },
+    ])
+    // Only the retry travels as a message of its own, delayed as planned.
+    expect(queue.takeWithDelays()).toEqual([
+      {
+        body: { kind: 'deliver', treeId, seq, webhookId: down.webhook.id },
+        delaySeconds: RETRY_DELAYS_SECONDS[0],
+      },
+    ])
+  })
+
   it('writes a delivery for each webhook that takes the event and existed then, and delivers it signed', async () => {
     harness.use(runtime)
     const s = await space()
@@ -179,22 +223,14 @@ describe('the consumer', () => {
     const events = queue.take()
     expect(events).toHaveLength(1)
 
-    const fanned = await consumeAt(runtime, T + 3 * SECOND, events)
+    const when = T + 3 * SECOND
+    const fanned = await consumeAt(runtime, when, events)
     expect(fanned.explicitAcks).toEqual(fanned.ids)
-    expect(await deliveries(yes.webhook.id)).toMatchObject([
-      { event_tree_id: treeId, event_seq: seq, state: 'pending', attempts: 0 },
-    ])
+    expect(fanned.retryMessages).toEqual([])
     expect(await deliveries(no.webhook.id)).toEqual([])
     expect(await deliveries(late.webhook.id)).toEqual([])
-    const sent = queue.take()
-    expect(sent).toEqual([
-      { kind: 'deliver', treeId, seq, webhookId: yes.webhook.id },
-    ])
-
-    const when = Date.now()
-    const delivered = await consumeAt(runtime, when, sent)
-    expect(delivered.explicitAcks).toEqual(delivered.ids)
-    expect(delivered.retryMessages).toEqual([])
+    // Delivered in the fan-out: no message of its own.
+    expect(queue.take()).toEqual([])
     const [got] = takes.received()
     expect(takes.received()).toHaveLength(1)
     expect(other.received()).toEqual([])
@@ -233,15 +269,27 @@ describe('the consumer', () => {
       },
     })
     expect(await deliveries(yes.webhook.id)).toMatchObject([
-      { state: 'delivered', attempts: 1, last_status: 200 },
+      {
+        event_tree_id: treeId,
+        event_seq: seq,
+        state: 'delivered',
+        attempts: 1,
+        last_status: 200,
+      },
     ])
-    // The same message again sends nothing more.
-    const again = await consumeAt(runtime, when + SECOND, sent)
-    expect(again.explicitAcks).toEqual(again.ids)
+    // The events message again, or a stray delivery message, sends nothing.
+    await consumeAt(runtime, when + SECOND, events)
+    const stray = await consumeAt(runtime, when + 2 * SECOND, [
+      {
+        kind: 'deliver',
+        treeId: treeId as TreeId,
+        seq: seq as EventSeq,
+        webhookId: yes.webhook.id,
+      },
+    ])
+    expect(stray.explicitAcks).toEqual(stray.ids)
+    expect(queue.take()).toEqual([])
     expect(takes.received()).toHaveLength(1)
-    // And so does the events message again.
-    await consumeAt(runtime, when + 2 * SECOND, events)
-    expect(deliverOf(queue.take(), yes.webhook.id)).toEqual([])
   })
 
   it('retries a failing receiver with backoff, shows "Failing since" after the third failure in a row, and clears it on a success', async () => {
@@ -252,15 +300,20 @@ describe('the consumer', () => {
     const hook = await addAt(T, s, host.url)
     queue.take()
     const { seq } = await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const [deliver] = queue.take()
     let now = T + 3 * SECOND
+    const first = await firstAttemptAt(now, hook.webhook.id)
+    expect(first.retries).toEqual([
+      { body: first.retry[0], delaySeconds: RETRY_DELAYS_SECONDS[0] },
+    ])
+    const deliver = first.retry[0]
     for (let n = 1; n <= FAILING_AFTER; n += 1) {
-      const result = await consumeAt(runtime, now, [deliver!])
-      expect(result.explicitAcks).toEqual([])
-      expect(result.retryMessages).toEqual([
-        { msgId: result.ids[0], delaySeconds: RETRY_DELAYS_SECONDS[n - 1] },
-      ])
+      if (n > 1) {
+        const result = await consumeAt(runtime, now, [deliver!])
+        expect(result.explicitAcks).toEqual([])
+        expect(result.retryMessages).toEqual([
+          { msgId: result.ids[0], delaySeconds: RETRY_DELAYS_SECONDS[n - 1] },
+        ])
+      }
       const [row] = await deliveries(hook.webhook.id)
       expect(row).toMatchObject({
         event_seq: seq,
@@ -304,28 +357,19 @@ describe('the consumer', () => {
     const hook = await addAt(T, s, host.url)
     queue.take()
     await pushPage(T + SECOND, s, 'acme', 1)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const [first] = queue.take()
     let now = T + 3 * SECOND
-    for (let n = 1; n <= FAILING_AFTER; n += 1) {
-      await consumeAt(runtime, now, [first!])
+    const { retry } = await firstAttemptAt(now, hook.webhook.id)
+    now += RETRY_DELAYS_SECONDS[0]! * SECOND
+    for (let n = 2; n <= FAILING_AFTER; n += 1) {
+      await consumeAt(runtime, now, retry)
       now += RETRY_DELAYS_SECONDS[n - 1]! * SECOND
     }
     const [failing] = (await listAt(now, s)).webhooks
     expect(failing!.failing).toMatchObject({ lastError: 'HTTP 502' })
 
     const second = await pushPage(now, s, 'acme', 2)
-    await consumeAt(runtime, now + SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
-    expect(sent).toEqual([
-      {
-        kind: 'deliver',
-        treeId: second.treeId,
-        seq: second.seq,
-        webhookId: hook.webhook.id,
-      },
-    ])
-    await consumeAt(runtime, now + 2 * SECOND, sent)
+    const next = await firstAttemptAt(now + SECOND, hook.webhook.id)
+    expect(next.retries).toEqual([])
     expect(host.received()).toHaveLength(FAILING_AFTER + 1)
     expect(JSON.parse(host.received().at(-1)!.body)).toMatchObject({
       data: { event: { seq: second.seq } },
@@ -340,10 +384,11 @@ describe('the consumer', () => {
     const hook = await addAt(T, s, host.url)
     queue.take()
     await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const [deliver] = queue.take()
     let now = T + 3 * SECOND
-    for (let n = 1; n <= 9; n += 1) {
+    const { retry } = await firstAttemptAt(now, hook.webhook.id)
+    const deliver = retry[0]
+    now += RETRY_DELAYS_SECONDS[0]! * SECOND
+    for (let n = 2; n <= 9; n += 1) {
       const result = await consumeAt(runtime, now, [deliver!])
       if (n < 9) {
         expect(result.retryMessages).toHaveLength(1)
@@ -368,22 +413,25 @@ describe('the consumer', () => {
     harness.use(runtime)
     const s = await space()
     const T = Date.now()
-    const host = receiver.host()
+    const host = receiver.host(500)
     const hook = await addAt(T, s, host.url)
     queue.take()
     await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
+    // The first attempt fails; two copies of its retry message race.
+    const { retry: sent } = await firstAttemptAt(
+      T + 2 * SECOND,
+      hook.webhook.id,
+    )
     let release = () => {}
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
     host.during(() => held)
-    const first = consumeAt(runtime, T + 3 * SECOND, sent)
+    const first = consumeAt(runtime, T + 32 * SECOND, sent)
     // While the first copy's request is in flight, the second finds the
     // delivery held and comes back after the claim's lease.
     await new Promise((resolve) => setTimeout(resolve, 50))
-    const second = await consumeAt(runtime, T + 4 * SECOND, sent)
+    const second = await consumeAt(runtime, T + 33 * SECOND, sent)
     expect(second.explicitAcks).toEqual([])
     expect(second.retryMessages).toEqual([
       { msgId: second.ids[0], delaySeconds: 60 },
@@ -391,11 +439,11 @@ describe('the consumer', () => {
     release()
     expect((await first).explicitAcks).toHaveLength(1)
     host.during(async () => {})
-    const later = await consumeAt(runtime, T + 64 * SECOND, sent)
+    const later = await consumeAt(runtime, T + 93 * SECOND, sent)
     expect(later.explicitAcks).toEqual(later.ids)
-    expect(host.received()).toHaveLength(1)
+    expect(host.received()).toHaveLength(2)
     expect(await deliveries(hook.webhook.id)).toMatchObject([
-      { state: 'delivered', attempts: 1 },
+      { state: 'delivered', attempts: 2 },
     ])
   })
 
@@ -404,11 +452,9 @@ describe('the consumer', () => {
     const T = Date.now()
     const host = receiver.host()
     harness.use(runtime)
-    const hook = await addAt(T, s, host.url)
+    await addAt(T, s, host.url)
     queue.take()
     await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
     const broken = testRuntime({
       env: {
         WEBHOOKS: queue.queue,
@@ -417,12 +463,18 @@ describe('the consumer', () => {
         ),
       },
     })
-    const failed = await consumeAt(broken, T + 3 * SECOND, sent)
-    expect(failed.retryMessages).toEqual([
-      { msgId: failed.ids[0], delaySeconds: 30 },
-    ])
+    // The first attempt, in the fan-out, fails before sending: it lets its
+    // claim go and leaves a retry message.
+    const failed = await consumeAt(broken, T + 3 * SECOND, queue.take())
+    expect(failed.explicitAcks).toEqual(failed.ids)
+    const left = queue.takeWithDelays().filter((m) => m.body.kind === 'deliver')
+    expect(left.map((m) => m.delaySeconds)).toEqual([30])
     expect(host.received()).toEqual([])
-    const retried = await consumeAt(runtime, T + 33 * SECOND, sent)
+    const retried = await consumeAt(
+      runtime,
+      T + 33 * SECOND,
+      left.map((m) => m.body),
+    )
     expect(retried.explicitAcks).toEqual(retried.ids)
     expect(host.received()).toHaveLength(1)
   })
@@ -436,9 +488,7 @@ describe('the consumer', () => {
     const hook = await addAt(T, s, old.url)
     queue.take()
     await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
-    // The admin edits the URL while the request to the old one is out.
+    // The admin edits the URL while the first request to the old one is out.
     old.during(async () => {
       await exec(
         'update webhooks set url = ? where id = ?',
@@ -446,7 +496,10 @@ describe('the consumer', () => {
         hook.webhook.id,
       )
     })
-    await consumeAt(runtime, T + 3 * SECOND, sent)
+    const { retry: sent } = await firstAttemptAt(
+      T + 3 * SECOND,
+      hook.webhook.id,
+    )
     const [row] = await rows<{ consecutive_failures: number; url: string }>(
       'select consecutive_failures, url from webhooks where id = ?',
       hook.webhook.id,
@@ -464,12 +517,14 @@ describe('the consumer', () => {
     harness.use(runtime)
     const s = await space()
     const T = Date.now()
-    const host = receiver.host()
+    const host = receiver.host(500)
     const hook = await addAt(T, s, host.url)
     queue.take()
     await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
+    const { retry: sent } = await firstAttemptAt(
+      T + 2 * SECOND,
+      hook.webhook.id,
+    )
     let release = () => {}
     const held = new Promise<void>((resolve) => {
       release = resolve
@@ -483,8 +538,8 @@ describe('the consumer', () => {
       env.DB,
       (q) => q.includes('as nodeKind'),
       async () => {
-        second = consumeAt(runtime, T + 64 * SECOND, sent)
-        while (host.received().length === 0) {
+        second = consumeAt(runtime, T + 93 * SECOND, sent)
+        while (host.received().length < 2) {
           await new Promise((resolve) => setTimeout(resolve, 10))
         }
         await exec(
@@ -496,15 +551,15 @@ describe('the consumer', () => {
     )
     await consumeAt(
       testRuntime({ env: { WEBHOOKS: queue.queue, DB: stalled } }),
-      T + 3 * SECOND,
+      T + 32 * SECOND,
       sent,
     )
     release()
     await second
     host.during(async () => {})
-    expect(host.received()).toHaveLength(1)
+    expect(host.received()).toHaveLength(2)
     expect(await deliveries(hook.webhook.id)).toMatchObject([
-      { state: 'delivered', attempts: 1, last_status: 200 },
+      { state: 'delivered', attempts: 2, last_status: 200 },
     ])
   })
 
@@ -516,10 +571,10 @@ describe('the consumer', () => {
     const hook = await addAt(T, s, host.url)
     queue.take()
     await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
     let now = T + 3 * SECOND
-    for (let n = 1; n <= FAILING_AFTER; n += 1) {
+    const { retry: sent } = await firstAttemptAt(now, hook.webhook.id)
+    now += RETRY_DELAYS_SECONDS[0]! * SECOND
+    for (let n = 2; n <= FAILING_AFTER; n += 1) {
       await consumeAt(runtime, now, sent)
       now += RETRY_DELAYS_SECONDS[n - 1]! * SECOND
     }
@@ -563,9 +618,7 @@ describe('the consumer', () => {
       const hook = await addAt(T, s, host.url)
       queue.take()
       await pushPage(T + SECOND, s, `tree${n}`)
-      await consumeAt(runtime, T + 2 * SECOND, queue.take())
-      const sent = deliverOf(queue.take(), hook.webhook.id)
-      await consumeAt(runtime, T + 3 * SECOND, sent)
+      await firstAttemptAt(T + 2 * SECOND, hook.webhook.id)
       expect(await deliveries(hook.webhook.id)).toMatchObject([
         { state: 'pending', attempts: 1, last_error: error },
       ])
@@ -587,18 +640,24 @@ describe('the consumer', () => {
 describe('the rechecks before each attempt', () => {
   beforeAll(fresh)
 
-  /** A webhook with a delivery waiting, and its message. */
+  /**
+   * A webhook whose first attempt failed, with its retry waiting: each case
+   * changes something, and the retry then sends nothing more.
+   */
   const waiting = async () => {
     const s = await space()
     const T = Date.now()
-    const host = receiver.host()
+    const host = receiver.host(500)
     const hook = await addAt(T, s, host.url)
     queue.take()
     const event = await pushPage(T + SECOND, s)
-    await consumeAt(runtime, T + 2 * SECOND, queue.take())
-    const sent = deliverOf(queue.take(), hook.webhook.id)
+    const { retry: sent } = await firstAttemptAt(
+      T + 2 * SECOND,
+      hook.webhook.id,
+    )
     expect(sent).toHaveLength(1)
-    return { s, T, host, hook, event, sent }
+    expect(host.received()).toHaveLength(1)
+    return { s, T: T + 30 * SECOND, host, hook, event, sent }
   }
 
   it('sends nothing for a webhook deleted meanwhile', async () => {
@@ -613,7 +672,7 @@ describe('the rechecks before each attempt', () => {
     )
     const result = await consumeAt(runtime, T + 3 * SECOND, sent)
     expect(result.explicitAcks).toEqual(result.ids)
-    expect(host.received()).toEqual([])
+    expect(host.received()).toHaveLength(1)
     // Its deliveries went with it.
     expect(await deliveries(hook.webhook.id)).toEqual([])
   })
@@ -628,9 +687,9 @@ describe('the rechecks before each attempt', () => {
     )
     const result = await consumeAt(runtime, T + 3 * SECOND, sent)
     expect(result.explicitAcks).toEqual(result.ids)
-    expect(host.received()).toEqual([])
+    expect(host.received()).toHaveLength(1)
     expect(await deliveries(hook.webhook.id)).toMatchObject([
-      { state: 'skipped', attempts: 0 },
+      { state: 'skipped', attempts: 1 },
     ])
   })
 
@@ -645,7 +704,7 @@ describe('the rechecks before each attempt', () => {
     )
     const result = await consumeAt(runtime, T + 3 * SECOND, sent)
     expect(result.explicitAcks).toEqual(result.ids)
-    expect(host.received()).toEqual([])
+    expect(host.received()).toHaveLength(1)
     expect(await deliveries(hook.webhook.id)).toMatchObject([
       { state: 'skipped' },
     ])
@@ -667,7 +726,7 @@ describe('the rechecks before each attempt', () => {
       ),
     )
     await consumeAt(runtime, T + 3 * SECOND, sent)
-    expect(host.received()).toEqual([])
+    expect(host.received()).toHaveLength(1)
     expect(await deliveries(hook.webhook.id)).toMatchObject([
       { state: 'skipped' },
     ])
@@ -825,10 +884,9 @@ describe('the Worker’s queue handler', () => {
       await worker.queue(batch)
       return getQueueResult(batch, ctx)
     }
+    // The commit's message delivers at once; nothing else goes on the Queue.
     expect((await run(queue.take())).explicitAcks).toEqual(['m0'])
-    expect(
-      (await run(deliverOf(queue.take(), hook.webhook.id))).explicitAcks,
-    ).toEqual(['m0'])
     expect(host.received()).toHaveLength(1)
+    expect(deliverOf(queue.take(), hook.webhook.id)).toEqual([])
   })
 })

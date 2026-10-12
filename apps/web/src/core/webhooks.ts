@@ -301,6 +301,16 @@ const attempt = (
   })
 
 type DeliverMessage = Extract<WebhookMessage, { kind: 'deliver' }>
+
+/** What one attempt left to do: nothing, or another try after a while. */
+type Outcome =
+  | { readonly kind: 'done' }
+  | { readonly kind: 'retry'; readonly delaySeconds: number }
+
+const DONE: Outcome = { kind: 'done' }
+
+/** First attempts one commit's message makes at once. */
+const FIRST_ATTEMPTS = 10
 type DeliveryKey = Pick<DeliverMessage, 'treeId' | 'seq' | 'webhookId'>
 
 export const WebhooksLive: Layer.Layer<
@@ -632,7 +642,9 @@ export const WebhooksLive: Layer.Layer<
       })
 
     /** One 'deliver' message per delivery, at most 100 a call. */
-    const sendDeliveries = (rows: readonly DeliveryKey[]) =>
+    const sendDeliveries = (
+      rows: readonly (DeliveryKey & { readonly delaySeconds?: number })[],
+    ) =>
       Effect.gen(function* () {
         const queue = env.WEBHOOKS
         if (rows.length === 0) return
@@ -652,13 +664,21 @@ export const WebhooksLive: Layer.Layer<
                   seq: r.seq,
                   webhookId: r.webhookId,
                 } satisfies WebhookMessage,
+                ...(r.delaySeconds === undefined
+                  ? {}
+                  : { delaySeconds: r.delaySeconds }),
               })),
             ),
           )
         }
       })
 
-    /** A commit's events: a delivery row and a message per webhook taking each. */
+    /**
+     * A commit's events: a delivery row per webhook taking each, and its
+     * first attempt made here, so a delivery follows its commit after one
+     * Queue crossing. Only a retry travels as a message of its own; work
+     * lost on the way is found by the sweep.
+     */
     const fanOut = (
       system: SystemStore,
       m: Extract<WebhookMessage, { kind: 'events' }>,
@@ -670,8 +690,38 @@ export const WebhooksLive: Layer.Layer<
         const pairs = pairsOf(events, hooks)
         if (pairs.length === 0) return
         const at = yield* Clock.currentTimeMillis
-        // Messages lost after the rows are written are found by the sweep.
-        yield* sendDeliveries(yield* insertPending(pairs, at))
+        const fresh = yield* insertPending(pairs, at)
+        const retries = yield* Effect.forEach(
+          fresh,
+          (row) =>
+            attemptDelivery(system, row).pipe(
+              Effect.map((outcome) =>
+                outcome.kind === 'done'
+                  ? null
+                  : { ...row, delaySeconds: outcome.delaySeconds },
+              ),
+              Effect.catchAllCause((cause) =>
+                Effect.sync(() => {
+                  console.error('A first webhook attempt will be tried again', {
+                    webhook: row.webhookId,
+                    cause: String(cause),
+                  })
+                  return { ...row, delaySeconds: RETRY_DELAYS_SECONDS[0] }
+                }),
+              ),
+            ),
+          { concurrency: FIRST_ATTEMPTS },
+        )
+        yield* sendDeliveries(retries.filter((r) => r !== null)).pipe(
+          Effect.catchAllCause((cause) =>
+            Effect.sync(() => {
+              console.error(
+                'Webhook retries were not queued; the sweep sends them',
+                String(cause),
+              )
+            }),
+          ),
+        )
       })
 
     const keyBinds = (m: DeliveryKey) => [m.treeId, m.seq, m.webhookId] as const
@@ -718,12 +768,12 @@ export const WebhooksLive: Layer.Layer<
     /**
      * One delivery: claimed, rechecked, signed, sent, and recorded. Only the
      * attempt holding the claim sends, and only it records what came of it.
+     * Answers whether the delivery is done here or wants another try.
      */
-    const deliver = (
+    const attemptDelivery = (
       system: SystemStore,
-      message: Message<WebhookMessage>,
-      m: DeliverMessage,
-    ) =>
+      m: DeliveryKey,
+    ): Effect.Effect<Outcome, DossierError<'unavailable'>> =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
         const claimId = newId()
@@ -753,17 +803,18 @@ export const WebhooksLive: Layer.Layer<
               }>(),
           )
           // Done, failed for good, skipped or gone: a repeated message.
-          if (row === null || row.state !== 'pending') return message.ack()
+          if (row === null || row.state !== 'pending') return DONE
           // Held by another attempt, or not due yet: back when it may run.
           const until = Math.max(row.nextAt, row.claimedUntil ?? 0)
-          return message.retry({
+          return {
+            kind: 'retry',
             delaySeconds: Math.min(
               MAX_DELAY_SECONDS,
               Math.max(1, Math.ceil((until - now) / 1000) + 1),
             ),
-          })
+          } satisfies Outcome
         }
-        return yield* attemptClaimed(system, message, m, {
+        return yield* attemptClaimed(system, m, {
           claimId,
           claimedAt: now,
           attempts: claimed.attempts,
@@ -773,10 +824,21 @@ export const WebhooksLive: Layer.Layer<
         )
       })
 
-    const attemptClaimed = (
+    /** A delivery message: its attempt, then ack or retry as it says. */
+    const deliver = (
       system: SystemStore,
       message: Message<WebhookMessage>,
       m: DeliverMessage,
+    ) =>
+      Effect.map(attemptDelivery(system, m), (outcome) =>
+        outcome.kind === 'done'
+          ? message.ack()
+          : message.retry({ delaySeconds: outcome.delaySeconds }),
+      )
+
+    const attemptClaimed = (
+      system: SystemStore,
+      m: DeliveryKey,
       claim: {
         readonly claimId: string
         readonly claimedAt: number
@@ -791,35 +853,35 @@ export const WebhooksLive: Layer.Layer<
         )
         if (hook === null) {
           yield* skip(m, claim.claimId, 'webhook gone')
-          return message.ack()
+          return DONE
         }
         // One read of the event, its tree and the workspace it is in now:
         // the rechecks below rest on the same moment.
         const facts = yield* system.eventForDelivery(m.treeId, m.seq)
         if (facts === null) {
           yield* skip(m, claim.claimId, 'event gone')
-          return message.ack()
+          return DONE
         }
         if (facts.tree.workspaceId !== hook.workspaceId) {
           yield* skip(m, claim.claimId, 'tree moved')
-          return message.ack()
+          return DONE
         }
         if (
           facts.workspace.deletedAt !== null ||
           facts.workspace.suspendedAt !== null
         ) {
           yield* skip(m, claim.claimId, 'workspace not live')
-          return message.ack()
+          return DONE
         }
         const type = facts.event.type as EventType
         if (!eventsOf(hook.eventsJson).includes(type)) {
           yield* skip(m, claim.claimId, 'event no longer chosen')
-          return message.ack()
+          return DONE
         }
         const url = webhookUrl(hook.url, rules)
         if (url === null) {
           yield* skip(m, claim.claimId, 'url refused')
-          return message.ack()
+          return DONE
         }
         const pushId = facts.event.pushId
         const push =
@@ -966,9 +1028,9 @@ export const WebhooksLive: Layer.Layer<
           ]),
         )
         // The claim was lost meanwhile: whoever holds it now records.
-        if ((results[0]?.results.length ?? 0) === 0) return message.ack()
-        if (result.ok || last) return message.ack()
-        return message.retry({ delaySeconds: delay })
+        if ((results[0]?.results.length ?? 0) === 0) return DONE
+        if (result.ok || last) return DONE
+        return { kind: 'retry', delaySeconds: delay } satisfies Outcome
       })
 
     const consume: WebhooksService['consume'] = (batch) =>
