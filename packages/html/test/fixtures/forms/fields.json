@@ -371,10 +371,6 @@
         "multiple": false,
         "options": [
           {
-            "value": "",
-            "label": "Choose one"
-          },
-          {
             "value": "XS",
             "label": "XS"
           },

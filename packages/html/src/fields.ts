@@ -265,13 +265,28 @@ const fieldsOf = (
         offer(value, own ?? value)
       } else if (type === 'select' || type === 'select-multiple') {
         if (kind !== 'select' && kind !== 'select-multiple') return
+        // Disabled options cannot be chosen, and a required single
+        // select's empty first option is its placeholder, not a choice.
+        const placeholder =
+          kind === 'select' && hasAttr(control, 'required')
+            ? control.childNodes.find(
+                (node): node is Element =>
+                  isElement(node) && isHtml(node, 'option'),
+              )
+            : undefined
         const walk = (parent: Element): void => {
           for (const node of parent.childNodes) {
             if (!isElement(node)) continue
             if (isHtml(node, 'option')) {
+              if (hasAttr(node, 'disabled')) continue
+              if (node === placeholder && attrOf(node, 'value') === '') continue
               const text = textOf(node)
               offer(attrOf(node, 'value') ?? text, text)
-            } else walk(node)
+            } else if (
+              !(isHtml(node, 'optgroup') && hasAttr(node, 'disabled'))
+            ) {
+              walk(node)
+            }
           }
         }
         walk(control)

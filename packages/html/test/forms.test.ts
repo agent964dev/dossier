@@ -225,6 +225,13 @@ describe('the fields of a form', () => {
     expect(byName(feedback!.fields).pick?.label).toBeNull()
   })
 
+  it('leave out disabled options and those of a disabled group', () => {
+    const [form] = analyze(
+      '<form action="a/"><select name="s"><option>A</option><option disabled>B</option><optgroup disabled><option>C</option></optgroup><option value="">None</option></select></form>',
+    ).forms
+    expect(form?.fields[0]?.options.map((o) => o.value)).toEqual(['A', ''])
+  })
+
   it('offer each radio, checkbox, button and option with its own label', () => {
     expect(signupFields.meal?.options).toEqual([
       { value: 'veg', label: 'Vegetarian' },
@@ -235,8 +242,8 @@ describe('the fields of a form', () => {
       { value: 'html', label: 'HTML' },
       { value: 'css', label: 'CSS' },
     ])
+    // A required select's empty first option is its placeholder.
     expect(signupFields.size?.options).toEqual([
-      { value: '', label: 'Choose one' },
       { value: 'XS', label: 'XS' },
       { value: 's', label: 'Small size' },
       { value: 'l', label: 'Large' },
