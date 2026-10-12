@@ -3853,31 +3853,32 @@ export const TreeStoreLive: Layer.Layer<
         if (found === null) return yield* deny(null)
         const t = found.tree
         const readable = yield* access.readable(t.id)
-        // The caller follows a path it may read, or, without one, anything
-        // in the tree it may read.
-        if (i.path !== null) {
-          const node = yield* nearest(t.id, i.path)
-          if (node === null) return yield* deny(t.id)
-          yield* access
-            .require('read', node)
-            .pipe(
-              Effect.mapError((e) =>
-                e.code === 'sign_in_required'
-                  ? (e as DossierError<'sign_in_required'>)
-                  : dossierError('not_found'),
+        // The caller follows a path at or below a node it reads, or, without
+        // one, anything in the tree it reads. A path it cannot read under a
+        // node it reads answers as a missing one; a refusal names only the
+        // path asked.
+        const paths =
+          i.path === null
+            ? null
+            : JSON.stringify(ancestorPaths(i.path.replace(/^\/+|\/+$/g, '')))
+        const any = yield* read(() =>
+          database
+            .select({ one: sql<number>`1` })
+            .from(schema.nodes)
+            .where(
+              and(
+                eq(schema.nodes.treeId, t.id),
+                isNull(schema.nodes.deletedAt),
+                paths === null
+                  ? undefined
+                  : sql`${schema.nodes.path} in (select value from json_each(${paths}))`,
+                readable.where,
               ),
             )
-        } else {
-          const any = yield* read(() =>
-            database
-              .select({ one: sql<number>`1` })
-              .from(schema.nodes)
-              .where(and(readable.where, isNull(schema.nodes.deletedAt)))
-              .limit(1)
-              .all(),
-          )
-          if (any.length === 0) return yield* deny(t.id)
-        }
+            .limit(1)
+            .all(),
+        )
+        if (any.length === 0) return yield* deny(t.id)
         const secret = bindings.HANDLE_SECRET
         const who = caller.person?.id ?? ''
         const seal = (seq: number) =>
