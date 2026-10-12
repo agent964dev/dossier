@@ -241,7 +241,8 @@ export const responsesView = createServerFn({ method: 'GET' })
           pageLink,
         ]
         const forms = found.forms.map((f) => {
-          const title = f.form.title ?? found.page.title
+          // An untitled form is named by its id, or by the page it is on.
+          const title = f.form.title ?? f.form.id ?? found.page.title
           const target = fromPage(f.form.target)
           const people = plural(f.people, 'person', 'people')
           const fields = f.form.fields

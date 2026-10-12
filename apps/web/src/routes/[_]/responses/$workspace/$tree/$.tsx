@@ -117,7 +117,7 @@ function Responses({ view, at }: { view: ResponsesView; at: PageAt }) {
   return (
     <div className="min-h-dvh">
       <AppHeader email={view.me.email} />
-      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 pt-6 pb-16 sm:px-6">
+      <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 pt-6 pb-16 sm:px-6">
         <div className="flex flex-col gap-3">
           <nav aria-label="Breadcrumbs">
             <ol className="flex flex-wrap items-center gap-x-1.5 font-mono text-xs text-neutral-400">
@@ -217,11 +217,6 @@ function FormSection({
           <span>Form · {form.target}</span>
           <span aria-hidden className="h-px flex-1 bg-border" />
         </p>
-        {single ? null : (
-          <p className="text-[0.9375rem] text-neutral-300 md:hidden">
-            {form.heading}
-          </p>
-        )}
       </div>
       {form.empty !== null ? (
         <Empty text={form.empty} />
@@ -359,7 +354,7 @@ function ResponsesTable({
   form: FormView
   onRevisions: (sheet: Sheet) => void
 }) {
-  const head = `px-4 py-3 text-left font-normal ${LABEL}`
+  const head = `px-3.5 py-3 text-left font-normal ${LABEL}`
   return (
     <div className="hidden overflow-x-auto rounded-xl border border-border bg-card md:block">
       <table className="w-full border-collapse text-[0.9375rem]">
@@ -386,22 +381,22 @@ function ResponsesTable({
             <tr key={row.path} className="align-top">
               <th
                 scope="row"
-                className="px-4 py-3.5 text-left font-normal break-all text-neutral-50"
+                className="px-3.5 py-3.5 text-left font-normal whitespace-nowrap text-neutral-50"
               >
                 {row.who}
               </th>
               {row.cells.map((cell) => (
                 <td
                   key={cell.field}
-                  className="px-4 py-3.5 break-words text-neutral-100"
+                  className="px-3.5 py-3.5 break-words text-neutral-100"
                 >
                   <CellValue cell={cell.cell} />
                 </td>
               ))}
-              <td className="px-4 py-3.5 font-mono text-xs whitespace-nowrap text-neutral-400">
+              <td className="px-3.5 py-3.5 font-mono text-xs whitespace-nowrap text-neutral-400">
                 {row.when} · push {row.push}
               </td>
-              <td className="px-4 py-3">
+              <td className="px-3.5 py-3">
                 {row.revisions > 1 ? (
                   <button
                     type="button"
