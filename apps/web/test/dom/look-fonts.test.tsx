@@ -220,6 +220,64 @@ describe('choosing a Google font for a role', () => {
     })
   })
 
+  it('keeps both choices when copies for two roles finish out of order', async () => {
+    const pending = new Map<string, (choice: FontChoice) => void>()
+    const slow: FontActions = {
+      copyGoogleFont: (family) =>
+        new Promise((resolve) => pending.set(family, resolve)),
+      uploadFont: async () => 'not in this test',
+    }
+    function Slow() {
+      const [draft, setDraft] = useState<Look>(AGENT964_LOOK)
+      return (
+        <Fonts
+          draft={draft}
+          onChange={(next) => {
+            saved.push(next)
+            setDraft(next)
+          }}
+          actions={slow}
+        />
+      )
+    }
+    act(() => root.render(<Slow />))
+    const choose = async (role: string, family: string) => {
+      act(() => button(`Change the ${role} font`).click())
+      const list = () =>
+        host.querySelector(
+          `#${CSS.escape(
+            host
+              .querySelector(
+                `input[role="combobox"][aria-label="Google Fonts family for ${role}"]`,
+              )!
+              .getAttribute('aria-controls')!,
+          )}`,
+        )!
+      await until(
+        () => list().querySelector(`[data-family="${family}"]`) !== null,
+      )
+      act(() =>
+        (
+          list().querySelector(
+            `[data-family="${family}"]`,
+          ) as unknown as HTMLElement
+        ).click(),
+      )
+    }
+    await choose('Body', 'Roboto')
+    await choose('Display', 'Montserrat')
+    await until(() => pending.size === 2)
+    const face = (family: string): FontChoice => ({
+      kind: 'google',
+      family,
+      faces: [FACE],
+    })
+    await act(async () => pending.get('Roboto')!(face('Roboto')))
+    await act(async () => pending.get('Montserrat')!(face('Montserrat')))
+    expect(saved.at(-1)!.fonts.body).toMatchObject({ family: 'Roboto' })
+    expect(saved.at(-1)!.fonts.display).toMatchObject({ family: 'Montserrat' })
+  })
+
   it('shows why a copy was refused and keeps the list open', async () => {
     await openBody(true)
     typeValue('inter')

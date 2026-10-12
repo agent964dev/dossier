@@ -54,6 +54,20 @@ export function Fonts({
   onChange: (look: Look) => void
   actions: FontActions
 }) {
+  // A copy finishes after other edits may have landed, so its choice goes
+  // into the draft as it is then, not as it was when the copy began.
+  const latest = useRef(draft)
+  useEffect(() => {
+    latest.current = draft
+  }, [draft])
+  const choose = (role: FontRole, choice: FontChoice) => {
+    const next = {
+      ...latest.current,
+      fonts: { ...latest.current.fonts, [role]: choice },
+    }
+    latest.current = next
+    onChange(next)
+  }
   return (
     <section aria-labelledby="fonts-label" className="flex flex-col gap-3">
       <SectionLabel id="fonts-label">Fonts</SectionLabel>
@@ -64,9 +78,7 @@ export function Fonts({
             role={role}
             choice={draft.fonts[role]}
             actions={actions}
-            onChange={(choice) =>
-              onChange({ ...draft, fonts: { ...draft.fonts, [role]: choice } })
-            }
+            onChange={(choice) => choose(role, choice)}
           />
         ))}
       </ul>
