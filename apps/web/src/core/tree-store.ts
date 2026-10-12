@@ -418,6 +418,11 @@ export interface ChangeSet {
      * entries name (`replyTo`, `resolves`, `reopens`) follow.
      */
     refs?: { readonly from: string; readonly to: string },
+    /**
+     * A file the move makes a page or a layout: the forms its content
+     * declares at `to`, by its current version.
+     */
+    forms?: readonly NewFormRow[],
   ) => void
   /**
    * A new authored version of an existing file, as a move's rewritten
@@ -2873,7 +2878,7 @@ export const TreeStoreLive: Layer.Layer<
             outcomes.push(liveUnderLive(t))
           },
 
-          move: (node, to, folders, refs) => {
+          move: (node, to, folders, refs, pageForms) => {
             const t = tid()
             authoredTouched = true
             bases.push(everyBasis(node.basis, person.id))
@@ -2962,6 +2967,30 @@ export const TreeStoreLive: Layer.Layer<
                         or substr(target_path, 1, length(?3) + 1) = ?3 || '/')`,
                 binds: [t, to, node.path],
               },
+              ...(pageForms === undefined
+                ? []
+                : [
+                    {
+                      // What an earlier life as a page left is replaced.
+                      sql: `delete from forms where host_version_id =
+                              (select current_version_id from nodes where id = ?1)`,
+                      binds: [node.id],
+                    },
+                    {
+                      sql: `insert into forms (host_version_id, host_node_id, tree_id,
+                              target_path, form_key, kind, closes_at, closed, line, title,
+                              schema_json)
+                            select n.current_version_id, n.id, n.tree_id,
+                              json_extract(f.value, '$.target'), json_extract(f.value, '$.key'),
+                              json_extract(f.value, '$.kind'), json_extract(f.value, '$.closesAt'),
+                              json_extract(f.value, '$.closed'), json_extract(f.value, '$.line'),
+                              json_extract(f.value, '$.title'), json_extract(f.value, '$.schema')
+                            from nodes n join json_each(?2) f
+                            where n.id = ?1 and n.current_version_id is not null
+                            on conflict do nothing`,
+                      binds: [node.id, JSON.stringify(pageForms)],
+                    },
+                  ]),
             )
             outcomes.push(
               {

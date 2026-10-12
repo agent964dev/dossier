@@ -23,6 +23,8 @@ import {
 } from '@dossier/contracts'
 import {
   ANALYZER_VERSION,
+  checkPush,
+  describeProblems,
   pageFolderClash,
   rewriteForMove,
   type HtmlAnalysis,
@@ -988,6 +990,76 @@ export const makeChanges = (deps: ChangesDeps) => {
           )
         }
       }
+      // Kinds as the new paths make them: a file renamed to `.html` is a
+      // page (or a layout) from the move on, and a page renamed to `.txt`
+      // is not.
+      const kindsAfter = new Map<string, NodeKindAfter>()
+      for (const n of live) {
+        const after = newOf(n.path)
+        kindsAfter.set(after, kindOf({ ...n, path: after }))
+      }
+      for (const p of make) kindsAfter.set(p, 'folder')
+      // Files a rename makes pages or layouts: what their content declares
+      // where they will stand, by the version's author, as a push of them
+      // there would record it. The push's page rules apply to them.
+      const becoming: {
+        readonly path: string
+        readonly author: PersonId
+        readonly analysis: HtmlAnalysis | null
+      }[] = []
+      for (const n of live) {
+        const after = newOf(n.path)
+        if (
+          n.kind !== 'file' ||
+          n.origin !== 'authored' ||
+          n.path.endsWith('.html') ||
+          !after.endsWith('.html')
+        ) {
+          continue
+        }
+        const row = yield* query(() =>
+          DB.prepare(
+            `select blob_sha256 as sha, author_id as author from node_versions
+             where id = ?`,
+          )
+            .bind(n.currentVersionId)
+            .first<{ sha: Sha256 | null; author: PersonId }>(),
+        )
+        if (row === null) continue
+        const analysis =
+          row.sha === null ? null : yield* store.analysis(row.sha)
+        becoming.push({ path: after, author: row.author, analysis })
+      }
+      const asPages = becoming.flatMap((b) =>
+        b.analysis === null ? [] : [{ path: b.path, analysis: b.analysis }],
+      )
+      const pageCheck = checkPush(
+        asPages,
+        { kindAt: (p) => kindsAfter.get(p) ?? null, componentAt: () => true },
+        { warnFor: new Set() },
+      )
+      if (pageCheck.problems.length > 0) {
+        const described = describeProblems(pageCheck.problems)
+        return yield* Effect.fail(
+          dossierError(
+            'policy_rejected',
+            described.message,
+            described.fix,
+            described.path,
+          ),
+        )
+      }
+      // Its forms, by its version, with targets read from where it will be.
+      const becomingForms = formRowsOf(asPages).map((f): NewFormRow => ({
+        target: f.target,
+        key: f.key,
+        kind: f.kind,
+        closesAt: f.closesAt,
+        closed: f.closed,
+        line: f.line,
+        title: f.title,
+        schema: f.schema,
+      }))
       // Relative links in authored HTML that cross the move follow it.
       const kinds = new Map(live.map((n) => [n.path, kindOf(n)]))
       const html = yield* htmlFiles(tree.id)
@@ -1068,15 +1140,27 @@ export const makeChanges = (deps: ChangesDeps) => {
           const analysis = yield* store.analysis(r.sha)
           if (analysis !== null) analyses.set(r.file.node.id, analysis)
         }
-        const files: HtmlAfter[] = html.map((f) => ({
-          path: newOf(f.node.path),
-          analysis: analyses.get(f.node.id) ?? f.analysis,
-          author: f.author,
-          was: f.node.path,
-        }))
-        const kindsAfter = new Map<string, NodeKindAfter>()
-        for (const n of live) kindsAfter.set(newOf(n.path), kindOf(n))
-        for (const p of make) kindsAfter.set(p, 'folder')
+        const files: HtmlAfter[] = [
+          ...html.map((f) => ({
+            path: newOf(f.node.path),
+            analysis: analyses.get(f.node.id) ?? f.analysis,
+            author: f.author,
+            was: f.node.path,
+          })),
+          // Nothing was recorded for these: evaluated as their author.
+          ...becoming.flatMap((b) =>
+            b.analysis === null
+              ? []
+              : [
+                  {
+                    path: b.path,
+                    analysis: b.analysis,
+                    author: b.author,
+                    was: null,
+                  },
+                ],
+          ),
+        ]
         const needs = yield* neededAfter({
           DB,
           access,
@@ -1093,38 +1177,6 @@ export const makeChanges = (deps: ChangesDeps) => {
         const moved = live
           .filter((n) => n.kind === 'file' && isUnder(n.path, node.path))
           .map((n) => n.path)
-        // Kinds as the new paths make them: a file renamed to `.html` is a
-        // page now, and a page renamed to `.txt` is not.
-        const searchKinds = new Map(kindsAfter)
-        for (const n of live) {
-          const after = newOf(n.path)
-          if (after !== n.path) {
-            searchKinds.set(after, kindOf({ ...n, path: after }))
-          }
-        }
-        // Files that a rename makes pages: their analyses, as HTML.
-        const becoming: { path: string; alternate: string | null }[] = []
-        for (const n of live) {
-          const after = newOf(n.path)
-          if (
-            n.kind !== 'file' ||
-            n.origin !== 'authored' ||
-            n.path.endsWith('.html') ||
-            !after.endsWith('.html')
-          ) {
-            continue
-          }
-          const row = yield* query(() =>
-            DB.prepare(
-              'select blob_sha256 as sha from node_versions where id = ?',
-            )
-              .bind(n.currentVersionId)
-              .first<{ sha: Sha256 | null }>(),
-          )
-          const analysis =
-            row?.sha == null ? null : yield* store.analysis(row.sha)
-          becoming.push({ path: after, alternate: analysis?.alternate ?? null })
-        }
         const search = yield* indexing({
           treeId: tree.id,
           changed: [
@@ -1137,9 +1189,12 @@ export const makeChanges = (deps: ChangesDeps) => {
               path: f.path,
               alternate: f.analysis.alternate,
             })),
-            ...becoming,
+            // Those `files` lacks: no analysis to carry anything.
+            ...becoming
+              .filter((b) => b.analysis === null)
+              .map((b) => ({ path: b.path, alternate: null })),
           ],
-          kindAt: (p) => searchKinds.get(p) ?? null,
+          kindAt: (p) => kindsAfter.get(p) ?? null,
           shaAt: new Map(
             rewrites.map((r) => [
               newOf(r.file.node.path),
@@ -1154,7 +1209,7 @@ export const makeChanges = (deps: ChangesDeps) => {
               cs.guardHead('', tree.authoredSeq as AuthoredSeq)
               // The write on the destination, as the check saw it.
               cs.holds(destination)
-              cs.move(granted, dest, make)
+              cs.move(granted, dest, make, undefined, becomingForms)
               if (
                 comments !== undefined &&
                 commentsGranted !== null &&
