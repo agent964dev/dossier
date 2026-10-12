@@ -59,7 +59,7 @@ Only the purge deletes from `blobs/` and `derived/`. Nothing deletes `base/`,
 
 The `WEBHOOKS` Queue carries webhook work: one message per committed change,
 then one per delivery. The same Worker is its producer and its consumer
-(`max_batch_size` 10, `max_batch_timeout` 5, `max_retries` 10). D1 holds each
+(`max_batch_size` 10, `max_batch_timeout` 1, `max_retries` 10). D1 holds each
 delivery's state, and the consumer decides when a delivery has failed for good.
 A deployment without the Queue binding delivers no webhooks.
 
@@ -261,7 +261,7 @@ are: the code reads them.
       {
         "queue": "<queue>",
         "max_batch_size": 10,
-        "max_batch_timeout": 5,
+        "max_batch_timeout": 1,
         "max_retries": 10,
       },
     ],

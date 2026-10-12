@@ -47,6 +47,8 @@
   // A Queue has one consumer Worker, so each environment has its own.
   // max_retries is above a delivery's nine attempts: the consumer decides
   // when one has failed for good, and D1 holds every delivery's state.
+  // A one-second batch wait keeps a delivery within a few seconds of its
+  // commit, since an event passes through the Queue twice.
   "queues": {
     "producers": [
       { "binding": "WEBHOOKS", "queue": "dossier-next-production" },
@@ -55,7 +57,7 @@
       {
         "queue": "dossier-next-production",
         "max_batch_size": 10,
-        "max_batch_timeout": 5,
+        "max_batch_timeout": 1,
         "max_retries": 10,
       },
     ],
