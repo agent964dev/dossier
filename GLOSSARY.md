@@ -46,6 +46,10 @@ _Avoid_: organisation, tenant, account, domain
 One running copy of Dossier on its own domain, with its own workspaces and settings, run by its super admins. dossier.agent964.com is the owner's deployment.
 _Avoid_: instance, installation, server, host
 
+**Look**:
+How Dossier's own screens look on a deployment: the name in the header, a logo, a palette behind the colour roles, fonts per role and the corner radius. Super admins set it; pages never receive it. agent964's design language is the Look every deployment starts with.
+_Avoid_: theme (a tree's `_theme.css`), branding, skin
+
 **Role**:
 What a person may do on a node: read, respond or write. A role given on a node applies to everything below it; a lower node cannot narrow it. When several shares reach a person, every role they give adds up: read on a folder and respond on a page inside it give both.
 _Avoid_: permission level, visibility

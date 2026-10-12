@@ -1,122 +1,115 @@
 /**
  * =============================================================================
- * DOSSIER DESIGN TOKENS — agent964 design system
+ * DOSSIER DESIGN TOKENS — agent964 design system, restyled by the Look
  * =============================================================================
  *
- * Ported from ~/dev/agent964-web/src/app/globals.css (lines 29-300) and
- * ~/dev/agent964-web/DESIGN.md sections 2-4.
+ * The values live in the Look (src/lib/look.ts): the deployment's stylesheet
+ * at /_/look/<version>.css sets every palette step (--brand-300), role
+ * (--primary), --radius and the font stacks (--font-display, --font-body,
+ * --font-mono, --font-arabic). agent964's own values are AGENT964_LOOK. This
+ * file only gives Tailwind its names for those variables. `inline` makes each
+ * utility read the variable where it is used, so a container that sets other
+ * values (the Look screen's live preview) restyles everything inside it.
  *
  * Rules (DESIGN.md section 9):
- * - Dark only. There is no light variant and no toggle; <html class="dark">.
  * - Never use Tailwind's default scales (cyan-*, gray-*, slate-*, zinc-*, ...).
  *   Use the seven scales below or the semantic tokens.
  * - complement-400 is the REAL secondary accent. accent-* is reserved for the
  *   orb gradient and the purple/blue glows; it is not a general UI accent.
  * - Never hardcode hex. Never invent an eighth scale.
- *
- * Scales: brand (cyan 207.1) · accent (blue-purple 267.3) · success (145.8)
- *         warning (83.5) · error (27.4) · complement (orange 60.4)
- *         neutral (teal-tinted ~232)
+ * - Custom CSS reads the Look's own names (var(--border)), never Tailwind's
+ *   (var(--color-border)), which resolve once at the root.
  * =============================================================================
  */
 
 @theme inline {
   /* ==========================================================================
-   * BRAND COLOR SCALES — 11 rungs, shared lightness ladder across all scales
+   * BRAND COLOR SCALES — 11 rungs each, from the Look's palette
    * ========================================================================== */
 
-  /* Brand — primary cyan (hue 207.1) — REPLACES cyan-* */
-  --color-brand-50: oklch(96% 0.0412 207.1);
-  --color-brand-100: oklch(94.18% 0.0523 207.1);
-  --color-brand-200: oklch(90.85% 0.0553 207.1);
-  --color-brand-300: oklch(86.54% 0.1367 207.1); /* #3EEBFF — the anchor */
-  --color-brand-400: oklch(73.83% 0.138 207.1);
-  --color-brand-500: oklch(62.15% 0.1294 207.1);
-  --color-brand-600: oklch(51.58% 0.1169 207.1);
-  --color-brand-700: oklch(42.27% 0.0958 207.1);
-  --color-brand-800: oklch(34.4% 0.078 207.1);
-  --color-brand-900: oklch(28.32% 0.0642 207.1);
-  --color-brand-950: oklch(25% 0.0567 207.1);
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
+  --color-brand-950: var(--brand-950);
 
-  /* Accent — analogous warm blue (hue 267.3) — orb tail + glows only */
-  --color-accent-50: oklch(96% 0.0205 267.3);
-  --color-accent-100: oklch(94.18% 0.026 267.3);
-  --color-accent-200: oklch(90.85% 0.0276 267.3);
-  --color-accent-300: oklch(86.54% 0.0684 267.3);
-  --color-accent-400: oklch(73.83% 0.1188 267.3);
-  --color-accent-500: oklch(62.15% 0.1988 267.3);
-  --color-accent-600: oklch(51.58% 0.286 267.3);
-  --color-accent-700: oklch(42.27% 0.2816 267.3);
-  --color-accent-800: oklch(34.4% 0.2292 267.3);
-  --color-accent-900: oklch(28.32% 0.1887 267.3);
-  --color-accent-950: oklch(25% 0.1666 267.3);
+  --color-accent-50: var(--accent-50);
+  --color-accent-100: var(--accent-100);
+  --color-accent-200: var(--accent-200);
+  --color-accent-300: var(--accent-300);
+  --color-accent-400: var(--accent-400);
+  --color-accent-500: var(--accent-500);
+  --color-accent-600: var(--accent-600);
+  --color-accent-700: var(--accent-700);
+  --color-accent-800: var(--accent-800);
+  --color-accent-900: var(--accent-900);
+  --color-accent-950: var(--accent-950);
 
-  /* Success — analogous cool green (hue 145.8) — REPLACES green-*, emerald-* */
-  --color-success-50: oklch(96% 0.0758 145.8);
-  --color-success-100: oklch(94.18% 0.1085 145.8);
-  --color-success-200: oklch(90.85% 0.1213 145.8);
-  --color-success-300: oklch(86.54% 0.2981 145.8);
-  --color-success-400: oklch(73.83% 0.2859 145.8);
-  --color-success-500: oklch(62.15% 0.2661 145.8);
-  --color-success-600: oklch(51.58% 0.2209 145.8);
-  --color-success-700: oklch(42.27% 0.181 145.8);
-  --color-success-800: oklch(34.4% 0.1473 145.8);
-  --color-success-900: oklch(28.32% 0.1213 145.8);
-  --color-success-950: oklch(25% 0.1071 145.8);
+  --color-success-50: var(--success-50);
+  --color-success-100: var(--success-100);
+  --color-success-200: var(--success-200);
+  --color-success-300: var(--success-300);
+  --color-success-400: var(--success-400);
+  --color-success-500: var(--success-500);
+  --color-success-600: var(--success-600);
+  --color-success-700: var(--success-700);
+  --color-success-800: var(--success-800);
+  --color-success-900: var(--success-900);
+  --color-success-950: var(--success-950);
 
-  /* Warning — split warm gold (hue 83.5) — REPLACES yellow-*, amber-* */
-  --color-warning-50: oklch(96% 0.0495 83.5);
-  --color-warning-100: oklch(94.18% 0.0705 83.5);
-  --color-warning-200: oklch(90.85% 0.0749 83.5);
-  --color-warning-300: oklch(86.54% 0.1666 83.5);
-  --color-warning-400: oklch(73.83% 0.1598 83.5);
-  --color-warning-500: oklch(62.15% 0.1456 83.5);
-  --color-warning-600: oklch(51.58% 0.1209 83.5);
-  --color-warning-700: oklch(42.27% 0.0991 83.5);
-  --color-warning-800: oklch(34.4% 0.0806 83.5);
-  --color-warning-900: oklch(28.32% 0.0664 83.5);
-  --color-warning-950: oklch(25% 0.0586 83.5);
+  --color-warning-50: var(--warning-50);
+  --color-warning-100: var(--warning-100);
+  --color-warning-200: var(--warning-200);
+  --color-warning-300: var(--warning-300);
+  --color-warning-400: var(--warning-400);
+  --color-warning-500: var(--warning-500);
+  --color-warning-600: var(--warning-600);
+  --color-warning-700: var(--warning-700);
+  --color-warning-800: var(--warning-800);
+  --color-warning-900: var(--warning-900);
+  --color-warning-950: var(--warning-950);
 
-  /* Error — split cool red (hue 27.4) — REPLACES red-* */
-  --color-error-50: oklch(96% 0.0255 27.4);
-  --color-error-100: oklch(94.18% 0.032 27.4);
-  --color-error-200: oklch(90.85% 0.0345 27.4);
-  --color-error-300: oklch(86.54% 0.0889 27.4);
-  --color-error-400: oklch(73.83% 0.1633 27.4);
-  --color-error-500: oklch(62.15% 0.2549 27.4);
-  --color-error-600: oklch(51.58% 0.2319 27.4);
-  --color-error-700: oklch(42.27% 0.1924 27.4);
-  --color-error-800: oklch(34.4% 0.1566 27.4);
-  --color-error-900: oklch(28.32% 0.1289 27.4);
-  --color-error-950: oklch(25% 0.1138 27.4);
+  --color-error-50: var(--error-50);
+  --color-error-100: var(--error-100);
+  --color-error-200: var(--error-200);
+  --color-error-300: var(--error-300);
+  --color-error-400: var(--error-400);
+  --color-error-500: var(--error-500);
+  --color-error-600: var(--error-600);
+  --color-error-700: var(--error-700);
+  --color-error-800: var(--error-800);
+  --color-error-900: var(--error-900);
+  --color-error-950: var(--error-950);
 
-  /* Complement — orange (hue 60.4) — the REAL secondary accent at level 400 */
-  --color-complement-50: oklch(96% 0.0315 60.4);
-  --color-complement-100: oklch(94.18% 0.0397 60.4);
-  --color-complement-200: oklch(90.85% 0.0425 60.4);
-  --color-complement-300: oklch(
-    86.54% 0.1086 60.4
-  ); /* pastel peach, not orange */
-  --color-complement-400: oklch(73.83% 0.1585 60.4); /* #F18F2A — use this */
-  --color-complement-500: oklch(62.15% 0.1487 60.4);
-  --color-complement-600: oklch(51.58% 0.1352 60.4);
-  --color-complement-700: oklch(42.27% 0.1117 60.4);
-  --color-complement-800: oklch(34.4% 0.0909 60.4);
-  --color-complement-900: oklch(28.32% 0.0749 60.4);
-  --color-complement-950: oklch(25% 0.0661 60.4);
+  --color-complement-50: var(--complement-50);
+  --color-complement-100: var(--complement-100);
+  --color-complement-200: var(--complement-200);
+  --color-complement-300: var(--complement-300);
+  --color-complement-400: var(--complement-400);
+  --color-complement-500: var(--complement-500);
+  --color-complement-600: var(--complement-600);
+  --color-complement-700: var(--complement-700);
+  --color-complement-800: var(--complement-800);
+  --color-complement-900: var(--complement-900);
+  --color-complement-950: var(--complement-950);
 
-  /* Neutral — teal-tinted grays (hue ~232) — REPLACES gray-*, slate-*, zinc-* */
-  --color-neutral-50: oklch(99.24% 0 0); /* #FCFCFC */
-  --color-neutral-100: oklch(97.71% 0.0024 194);
-  --color-neutral-200: oklch(93.09% 0.0087 200.1);
-  --color-neutral-300: oklch(85.16% 0.0167 206.3);
-  --color-neutral-400: oklch(73.96% 0.0245 212.6); /* #9AAFB4 — label text */
-  --color-neutral-500: oklch(59.57% 0.0297 218.6); /* #6C848B — muted text */
-  --color-neutral-600: oklch(44.94% 0.0313 224);
-  --color-neutral-700: oklch(33.2% 0.0303 228.6);
-  --color-neutral-800: oklch(24.6% 0.0276 232.1); /* #13232C — muted surface */
-  --color-neutral-900: oklch(19.26% 0.0253 234.3); /* #08161E — card */
-  --color-neutral-950: oklch(16.9% 0.0286 232.6); /* #031119 — the canvas */
+  --color-neutral-50: var(--neutral-50);
+  --color-neutral-100: var(--neutral-100);
+  --color-neutral-200: var(--neutral-200);
+  --color-neutral-300: var(--neutral-300);
+  --color-neutral-400: var(--neutral-400);
+  --color-neutral-500: var(--neutral-500);
+  --color-neutral-600: var(--neutral-600);
+  --color-neutral-700: var(--neutral-700);
+  --color-neutral-800: var(--neutral-800);
+  --color-neutral-900: var(--neutral-900);
+  --color-neutral-950: var(--neutral-950);
 
   /* ==========================================================================
    * SEMANTIC TOKENS — the shadcn contract. Components consume these.
@@ -142,27 +135,13 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
-  /* Charts */
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-
-  /* Glows */
-  --color-glow-cyan: var(--glow-cyan);
-  --color-glow-purple: var(--glow-purple);
-  --color-glow-blue: var(--glow-blue);
-
   /* ==========================================================================
-   * TYPOGRAPHY — Clash Display (display) · Geist (body) · Geist Mono (chrome)
+   * TYPOGRAPHY — the Look's display, body and mono faces. `font-mono` is
+   * Tailwind's own name, which the Look sets directly.
    * ========================================================================== */
 
-  --font-sans: 'Geist', system-ui, -apple-system, sans-serif;
-  --font-mono:
-    'Geist Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
-    'Liberation Mono', monospace;
-  --font-clash: 'Clash Display', 'Geist', system-ui, sans-serif;
+  --font-sans: var(--font-body);
+  --font-clash: var(--font-display);
 
   /* Micro tier — below Tailwind's text-xs (12px). Terminal chrome. */
   --text-micro: 0.5rem; /* 8px  — smallest status indicators */
@@ -186,11 +165,11 @@
   --leading-micro: 1.5;
 
   /* ==========================================================================
-   * RADIUS — rounded-lg (10px) is the default for most things
+   * RADIUS — rounded-lg is the Look's radius (agent964: 10px)
    * ========================================================================== */
 
-  --radius-sm: calc(var(--radius) - 4px); /*  6px */
-  --radius-md: calc(var(--radius) - 2px); /*  8px */
+  --radius-sm: max(0px, calc(var(--radius) - 4px)); /*  6px */
+  --radius-md: max(0px, calc(var(--radius) - 2px)); /*  8px */
   --radius-lg: var(--radius); /* 10px */
   --radius-xl: calc(var(--radius) + 4px); /* 14px */
   --radius-2xl: calc(var(--radius) + 8px); /* 18px */
@@ -203,60 +182,4 @@
 
   --ease-agent: cubic-bezier(0.25, 0.46, 0.45, 0.94);
   --animate-status-pulse: status-pulse 2s ease-in-out infinite;
-}
-
-/* =============================================================================
- * SEMANTIC VALUES — dark only. `:root` and `.dark` are the same set on purpose;
- * there is no light variant to fall back to (DESIGN.md section 9).
- * ============================================================================= */
-
-:root,
-.dark {
-  --radius: 0.625rem; /* 10px */
-  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
-
-  /* Canvas & text */
-  --background: oklch(16.9% 0.0286 232.6); /* neutral-950 #031119 */
-  --foreground: oklch(99.24% 0 0); /* neutral-50  #FCFCFC */
-
-  /* Surfaces */
-  --card: oklch(19.26% 0.0253 234.3); /* neutral-900 #08161E */
-  --card-foreground: oklch(99.24% 0 0);
-  --popover: oklch(19.26% 0.0253 234.3); /* neutral-900 */
-  --popover-foreground: oklch(99.24% 0 0);
-
-  /* Primary — the cyan. One per viewport. */
-  --primary: oklch(86.54% 0.1367 207.1); /* brand-300 #3EEBFF */
-  --primary-foreground: oklch(16.9% 0.0286 232.6); /* neutral-950 */
-
-  /* Secondary & muted */
-  --secondary: oklch(24.6% 0.0276 232.1); /* neutral-800 */
-  --secondary-foreground: oklch(97.71% 0.0024 194); /* neutral-100 */
-  --muted: oklch(24.6% 0.0276 232.1); /* neutral-800 #13232C */
-  --muted-foreground: oklch(59.57% 0.0297 218.6); /* neutral-500 #6C848B */
-
-  /* Accent — orb/glow heritage. Not a general UI accent; use complement-400. */
-  --accent: oklch(62.15% 0.1988 267.3); /* accent-500 #527AFC */
-  --accent-foreground: oklch(99.24% 0 0);
-
-  /* Destructive */
-  --destructive: oklch(58.42% 0.2603 27.4); /* error-500 #FC0018 */
-  --destructive-foreground: oklch(99.24% 0 0);
-
-  /* Lines & focus */
-  --border: oklch(33.2% 0.0303 228.6 / 40%); /* neutral-700 @ 40% */
-  --input: oklch(24.6% 0.0276 232.1 / 80%); /* neutral-800 @ 80% */
-  --ring: oklch(86.54% 0.1367 207.1); /* brand-300 */
-
-  /* Glows */
-  --glow-cyan: oklch(86.54% 0.1367 207.1); /* brand-300 */
-  --glow-purple: oklch(51.58% 0.286 267.3); /* accent-600 */
-  --glow-blue: oklch(62.15% 0.1988 267.3); /* accent-500 */
-
-  /* Charts — brand cyan, accent blue, warning gold, success green, complement */
-  --chart-1: oklch(86.54% 0.1367 207.1);
-  --chart-2: oklch(62.15% 0.1988 267.3);
-  --chart-3: oklch(86.54% 0.1666 83.5);
-  --chart-4: oklch(76.49% 0.3275 145.8);
-  --chart-5: oklch(79.5% 0.1452 60.4);
 }

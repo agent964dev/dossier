@@ -310,6 +310,20 @@ export interface PeopleService {
 
   // Super admins.
   readonly isSuperAdmin: () => Effect.Effect<boolean, never, CurrentCaller>
+  /** A super admin in a browser; anyone else gets not_found. */
+  readonly superAdminOnly: () => Effect.Effect<
+    Person,
+    Fail<'sign_in_required' | 'not_found' | 'unavailable'>,
+    CurrentCaller
+  >
+  /**
+   * Saves one deployment setting as a super admin, or removes it with null,
+   * in a batch that writes only while they still are one.
+   */
+  readonly saveSetting: (
+    key: SettingKey,
+    value: unknown,
+  ) => Effect.Effect<void, AdminFail, CurrentCaller>
   readonly adminOverview: () => Effect.Effect<
     AdminOverview,
     AdminFail,
@@ -2085,6 +2099,18 @@ export const PeopleLive: Layer.Layer<
       deletionPreview,
       deleteAccount,
       isSuperAdmin,
+      superAdminOnly: () => superAdmin,
+      saveSetting: (key, value) =>
+        Effect.gen(function* () {
+          const me = yield* superAdmin
+          yield* runSaved([
+            value === null
+              ? DB.prepare(
+                  'delete from deployment_settings where key = ?',
+                ).bind(key)
+              : yield* saveSetting(key, value, me.id),
+          ])
+        }),
       adminOverview,
       setWorkspaceCreation,
       addCreator,

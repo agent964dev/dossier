@@ -368,7 +368,7 @@ export const deploymentSettings = sqliteTable(
   (t) => [
     check(
       'deployment_settings_key_check',
-      sql`${t.key} in ('workspace_creation', 'limits', 'retention_days')`,
+      sql`${t.key} in ('workspace_creation', 'limits', 'retention_days', 'look')`,
     ),
   ],
 )

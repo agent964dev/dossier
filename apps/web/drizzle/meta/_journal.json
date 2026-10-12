@@ -71,6 +71,13 @@
       "when": 1791779475910,
       "tag": "0013_teams_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1791781595977,
+      "tag": "0015_look_setting",
+      "breakpoints": true
     }
   ]
 }

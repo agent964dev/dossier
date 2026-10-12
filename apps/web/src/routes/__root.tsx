@@ -7,34 +7,42 @@ import {
 } from '@tanstack/react-router'
 
 import { PlainError } from '../components/plain-error'
+import { currentLookVersion, type CurrentLook } from '../server/look'
 import '../styles/app.css'
 
 export const Route = createRootRoute({
-  head: () => ({
+  // The Look changes only when a super admin saves it, and the Look screen
+  // loads a new document after a save, so a loaded document keeps this.
+  loader: (): Promise<CurrentLook> => currentLookVersion(),
+  staleTime: Number.POSITIVE_INFINITY,
+  head: ({ loaderData }) => ({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { name: 'color-scheme', content: 'dark' },
-      { name: 'theme-color', content: '#031119' },
+      { name: 'color-scheme', content: loaderData?.scheme ?? 'dark' },
+      { name: 'theme-color', content: loaderData?.themeColor ?? '#031119' },
       { name: 'referrer', content: 'strict-origin-when-cross-origin' },
-      { title: 'Dossier' },
+      { title: loaderData?.name ?? 'Dossier' },
     ],
     links: [
       { rel: 'icon', href: '/_/app/favicon.svg', type: 'image/svg+xml' },
-      {
+      // The deployment's Look: every design token and font face, after
+      // app.css, which only names them.
+      ...(loaderData === undefined
+        ? []
+        : [
+            {
+              rel: 'stylesheet',
+              href: `/_/look/${loaderData.version}.css`,
+            },
+          ]),
+      ...(loaderData?.preload ?? []).map((href) => ({
         rel: 'preload',
-        href: '/_/app/fonts/ClashDisplay-Variable.woff2',
+        href,
         as: 'font',
         type: 'font/woff2',
-        crossOrigin: 'anonymous',
-      },
-      {
-        rel: 'preload',
-        href: '/_/app/fonts/Geist-Variable.woff2',
-        as: 'font',
-        type: 'font/woff2',
-        crossOrigin: 'anonymous',
-      },
+        crossOrigin: 'anonymous' as const,
+      })),
     ],
   }),
   component: RootComponent,
@@ -73,9 +81,12 @@ function NotFound() {
 }
 
 function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
+  const look = Route.useLoaderData({
+    select: (data: CurrentLook | undefined) => data?.scheme,
+  })
   return (
-    // Dark only: the agent964 design language has no light variant.
-    <html lang="en" className="dark">
+    // agent964's Look is dark; a deployment's Look may be light.
+    <html lang="en" className={look === 'light' ? 'light' : 'dark'}>
       <head>
         <HeadContent />
       </head>

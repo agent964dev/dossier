@@ -21,6 +21,7 @@ import {
   basePathOf,
   Config,
   CurrentCaller,
+  LookSettings,
   Pages,
   runtimeFor,
   SignIn,
@@ -48,7 +49,10 @@ import {
   codeResponse,
   errorResponse,
   frameFailure,
+  fontResponse,
   frameResponse,
+  logoResponse,
+  lookSheetResponse,
   normalizeApiError,
   notFoundPage,
   plainErrorPage,
@@ -75,6 +79,7 @@ export type RequestKind =
   | 'base'
   | 'static'
   | 'fonts'
+  | 'look'
   | 'legacy'
 
 export type HostMatch =
@@ -117,6 +122,7 @@ export const classify = (
   }
   if (under(pathname, '/_/app')) return 'static'
   if (under(pathname, '/_/fonts')) return 'fonts'
+  if (under(pathname, '/_/look')) return 'look'
   if (under(pathname, '/_serverFn')) return 'screen-call'
   if (pathname === '/' || pathname.startsWith('/_/')) return 'screen'
   if (under(pathname, '/api') || under(pathname, '/cli')) return 'legacy'
@@ -268,6 +274,9 @@ export const serve = async (
       case 'upgrade':
         return upgrade()
       case 'fonts':
+        return fontFile()
+      case 'look':
+        return lookFile()
       case 'legacy':
         throw dossierError('not_found')
       case 'frame':
@@ -417,6 +426,46 @@ export const serve = async (
     )
     if (file === null) return plainNotFound()
     return baseResponse(file, request.method === 'HEAD')
+  }
+
+  /** /_/fonts/<sha256>.<ext>: a font the Look copied or a super admin uploaded. */
+  async function fontFile(): Promise<Response> {
+    const name = url.pathname.slice('/_/fonts/'.length)
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return plainNotFound()
+    }
+    const file = await run(
+      runtime,
+      Effect.flatMap(LookSettings, (look) => look.font(name)),
+    )
+    if (file === null) return plainNotFound()
+    return fontResponse(file, request.method === 'HEAD')
+  }
+
+  /**
+   * /_/look/<version>.css, the current Look's stylesheet, and
+   * /_/look/logo-<sha256>. Public, like fonts: no caller is read.
+   */
+  async function lookFile(): Promise<Response> {
+    const name = url.pathname.slice('/_/look/'.length)
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return plainNotFound()
+    }
+    const head = request.method === 'HEAD'
+    if (name.startsWith('logo-')) {
+      const file = await run(
+        runtime,
+        Effect.flatMap(LookSettings, (look) => look.logo(name.slice(5))),
+      )
+      return file === null ? plainNotFound() : logoResponse(file, head)
+    }
+    const version = /^([0-9a-f]{16})\.css$/.exec(name)?.[1]
+    if (version === undefined) return plainNotFound()
+    const css = await run(
+      runtime,
+      Effect.flatMap(LookSettings, (look) => look.stylesheet(version)),
+    )
+    return css === null ? plainNotFound() : lookSheetResponse(css, head)
   }
 
   /** A tree's content host: only what the view handle in the path opens. */

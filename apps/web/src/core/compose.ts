@@ -9,6 +9,7 @@ import { Config, ConfigLive } from './config.ts'
 import { Data, DataLive } from './data.ts'
 import { Files, FilesLive } from './files.ts'
 import { Limits, LimitsLive } from './limits.ts'
+import { LookSettings, LookSettingsLive } from './look.ts'
 import { PageCache, PageCacheLive } from './page-cache.ts'
 import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
@@ -37,6 +38,7 @@ export type CoreServices =
   | Settings
   | ChangeFeed
   | Watch
+  | LookSettings
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -67,10 +69,12 @@ export const makeLayer = (
     Layer.provideMerge(config),
   )
   const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(trees))
+  const people = PeopleLive.pipe(Layer.provide(DataLive))
   return Layer.mergeAll(
     SignInLive,
     PushLive,
-    PeopleLive.pipe(Layer.provide(DataLive)),
+    people,
+    LookSettingsLive.pipe(Layer.provide(people)),
     PagesLive.pipe(Layer.provideMerge(FilesLive)),
     DataLive,
     WatchLive,

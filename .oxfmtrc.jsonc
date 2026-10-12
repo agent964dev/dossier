@@ -18,5 +18,7 @@
     "docs/**/*.html",
     // The base layout goes into every page as written; tests pin its bytes.
     "packages/browser/src/base/_layout.html",
+    // The Look's golden stylesheet is compared byte for byte.
+    "apps/web/src/lib/*.golden.txt",
   ],
 }

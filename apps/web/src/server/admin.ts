@@ -4,12 +4,14 @@ import { Effect } from 'effect'
 
 import {
   bytesText,
+  LookSettings,
   People,
   type AdminOverview,
   type AdminWorkspaceRow,
   type LimitValues,
   type WorkspaceCreation,
 } from '../core/index.ts'
+import { headerName, roleColor } from '../lib/look.ts'
 import { runScreen } from './run.ts'
 
 /** One limit as the super admin screen lists it. */
@@ -31,9 +33,19 @@ export interface AdminWorkspaceView extends AdminWorkspaceRow {
   readonly deleted: string | null
 }
 
+/** The Look as the super admin screen's row sums it up. */
+export interface AdminLookRow {
+  readonly name: string
+  /** A super admin saved a Look; false is agent964's. */
+  readonly custom: boolean
+  /** Background, card and primary, for the row's swatches. */
+  readonly swatches: readonly string[]
+}
+
 export type AdminView = Omit<AdminOverview, 'workspaces'> & {
   readonly limitRows: readonly LimitRow[]
   readonly workspaces: readonly AdminWorkspaceView[]
+  readonly look: AdminLookRow
 }
 
 /** The limits in the order the screen lists them. */
@@ -68,6 +80,7 @@ export const adminView = createServerFn({ method: 'GET' }).handler(() =>
     Effect.gen(function* () {
       const people = yield* People
       const overview = yield* people.adminOverview()
+      const look = yield* Effect.flatMap(LookSettings, (l) => l.current())
       return {
         ...overview,
         limitRows: LIMITS.map(({ key, label, bytes }) => {
@@ -89,6 +102,13 @@ export const adminView = createServerFn({ method: 'GET' }).handler(() =>
               ? null
               : `deleted ${DAY.format(new Date(row.deletedAt))}`,
         })),
+        look: {
+          name: headerName(look.look),
+          custom: look.custom,
+          swatches: (['background', 'card', 'primary'] as const).map(
+            (role) => roleColor(look.look, role).css,
+          ),
+        },
       } satisfies AdminView
     }),
   ),

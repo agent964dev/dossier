@@ -41,10 +41,10 @@ const buttonVariants = cva(
         success:
           'border-success-500/25 bg-success-500/12 text-success-300 hover:bg-success-500/20',
         'success-solid':
-          'bg-success-500 text-neutral-950 hover:bg-success-400 hover:shadow-[0_8px_24px_-10px_var(--color-success-400)]',
+          'bg-success-500 text-neutral-950 hover:bg-success-400 hover:shadow-[0_8px_24px_-10px_var(--success-400)]',
         warn: 'border-warning-400/25 bg-warning-400/12 text-warning-300 hover:bg-warning-400/20',
         'warn-solid':
-          'bg-warning-400 text-neutral-950 hover:bg-warning-300 hover:shadow-[0_8px_24px_-10px_var(--color-warning-400)]',
+          'bg-warning-400 text-neutral-950 hover:bg-warning-300 hover:shadow-[0_8px_24px_-10px_var(--warning-400)]',
         destructive:
           'border-destructive/30 bg-destructive/12 text-error-300 hover:bg-destructive/20',
         'destructive-solid':

@@ -49,7 +49,11 @@ export class Settings extends Context.Tag('Settings')<
 >() {}
 
 /** The keys super admins save; absent keys read as the defaults. */
-export type SettingKey = 'workspace_creation' | 'limits' | 'retention_days'
+export type SettingKey =
+  | 'workspace_creation'
+  | 'limits'
+  | 'retention_days'
+  | 'look'
 
 const CREATIONS: ReadonlySet<string> = new Set([
   'super_admins',
@@ -118,6 +122,9 @@ let generation = 0
 export const settingsSaved = (): void => {
   generation += 1
 }
+
+/** Moves with every save in this isolate; caches of settings compare it. */
+export const settingsGeneration = (): number => generation
 
 /** The file the base layer always holds, read to check Static Assets. */
 const HEALTH_KEY = 'health/probe'

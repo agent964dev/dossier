@@ -102,6 +102,15 @@ export {
   type WorkspaceCreation,
 } from './settings.ts'
 export {
+  FONT_FAMILY_BYTES,
+  FONT_FILE_BYTES,
+  LOGO_BYTES,
+  LookSettings,
+  LookSettingsLive,
+  type LookSettingsService,
+  type LookState,
+} from './look.ts'
+export {
   Pages,
   parseRange,
   treeRefOf,

@@ -1,28 +1,33 @@
 import {
   createFileRoute,
+  Link,
   redirect,
   useNavigate,
   useRouter,
 } from '@tanstack/react-router'
-import { Building2, Lock, Pencil, Plus } from 'lucide-react'
+import { Building2, ChevronRight, Lock, Pencil, Plus } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 
-import { AppHeader } from '../../components/app-header'
-import { HostName } from '../../components/host-name'
-import { NoAccessScreen } from '../../components/no-access'
-import { SectionLabel } from '../../components/section-label'
+import { AppHeader } from '../../../components/app-header'
+import { HostName } from '../../../components/host-name'
+import { NoAccessScreen } from '../../../components/no-access'
+import { SectionLabel } from '../../../components/section-label'
 import {
   Initial,
   Refusal,
   refusalOf,
   ROW,
   RowList,
-} from '../../components/settings-parts'
-import { Badge } from '../../components/ui/badge'
-import { Button } from '../../components/ui/button'
-import { Input, Label, Select } from '../../components/ui/input'
-import { Modal } from '../../components/ui/modal'
-import type { Health, LimitValues, WorkspaceCreation } from '../../core/index'
+} from '../../../components/settings-parts'
+import { Badge } from '../../../components/ui/badge'
+import { Button } from '../../../components/ui/button'
+import { Input, Label, Select } from '../../../components/ui/input'
+import { Modal } from '../../../components/ui/modal'
+import type {
+  Health,
+  LimitValues,
+  WorkspaceCreation,
+} from '../../../core/index'
 import {
   addCreator,
   addSuperAdmin,
@@ -37,15 +42,15 @@ import {
   suspendWorkspace,
   type AdminView,
   type LimitRow,
-} from '../../server/admin'
-import { isScreenFailure } from '../../server/failure'
-import { noAccessView } from '../../server/no-access'
+} from '../../../server/admin'
+import { isScreenFailure } from '../../../server/failure'
+import { noAccessView } from '../../../server/no-access'
 
 type Loaded =
   | { readonly kind: 'admin'; readonly view: AdminView }
   | { readonly kind: 'no-access'; readonly email: string | null }
 
-export const Route = createFileRoute('/_/admin')({
+export const Route = createFileRoute('/_/admin/')({
   loader: async ({ location }): Promise<Loaded> => {
     const view = await adminView()
     if (!isScreenFailure(view)) return { kind: 'admin', view }
@@ -117,6 +122,7 @@ function SuperAdmin({ view }: { view: AdminView }) {
             <Retention days={view.retentionDays} onChange={refresh} />
             <SuperAdmins view={view} onChange={refresh} />
             <Workspaces view={view} onChange={refresh} />
+            <LookRow look={view.look} />
           </>
         )}
       </main>
@@ -879,6 +885,43 @@ function AddSuperAdminDialog({
         <Refusal message={refused} />
       </form>
     </Modal>
+  )
+}
+
+/** How Dossier looks here, and the way into the Look section. */
+function LookRow({ look }: { look: AdminView['look'] }) {
+  return (
+    <section aria-labelledby="look-label" className="flex flex-col gap-3">
+      <SectionLabel id="look-label">Look</SectionLabel>
+      <Link
+        to="/_/admin/look"
+        className={`${ROW} rounded-xl border border-border bg-card outline-none transition-colors duration-200 ease-agent hover:bg-neutral-800/40 focus-visible:ring-[3px] focus-visible:ring-ring/50`}
+      >
+        <span aria-hidden className="flex shrink-0 -space-x-1.5">
+          {look.swatches.map((color, index) => (
+            <span
+              // The swatches are a fixed list: background, card, primary.
+              // oxlint-disable-next-line react/no-array-index-key
+              key={index}
+              className="size-6 rounded-full border border-neutral-600"
+              style={{ background: color }}
+            />
+          ))}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[0.9375rem] text-neutral-50">
+            {look.name}
+          </span>
+          <span className="block font-mono text-xs text-neutral-400">
+            {look.custom ? 'this deployment’s Look' : 'agent964, as shipped'}
+          </span>
+        </span>
+        <span className="flex items-center gap-1 text-sm text-neutral-300">
+          Edit
+          <ChevronRight aria-hidden className="size-4" />
+        </span>
+      </Link>
+    </section>
   )
 }
 

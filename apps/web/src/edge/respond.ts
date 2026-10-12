@@ -450,6 +450,66 @@ export const baseResponse = (
   return new Response(file.body, { status: 200, headers })
 }
 
+const IMMUTABLE = 'public, max-age=31536000, immutable'
+
+/** A copied or uploaded font: named by its hash, so it never changes. */
+export const fontResponse = (
+  file: {
+    readonly body: ReadableStream<Uint8Array>
+    readonly type: string
+    readonly size: number
+  },
+  head: boolean,
+): Response => {
+  const headers = new Headers({
+    'content-type': file.type,
+    'content-length': String(file.size),
+    'cache-control': IMMUTABLE,
+    'x-content-type-options': 'nosniff',
+  })
+  if (head) {
+    file.body.cancel().catch(() => {})
+    return new Response(null, { status: 200, headers })
+  }
+  return new Response(file.body, { status: 200, headers })
+}
+
+/**
+ * The Look's logo. An SVG is only ever an image here: no scripts, no
+ * loads, sandboxed even when opened on its own.
+ */
+export const logoResponse = (
+  file: {
+    readonly body: ReadableStream<Uint8Array>
+    readonly type: string
+    readonly size: number
+  },
+  head: boolean,
+): Response => {
+  const response = fontResponse(file, head)
+  if (file.type === 'image/svg+xml') {
+    response.headers.set(
+      'content-security-policy',
+      "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    )
+  }
+  return response
+}
+
+/** A Look's stylesheet: its version is in its name, so it never changes. */
+export const lookSheetResponse = (css: string, head: boolean): Response => {
+  const bytes = new TextEncoder().encode(css)
+  return new Response(head ? null : bytes, {
+    status: 200,
+    headers: {
+      'content-type': 'text/css; charset=utf-8',
+      'content-length': String(bytes.byteLength),
+      'cache-control': IMMUTABLE,
+      'x-content-type-options': 'nosniff',
+    },
+  })
+}
+
 /**
  * A link's answer to an agent: the agent version as text, or a file as a
  * download, never author content shown on the main host. Viewer-specific,
