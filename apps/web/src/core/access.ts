@@ -450,7 +450,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
     ) =>
       Effect.gen(function* () {
         // One lookup per request and state of the tree, however many checks.
-        const key = `${treeId}:${asOf}:${facts.stamp}`
+        // Who the caller is in the workspace decides which shares reach them.
+        const key = `${treeId}:${asOf}:${facts.stamp}:${facts.memberRole}:${facts.teams.join(',')}`
         const kept = pageShareCache.get(caller)?.get(key)
         if (kept !== undefined) return kept
         const found = yield* pageSharesNow(caller, facts, treeId, asOf)
@@ -745,7 +746,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         }
         const facts = yield* treeFacts(caller, treeId, asOf)
         if (facts === null || facts.state !== 'live') return null
-        let scopePath: string | null = null
+        let scopeId: string | null = null
         if (caller.via.kind === 'agent' && caller.via.scope !== null) {
           const scopeNode = yield* query(() =>
             DB.prepare(
@@ -755,7 +756,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               .first<{ path: string }>(),
           )
           if (scopeNode === null) return null
-          scopePath = scopeNode.path
+          scopeId = caller.via.scope
         }
         const member = facts.memberRole !== null
         return {
@@ -766,8 +767,15 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             member: lit(member ? 1 : 0),
             admin: lit(facts.memberRole === 'admin' ? 1 : 0),
             teams: lit(JSON.stringify(member ? facts.teams : [])),
+            // The scope's path by its node, so a long path is written once
+            // per use rather than spelled out in full each time.
             within: (path: SQL) =>
-              scopePath === null ? sql`1` : underColumn(path, lit(scopePath)),
+              scopeId === null
+                ? sql`1`
+                : underColumn(
+                    path,
+                    tight`(select sp.path from nodes sp where sp.id = ${lit(scopeId)} and sp.deleted_at is null)`,
+                  ),
           } satisfies CallerFacts,
         }
       })

@@ -1946,3 +1946,138 @@ describe('what a shared page renders with, as the link route reads it', () => {
     expect(await attempt(reader, `${ws.name}/embeds/embed`)).toBe('not_found')
   })
 })
+
+describe('what a shared page carries, in more shapes', () => {
+  const shareWith = async (files: Record<string, string>, page: string) => {
+    const admin = await person('admin')
+    const ws = await workspace(admin)
+    const outsider = await person('outsider')
+    const pushed = await pushAll(await agent(admin), `${ws.name}/shapes`, files)
+    if (!('treeId' in pushed)) throw new Error('no tree')
+    await share(
+      pushed.treeId,
+      (await nodeAt(pushed.treeId, page))!.id,
+      'email',
+      outsider.email,
+      'read',
+      admin,
+    )
+    return {
+      reader: await agent(outsider),
+      at: (path: string) => `${ws.name}/shapes/${path}`,
+      outsider,
+      ws,
+      admin,
+      treeId: pushed.treeId,
+    }
+  }
+
+  it('carries the page a folder frame shows, not the rest of the folder', async () => {
+    const s = await shareWith(
+      {
+        'host.html':
+          '<!doctype html><title>Host</title><iframe src="dir/"></iframe><iframe src="other"></iframe>',
+        'dir/index.html': '<title>Dir</title>',
+        'dir/secret.html': '<title>Secret</title>',
+        'other/index.html': '<title>Other</title>',
+      },
+      'host.html',
+    )
+    expect(await attempt(s.reader, s.at('dir/index.html'))).toBe('ok')
+    expect(await attempt(s.reader, s.at('other/index.html'))).toBe('ok')
+    expect(await attempt(s.reader, s.at('dir/secret.html'))).toBe('not_found')
+  })
+
+  it('carries what a layout’s inline styles and scripts load, read from the page’s folder', async () => {
+    const s = await shareWith(
+      {
+        '_layout.html':
+          '<style>body { background: url(bg.png) }</style><script type="module">import "./widget.js"</script><slot></slot>',
+        'guide/page.html': '<title>Page</title><p>Fragment</p>',
+        'guide/bg.png': 'bg',
+        'guide/widget.js': 'export {}',
+        'bg.png': 'root bg',
+      },
+      'guide/page.html',
+    )
+    expect(await attempt(s.reader, s.at('guide/bg.png'))).toBe('ok')
+    expect(await attempt(s.reader, s.at('guide/widget.js'))).toBe('ok')
+    expect(await attempt(s.reader, s.at('bg.png'))).toBe('not_found')
+  })
+
+  it('stops reading through a team’s page share within the same request once the place in the team goes', async () => {
+    const s = await shareWith(
+      {
+        'host.html': '<!doctype html><title>Host</title><img src="pic.png">',
+        'pic.png': 'pic',
+      },
+      'host.html',
+    )
+    await join(s.ws, s.outsider)
+    const crew = await team(s.ws, 'Crew', [s.outsider])
+    await share(
+      s.treeId,
+      (await nodeAt(s.treeId, 'host.html'))!.id,
+      'team',
+      crew.id,
+      'read',
+      s.admin,
+    )
+    await exec(
+      "delete from shares where tree_id = ? and target_kind = 'email'",
+      s.treeId,
+    )
+    const pic = (await nodeAt(s.treeId, 'pic.png'))!
+    const answers = await runAs(
+      s.reader,
+      Effect.gen(function* () {
+        const access = yield* Access
+        const node = yield* (yield* TreeStore).locate(ref(s.at('pic.png')))
+        if ('missing' in node) throw new Error('missing')
+        const before = yield* access
+          .require('read', node.node)
+          .pipe(Effect.isSuccess)
+        yield* Effect.promise(() =>
+          exec('delete from team_members where team_id = ?', crew.id),
+        )
+        const after = yield* access
+          .require('read', node.node)
+          .pipe(Effect.isSuccess)
+        return { before, after }
+      }),
+    )
+    expect(pic).toBeDefined()
+    expect(answers).toEqual({ before: true, after: false })
+  })
+
+  it('lists for a key scoped to a deep folder with long names', async () => {
+    const deep = Array.from(
+      { length: 8 },
+      (_, i) => `${String(i).repeat(1)}${'n'.repeat(200)}`,
+    ).join('/')
+    const admin = await person('admin')
+    const ws = await workspace(admin)
+    const pushed = await pushAll(await agent(admin), `${ws.name}/deep`, {
+      [`${deep}/page.html`]: '<title>Deep</title>',
+    })
+    if (!('treeId' in pushed)) throw new Error('no tree')
+    const scope = (await nodeAt(pushed.treeId, deep))!.id as NodeId
+    const key = await agent(admin, { scope })
+    const listed = await runAs(
+      key,
+      Effect.gen(function* () {
+        const readable = yield* (yield* Access).readable(
+          pushed.treeId as TreeId,
+        )
+        return yield* Effect.promise(() =>
+          db(env)
+            .select({ path: schema.nodes.path })
+            .from(schema.nodes)
+            .where(and(eq(schema.nodes.treeId, pushed.treeId), readable.where))
+            .all(),
+        )
+      }),
+    )
+    expect(listed.map((row) => row.path)).toContain(`${deep}/page.html`)
+  })
+})

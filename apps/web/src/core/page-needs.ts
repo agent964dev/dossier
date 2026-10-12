@@ -13,7 +13,7 @@ export interface RenderPath {
   readonly path: string
   /**
    * Named in an inline style or module script, which a composed layout's
-   * are read from the page's folder, so only a page's own count.
+   * are read from the page's folder.
    */
   readonly inline: boolean
 }
@@ -116,14 +116,20 @@ export const pageNeedsOf = (
   const out = new Map<string, PageNeed>()
   const add = (need: PageNeed) =>
     out.set(`${need.page}\u0000${need.need}\u0000${need.kind}`, need)
-  const resolve = (path: string): string | null => {
+  // A folder is the folder and the page it shows, never the rest of it.
+  const folderNeeds = (folder: string): readonly string[] =>
+    kindAt(joinPath(folder, 'index.html')) === 'page'
+      ? [folder, joinPath(folder, 'index.html')]
+      : [folder]
+  const resolve = (path: string): readonly string[] => {
     if (path.endsWith('/')) {
       const folder = path.slice(0, -1)
-      return kindAt(folder) === 'folder' ? folder : null
+      return kindAt(folder) === 'folder' ? folderNeeds(folder) : []
     }
-    if (kindAt(`${path}.html`) === 'page') return `${path}.html`
+    if (kindAt(`${path}.html`) === 'page') return [`${path}.html`]
     const kind = kindAt(path)
-    return kind === 'folder' || kind === 'file' || kind === 'page' ? path : null
+    if (kind === 'folder') return folderNeeds(path)
+    return kind === 'file' || kind === 'page' ? [path] : []
   }
   for (const page of files) {
     if (!page.path.endsWith('.html')) continue
@@ -141,18 +147,23 @@ export const pageNeedsOf = (
         folder = folder === '' ? null : parentOf(folder)
       }
     }
+    // A layout's attribute URLs are rewritten to its own folder when it is
+    // composed; what its inline styles and scripts name is read from the
+    // page's folder.
     const rendered = [
       ...renderPathsOf(page.analysis, parentOf(page.path)),
-      ...chain.flatMap((layout) =>
-        renderPathsOf(layout.analysis, parentOf(layout.path)).filter(
+      ...chain.flatMap((layout) => [
+        ...renderPathsOf(layout.analysis, parentOf(layout.path)).filter(
           (r) => !r.inline,
         ),
-      ),
+        ...renderPathsOf(layout.analysis, parentOf(page.path)).filter(
+          (r) => r.inline,
+        ),
+      ]),
     ]
     for (const r of rendered) {
-      const need = resolve(r.path)
-      if (need !== null && need !== page.path) {
-        add({ page: page.path, need, kind: 'render' })
+      for (const need of resolve(r.path)) {
+        if (need !== page.path) add({ page: page.path, need, kind: 'render' })
       }
     }
     for (const host of [page, ...chain]) {

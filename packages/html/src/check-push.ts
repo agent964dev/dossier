@@ -36,6 +36,8 @@ export type PushProblemCode =
   | 'form_action_authored'
   /** The action is neither a folder ending in '/' nor a .json file. */
   | 'form_action_kind'
+  /** The action is a page's comments folder or lies inside one. */
+  | 'form_action_comments'
   /** data-closes has no offset or Z. */
   | 'closes_without_offset'
   /** Two forms on one page share a target and lack distinct ids. */
@@ -201,7 +203,19 @@ const formProblems = (
       }
     } else {
       const kind = tree.kindAt(resolved.target)
-      if (kind === 'page' || kind === 'file' || kind === 'folder') {
+      if (
+        resolved.target.split('/').some((name) => name.endsWith('.comments'))
+      ) {
+        found.push(
+          problem(
+            'form_action_comments',
+            path,
+            form.line,
+            `${where} has ${written}, which is inside a page's comments folder, where everyone who reads the page reads what is written.`,
+            'Point the form at a folder or .json file of its own, such as action="answers/".',
+          ),
+        )
+      } else if (kind === 'page' || kind === 'file' || kind === 'folder') {
         found.push(
           problem(
             'form_action_authored',

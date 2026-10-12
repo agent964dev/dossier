@@ -1743,6 +1743,9 @@ export const DataLive: Layer.Layer<
           // Respond on the file, or on the closest folder above a new one.
           let granted: Granted<'respond'> | null = null
           let under: Granted<'respond'> | null = null
+          // Set when the write rests on the page alone: then only its forms
+          // decide whether, and in what shape, it may write here.
+          let pageForms: readonly FormRow[] | null = null
           if (existing !== null) {
             granted = yield* access.require('respond', existing)
           } else {
@@ -1759,22 +1762,25 @@ export const DataLive: Layer.Layer<
               // A respondent through the page alone answers where a form of
               // the page, or of a layout composed into it, writes.
               const page = yield* store.fileAt(tree.id, i.page)
-              const writesHere =
-                page !== null &&
-                (yield* formsHolding(tree, page, path)).length > 0
-              if (!writesHere) return yield* Effect.fail(onFolder.left)
+              const held =
+                page === null ? [] : yield* formsHolding(tree, page, path)
+              if (page === null || held.length === 0) {
+                return yield* Effect.fail(onFolder.left)
+              }
               under = yield* access.require('respond', page.node)
+              pageForms = held
             }
           }
           // Every form whose answers hold this path: under a folder target at
           // any depth, a shared file, or a shared file's uploads.
-          const holding = (yield* currentForms(tree.id)).filter((row) =>
-            row.kind === 'shared'
-              ? row.targetPath === path ||
-                path.startsWith(
-                  `${row.targetPath.replace(/\.json$/i, '')}.files/`,
-                )
-              : path.startsWith(row.targetPath),
+          const holding = (pageForms ?? (yield* currentForms(tree.id))).filter(
+            (row) =>
+              row.kind === 'shared'
+                ? row.targetPath === path ||
+                  path.startsWith(
+                    `${row.targetPath.replace(/\.json$/i, '')}.files/`,
+                  )
+                : path.startsWith(row.targetPath),
           )
           let values = written
           if (holding.length > 0) {

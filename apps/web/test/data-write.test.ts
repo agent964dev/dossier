@@ -772,3 +772,34 @@ describe('a respondent through a page share alone', () => {
     expect(refused.code).toBe('not_found')
   })
 })
+
+describe('a page share’s respondent and the forms of other pages', () => {
+  it('writes a target only through an open form of the shared page itself', async () => {
+    const tree = await pushForms(owner, ws, {
+      'closed-vote.html': pageWith(
+        '<form action="poll.json" data-closed><input name="vote"></form>',
+        'Closed vote',
+      ),
+      'open-vote.html': pageWith(
+        '<form action="poll.json"><input name="anything"></form>',
+        'Open vote',
+      ),
+    })
+    const who = await person('closed-respondent')
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'closed-vote.html'))!.id,
+      'email',
+      who.email.toLowerCase(),
+      'respond',
+      owner,
+    )
+    const refused = await writeFailure(await sessionFor(who), tree, {
+      page: 'closed-vote.html',
+      path: 'poll.json',
+      patch: { anything: 'sneaked in' },
+    })
+    expect(['closed', 'forbidden', 'not_found']).toContain(refused.code)
+    expect(await liveValue(tree.treeId, 'poll.json')).toBeFalsy()
+  })
+})

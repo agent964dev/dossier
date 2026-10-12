@@ -564,3 +564,35 @@ describe('the companion warning', () => {
     ).toEqual([])
   })
 })
+
+describe('a page’s comments folder', () => {
+  it('is never a form’s target, at it or below it', () => {
+    for (const action of [
+      'pub.comments/',
+      'pub.comments/x/',
+      'pub.comments/a.json',
+    ]) {
+      const check = checkPush(
+        [
+          file(
+            'questions.html',
+            `<form action="${action}"><input name="a"></form>`,
+          ),
+        ],
+        treeOf({ 'pub.html': 'page' }),
+      )
+      expect(codes(check.problems), action).toEqual(['form_action_comments'])
+    }
+    // A folder that only ends in .comments elsewhere in its name is fine.
+    const fine = checkPush(
+      [
+        file(
+          'questions.html',
+          '<form action="my.comments.d/"><input name="a"></form>',
+        ),
+      ],
+      treeOf(),
+    )
+    expect(fine.problems).toEqual([])
+  })
+})
