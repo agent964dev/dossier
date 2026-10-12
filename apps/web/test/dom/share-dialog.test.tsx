@@ -105,3 +105,23 @@ describe('the share dialog under shares from a folder above', () => {
     ])
   })
 })
+
+describe('the Anyone with the link button', () => {
+  it('says in its name that it makes the page public at once', async () => {
+    server.view = { ...VIEW, inherited: [] }
+    await act(async () => {
+      root.render(<ShareDialog link="/acme/t/plan" onClose={() => {}} />)
+    })
+    const button = [...document.querySelectorAll('button')].find((b) =>
+      (b.textContent ?? '').startsWith('Anyone with the link'),
+    )
+    expect(button).toBeDefined()
+    // No label apart from its text: what it says is its name, and what it
+    // shows comes first.
+    expect(button!.hasAttribute('aria-label')).toBe(false)
+    const name = (button!.textContent ?? '').replace(/\s+/g, ' ').trim()
+    expect(name).toMatch(/^Anyone with the link\b/)
+    expect(name).toMatch(/public/i)
+    expect(name).toMatch(/read and respond/i)
+  })
+})

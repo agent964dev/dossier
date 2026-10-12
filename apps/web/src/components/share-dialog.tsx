@@ -350,6 +350,7 @@ function ShareBody({
               </Tile>
             }
             name="Anyone with the link"
+            nameHint=": make it public now, to read and respond"
             onName={
               anyone === ''
                 ? () => {
@@ -638,6 +639,7 @@ function ShareRow({
   highlighted = false,
   wrap = false,
   onName,
+  nameHint,
 }: {
   icon: ReactNode
   name: string
@@ -648,6 +650,8 @@ function ShareRow({
   wrap?: boolean
   /** Makes the name a button that turns the share on. */
   onName?: () => void
+  /** What pressing the name does, for screen readers, after the name. */
+  nameHint?: string
 }) {
   const nameClass = cn(
     'text-[0.9375rem] leading-snug text-neutral-50',
@@ -678,6 +682,9 @@ function ShareRow({
             )}
           >
             {name}
+            {nameHint === undefined ? null : (
+              <span className="sr-only">{nameHint}</span>
+            )}
           </button>
         )}
         {detail}
