@@ -1717,6 +1717,11 @@ export const DataLive: Layer.Layer<
               )
             }
           }
+          // An early refusal; the batch's storage guard decides.
+          yield* limits.requireStorage(
+            tree.workspaceId,
+            new TextEncoder().encode(JSON.stringify(values)).length,
+          )
           const provenance = { seenPush, opId: i.opId }
           const done = yield* store
             .change(tree.id, (cs) =>

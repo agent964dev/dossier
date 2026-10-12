@@ -1,4 +1,4 @@
-import type { Person } from '@dossier/contracts'
+import type { AuthoredSeq, OpId, Person } from '@dossier/contracts'
 import { Effect, TestClock, TestContext } from 'effect'
 import { beforeAll, describe, expect, it } from 'vitest'
 
@@ -207,6 +207,38 @@ describe('deployment settings', () => {
     )
     expect(used).toBeGreaterThan(1024)
     await people((p) => p.setLimits('defaults'))
+  })
+
+  it('refuses a page-code write past a saved storage limit with the limit named', async () => {
+    const ws = await workspace(chief)
+    const tree = await pushForms(chief, ws, {
+      'board.html': '<!doctype html><title>Board</title><p>Board</p>',
+      'notes.txt': 'n'.repeat(1100),
+    })
+    await people((p) => p.setLimits({ storageBytes: 1024 }))
+    try {
+      const write = await failureAs(
+        await sessionFor(chief),
+        Effect.flatMap(Data, (data) =>
+          data.write({
+            tree: tree.treeId,
+            page: 'board.html',
+            path: 'layout.json',
+            patch: { n1: { x: 1, y: 2 } },
+            replace: false,
+            opId: crypto.randomUUID() as OpId,
+            seq: 1 as AuthoredSeq,
+          }),
+        ),
+      )
+      expect(write).toMatchObject({
+        code: 'too_large',
+        message:
+          'This workspace has reached its 1 KiB storage limit. A super admin can raise it.',
+      })
+    } finally {
+      await people((p) => p.setLimits('defaults'))
+    }
   })
 
   it('charges a send the whole revision it stores, checked in the same batch', async () => {
