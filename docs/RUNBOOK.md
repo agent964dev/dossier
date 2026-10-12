@@ -343,9 +343,11 @@ The answer is `200` with:
 ```
 
 `version` is the commit the Worker was built from, `protocol` the API version
-the CLI must speak, and `db: "ok"` means D1 answered. A `503` with
-`"code":"unavailable"` means a variable or secret is missing; section 5 shows
-how to read the logs.
+the CLI must speak, and `db: "ok"` means D1 answered. Right after the first
+deploy onto a new database, the answer can be a `503` with
+`"code":"unavailable"` for a few seconds; ask again after ten seconds. A `503`
+that stays means a variable or secret is missing; section 5 shows how to read
+the logs.
 
 Then ask a content host for a path only the main host serves:
 
