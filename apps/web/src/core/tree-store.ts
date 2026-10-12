@@ -507,6 +507,17 @@ export interface TreeStoreService {
     name: string,
   ) => Effect.Effect<TreeRow | null>
   /**
+   * `workspace` and `tree` in one read: the live workspace of the name, or
+   * null, and its live tree of the name, or null.
+   */
+  readonly place: (
+    workspace: string,
+    tree: string,
+  ) => Effect.Effect<{
+    readonly workspace: WorkspaceRow | null
+    readonly tree: TreeRow | null
+  }>
+  /**
    * The node a path names: a folder, a file, or the page `path.html`. With
    * `deleted`, for history and restore only: the newest deleted node at the
    * path when no live one holds it, and a deleted tree by its name when no
@@ -562,11 +573,15 @@ export interface TreeStoreService {
     sha256: Sha256,
     size: number,
   ) => Effect.Effect<string, DossierError<'blob_reclaiming'>>
-  /** The bytes are in R2 and match their hash and size. */
+  /**
+   * The bytes are in R2 and match their hash and size. `alongside` runs in
+   * the same batch, before the hold is confirmed.
+   */
   readonly confirmHold: (
     holder: { readonly kind: HoldKind; readonly id: string },
     sha256: Sha256,
     size: number,
+    alongside?: readonly D1PreparedStatement[],
   ) => Effect.Effect<void>
   /** Lets go of a hold whose bytes never arrived; a verified one stays. */
   readonly dropHold: (
@@ -1314,6 +1329,34 @@ export const TreeStoreLive: Layer.Layer<
         Effect.orDie,
       )
 
+    const place = (workspaceName: string, treeName: string) =>
+      read(() =>
+        database
+          .select({ workspace: schema.workspaces, tree: schema.trees })
+          .from(schema.workspaces)
+          .leftJoin(
+            schema.trees,
+            and(
+              eq(schema.trees.workspaceId, schema.workspaces.id),
+              eq(schema.trees.name, treeName),
+              isNull(schema.trees.deletedAt),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.workspaces.name, workspaceName),
+              isNull(schema.workspaces.deletedAt),
+            ),
+          )
+          .get(),
+      ).pipe(
+        Effect.map((row) => ({
+          workspace: (row?.workspace ?? null) as WorkspaceRow | null,
+          tree: (row?.tree ?? null) as TreeRow | null,
+        })),
+        Effect.orDie,
+      )
+
     const liveNode = (treeId: TreeId, path: string) =>
       read(() =>
         database
@@ -1356,10 +1399,13 @@ export const TreeStoreLive: Layer.Layer<
           treeId,
           path: ref.path,
         })
-        const ws = yield* workspace(ref.workspace)
+        const { workspace: ws, tree: liveTree } = yield* place(
+          ref.workspace,
+          ref.tree,
+        )
         if (ws === null) return missing(null)
         const found =
-          (yield* tree(ws, ref.tree)) ??
+          liveTree ??
           (opts.deleted === true ? yield* deletedTree(ws, ref.tree) : null)
         if (found === null) return missing(null)
         // A deleted tree's nodes are all deleted: only history reaches them.
@@ -1498,14 +1544,33 @@ export const TreeStoreLive: Layer.Layer<
         ),
       )
 
-    /** A live file now: authored or data. */
+    /** A live file now: authored or data. Its node and version in one read. */
     const liveFile = (treeId: TreeId, path: string) =>
-      Effect.gen(function* () {
-        const node = yield* liveNode(treeId, path)
-        if (node === null || node.kind !== 'file') return null
-        const version = yield* versionOf(node)
-        return version === null ? null : { node, version }
-      })
+      read(() =>
+        database
+          .select({ node: schema.nodes, version: schema.nodeVersions })
+          .from(schema.nodes)
+          .leftJoin(
+            schema.nodeVersions,
+            eq(schema.nodeVersions.id, schema.nodes.currentVersionId),
+          )
+          .where(
+            and(
+              eq(schema.nodes.treeId, treeId),
+              eq(schema.nodes.path, path),
+              isNull(schema.nodes.deletedAt),
+            ),
+          )
+          .get(),
+      ).pipe(
+        Effect.map((row) => {
+          if (row === undefined || row.node.kind !== 'file') return null
+          const version = row.version
+          return version === null || version.state !== 'live'
+            ? null
+            : { node: row.node as NodeRow, version: version as VersionRow }
+        }),
+      )
 
     /**
      * An authored file as it stood at a sequence, or any file live now
@@ -1587,14 +1652,71 @@ export const TreeStoreLive: Layer.Layer<
         return held.length === 0 ? null : (node as NodeRow)
       })
 
+    /**
+     * What a path names in a tree, read as files and folders: for a folder
+     * link, the folder and its index; otherwise the page, then the folder
+     * and the file. Independent reads go out together.
+     */
+    const pathReads = (
+      treeId: TreeId,
+      ref: LinkRef | TreeRef,
+      at?: AuthoredSeq,
+    ) =>
+      Effect.gen(function* () {
+        if (ref.folder || ref.path === '') {
+          const [folder, index] = yield* Effect.all(
+            [
+              folderAt(treeId, ref.path, at),
+              fileThen(treeId, joinPath(ref.path, 'index.html'), at),
+            ],
+            { concurrency: 'unbounded' },
+          )
+          return { kind: 'folder', folder, index } as const
+        }
+        const html = yield* fileThen(treeId, `${ref.path}.html`, at)
+        // People's data is never a page, whatever its name.
+        if (html !== null && html.node.origin === 'authored') {
+          return { kind: 'page', html } as const
+        }
+        const [folder, file] = yield* Effect.all(
+          [folderAt(treeId, ref.path, at), fileThen(treeId, ref.path, at)],
+          { concurrency: 'unbounded' },
+        )
+        return { kind: 'path', folder, file } as const
+      })
+
     const resolve: TreeStoreService['resolve'] = (ref, at) =>
       Effect.gen(function* () {
+        const split = underscoreSplit(ref.path)
         let found: TreeRow | null
+        // A tree known by ID is read together with what the path names in it.
+        let prefetched: Effect.Effect.Success<
+          ReturnType<typeof pathReads>
+        > | null = null
+        let candidatesAt: readonly KitFound[] | null = null
         if ('treeId' in ref) {
-          found = (yield* treeById(ref.treeId))?.tree ?? null
+          const [byId, reads, candidates] = yield* Effect.all(
+            [
+              treeById(ref.treeId),
+              split === null
+                ? pathReads(ref.treeId, ref, at)
+                : Effect.succeed(null),
+              split !== null && at !== undefined
+                ? lookupUnderscore({
+                    treeId: ref.treeId,
+                    folder: split.from,
+                    rest: split.rest,
+                    at,
+                  }).pipe(Effect.provide(context))
+                : Effect.succeed(null),
+            ],
+            { concurrency: 'unbounded' },
+          )
+          found = byId?.tree ?? null
+          prefetched = reads
+          candidatesAt = candidates
         } else {
-          const ws = yield* workspace(ref.workspace)
-          found = ws === null ? null : yield* tree(ws, ref.tree)
+          found = (yield* place(ref.workspace, ref.tree)).tree
           // An old link of a tree that moved: the same path where it is now.
           if (found === null && at === undefined) {
             const moved = yield* movedTree(ref.workspace, ref.tree)
@@ -1627,14 +1749,15 @@ export const TreeStoreLive: Layer.Layer<
         if (found === null) return missing()
         const t = found
         // A `_` path is answered by the closest `_` file the lookup reaches.
-        const split = underscoreSplit(ref.path)
         if (split !== null) {
-          const candidates = yield* lookupUnderscore({
-            treeId: t.id,
-            folder: split.from,
-            rest: split.rest,
-            at: at ?? (t.authoredSeq as AuthoredSeq),
-          }).pipe(Effect.provide(context))
+          const candidates =
+            candidatesAt ??
+            (yield* lookupUnderscore({
+              treeId: t.id,
+              folder: split.from,
+              rest: split.rest,
+              at: at ?? (t.authoredSeq as AuthoredSeq),
+            }).pipe(Effect.provide(context)))
           return {
             kind: 'kit',
             tree: t,
@@ -1666,50 +1789,50 @@ export const TreeStoreLive: Layer.Layer<
                 to: linkPath,
               } satisfies Resolved)
         }
-        const answer = yield* Effect.gen(function* () {
-          if (ref.folder || ref.path === '') {
-            const folder = yield* folderAt(t.id, ref.path, at)
-            if (folder === null) return missing()
-            const index = yield* fileThen(
-              t.id,
-              joinPath(ref.path, 'index.html'),
-              at,
-            )
-            if (index !== null && index.node.origin === 'authored') {
-              return page(index)
+        const reads = prefetched ?? (yield* pathReads(t.id, ref, at))
+        const answer = ((): Resolved | MissingNode => {
+          switch (reads.kind) {
+            case 'folder': {
+              if (reads.folder === null) return missing()
+              const index = reads.index
+              if (index !== null && index.node.origin === 'authored') {
+                return page(index)
+              }
+              return {
+                kind: 'folder',
+                node: reads.folder,
+                tree: t,
+              } satisfies Resolved
             }
-            return { kind: 'folder', node: folder, tree: t } satisfies Resolved
+            case 'page':
+              return page(reads.html)
+            case 'path': {
+              if (reads.folder !== null) {
+                return {
+                  kind: 'redirect',
+                  node: reads.folder,
+                  tree: t,
+                  to: linkPathOf(ref.path, true),
+                } satisfies Resolved
+              }
+              const file = reads.file
+              if (file === null) return missing()
+              if (
+                file.node.origin === 'authored' &&
+                file.node.name.endsWith('.html')
+              ) {
+                return page(file)
+              }
+              return {
+                kind: 'file',
+                node: file.node,
+                version: file.version,
+                path: file.path,
+                tree: t,
+              } satisfies Resolved
+            }
           }
-          const html = yield* fileThen(t.id, `${ref.path}.html`, at)
-          // People's data is never a page, whatever its name.
-          if (html !== null && html.node.origin === 'authored') {
-            return page(html)
-          }
-          const folder = yield* folderAt(t.id, ref.path, at)
-          if (folder !== null) {
-            return {
-              kind: 'redirect',
-              node: folder,
-              tree: t,
-              to: linkPathOf(ref.path, true),
-            } satisfies Resolved
-          }
-          const file = yield* fileThen(t.id, ref.path, at)
-          if (file === null) return missing()
-          if (
-            file.node.origin === 'authored' &&
-            file.node.name.endsWith('.html')
-          ) {
-            return page(file)
-          }
-          return {
-            kind: 'file',
-            node: file.node,
-            version: file.version,
-            path: file.path,
-            tree: t,
-          } satisfies Resolved
-        })
+        })()
         // Now, a path a move left leads to where its node is; a live node
         // at the path always wins, and a pinned sequence never redirects.
         if (!('missing' in answer) || at !== undefined) return answer
@@ -1931,9 +2054,11 @@ export const TreeStoreLive: Layer.Layer<
       holder: { readonly kind: HoldKind; readonly id: string },
       sha256: Sha256,
       size: number,
+      alongside: readonly D1PreparedStatement[] = [],
     ) =>
       read(() =>
         DB.batch([
+          ...alongside,
           // Verified bytes fix the blob's size, whatever row came first.
           DB.prepare('update blobs set size = ? where sha256 = ?').bind(
             size,
@@ -3846,6 +3971,7 @@ export const TreeStoreLive: Layer.Layer<
     return {
       workspace,
       tree,
+      place,
       locate,
       resolve,
       treeById,

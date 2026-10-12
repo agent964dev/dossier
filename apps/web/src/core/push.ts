@@ -41,19 +41,20 @@ import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { Config } from './config.ts'
+import { derivedNeeds, derivedOf, needsText } from './derived.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
-import { jsAnalysisOf } from './lookup.ts'
-import {
-  indexEntries,
-  namesOf,
-  searchKindOf,
-  searchTextOf,
-} from './search-index.ts'
+import { indexEntries, namesOf } from './search-index.ts'
 import { pageNeedsOf, type PageNeed, type PageNeedRow } from './page-needs.ts'
 import { Shares } from './shares.ts'
-import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
-import { TreeStore, type NewShare } from './tree-store.ts'
+import {
+  ancestorPaths,
+  type MissingNode,
+  type NodeRow,
+  type TreeRow,
+  type WorkspaceRow,
+} from './rows.ts'
+import { markdownKey, TreeStore, type NewShare } from './tree-store.ts'
 
 export interface ManifestFile {
   /** Inside the pushed folder. */
@@ -396,19 +397,25 @@ export const PushLive: Layer.Layer<
     const anchorOf = (tree: TreeRow, path: string) =>
       Effect.gen(function* () {
         const paths = ancestorPaths(path)
-        const found = yield* query(() =>
-          DB.prepare(
-            `select path, kind from nodes where tree_id = ? and deleted_at is null
-               and path in (${paths.map(() => '?').join(', ')})`,
-          )
-            .bind(tree.id, ...paths)
-            .all<{ path: string; kind: 'file' | 'folder' }>(),
-        )
-        const deepest = found.results
+        const found = (yield* query(() =>
+          db(bindings)
+            .select()
+            .from(schema.nodes)
+            .where(
+              sql`${schema.nodes.treeId} = ${tree.id} and ${schema.nodes.deletedAt} is null and ${schema.nodes.path} in (${sql.join(
+                paths.map((p) => sql`${p}`),
+                sql`, `,
+              )})`,
+            )
+            .all(),
+        )) as NodeRow[]
+        const deepest = found
           .filter((n) => n.kind === 'folder')
-          .map((n) => n.path)
-          .reduce((a, b) => (depthOf(b) > depthOf(a) ? b : a), '')
-        const file = found.results.find((n) => n.kind === 'file') ?? null
+          .reduce<NodeRow | null>(
+            (a, b) => (a === null || depthOf(b.path) > depthOf(a.path) ? b : a),
+            null,
+          )
+        const file = found.find((n) => n.kind === 'file') ?? null
         return { deepest, file }
       })
 
@@ -416,19 +423,15 @@ export const PushLive: Layer.Layer<
      * Write on the deepest live folder at or above a path, through Access.
      * Only a caller who holds it learns that a file is in the way.
      */
-    const writeOn = (workspace: WorkspaceRow, tree: TreeRow, path: string) =>
+    const writeOn = (tree: TreeRow, path: string) =>
       Effect.gen(function* () {
         const { deepest, file } = yield* anchorOf(tree, path)
-        const resolved = yield* store.locate({
-          workspace: workspace.name,
-          tree: tree.name,
-          path: deepest,
-          folder: true,
-        })
-        const granted = yield* access.require(
-          'write',
-          'missing' in resolved ? resolved : resolved.node,
-        )
+        const missing: MissingNode = {
+          missing: true,
+          treeId: tree.id,
+          path: deepest?.path ?? '',
+        }
+        const granted = yield* access.require('write', deepest ?? missing)
         if (file !== null) {
           return yield* Effect.fail(
             dossierError(
@@ -630,13 +633,14 @@ export const PushLive: Layer.Layer<
         }
 
         const { target } = i
-        const workspace = yield* store.workspace(target.workspace)
-        const tree =
-          workspace === null ? null : yield* store.tree(workspace, target.tree)
+        const { workspace, tree } = yield* store.place(
+          target.workspace,
+          target.tree,
+        )
         if (tree === null) {
           yield* access.member(workspace)
         } else {
-          yield* writeOn(workspace as WorkspaceRow, tree, target.path)
+          yield* writeOn(tree, target.path)
         }
         const ws = workspace as WorkspaceRow
         const link = folderLink(ws.name, target.tree, target.path)
@@ -880,11 +884,10 @@ export const PushLive: Layer.Layer<
      */
     const authorize = (push: StagedPush) =>
       Effect.gen(function* () {
-        const workspace = yield* store.workspace(push.workspace_name)
-        const tree =
-          workspace === null
-            ? null
-            : yield* store.tree(workspace, push.tree_name)
+        const { workspace, tree } = yield* store.place(
+          push.workspace_name,
+          push.tree_name,
+        )
         if (tree === null) {
           const membership = yield* access.member(workspace)
           return {
@@ -894,11 +897,7 @@ export const PushLive: Layer.Layer<
             membership,
           }
         }
-        const target = yield* writeOn(
-          workspace as WorkspaceRow,
-          tree,
-          push.path,
-        )
+        const target = yield* writeOn(tree, push.path)
         return {
           workspace: workspace as WorkspaceRow,
           tree,
@@ -920,13 +919,21 @@ export const PushLive: Layer.Layer<
     }) =>
       Effect.gen(function* () {
         const push = yield* stagedPush(i.pushId)
-        yield* authorize(push)
-        const listed = yield* query(() =>
-          DB.prepare(
-            'select path, size from push_files where push_id = ? and sha256 = ?',
-          )
-            .bind(push.id, i.sha256)
-            .all<{ path: string; size: number }>(),
+        // What the caller holds, what the push lists and the limits are read
+        // together; nothing is written before all three answer.
+        const [, listed, limit] = yield* Effect.all(
+          [
+            authorize(push),
+            query(() =>
+              DB.prepare(
+                'select path, size from push_files where push_id = ? and sha256 = ?',
+              )
+                .bind(push.id, i.sha256)
+                .all<{ path: string; size: number }>(),
+            ),
+            limits.current(),
+          ],
+          { concurrency: 'unbounded' },
         )
         const first = listed.results[0]
         if (first === undefined) {
@@ -948,7 +955,6 @@ export const PushLive: Layer.Layer<
             ),
           )
         }
-        const limit = yield* limits.current()
         if (i.size > limit.fileBytes) {
           return yield* Effect.fail(
             tooLarge(
@@ -960,19 +966,34 @@ export const PushLive: Layer.Layer<
         // The hold comes first, so a purge never takes the blob while its
         // bytes are being written; it counts for the commit once verified.
         const key = yield* store.holdBlob(holder, i.sha256, i.size)
+        // What the file's paths keep beside its blob, made from the bytes
+        // as they arrive rather than read back from R2.
+        const needs = derivedNeeds(listed.results.map((f) => f.path))
+        const keepsText = needsText(needs, i.size)
         // The bytes are always written, so the answer never tells whether
         // they were stored before.
-        yield* Effect.tryPromise({
+        const text = yield* Effect.tryPromise({
           try: async () => {
+            if (keepsText) {
+              const held = new Uint8Array(
+                await new Response(i.body).arrayBuffer(),
+              )
+              if (held.byteLength !== i.size) {
+                throw new Error(`${held.byteLength} bytes, not ${i.size}`)
+              }
+              await BLOBS.put(key, held, { sha256: i.sha256 })
+              // Decoded only once R2 has verified the hash.
+              return new TextDecoder().decode(held)
+            }
             const sized = new FixedLengthStream(i.size)
             const piped = i.body.pipeTo(sized.writable)
-            const [put] = await Promise.all([
+            await Promise.all([
               BLOBS.put(key, sized.readable, {
                 sha256: i.sha256,
               }),
               piped,
             ])
-            return put
+            return null
           },
           catch: (error) => {
             console.warn('An upload was refused', {
@@ -987,48 +1008,48 @@ export const PushLive: Layer.Layer<
             )
           },
         }).pipe(Effect.tapError(() => store.dropHold(holder, i.sha256)))
-        if (listed.results.some((f) => isPageFile(f.path))) {
-          yield* store.analysis(i.sha256)
-        }
-        // A module's imports, which exporting a page follows.
-        if (listed.results.some((f) => /\.m?js$/i.test(f.path))) {
-          yield* jsAnalysisOf(i.sha256).pipe(
-            Effect.provideService(Bindings, bindings),
-          )
-        }
-        // What search reads of a page or a companion, kept beside the blob
-        // so a commit joins it and never reads the bytes again.
-        const kinds = new Set(
-          listed.results.flatMap((f) =>
-            f.path.split('/').some(isKitName) ? [] : [searchKindOf(f.path)],
-          ),
-        )
-        for (const kind of ['html', 'text'] as const) {
-          if (kinds.has(kind)) {
-            yield* searchTextOf(i.sha256, kind).pipe(
-              Effect.provideService(Bindings, bindings),
-            )
-          }
-        }
-        // A page's generated agent version is made as it arrives; a failure
-        // here only means the first read makes it.
-        if (
-          listed.results.some(
-            (f) => isPageFile(f.path) && !f.path.split('/').some(isKitName),
-          )
-        ) {
-          yield* store.markdown(i.sha256).pipe(
-            Effect.catchAll((error) =>
-              Effect.sync(() =>
-                console.warn('A page could not be converted to Markdown', {
-                  sha256: i.sha256,
-                  error: error.code,
+        const derived = derivedOf(i.sha256, needs, i.size, text)
+        const at = yield* Clock.currentTimeMillis
+        const markdown = derived.markdown
+        // A page's generated agent version is stored as it arrives; a
+        // failure here only means the first read makes it.
+        const stored =
+          markdown === null
+            ? Effect.void
+            : Effect.tryPromise(() =>
+                BLOBS.put(markdownKey(i.sha256), markdown, {
+                  httpMetadata: {
+                    contentType: 'text/markdown; charset=utf-8',
+                  },
                 }),
+              ).pipe(
+                Effect.catchAll((error) =>
+                  Effect.sync(() =>
+                    console.warn('A page could not be converted to Markdown', {
+                      sha256: i.sha256,
+                      error: String(error.error),
+                    }),
+                  ),
+                ),
+                Effect.asVoid,
+              )
+        yield* Effect.all(
+          [
+            stored,
+            store.confirmHold(
+              holder,
+              i.sha256,
+              i.size,
+              derived.analyses.map((row) =>
+                DB.prepare(
+                  `insert into analyses (sha256, analyzer, version, json, created_at)
+                   values (?, ?, ?, ?, ?) on conflict do nothing`,
+                ).bind(i.sha256, row.analyzer, row.version, row.json, at),
               ),
             ),
-          )
-        }
-        yield* store.confirmHold(holder, i.sha256, i.size)
+          ],
+          { concurrency: 'unbounded', discard: true },
+        )
       })
 
     /**
@@ -1686,11 +1707,10 @@ export const PushLive: Layer.Layer<
     /** Whether the tree changed since the commit read it, or came to be. */
     const treeMoved = (push: StagedPush, seen: TreeRow | null) =>
       Effect.gen(function* () {
-        const workspace = yield* store.workspace(push.workspace_name)
-        const now =
-          workspace === null
-            ? null
-            : yield* store.tree(workspace, push.tree_name)
+        const { tree: now } = yield* store.place(
+          push.workspace_name,
+          push.tree_name,
+        )
         return now?.id !== seen?.id || now?.authoredSeq !== seen?.authoredSeq
       })
 
@@ -1707,11 +1727,7 @@ export const PushLive: Layer.Layer<
     const exhausted = (pushId: PushId) =>
       Effect.gen(function* () {
         const push = yield* stagedPush(pushId)
-        const workspace = yield* store.workspace(push.workspace_name)
-        const tree =
-          workspace === null
-            ? null
-            : yield* store.tree(workspace, push.tree_name)
+        const { tree } = yield* store.place(push.workspace_name, push.tree_name)
         if (tree !== null && push.force === 0) {
           const since = yield* pushedSince(
             tree.id,

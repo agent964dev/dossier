@@ -368,6 +368,11 @@ interface TreeFacts {
   readonly teams: readonly TeamId[]
 }
 
+type TreeFactsRow = Omit<TreeFacts, 'teams' | 'treeOnlyDeleted'> & {
+  readonly teamsJson: string | null
+  readonly treeOnlyDeleted: number
+}
+
 /** What a member hears when a suspended workspace refuses a change. */
 export const suspendedError = (
   workspace: string,
@@ -400,19 +405,14 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         Effect.orDie,
       )
 
-    /**
-     * The tree's workspace, whether the two are live, suspended or deleted,
-     * and the caller's role and teams in it, counting only grants at or
-     * below order `asOf`; null when no such tree exists.
-     */
-    const treeFacts = (
+    /** The statement `treeFacts` runs, for a batch to hold. */
+    const treeFactsStatement = (
       caller: Caller,
       treeId: TreeId,
-      asOf: number | null = null,
+      asOf: number | null,
     ) =>
-      query(() =>
-        DB.prepare(
-          `select t.workspace_id as workspaceId, w.name as workspaceName,
+      DB.prepare(
+        `select t.workspace_id as workspaceId, w.name as workspaceName,
              t.authored_seq || ':' || (select count(*) || ':' || coalesce(max(grant_order), 0)
                from shares where tree_id = t.id) as stamp,
              case when w.deleted_at is not null or t.deleted_at is not null then 'deleted'
@@ -429,29 +429,34 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                  and (?3 is null or tm.grant_order <= ?3)) as teamsJson
            from trees t join workspaces w on w.id = t.workspace_id
            where t.id = ?1`,
-        )
-          .bind(treeId, caller.person?.id ?? '', asOf)
-          .first<
-            Omit<TreeFacts, 'teams' | 'treeOnlyDeleted'> & {
-              teamsJson: string | null
-              treeOnlyDeleted: number
-            }
-          >(),
-      ).pipe(
-        Effect.map((row): TreeFacts | null =>
-          row === null
-            ? null
-            : {
-                workspaceId: row.workspaceId,
-                workspaceName: row.workspaceName,
-                stamp: row.stamp,
-                state: row.state,
-                treeOnlyDeleted: row.treeOnlyDeleted === 1,
-                memberRole: row.memberRole,
-                teams: JSON.parse(row.teamsJson ?? '[]') as TeamId[],
-              },
-        ),
-      )
+      ).bind(treeId, caller.person?.id ?? '', asOf)
+
+    const treeFactsOf = (row: TreeFactsRow | null): TreeFacts | null =>
+      row === null
+        ? null
+        : {
+            workspaceId: row.workspaceId,
+            workspaceName: row.workspaceName,
+            stamp: row.stamp,
+            state: row.state,
+            treeOnlyDeleted: row.treeOnlyDeleted === 1,
+            memberRole: row.memberRole,
+            teams: JSON.parse(row.teamsJson ?? '[]') as TeamId[],
+          }
+
+    /**
+     * The tree's workspace, whether the two are live, suspended or deleted,
+     * and the caller's role and teams in it, counting only grants at or
+     * below order `asOf`; null when no such tree exists.
+     */
+    const treeFacts = (
+      caller: Caller,
+      treeId: TreeId,
+      asOf: number | null = null,
+    ) =>
+      query(() =>
+        treeFactsStatement(caller, treeId, asOf).first<TreeFactsRow>(),
+      ).pipe(Effect.map(treeFactsOf))
 
     /** The grant a share gives the caller, or null when it does not reach them. */
     const grantOf = (
@@ -622,7 +627,43 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         if (caller.via.kind === 'handle' && caller.via.treeId !== node.treeId) {
           return none
         }
-        const raw = yield* treeFacts(caller, node.treeId, asOf)
+        const paths = ancestorPaths(node.path)
+        // A deleted node keeps the grants of the folders it was deleted in,
+        // deleted with it or not: by its own line of folders.
+        const line =
+          deleted && node.deletedAt !== null
+            ? {
+                sql: `with recursive up(id, parent) as (
+                   select id, parent_id from nodes where id = ? and tree_id = ?
+                   union all select n.id, n.parent_id from nodes n join up on n.id = up.parent)`,
+                select: 'select id from up',
+                binds: [node.id, node.treeId] as unknown[],
+              }
+            : {
+                sql: '',
+                select: `select id from nodes where tree_id = ? and deleted_at is null
+                   and path in (${paths.map(() => '?').join(', ')})`,
+                binds: [node.treeId, ...paths] as unknown[],
+              }
+        // The tree's facts, the node's line of folders and the shares on
+        // them, read in one round trip and one snapshot.
+        const [factsRow, ancestors, sharesFound] = yield* query(() =>
+          DB.batch([
+            treeFactsStatement(caller, node.treeId, asOf),
+            DB.prepare(`${line.sql} ${line.select}`).bind(...line.binds),
+            DB.prepare(
+              `${line.sql}
+               select s.id, s.target_kind as targetKind, s.target, s.role,
+                 n.origin = 'data' as onData
+               from shares s join nodes n on n.id = s.node_id
+               where s.node_id in (${line.select})
+                 and (? is null or s.grant_order <= ?)`,
+            ).bind(...line.binds, asOf, asOf),
+          ]),
+        )
+        const raw = treeFactsOf(
+          (factsRow?.results[0] ?? null) as TreeFactsRow | null,
+        )
         // A deleted tree's history stays its write holders'.
         const facts =
           raw !== null && deleted && raw.treeOnlyDeleted
@@ -630,27 +671,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             : raw
         // A suspended or deleted workspace reads as missing, for everyone.
         if (facts === null || facts.state !== 'live') return { ...none, facts }
-        const paths = ancestorPaths(node.path)
-        // A deleted node keeps the grants of the folders it was deleted in,
-        // deleted with it or not: by its own line of folders.
-        const ancestors = yield* query(() =>
-          deleted && node.deletedAt !== null
-            ? DB.prepare(
-                `with recursive up(id, parent) as (
-                   select id, parent_id from nodes where id = ? and tree_id = ?
-                   union all select n.id, n.parent_id from nodes n join up on n.id = up.parent)
-                 select id from up`,
-              )
-                .bind(node.id, node.treeId)
-                .all<{ id: NodeId }>()
-            : DB.prepare(
-                `select id from nodes where tree_id = ? and deleted_at is null
-                   and path in (${paths.map(() => '?').join(', ')})`,
-              )
-                .bind(node.treeId, ...paths)
-                .all<{ id: NodeId }>(),
+        const ids = ((ancestors?.results ?? []) as { id: NodeId }[]).map(
+          (row) => row.id,
         )
-        const ids = ancestors.results.map((row) => row.id)
         if (
           caller.via.kind === 'agent' &&
           caller.via.scope !== null &&
@@ -658,20 +681,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         ) {
           return { ...none, facts }
         }
-        const shares =
-          ids.length === 0
-            ? []
-            : (yield* query(() =>
-                DB.prepare(
-                  `select s.id, s.target_kind as targetKind, s.target, s.role,
-                     n.origin = 'data' as onData
-                   from shares s join nodes n on n.id = s.node_id
-                   where s.node_id in (${ids.map(() => '?').join(', ')})
-                     and (? is null or s.grant_order <= ?)`,
-                )
-                  .bind(...ids, asOf, asOf)
-                  .all<ShareRow>(),
-              )).results
+        const shares = (sharesFound?.results ?? []) as ShareRow[]
         const grants: Grant[] = []
         for (const share of shares) {
           const grant = grantOf(caller, facts, share)
