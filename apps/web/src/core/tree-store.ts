@@ -2254,10 +2254,11 @@ export const TreeStoreLive: Layer.Layer<
             })
             for (let at = 0; at < needs.length; at += 200) {
               writes.push({
-                sql: `insert into page_needs (tree_id, page_path, need_path, kind, reads, responds)
+                sql: `insert into page_needs (tree_id, page_path, need_path, kind, host_path,
+                        reads, responds)
                       select ?, json_extract(j.value, '$.page'), json_extract(j.value, '$.need'),
-                        json_extract(j.value, '$.kind'), json_extract(j.value, '$.reads'),
-                        json_extract(j.value, '$.responds')
+                        json_extract(j.value, '$.kind'), json_extract(j.value, '$.host'),
+                        json_extract(j.value, '$.reads'), json_extract(j.value, '$.responds')
                       from json_each(?) j where true on conflict do nothing`,
                 binds: [
                   t,

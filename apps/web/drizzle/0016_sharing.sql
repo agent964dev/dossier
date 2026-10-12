@@ -3,9 +3,10 @@ CREATE TABLE `page_needs` (
 	`page_path` text NOT NULL,
 	`need_path` text NOT NULL,
 	`kind` text NOT NULL,
+	`host_path` text NOT NULL,
 	`reads` integer NOT NULL,
 	`responds` integer NOT NULL,
-	PRIMARY KEY(`tree_id`, `page_path`, `need_path`, `kind`),
+	PRIMARY KEY(`tree_id`, `page_path`, `need_path`, `kind`, `host_path`),
 	FOREIGN KEY (`tree_id`) REFERENCES `trees`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "page_needs_kind_check" CHECK("page_needs"."kind" in ('render', 'folder', 'json'))
 );

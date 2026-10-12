@@ -958,16 +958,21 @@ export const pageNeeds = sqliteTable(
     needPath: text('need_path').notNull(),
     /** 'render', or 'folder' and 'json' for a form's target. */
     kind: text('kind').notNull(),
+    /** The HTML file naming it: the page, or a layout composed into it. */
+    hostPath: text('host_path').notNull(),
     /**
-     * The pusher of the HTML file naming it read it when it was pushed:
-     * people's data by a real grant or as its writer. Render rows always.
+     * Whoever pushed the host's current version read it then, by their own
+     * grants (people's data: a real grant or as its writer), never by what
+     * a page carried. Kept while that version stands.
      */
     reads: integer('reads', { mode: 'boolean' }).notNull(),
     /** That pusher held respond or write there. */
     responds: integer('responds', { mode: 'boolean' }).notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.treeId, t.pagePath, t.needPath, t.kind] }),
+    primaryKey({
+      columns: [t.treeId, t.pagePath, t.needPath, t.kind, t.hostPath],
+    }),
     index('page_needs_need_idx').on(t.treeId, t.needPath),
     check(
       'page_needs_kind_check',

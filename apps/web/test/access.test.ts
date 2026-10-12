@@ -597,9 +597,10 @@ const plantTree = async (
         })),
       ].map(({ need, kind, responds }) =>
         env.DB.prepare(
-          `insert into page_needs (tree_id, page_path, need_path, kind, reads, responds)
-           values (?, ?, ?, ?, 1, ?) on conflict do nothing`,
-        ).bind(treeId, path, need, kind, responds),
+          `insert into page_needs (tree_id, page_path, need_path, kind, host_path,
+             reads, responds)
+           values (?, ?, ?, ?, ?, 1, ?) on conflict do nothing`,
+        ).bind(treeId, path, need, kind, path, responds),
       ),
       ...page.targets.map((target) =>
         env.DB.prepare(

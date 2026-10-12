@@ -1000,7 +1000,11 @@ export const PushLive: Layer.Layer<
         yield* store.confirmHold(holder, i.sha256, i.size)
       })
 
-    /** Every HTML file the tree will hold after the push, with its analysis. */
+    /**
+     * Every HTML file the tree will hold after the push, with its analysis
+     * and who pushed the version it will have: null for a version this push
+     * adds or changes.
+     */
     const pagesAfter = (
       push: StagedPush,
       tree: TreeRow | null,
@@ -1011,7 +1015,7 @@ export const PushLive: Layer.Layer<
       }[],
     ) =>
       Effect.gen(function* () {
-        const outside =
+        const live =
           tree === null
             ? []
             : (yield* query(() =>
@@ -1019,14 +1023,12 @@ export const PushLive: Layer.Layer<
                   `select n.path, v.blob_sha256 as sha256, a.json, v.author_id as author
                    from nodes n join node_versions v on v.id = n.current_version_id
                    left join analyses a on a.sha256 = v.blob_sha256
-                     and a.analyzer = 'html' and a.version = ?3
+                     and a.analyzer = 'html' and a.version = ?2
                    where n.tree_id = ?1 and n.deleted_at is null and n.kind = 'file'
                      and n.origin = 'authored' and v.state = 'live'
-                     and n.path like '%.html'
-                     and not (?2 = '' or n.path = ?2
-                       or substr(n.path, 1, length(?2) + 1) = ?2 || '/')`,
+                     and n.path like '%.html'`,
                 )
-                  .bind(tree.id, push.path, ANALYZER)
+                  .bind(tree.id, ANALYZER)
                   .all<{
                     path: string
                     sha256: Sha256
@@ -1034,12 +1036,30 @@ export const PushLive: Layer.Layer<
                     author: string
                   }>(),
               )).results
+        const inPush = (path: string) =>
+          push.path === '' ||
+          path === push.path ||
+          path.startsWith(`${push.path}/`)
+        const now = new Map(live.map((row) => [row.path, row]))
+        const rows = [
+          ...manifestRows.map((row) => {
+            const was = now.get(row.path)
+            return {
+              ...row,
+              author:
+                was !== undefined && was.sha256 === row.sha256
+                  ? was.author
+                  : null,
+            }
+          }),
+          ...live.filter((row) => !inPush(row.path)),
+        ]
         const pages: (PushFile & {
           readonly sha256: Sha256
           /** Who pushed the version; null for this push. */
           readonly author: string | null
         })[] = []
-        for (const row of [...manifestRows, ...outside]) {
+        for (const row of rows) {
           if (!isPageFile(row.path)) continue
           const analysis =
             row.json === null
@@ -1050,7 +1070,7 @@ export const PushLive: Layer.Layer<
               path: row.path,
               analysis,
               sha256: row.sha256,
-              author: 'author' in row ? (row.author as string) : null,
+              author: row.author,
             })
           }
         }
@@ -1058,12 +1078,15 @@ export const PushLive: Layer.Layer<
       })
 
     /**
-     * What the person who pushed each HTML file held at a path it names, as
-     * the tree stands before this push: read (people's data only by a real
-     * grant or as its writer) and respond. This push's caller also reads
-     * what it pushes. A new tree is its creator's.
+     * What each HTML file's pusher held at a path it names, by the version
+     * the file will have. A version this push adds or changes is this push's
+     * caller's: read (people's data only by a real grant or as its writer),
+     * respond, and what it pushes, by their own grants, never by what a page
+     * carries. A version that stands keeps what was recorded when it was
+     * pushed; what it names that nothing recorded is its pusher's in the
+     * same way. A new tree is its creator's. Also the rows recorded before.
      */
-    const heldByAuthors = (
+    const heldByVersions = (
       tree: TreeRow | null,
       pages: readonly {
         readonly path: string
@@ -1077,30 +1100,64 @@ export const PushLive: Layer.Layer<
         for (const path of manifest.keys()) {
           for (const at of ancestorPaths(path)) if (at !== '') pushed.add(at)
         }
+        const before =
+          tree === null
+            ? []
+            : (yield* query(() =>
+                DB.prepare(
+                  `select page_path as page, need_path as need, kind, host_path as host,
+                     reads, responds
+                   from page_needs where tree_id = ?`,
+                )
+                  .bind(tree.id)
+                  .all<{
+                    page: string
+                    need: string
+                    kind: PageNeed['kind']
+                    host: string
+                    reads: number
+                    responds: number
+                  }>(),
+              )).results
+        const keyOf = (r: {
+          page: string
+          need: string
+          kind: string
+          host: string
+        }) => `${r.page}\u0000${r.need}\u0000${r.kind}\u0000${r.host}`
+        const recorded = new Map(
+          before.map((r) => [
+            keyOf(r),
+            { reads: r.reads === 1, responds: r.responds === 1 },
+          ]),
+        )
         const callers = new Map<string | null, Caller | null>([[null, caller]])
-        for (const author of new Set(pages.map((p) => p.author))) {
-          if (author === null || callers.has(author)) continue
-          const person = yield* query(() =>
-            DB.prepare('select id, email, name, image from "user" where id = ?')
-              .bind(author)
-              .first<{
-                id: PersonId
-                email: string
-                name: string
-                image: string | null
-              }>(),
-          )
-          callers.set(
-            author,
-            person === null
-              ? null
-              : {
-                  person,
-                  via: { kind: 'browser', sessionId: '' as SessionId },
-                  requestId: caller.requestId,
-                },
-          )
-        }
+        const callerOf = (author: string | null) =>
+          Effect.gen(function* () {
+            if (callers.has(author)) return callers.get(author) ?? null
+            const person = yield* query(() =>
+              DB.prepare(
+                'select id, email, name, image from "user" where id = ?',
+              )
+                .bind(author)
+                .first<{
+                  id: PersonId
+                  email: string
+                  name: string
+                  image: string | null
+                }>(),
+            )
+            const who: Caller | null =
+              person === null
+                ? null
+                : {
+                    person,
+                    via: { kind: 'browser', sessionId: '' as SessionId },
+                    requestId: caller.requestId,
+                  }
+            callers.set(author, who)
+            return who
+          })
         const readableSets = new Map<string | null, ReadonlySet<string>>()
         const readableTo = (author: string | null, who: Caller) =>
           Effect.gen(function* () {
@@ -1108,7 +1165,7 @@ export const PushLive: Layer.Layer<
             if (kept !== undefined) return kept
             const found = new Set<string>(author === null ? pushed : [])
             if (tree !== null) {
-              const readable = yield* access.readable(tree.id as TreeId)
+              const readable = yield* access.readableByGrants(tree.id as TreeId)
               const rows = yield* query(() =>
                 db({ DB })
                   .select({ path: schema.nodes.path })
@@ -1125,40 +1182,47 @@ export const PushLive: Layer.Layer<
           }).pipe(Effect.provideService(CurrentCaller, who))
         const held = new Map<string, { reads: boolean; responds: boolean }>()
         const authorOf = new Map(pages.map((p) => [p.path, p.author]))
-        return (host: string, need: string, kind: PageNeed['kind']) =>
+        const none = { reads: false, responds: false }
+        const heldBy = (need: PageNeed) =>
           Effect.gen(function* () {
-            const author = authorOf.get(host) ?? null
-            const who = callers.get(author) ?? null
-            if (who === null) return { reads: false, responds: false }
-            if (kind === 'render') {
-              const reads = (yield* readableTo(author, who)).has(need)
+            if (!authorOf.has(need.host)) return none
+            const author = authorOf.get(need.host) ?? null
+            if (author !== null) {
+              const kept = recorded.get(keyOf(need))
+              if (kept !== undefined) return kept
+            }
+            const who = yield* callerOf(author)
+            if (who === null) return none
+            if (need.kind === 'render') {
+              const reads = (yield* readableTo(author, who)).has(need.need)
               return { reads, responds: false }
             }
             // A new tree is wholly its creator's.
             if (tree === null) return { reads: true, responds: true }
-            const key = `${author}\u0000${need}`
+            const key = `${author}\u0000${need.need}`
             const kept = held.get(key)
             if (kept !== undefined) return kept
             const node = yield* store
-              .nearest(tree.id as TreeId, need)
+              .nearest(tree.id as TreeId, need.need)
               .pipe(Effect.orDie)
-            let found = { reads: false, responds: false }
+            let found = none
             if (node !== null) {
               const roles = yield* access
-                .roleOn(node)
+                .heldOn(node)
                 .pipe(Effect.provideService(CurrentCaller, who))
               found = {
                 // Through grants, or as the file's own writer: never
-                // because a form names it.
+                // because a form names it or a page carries it.
                 reads:
                   roles.privateCaps.has('read') ||
-                  (node.path === need && roles.owns),
+                  (node.path === need.need && roles.owns),
                 responds: roles.caps.has('respond'),
               }
             }
             held.set(key, found)
             return found
           })
+        return { heldBy, before }
       })
 
     /** One try at committing; `Retry` when another push moved the tree. */
@@ -1336,60 +1400,54 @@ export const PushLive: Layer.Layer<
           )
         }
 
-        // What every page carries after this push, for page shares.
-        // A page carries only what the people behind it held there.
-        const heldBy = yield* heldByAuthors(tree, pages, manifest)
-        const kept = new Map<string, PageNeedRow>()
+        // What every page carries after this push, for page shares: only
+        // what the pusher of each HTML file's version held there.
+        const { heldBy, before } = yield* heldByVersions(tree, pages, manifest)
+        const needs: PageNeedRow[] = []
         for (const need of pageNeedsOf(pages, (p) => kinds.get(p) ?? null)) {
-          const held = yield* heldBy(need.host, need.need, need.kind)
-          if (!held.reads && !held.responds) continue
-          const key = `${need.page}\u0000${need.need}\u0000${need.kind}`
-          const before = kept.get(key)
-          kept.set(key, {
-            page: need.page,
-            need: need.need,
-            kind: need.kind,
-            reads: held.reads || (before?.reads ?? false),
-            responds: held.responds || (before?.responds ?? false),
-          })
+          const held = yield* heldBy(need)
+          needs.push({ ...need, reads: held.reads, responds: held.responds })
         }
-        const needs = [...kept.values()]
         // A push that takes from what a shared page carried closes the
         // sockets that may have watched it; the head guard below keeps
         // these rows the ones the change replaces.
+        const carried = (rows: readonly PageNeedRow[]) => {
+          const out = new Map<string, { reads: boolean; responds: boolean }>()
+          for (const r of rows) {
+            const key = `${r.page}\u0000${r.need}\u0000${r.kind}`
+            const was = out.get(key)
+            out.set(key, {
+              reads: r.reads || (was?.reads ?? false),
+              responds: r.responds || (was?.responds ?? false),
+            })
+          }
+          return out
+        }
+        const after = carried(needs)
+        const shared =
+          tree !== null &&
+          (yield* query(() =>
+            DB.prepare('select 1 as one from shares where tree_id = ? limit 1')
+              .bind(tree.id)
+              .first(),
+          )) !== null
         const narrowed =
-          tree === null
-            ? false
-            : yield* query(() =>
-                DB.prepare(
-                  `select o.page_path as page, o.need_path as need, o.kind,
-                     o.reads, o.responds
-                   from page_needs o
-                   where o.tree_id = ? and exists (select 1 from shares s
-                     where s.tree_id = o.tree_id)`,
-                )
-                  .bind(tree.id)
-                  .all<{
-                    page: string
-                    need: string
-                    kind: string
-                    reads: number
-                    responds: number
-                  }>(),
-              ).pipe(
-                Effect.map((rows) =>
-                  rows.results.some((old) => {
-                    const now = kept.get(
-                      `${old.page}\u0000${old.need}\u0000${old.kind}`,
-                    )
-                    return (
-                      now === undefined ||
-                      (old.reads === 1 && !now.reads) ||
-                      (old.responds === 1 && !now.responds)
-                    )
-                  }),
-                ),
-              )
+          shared &&
+          [
+            ...carried(
+              before.map((r) => ({
+                ...r,
+                reads: r.reads === 1,
+                responds: r.responds === 1,
+              })),
+            ),
+          ].some(([key, old]) => {
+            const now = after.get(key)
+            return (
+              (old.reads && !(now?.reads ?? false)) ||
+              (old.responds && !(now?.responds ?? false))
+            )
+          })
 
         const baseSeq = push.base_seq ?? 0
         if (tree !== null && push.force === 0) {

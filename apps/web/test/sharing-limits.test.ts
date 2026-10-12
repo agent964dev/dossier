@@ -1,15 +1,16 @@
 // What a share may carry: never more than the people behind the shared page
 // could read, and what a public folder's pages show.
-import type { NodeId, TreeId } from '@dossier/contracts'
+import type { NodeId, OpId, TreeId } from '@dossier/contracts'
 import { env } from 'cloudflare:workers'
 import { and, eq } from 'drizzle-orm'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { Access, TreeStore, type Caller } from '../src/core/index.ts'
+import { Access, Data, TreeStore, type Caller } from '../src/core/index.ts'
 import { db, schema } from '../src/db/client.ts'
 import { Browser } from './support/browser.ts'
-import { exec } from './support/d1.ts'
+import { exec, rows } from './support/d1.ts'
+import { seqOf } from './support/forms.ts'
 import { harness } from './support/harness.ts'
 import { runAs } from './support/people.ts'
 import {
@@ -53,7 +54,7 @@ const listedAs = (caller: Caller, treeId: string) =>
           .all(),
       )
     }),
-  ).then((rows) => rows.map((row) => row.path).sort())
+  ).then((found) => found.map((row) => row.path).sort())
 
 /**
  * An admin's tree with a private page and other people's answers, and a
@@ -267,5 +268,229 @@ describe('a public page’s preview image', () => {
       ).text()
       expect(html, spelled).not.toContain('og:image')
     }
+  })
+})
+
+/** Every file of the world's tree as its admin pushed it, and `more`. */
+const WORLD_FILES = {
+  'private/secret.html': '<!doctype html><title>Secret</title><p>SALARIES</p>',
+  'hr/form.html':
+    '<!doctype html><title>HR</title><form action="answers/"><input name="a"></form>',
+  'team/pub.html': '<!doctype html><title>Public</title><p>Hello</p>',
+  'media/pic.png': 'pic',
+  'pub/page.html':
+    '<!doctype html><title>Pub</title><img src="../media/pic.png">',
+}
+
+const FRAMES_SECRET =
+  '<!doctype html><title>X</title><iframe src="../private/secret"></iframe>'
+
+describe('what a page carries belongs to the version its pusher pushed', () => {
+  it('stays out of reach when someone who reads more pushes the page again unchanged', async () => {
+    const w = await world()
+    await share(w.treeId, await w.node('team'), 'anyone', '*', 'read', w.admin)
+    const team = {
+      'team/pub.html': WORLD_FILES['team/pub.html'],
+      'team/x.html': FRAMES_SECRET,
+    }
+    await pushAll(
+      await agent(w.writer),
+      `${w.ws.name}/t/team`,
+      { 'pub.html': team['team/pub.html'], 'x.html': team['team/x.html'] },
+      { force: true },
+    )
+    expect(await readAs(visitorCaller(), w.at('team/x.html'))).toBe('ok')
+    expect(await readAs(visitorCaller(), w.at('private/secret.html'))).toBe(
+      'sign_in_required',
+    )
+    // The admin pushes the whole tree with one unrelated file more.
+    await pushAll(
+      w.adminAgent,
+      `${w.ws.name}/t`,
+      { ...WORLD_FILES, ...team, 'notes.txt': 'notes' },
+      { force: true },
+    )
+    expect(await readAs(visitorCaller(), w.at('private/secret.html'))).toBe(
+      'sign_in_required',
+    )
+    expect(await listedAs(visitorCaller(), w.treeId)).not.toContain(
+      'private/secret.html',
+    )
+  })
+
+  it('keeps a form’s answers out of reach when the page is pushed again unchanged', async () => {
+    const w = await world()
+    const grab =
+      '<!doctype html><title>Grab</title><form action="../hr/answers/"><input name="a"></form>'
+    await pushAll(
+      await agent(w.writer),
+      `${w.ws.name}/t/team`,
+      { 'pub.html': WORLD_FILES['team/pub.html'], 'grab.html': grab },
+      { force: true },
+    )
+    const reader = await person('reader')
+    await share(
+      w.treeId,
+      await w.node('team/grab.html'),
+      'email',
+      reader.email,
+      'read',
+      w.admin,
+    )
+    const answers = (listed: string[]) =>
+      listed.filter((p) => p.startsWith('hr/answers/'))
+    expect(answers(await listedAs(await agent(reader), w.treeId))).toEqual([])
+    await pushAll(
+      w.adminAgent,
+      `${w.ws.name}/t`,
+      { ...WORLD_FILES, 'team/grab.html': grab, 'notes.txt': 'notes' },
+      { force: true },
+    )
+    expect(answers(await listedAs(await agent(reader), w.treeId))).toEqual([])
+  })
+
+  it('keeps a layout’s needs out of reach when the layout is pushed again unchanged', async () => {
+    const w = await world()
+    await share(w.treeId, await w.node('team'), 'anyone', '*', 'read', w.admin)
+    const layout = '<iframe src="../private/secret"></iframe><slot></slot>'
+    await pushAll(
+      await agent(w.writer),
+      `${w.ws.name}/t/team`,
+      { 'pub.html': WORLD_FILES['team/pub.html'], '_layout.html': layout },
+      { force: true },
+    )
+    await pushAll(
+      w.adminAgent,
+      `${w.ws.name}/t`,
+      { ...WORLD_FILES, 'team/_layout.html': layout, 'notes.txt': 'notes' },
+      { force: true },
+    )
+    expect(await readAs(visitorCaller(), w.at('private/secret.html'))).toBe(
+      'sign_in_required',
+    )
+  })
+
+  it('keeps carrying what the pusher read when someone who reads less pushes it again unchanged', async () => {
+    const w = await world()
+    await share(w.treeId, await w.node('team'), 'anyone', '*', 'read', w.admin)
+    await pushAll(
+      w.adminAgent,
+      `${w.ws.name}/t`,
+      { ...WORLD_FILES, 'team/x.html': FRAMES_SECRET },
+      { force: true },
+    )
+    expect(await readAs(visitorCaller(), w.at('private/secret.html'))).toBe(
+      'ok',
+    )
+    // The writer of team/ pushes it again with a file more.
+    await pushAll(
+      await agent(w.writer),
+      `${w.ws.name}/t/team`,
+      {
+        'pub.html': WORLD_FILES['team/pub.html'],
+        'x.html': FRAMES_SECRET,
+        'notes.txt': 'notes',
+      },
+      { force: true },
+    )
+    expect(await readAs(visitorCaller(), w.at('private/secret.html'))).toBe(
+      'ok',
+    )
+  })
+})
+
+describe('a key scoped to a folder', () => {
+  it('sends nothing outside its folder through a form of a page in it', async () => {
+    const w = await world()
+    const scoped = await agent(w.admin, { scope: await w.node('team') })
+    await pushAll(
+      scoped,
+      `${w.ws.name}/t/team`,
+      {
+        'pub.html': WORLD_FILES['team/pub.html'],
+        'esc.html':
+          '<!doctype html><title>Esc</title><form action="../hr/answers/"><input name="a"></form>',
+      },
+      { force: true },
+    )
+    const host = await w.node('team/esc.html')
+    const sent = await runAs(
+      scoped,
+      Effect.flatMap(Data, (data) =>
+        Effect.gen(function* () {
+          return data.send({
+            treeId: w.treeId as TreeId,
+            page: 'team/esc.html',
+            seq: yield* Effect.promise(() =>
+              seqOf({ ws: w.ws, name: 't' } as never),
+            ),
+            form: { host, target: 'hr/answers/', id: null },
+            entries: [['a', 'escaped']],
+            submitter: null,
+            entry: null,
+            opId: crypto.randomUUID() as OpId,
+            as: null,
+          } as never)
+        }),
+      ).pipe(Effect.flatten, Effect.either),
+    )
+    expect(sent._tag === 'Left' ? sent.left.code : 'sent').toBe('forbidden')
+    expect(
+      await rows(
+        'select path from nodes where tree_id = ? and path = ?',
+        w.treeId,
+        `hr/answers/${w.admin.email.toLowerCase()}.json`,
+      ),
+    ).toEqual([])
+  })
+})
+
+describe('the read rule in a large tree', () => {
+  it('lists what a page share carries among ten thousand answers quickly', async () => {
+    const w = await world()
+    const reader = await person('reader')
+    await share(
+      w.treeId,
+      await w.node('hr/form.html'),
+      'email',
+      reader.email,
+      'read',
+      w.admin,
+    )
+    await dataFile(w.treeId, 'hr/answers/z.json', { a: 'z' }, w.admin)
+    const folder = await w.node('hr/answers')
+    await exec(
+      `with recursive n(i) as (select 1 union all select i + 1 from n where i < 10000)
+       insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin,
+         owner_id, current_version_id, created_at, deleted_at)
+       select lower(hex(randomblob(16))), ?1, ?2, 'a' || i || '.json',
+         'hr/answers/a' || i || '.json', 3, 'file', 'data', ?3, null, 0, null from n`,
+      w.treeId,
+      folder,
+      w.admin.id,
+    )
+    const caller = await agent(reader)
+    // Warm the runtime and the statement cache once.
+    await listedAs(caller, w.treeId)
+    const started = performance.now()
+    const listed = await listedAs(caller, w.treeId)
+    const took = performance.now() - started
+    expect(listed.filter((p) => p.startsWith('hr/answers/')).length).toBe(10002)
+    // One answer by the point check, and a push elsewhere in the tree,
+    // which records what its pages carry.
+    const pointStarted = performance.now()
+    expect(await readAs(caller, w.at('hr/answers/z.json'))).toBe('ok')
+    const point = performance.now() - pointStarted
+    const pushStarted = performance.now()
+    await pushAll(
+      await agent(w.writer),
+      `${w.ws.name}/t/team`,
+      { 'pub.html': WORLD_FILES['team/pub.html'], 'x.html': FRAMES_SECRET },
+      { force: true },
+    )
+    const pushed = performance.now() - pushStarted
+    expect(took).toBeLessThan(1500)
+    expect(point).toBeLessThan(500)
+    expect(pushed).toBeLessThan(3000)
   })
 })

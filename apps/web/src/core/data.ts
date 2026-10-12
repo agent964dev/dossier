@@ -585,10 +585,10 @@ export const DataLive: Layer.Layer<
 
     /**
      * Whether a form of a page may write at a path for someone who answers
-     * through that page: they respond at the closest node there themselves,
-     * or hold the page by their place in the workspace, or hold it by a
-     * share whose creator responds there now, on a page whose last push
-     * recorded that its author responded there then.
+     * through that page: within their key's folder, they respond at the
+     * closest node there themselves, or hold the page by a share whose
+     * creator responds there now, on a page whose pushed version recorded
+     * that its author responded there then.
      */
     const formReaches = (
       tree: TreeRow,
@@ -597,14 +597,34 @@ export const DataLive: Layer.Layer<
       path: string,
     ) =>
       Effect.gen(function* () {
+        // A key scoped to a folder answers only inside it, whatever page
+        // the form sits on.
+        const caller = yield* CurrentCaller
+        if (caller.via.kind === 'agent' && caller.via.scope !== null) {
+          const scope = yield* query(() =>
+            DB.prepare(
+              'select path from nodes where id = ? and tree_id = ? and deleted_at is null',
+            )
+              .bind(
+                caller.via.kind === 'agent' ? caller.via.scope : '',
+                tree.id,
+              )
+              .first<{ path: string }>(),
+          )
+          if (
+            scope === null ||
+            !(
+              scope.path === '' ||
+              path === scope.path ||
+              path.startsWith(`${scope.path}/`)
+            )
+          ) {
+            return false
+          }
+        }
         const near = yield* store.nearest(tree.id, path)
         if (near === null) return false
         if (yield* access.require('respond', near).pipe(Effect.isSuccess)) {
-          return true
-        }
-        if (
-          granted.basis.some((b) => b.kind === 'admin' || b.kind === 'member')
-        ) {
           return true
         }
         const shareIds = granted.basis.flatMap((b) =>

@@ -159,6 +159,20 @@ export interface AccessService {
     node: NodeRow,
     order: number,
   ) => Effect.Effect<boolean, never, CurrentCaller>
+  /**
+   * The caller's roles on a node from their own grants and ownership alone:
+   * never what page shares carry or derive. What a page's pusher held.
+   */
+  readonly heldOn: (
+    node: NodeRow,
+  ) => Effect.Effect<RoleSet, never, CurrentCaller>
+  /**
+   * The nodes of a tree the caller reads by their own grants alone: never
+   * what page shares carry, reach or ownership.
+   */
+  readonly readableByGrants: (
+    treeId: TreeId,
+  ) => Effect.Effect<ReadableNodes, never, CurrentCaller>
   /** Agrees with require('read') on every node of the tree. */
   readonly readable: (
     treeId: TreeId,
@@ -547,7 +561,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
      * The caller's grants on a node, counting only grants at or below order
      * `asOf`, and whether they own it.
      */
-    const grantsOn = (node: NodeRow, asOf: number | null = null) =>
+    const grantsOn = (
+      node: NodeRow,
+      asOf: number | null = null,
+      throughPageShares = true,
+    ) =>
       Effect.gen(function* () {
         const none = {
           grants: [] as Grant[],
@@ -601,7 +619,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         }
         // What page shares carry follows the pages as they are now, so it
         // never counts toward what was readable at an earlier grant order.
-        if (node.origin === 'data' && asOf === null) {
+        if (node.origin === 'data' && asOf === null && throughPageShares) {
           // Only where the share's creator reads the node through a grant.
           for (const grant of throughPages(
             node,
@@ -660,6 +678,15 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       })
 
     const roleOn = (node: NodeRow) => roleAt(node, null)
+
+    const heldOn = (node: NodeRow) =>
+      Effect.map(grantsOn(node, null, false), ({ grants, owns }) => {
+        const roles = roleSetOf(grants, owns)
+        return {
+          ...roles,
+          reads: readsBy(roles, node.origin),
+        } satisfies RoleSet
+      })
 
     const require = <A extends Action>(
       action: A,
@@ -879,6 +906,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             } satisfies ReadableNodes),
       )
 
+    const readableByGrants = (treeId: TreeId) =>
+      Effect.map(grantedWhere(treeId), (grants) => ({
+        where: grants === null ? sql`0` : grants(nodeColumn),
+      }))
+
     const member = (workspace: WorkspaceRow | null) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
@@ -937,7 +969,15 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         } satisfies Membership
       })
 
-    return { require, roleOn, readsAsOf, readable, member }
+    return {
+      require,
+      roleOn,
+      heldOn,
+      readsAsOf,
+      readable,
+      readableByGrants,
+      member,
+    }
   }),
 )
 
@@ -1092,9 +1132,11 @@ const pageCarries = (kinds: SQL, folders: boolean): SQL =>
 
 /**
  * Joins that find the share creator's (`cu`) own grant on the node `as`: an
- * admin place in the workspace (`cad`), or a share on it or a folder above
- * whose target is the creator (`cs2` on `ca`), read by the rules a grant
- * reads by. Joins rather than a nested rule, so SQLite's depth stays low.
+ * admin place in the workspace (`cad`), or a share of the tree whose target
+ * is the creator (`cs2`) on the node or a folder above it (`ca`), read by
+ * the rules a grant reads by. Joins rather than a nested rule, so SQLite's
+ * depth stays low; from the tree's shares rather than its nodes, so each
+ * node costs the tree's shares, never the whole tree.
  */
 export const creatorJoins = (
   workspaceId: string,
@@ -1112,9 +1154,7 @@ export const creatorJoins = (
         or ca.origin = 'data')`
   return tight`left join workspace_members cad on cad.workspace_id = ${W}
       and cad.user_id = cu.id and cad.role = 'admin'
-    left join nodes ca on ca.tree_id = ${N}.tree_id and ca.deleted_at is null
-      and ${underColumn(tight`${N}.path`, tight`ca.path`)}
-    left join shares cs2 on cs2.node_id = ca.id
+    left join shares cs2 on cs2.tree_id = ${N}.tree_id
       and (cs2.target_kind = 'anyone'
         or (cs2.target_kind = 'email' and cs2.target = lower(cu.email))
         or (cs2.target_kind = 'workspace' and cs2.target = ${W}
@@ -1125,11 +1165,13 @@ export const creatorJoins = (
             join workspace_members cw on cw.workspace_id = ctt.workspace_id
               and cw.user_id = ctm.user_id
           where ctt.workspace_id = ${W} and ctm.user_id = cu.id)))
+    left join nodes ca on ca.id = cs2.node_id and ca.deleted_at is null
+      and ${underColumn(tight`${N}.path`, tight`ca.path`)}
       ${rules}`
 }
 
 /** The creator holds a grant on the node, by `creatorJoins`. */
-export const creatorHolds = tight`(cad.user_id is not null or cs2.id is not null)`
+export const creatorHolds = tight`(cad.user_id is not null or ca.id is not null)`
 
 /**
  * The authored node `as` that a shared page renders with, then what more
@@ -1151,7 +1193,7 @@ const neededArm = (
     ${arm.joins}
     where s.tree_id = ${lit(treeId)} and ${reachesCaller(workspaceId, f, asOf)}
       and ${N}.path <> pn.page_path and ${f.within(tight`${N}.path`)}
-      and ${creatorHolds}`
+      and pn.reads = 1 and ${creatorHolds}`
 }
 
 /**

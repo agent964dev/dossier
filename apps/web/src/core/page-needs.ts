@@ -97,11 +97,15 @@ export interface PageNeed {
   readonly host: string
 }
 
-/** One row of `page_needs`: what the page carries, and what was held there. */
+/**
+ * One row of `page_needs`: what the page carries through one HTML file, and
+ * what that file's pusher held there when they pushed its version.
+ */
 export interface PageNeedRow {
   readonly page: string
   readonly need: string
   readonly kind: PageNeed['kind']
+  readonly host: string
   readonly reads: boolean
   readonly responds: boolean
 }
