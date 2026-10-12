@@ -140,6 +140,13 @@ export interface PageForms {
   readonly people: number | null
 }
 
+/** What a person's answers come to: the files they own. */
+export interface MineCounts {
+  readonly submissions: number
+  readonly entries: number
+  readonly uploads: number
+}
+
 export interface DataService {
   readonly send: (
     i: SendInput,
@@ -207,6 +214,20 @@ export interface DataService {
   ) => Effect.Effect<
     ReadonlyMap<NodeId, PageForms>,
     DossierError<'unavailable'>,
+    CurrentCaller
+  >
+  /**
+   * Withdraws every data file the person owns on the deployment, and the
+   * folders of theirs left empty, with a withdrawal event per file.
+   */
+  readonly withdrawMine: () => Effect.Effect<
+    MineCounts & { readonly trees: number },
+    DossierError<'sign_in_required' | 'unavailable'>,
+    CurrentCaller
+  >
+  readonly mineCounts: () => Effect.Effect<
+    MineCounts,
+    DossierError<'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
   readonly responses: (
@@ -695,6 +716,10 @@ export const DataLive: Layer.Layer<
             )
           }
           const values = check.values as Readonly<Record<string, unknown>>
+          yield* limits.requireStorage(
+            tree.workspaceId,
+            new TextEncoder().encode(JSON.stringify(values)).length,
+          )
           const provenance = { seenPush, opId: i.opId }
           const target = seenRow.targetPath
           let path: string
@@ -911,6 +936,7 @@ export const DataLive: Layer.Layer<
             ),
           )
         }
+        yield* limits.requireStorage(tree.workspaceId, i.size)
         const name = safeName(i.name)
         const own = ownFolder(seenRow, email)
         const folder = uploadsFolder(seenRow, email)
@@ -1550,10 +1576,128 @@ export const DataLive: Layer.Layer<
         }))
       }) as ReturnType<DataService['revisions']>
 
+    /** The person's live data nodes, files first, deepest folders first. */
+    const mine = (personId: string) =>
+      query(() =>
+        DB.prepare(
+          `select n.id, n.tree_id, n.parent_id, n.name, n.path, n.depth, n.kind, n.origin,
+             n.owner_id, n.current_version_id, n.created_at, n.deleted_at,
+             v.blob_sha256 is not null as upload,
+             coalesce(p.owner_id = n.owner_id, 0) as inOwnFolder
+           from nodes n
+           left join node_versions v on v.id = n.current_version_id
+           left join nodes p on p.id = n.parent_id
+           where n.owner_id = ? and n.origin = 'data' and n.deleted_at is null
+           order by n.tree_id, n.kind = 'folder', n.depth desc, n.path`,
+        )
+          .bind(personId)
+          .all<Record<string, unknown>>(),
+      ).pipe(
+        Effect.map((rows) =>
+          rows.results.map((raw) => ({
+            node: nodeOfRaw(raw),
+            kind: (raw.kind === 'folder'
+              ? 'folder'
+              : raw.upload === 1
+                ? 'upload'
+                : raw.inOwnFolder === 1
+                  ? 'entry'
+                  : 'submission') as
+              | 'folder'
+              | 'upload'
+              | 'entry'
+              | 'submission',
+          })),
+        ),
+      )
+
+    const countsOf = (
+      rows: readonly { readonly kind: string }[],
+    ): MineCounts => ({
+      submissions: rows.filter((r) => r.kind === 'submission').length,
+      entries: rows.filter((r) => r.kind === 'entry').length,
+      uploads: rows.filter((r) => r.kind === 'upload').length,
+    })
+
+    const mineCounts: DataService['mineCounts'] = () =>
+      Effect.gen(function* () {
+        const person = yield* signedIn('Sign in to see your answers.')
+        return countsOf(yield* mine(person.id))
+      })
+
+    /** Nodes withdrawn per change, so a batch stays small. */
+    const WITHDRAW_CHUNK = 40
+
+    const withdrawMine: DataService['withdrawMine'] = () =>
+      Effect.gen(function* () {
+        const person = yield* signedIn('Sign in to delete your answers.')
+        const rows = yield* mine(person.id)
+        const byTree = new Map<TreeId, (typeof rows)[number][]>()
+        for (const row of rows) {
+          const list = byTree.get(row.node.treeId) ?? []
+          list.push(row)
+          byTree.set(row.node.treeId, list)
+        }
+        let trees = 0
+        for (const [treeId, list] of byTree) {
+          const granted: {
+            readonly node: Granted<'withdraw-own'>
+            readonly file: boolean
+          }[] = []
+          for (const row of list) {
+            const ok = yield* access
+              .require('withdraw-own', row.node)
+              .pipe(Effect.option)
+            if (ok._tag === 'Some') {
+              granted.push({ node: ok.value, file: row.kind !== 'folder' })
+            }
+          }
+          if (granted.length === 0) continue
+          // Files go before the folders that hold them, which go last.
+          for (let at = 0; at < granted.length; at += WITHDRAW_CHUNK) {
+            const chunk = granted.slice(at, at + WITHDRAW_CHUNK)
+            yield* retrying(
+              store.change(treeId, (cs) =>
+                Effect.sync(() => {
+                  for (const { node, file } of chunk) {
+                    cs.markDeleted(node, 'withdrawn')
+                    if (file) {
+                      cs.event({ type: 'withdrawal', path: node.path, node })
+                    }
+                  }
+                  if (chunk.every((g) => !g.file)) {
+                    const first = chunk[0]?.node
+                    if (first !== undefined) {
+                      cs.event({
+                        type: 'withdrawal',
+                        path: first.path,
+                        node: first,
+                      })
+                    }
+                  }
+                  return {}
+                }),
+              ),
+            ).pipe(
+              Effect.mapError((error) => {
+                if (error.code !== 'unavailable') {
+                  console.error('Withdrawing answers failed', error.code)
+                }
+                return dossierError('unavailable')
+              }),
+            )
+          }
+          trees += 1
+        }
+        return { ...countsOf(rows), trees }
+      })
+
     return {
       send,
       upload,
       withdraw,
+      withdrawMine,
+      mineCounts,
       read,
       pageForms,
       responses,

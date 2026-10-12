@@ -11,17 +11,20 @@ import {
   type Caller,
   type NodeRow,
 } from '../src/core/index.ts'
-import { exec } from './support/d1.ts'
+import { beforeBatch, exec } from './support/d1.ts'
+import { harness, testRuntime } from './support/harness.ts'
 import { runAs } from './support/people.ts'
 import {
   agent,
   failureAs,
+  inTeam,
   join,
   nodeAt,
   person,
   pushAll,
   ref,
   share,
+  team,
   visitorCaller,
   workspace,
 } from './support/trees.ts'
@@ -369,10 +372,13 @@ const DATA = new Map<string, 'member' | 'outsider' | null>([
   ['_inbox/x.json', 'outsider'],
 ])
 
+type ShareKind = 'email' | 'workspace' | 'anyone' | 'team' | 'twin-team'
+
 interface Scenario {
   readonly shares: readonly {
     readonly at: number
-    readonly kind: 'email' | 'workspace' | 'anyone'
+    /** 'twin-team': a team of the same name in another workspace. */
+    readonly kind: ShareKind
     readonly role: 'read' | 'respond' | 'write'
   }[]
   readonly caller:
@@ -384,13 +390,21 @@ interface Scenario {
     | 'readonly'
   readonly scopeAt: number
   readonly deleted: number | null
+  /** The workspace is suspended for this run. */
+  readonly suspended?: boolean
 }
 
 const scenario: fc.Arbitrary<Scenario> = fc.record({
   shares: fc.array(
     fc.record({
       at: fc.integer({ min: -1, max: PATHS.length - 1 }),
-      kind: fc.constantFrom('email', 'workspace', 'anyone'),
+      kind: fc.constantFrom<ShareKind>(
+        'email',
+        'workspace',
+        'anyone',
+        'team',
+        'twin-team',
+      ),
       role: fc.constantFrom('read', 'respond', 'write'),
     }),
     { maxLength: 4 },
@@ -407,6 +421,7 @@ const scenario: fc.Arbitrary<Scenario> = fc.record({
   deleted: fc.option(fc.integer({ min: 0, max: PATHS.length - 1 }), {
     nil: null,
   }),
+  suspended: fc.constantFrom(false, false, false, true),
 })
 
 let built: {
@@ -414,8 +429,14 @@ let built: {
   member: Person
   outsider: Person
   ws: { id: string; name: string }
+  design: { id: string }
+  twin: { id: string }
 } | null = null
 
+/**
+ * The member is in the workspace's Design team. Another workspace has a
+ * Design team too, which the member and the outsider are in.
+ */
 const base = async () => {
   if (built !== null) return built
   const admin = await person('admin')
@@ -423,7 +444,11 @@ const base = async () => {
   const member = await person('member')
   await join(ws, member)
   const outsider = await person('outsider')
-  built = { admin, member, outsider, ws }
+  const design = await team(ws, 'Design', [member])
+  const elsewhere = await workspace(outsider)
+  await join(elsewhere, member)
+  const twin = await team(elsewhere, 'Design', [outsider, member])
+  built = { admin, member, outsider, ws, design, twin }
   return built
 }
 
@@ -489,18 +514,28 @@ const plantTree = async (
         `${treeId}-${i}`,
         treeId,
         ids.get(pathAt(sh.at)),
-        sh.kind,
+        sh.kind === 'twin-team' ? 'team' : sh.kind,
         sh.kind === 'email'
           ? (built?.outsider.email ?? '')
           : sh.kind === 'workspace'
             ? ws.id
-            : '*',
+            : sh.kind === 'team'
+              ? (built?.design.id ?? '')
+              : sh.kind === 'twin-team'
+                ? (built?.twin.id ?? '')
+                : '*',
         sh.role,
         creator.id,
         now,
       ),
     )
   }
+  statements.push(
+    env.DB.prepare('update workspaces set suspended_at = ? where id = ?').bind(
+      s.suspended === true ? now : null,
+      ws.id,
+    ),
+  )
   await env.DB.batch(statements)
   return { treeId, ids, name, pathAt }
 }
@@ -519,17 +554,20 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
   const live = (path: string) => path === '' || s.deleted !== index(path)
   const pathAt = (i: number) => (i < 0 ? '' : (PATHS[i] ?? ''))
   const origin = (path: string) => (DATA.has(path) ? 'data' : 'authored')
-  const matches = (kind: 'email' | 'workspace' | 'anyone') =>
+  const matches = (kind: ShareKind) =>
     kind === 'anyone' ||
     (kind === 'email' && (s.caller === 'outsider' || s.caller === 'scoped')) ||
-    (kind === 'workspace' && (s.caller === 'member' || s.caller === 'readonly'))
+    ((kind === 'workspace' || kind === 'team') &&
+      (s.caller === 'member' || s.caller === 'readonly'))
   const scope = s.caller === 'scoped' ? pathAt(s.scopeAt) : ''
   // A node holds one share per target: a later one for the same node and
   // target is not planted, as the database keeps the first.
+  const target = (kind: ShareKind) => (kind === 'twin-team' ? 'twin' : kind)
   const planted = s.shares.filter(
     (given, i) =>
       s.shares.findIndex(
-        (other) => other.at === given.at && other.kind === given.kind,
+        (other) =>
+          other.at === given.at && target(other.kind) === target(given.kind),
       ) === i,
   )
   const direct = (path: string): boolean => {
@@ -562,6 +600,8 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
     isUnder(path, scope)
   const all = ['', ...PATHS].filter(live)
   const readable = new Set<string>()
+  // A suspended workspace reads as missing, for everyone.
+  if (s.suspended === true) return readable
   for (const path of all) {
     if (direct(path) || owns(path)) {
       readable.add(path)
@@ -576,6 +616,263 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
   }
   return readable
 }
+
+describe('teams', () => {
+  it('opens a team share to the team’s members in its own workspace only', async () => {
+    const w = await world()
+    const design = await team(w.ws, 'Design', [w.member])
+    // The same name in another workspace, with the outsider and the member.
+    const elsewhere = await workspace(w.outsider)
+    await join(elsewhere, w.member)
+    const twin = await team(elsewhere, 'Design', [w.outsider, w.member])
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'team',
+      design.id,
+      'read',
+      w.creator,
+    )
+    await share(
+      w.treeId,
+      await w.node('notes.txt'),
+      'team',
+      twin.id,
+      'read',
+      w.creator,
+    )
+    const member = await agent(w.member)
+    expect(await attempt(member, at(w, 'plans/q3.html'))).toBe('ok')
+    expect(await attempt(member, at(w, 'index.html'))).toBe('not_found')
+    // A share to another workspace's team reaches nobody here.
+    expect(await attempt(member, at(w, 'notes.txt'))).toBe('not_found')
+    expect(await attempt(await agent(w.outsider), at(w, 'notes.txt'))).toBe(
+      'not_found',
+    )
+    expect(await attempt(await agent(w.outsider), at(w, 'plans/q3.html'))).toBe(
+      'not_found',
+    )
+    const roles = await rolesOf(member, at(w, 'plans/q3.html'))
+    expect(roles.basis).toEqual([
+      expect.objectContaining({ kind: 'share', targetKind: 'team' }),
+      {
+        kind: 'team-member',
+        teamId: design.id,
+        workspaceId: w.ws.id,
+        userId: w.member.id,
+      },
+    ])
+  })
+
+  it('stops reaching a person removed from the team, or from the workspace, at once', async () => {
+    const w = await world()
+    const design = await team(w.ws, 'Design', [w.member, w.creator])
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'team',
+      design.id,
+      'write',
+      w.admin,
+    )
+    const member = await agent(w.member)
+    expect(await attempt(member, at(w, 'plans/q3.html'), 'write')).toBe('ok')
+    await exec(
+      'delete from team_members where team_id = ? and user_id = ?',
+      design.id,
+      w.member.id,
+    )
+    expect(await attempt(member, at(w, 'plans/q3.html'))).toBe('not_found')
+    // A team place without the membership behind it reaches nothing.
+    await inTeam(design, w.outsider)
+    expect(await attempt(await agent(w.outsider), at(w, 'plans/q3.html'))).toBe(
+      'not_found',
+    )
+  })
+
+  it('fails a commit whose team place went between the check and the batch', async () => {
+    const w = await world()
+    const design = await team(w.ws, 'Design', [w.member])
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'team',
+      design.id,
+      'write',
+      w.admin,
+    )
+    const member = await agent(w.member)
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes('insert into change_guards'),
+            async () => {
+              await exec(
+                'delete from team_members where team_id = ? and user_id = ?',
+                design.id,
+                w.member.id,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    try {
+      const failed = await failureAs(
+        member,
+        Effect.gen(function* () {
+          const store = yield* TreeStore
+          const located = yield* store.locate(ref(at(w, 'plans/q3.html')))
+          if ('missing' in located) throw new Error('missing')
+          const granted = yield* (yield* Access).require('share', located.node)
+          return yield* store.change(w.treeId as TreeId, (cs) =>
+            Effect.sync(() => {
+              cs.grant(granted, {
+                targetKind: 'email',
+                target: 'x@example.com',
+                role: 'read',
+              })
+              cs.event({ type: 'share', path: granted.path, node: granted })
+              return {}
+            }),
+          )
+        }),
+      )
+      expect(failed.code).toBe('conflict')
+    } finally {
+      harness.reset()
+    }
+  })
+
+  it('counts a team place made after a view’s first issuance as new', async () => {
+    const w = await world()
+    const design = await team(w.ws, 'Design')
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'team',
+      design.id,
+      'read',
+      w.admin,
+    )
+    const order = async () =>
+      (await env.DB.prepare(
+        'select value from grant_clock where id = 1',
+      ).first<{
+        value: number
+      }>())!.value
+    const before = await order()
+    await inTeam(design, w.member)
+    const after = await order()
+    expect(after).toBeGreaterThan(before)
+    const readsAsOf = (asOf: number) =>
+      runAs(
+        // A view handle on the tree, as the frame asks.
+        {
+          person: w.member,
+          via: {
+            kind: 'handle',
+            treeId: w.treeId as TreeId,
+            sessionId: null,
+            anonSessionId: null,
+            handleHash: 'h',
+          },
+          requestId: 'test',
+        },
+        Effect.gen(function* () {
+          const located = yield* (yield* TreeStore).locate(
+            ref(at(w, 'plans/q3.html')),
+          )
+          if ('missing' in located) throw new Error('missing')
+          return yield* (yield* Access).readsAsOf(located.node, asOf)
+        }),
+      )
+    expect(await readsAsOf(before)).toBe(false)
+    expect(await readsAsOf(after)).toBe(true)
+  })
+})
+
+describe('suspended and deleted workspaces', () => {
+  const suspend = (w: World) =>
+    exec(
+      'update workspaces set suspended_at = ? where id = ?',
+      Date.now(),
+      w.ws.id,
+    )
+
+  it('reads every node of a suspended workspace as missing, and refuses its members changes with the suspension', async () => {
+    const w = await world()
+    await share(w.treeId, await w.node(''), 'anyone', '*', 'read', w.creator)
+    await suspend(w)
+    for (const who of [w.admin, w.creator, w.member, w.outsider]) {
+      expect(await attempt(await agent(who), at(w, 'index.html'))).toBe(
+        'not_found',
+      )
+    }
+    expect(await attempt(visitorCaller(), at(w, 'index.html'))).toBe(
+      'sign_in_required',
+    )
+    const refused = await failureAs(
+      await agent(w.creator),
+      Effect.gen(function* () {
+        const located = yield* (yield* TreeStore).locate(
+          ref(at(w, 'index.html')),
+        )
+        if ('missing' in located) throw new Error('missing')
+        return yield* (yield* Access).require('write', located.node)
+      }),
+    )
+    expect(refused).toMatchObject({
+      code: 'forbidden',
+      message: `${w.ws.name} is suspended. A super admin of ${env.DEPLOYMENT_NAME} can lift the suspension.`,
+    })
+    // Someone from outside learns nothing.
+    expect(
+      await attempt(await agent(w.outsider), at(w, 'index.html'), 'write'),
+    ).toBe('not_found')
+    const member = await failureAs(
+      await agent(w.member),
+      Effect.flatMap(Access, (access) =>
+        access.member({
+          id: w.ws.id,
+          name: w.ws.name,
+          createdBy: w.admin.id,
+          createdAt: 0,
+          suspendedAt: Date.now(),
+          deletedAt: null,
+        } as never),
+      ),
+    )
+    expect(member.code).toBe('forbidden')
+    await exec(
+      'update workspaces set suspended_at = null where id = ?',
+      w.ws.id,
+    )
+    expect(
+      await attempt(await agent(w.creator), at(w, 'index.html'), 'write'),
+    ).toBe('ok')
+  })
+
+  it('reads every node of a deleted workspace as missing, for everyone', async () => {
+    const w = await world()
+    await share(w.treeId, await w.node(''), 'anyone', '*', 'read', w.creator)
+    await exec(
+      'update workspaces set deleted_at = ? where id = ?',
+      Date.now(),
+      w.ws.id,
+    )
+    for (const who of [w.admin, w.creator, w.member]) {
+      expect(
+        await attempt(await agent(who), at(w, 'index.html'), 'write'),
+      ).toBe('not_found')
+    }
+    expect(await attempt(visitorCaller(), at(w, 'index.html'))).toBe(
+      'sign_in_required',
+    )
+  })
+})
 
 describe('people’s data', () => {
   /** A data node written straight into D1, as a send leaves one. */

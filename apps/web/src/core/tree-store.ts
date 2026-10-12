@@ -487,6 +487,10 @@ const callerLive = (caller: Caller, now: number): Statement => {
   }
 }
 
+/** The share's tree is in a workspace neither suspended nor deleted. */
+const SHARE_WORKSPACE_OPEN = `exists (select 1 from trees t join workspaces w on w.id = t.workspace_id
+  where t.id = s.tree_id and w.deleted_at is null and w.suspended_at is null)`
+
 const basisHolds = (basis: Basis, personId: string): Statement => {
   switch (basis.kind) {
     case 'share': {
@@ -497,21 +501,34 @@ const basisHolds = (basis: Basis, personId: string): Statement => {
             ? ' and exists (select 1 from workspace_members m where m.workspace_id = s.target and m.user_id = ?)'
             : ''
       return {
-        sql: `exists (select 1 from shares s where s.id = ? and s.role = ?${extra})`,
+        sql: `exists (select 1 from shares s where s.id = ? and s.role = ?${extra}
+                and ${SHARE_WORKSPACE_OPEN})`,
         binds: [basis.shareId, basis.role, ...(extra === '' ? [] : [personId])],
       }
     }
     case 'admin':
       return {
-        sql: `exists (select 1 from workspace_members where workspace_id = ?
-                and user_id = ? and role = 'admin')`,
+        sql: `exists (select 1 from workspace_members m join workspaces w on w.id = m.workspace_id
+                where m.workspace_id = ? and m.user_id = ? and m.role = 'admin'
+                  and w.deleted_at is null and w.suspended_at is null)`,
         binds: [basis.workspaceId, basis.userId],
       }
     case 'member':
       return {
         sql: `exists (select 1 from workspace_members m join workspaces w on w.id = m.workspace_id
-                where m.workspace_id = ? and m.user_id = ? and w.deleted_at is null)`,
+                where m.workspace_id = ? and m.user_id = ? and w.deleted_at is null
+                  and w.suspended_at is null)`,
         binds: [basis.workspaceId, basis.userId],
+      }
+    // A team share reaches its members while they stay in the team and the
+    // workspace.
+    case 'team-member':
+      return {
+        sql: `exists (select 1 from team_members tm join teams t on t.id = tm.team_id
+                join workspace_members m on m.workspace_id = t.workspace_id
+                  and m.user_id = tm.user_id
+                where tm.team_id = ? and tm.user_id = ? and t.workspace_id = ?)`,
+        binds: [basis.teamId, basis.userId, basis.workspaceId],
       }
     // Reach gives read only, which no change rests on.
     case 'reach':

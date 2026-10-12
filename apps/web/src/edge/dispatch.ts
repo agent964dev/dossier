@@ -52,7 +52,11 @@ import {
   renderShell,
   withCommonHeaders,
 } from './respond.ts'
-import { screenScope, type ScreenScope } from './screens.ts'
+import {
+  END_SESSION_COOKIES,
+  screenScope,
+  type ScreenScope,
+} from './screens.ts'
 
 export type RequestKind =
   | 'link'
@@ -274,6 +278,7 @@ export const serve = async (
   async function screen(who: Caller, status?: number): Promise<Response> {
     const scope: ScreenScope = { caller: who, runtime, unavailable: false }
     const response = await screenScope.run(scope, () => tanstack.fetch(request))
+    if (scope.endSession === true) setCookie = END_SESSION_COOKIES
     if (kind !== 'screen-call' && scope.unavailable && isHtml(response)) {
       return plainErrorPage(requestId)
     }

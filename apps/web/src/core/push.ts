@@ -667,6 +667,12 @@ export const PushLive: Layer.Layer<
               }
         const nothing =
           plan.added.length + plan.changed.length + plan.deleted.length === 0
+        // New bytes count against the workspace's storage, history included.
+        const growth = [...plan.added, ...plan.changed].reduce(
+          (sum, path) => sum + (sizeOf.get(path) ?? 0),
+          0,
+        )
+        if (growth > 0) yield* limits.requireStorage(ws.id, growth)
         if (i.dryRun || (tree !== null && nothing)) {
           return {
             pushId: null,
@@ -1085,6 +1091,23 @@ export const PushLive: Layer.Layer<
                   `${largest.path} is ${bytes(largest.stored)}; one file in a push may be at most ${bytes(limit.fileBytes)}.`,
                 ),
           )
+        }
+        // The verified bytes of files new at their paths, checked again
+        // against the storage now.
+        const growth = yield* query(() =>
+          DB.prepare(
+            `select coalesce(sum(b.size), 0) as bytes from push_files f
+             join blobs b on b.sha256 = f.sha256
+             where f.push_id = ?1 and not exists (
+               select 1 from nodes n join node_versions v on v.id = n.current_version_id
+               where n.tree_id = ?2 and n.path = f.path and n.deleted_at is null
+                 and v.blob_sha256 = f.sha256)`,
+          )
+            .bind(pushId, tree?.id ?? '')
+            .first<{ bytes: number }>(),
+        )
+        if ((growth?.bytes ?? 0) > 0) {
+          yield* limits.requireStorage(ws.id, growth?.bytes ?? 0)
         }
 
         const manifestRows = yield* query(() =>

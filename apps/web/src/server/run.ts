@@ -56,3 +56,9 @@ export const runScreen = async <A>(
     },
   }
 }
+
+/** Clears the session cookie on this screen call's answer. */
+export const endSessionCookie = (): void => {
+  const scope = screenScope.getStore()
+  if (scope !== undefined) scope.endSession = true
+}

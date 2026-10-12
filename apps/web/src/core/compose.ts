@@ -12,6 +12,7 @@ import { PageCache, PageCacheLive } from './page-cache.ts'
 import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
 import { Push, PushLive } from './push.ts'
+import { Settings, SettingsLive } from './settings.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
 import { TreeStore, TreeStoreLive } from './tree-store.ts'
 
@@ -31,6 +32,7 @@ export type CoreServices =
   | BaseLayer
   | PageCache
   | Data
+  | Settings
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -47,9 +49,10 @@ export const makeLayer = (
   const bindings = Layer.succeed(Bindings, env)
   const config = ConfigLive.pipe(Layer.provideMerge(bindings))
   const base = overrides.base ?? BaseLayerLive.pipe(Layer.provide(bindings))
+  const settings = SettingsLive.pipe(Layer.provideMerge(config))
   const trees = TreeStoreLive.pipe(
     Layer.provideMerge(AccessLive),
-    Layer.provideMerge(LimitsLive),
+    Layer.provideMerge(LimitsLive.pipe(Layer.provideMerge(settings))),
     Layer.provideMerge(base),
     Layer.provideMerge(overrides.pageCache ?? PageCacheLive),
     Layer.provideMerge(config),
@@ -58,7 +61,7 @@ export const makeLayer = (
   return Layer.mergeAll(
     SignInLive,
     PushLive,
-    PeopleLive,
+    PeopleLive.pipe(Layer.provide(Layer.merge(SignInLive, DataLive))),
     PagesLive.pipe(Layer.provideMerge(FilesLive)),
     DataLive,
   ).pipe(Layer.provideMerge(auth))

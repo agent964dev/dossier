@@ -4,6 +4,7 @@ import {
   type NodeId,
   type PersonId,
   type ShareId,
+  type TeamId,
   type TreeId,
   type WorkspaceId,
 } from '@dossier/contracts'
@@ -62,6 +63,13 @@ export type Basis =
   | {
       readonly kind: 'owner'
       readonly nodeId: NodeId
+      readonly userId: PersonId
+    }
+  /** The place in a team that a team share reaches, beside the share's own. */
+  | {
+      readonly kind: 'team-member'
+      readonly teamId: TeamId
+      readonly workspaceId: WorkspaceId
       readonly userId: PersonId
     }
 
@@ -187,10 +195,15 @@ const allows = (action: Action, roles: RoleSet): boolean => {
 
 interface Grant {
   readonly basis: Basis
+  /** What else the grant rests on: a team share's place in the team. */
+  readonly also: Basis | null
   readonly role: Role
   /** The share sits on a data node. */
   readonly onData: boolean
 }
+
+const basesOf = (g: Grant): readonly Basis[] =>
+  g.also === null ? [g.basis] : [g.basis, g.also]
 
 /**
  * The bases that give an action, kept on the Granted for the commit guard.
@@ -206,7 +219,7 @@ const basisFor = (
   // Reach is never part of a role set; it is granted beside one.
   const shared = grants
     .filter((g) => allows(action, roleSetOf([g], false)))
-    .map((g) => g.basis)
+    .flatMap(basesOf)
   return owner !== null &&
     (action === 'read' || action === 'read-data') &&
     roles.owns
@@ -226,7 +239,7 @@ const roleSetOf = (grants: readonly Grant[], owns: boolean): RoleSet => ({
       )
       .map((g) => g.role),
   ),
-  basis: grants.map((g) => g.basis),
+  basis: grants.flatMap(basesOf),
   owns,
 })
 
@@ -252,14 +265,33 @@ const denied = (caller: Caller, path: string | null) =>
 
 interface TreeFacts {
   readonly workspaceId: WorkspaceId
+  readonly workspaceName: string
+  /** A suspended or deleted workspace reads as missing. */
+  readonly state: 'live' | 'suspended' | 'deleted'
   /** The caller's role in the tree's workspace, if any. */
   readonly memberRole: 'admin' | 'member' | null
+  /** The caller's teams in the tree's workspace. */
+  readonly teams: readonly TeamId[]
 }
+
+/** What a member hears when a suspended workspace refuses a change. */
+export const suspendedError = (
+  workspace: string,
+  deployment: string,
+  path: string | null,
+) =>
+  dossierError(
+    'forbidden',
+    `${workspace} is suspended. A super admin of ${deployment} can lift the suspension.`,
+    null,
+    path,
+  )
 
 export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
   Access,
   Effect.gen(function* () {
-    const { DB } = yield* Bindings
+    const { DB, DEPLOYMENT_NAME } = yield* Bindings
+    const deployment = DEPLOYMENT_NAME ?? 'this deployment'
 
     const query = <A>(run: () => Promise<A>) =>
       Effect.tryPromise(run).pipe(
@@ -269,7 +301,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         Effect.orDie,
       )
 
-    /** The tree's live workspace and the caller's place in it, or null. */
+    /**
+     * The live tree's workspace, its state, and the caller's role and teams
+     * in it, counting only grants at or below order `asOf`; null when the
+     * tree is gone.
+     */
     const treeFacts = (
       caller: Caller,
       treeId: TreeId,
@@ -277,15 +313,34 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
     ) =>
       query(() =>
         DB.prepare(
-          `select t.workspace_id as workspaceId,
+          `select t.workspace_id as workspaceId, w.name as workspaceName,
+             case when w.deleted_at is not null then 'deleted'
+               when w.suspended_at is not null then 'suspended'
+               else 'live' end as state,
              (select role from workspace_members m
                where m.workspace_id = t.workspace_id and m.user_id = ?2
-                 and (?3 is null or m.grant_order <= ?3)) as memberRole
+                 and (?3 is null or m.grant_order <= ?3)) as memberRole,
+             (select json_group_array(tm.team_id) from team_members tm
+               join teams tt on tt.id = tm.team_id
+               where tt.workspace_id = t.workspace_id and tm.user_id = ?2
+                 and (?3 is null or tm.grant_order <= ?3)) as teamsJson
            from trees t join workspaces w on w.id = t.workspace_id
-           where t.id = ?1 and t.deleted_at is null and w.deleted_at is null`,
+           where t.id = ?1 and t.deleted_at is null`,
         )
           .bind(treeId, caller.person?.id ?? '', asOf)
-          .first<TreeFacts>(),
+          .first<Omit<TreeFacts, 'teams'> & { teamsJson: string | null }>(),
+      ).pipe(
+        Effect.map((row): TreeFacts | null =>
+          row === null
+            ? null
+            : {
+                workspaceId: row.workspaceId,
+                workspaceName: row.workspaceName,
+                state: row.state,
+                memberRole: row.memberRole,
+                teams: JSON.parse(row.teamsJson ?? '[]') as TeamId[],
+              },
+        ),
       )
 
     /**
@@ -294,7 +349,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
      */
     const grantsOn = (node: NodeRow, asOf: number | null = null) =>
       Effect.gen(function* () {
-        const none = { grants: [] as Grant[], owns: false }
+        const none = {
+          grants: [] as Grant[],
+          owns: false,
+          facts: null as TreeFacts | null,
+        }
         const caller = yield* CurrentCaller
         if (caller.via.kind === 'system') return none
         // A view handle reaches only the tree whose content host it serves.
@@ -302,7 +361,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           return none
         }
         const facts = yield* treeFacts(caller, node.treeId, asOf)
-        if (facts === null) return none
+        // A suspended or deleted workspace reads as missing, for everyone.
+        if (facts === null || facts.state !== 'live') return { ...none, facts }
         const paths = ancestorPaths(node.path)
         const ancestors = yield* query(() =>
           DB.prepare(
@@ -318,7 +378,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           caller.via.scope !== null &&
           !ids.includes(caller.via.scope)
         ) {
-          return none
+          return { ...none, facts }
         }
         const email = caller.person?.email.toLowerCase() ?? null
         const shares =
@@ -343,12 +403,20 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               )).results
         const grants: Grant[] = []
         for (const share of shares) {
+          // A team belongs to one workspace: its shares reach its members
+          // only in the trees of that workspace.
+          const team =
+            share.targetKind === 'team' &&
+            facts.memberRole !== null &&
+            caller.person !== null &&
+            facts.teams.includes(share.target as TeamId)
           const matches =
             share.targetKind === 'anyone' ||
             (share.targetKind === 'email' && share.target === email) ||
             (share.targetKind === 'workspace' &&
               share.target === facts.workspaceId &&
-              facts.memberRole !== null)
+              facts.memberRole !== null) ||
+            team
           if (!matches) continue
           grants.push({
             role: share.role,
@@ -359,12 +427,22 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               role: share.role,
               targetKind: share.targetKind,
             },
+            also:
+              team && caller.person !== null
+                ? {
+                    kind: 'team-member',
+                    teamId: share.target as TeamId,
+                    workspaceId: facts.workspaceId,
+                    userId: caller.person.id,
+                  }
+                : null,
           })
         }
         if (facts.memberRole === 'admin' && caller.person !== null) {
           grants.push({
             role: 'write',
             onData: false,
+            also: null,
             basis: {
               kind: 'admin',
               workspaceId: facts.workspaceId,
@@ -378,7 +456,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           node.origin === 'data' &&
           node.deletedAt === null &&
           node.ownerId === caller.person.id
-        return { grants, owns }
+        return { grants, owns, facts }
       })
 
     /** The caller's roles on a node, counting only grants made by `asOf`. */
@@ -396,7 +474,36 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (isMissing(node)) return yield* denied(caller, node.path)
-        const { grants, owns } = yield* grantsOn(node)
+        const { grants, owns, facts } = yield* grantsOn(node)
+        if (facts !== null && facts.state !== 'live') {
+          // People withdraw what they wrote wherever it sits, so deleting
+          // an account leaves nothing of theirs in a closed workspace.
+          if (
+            action === 'withdraw-own' &&
+            caller.via.kind === 'browser' &&
+            caller.person !== null &&
+            node.origin === 'data' &&
+            node.deletedAt === null &&
+            node.ownerId === caller.person.id
+          ) {
+            const owner: Basis = {
+              kind: 'owner',
+              nodeId: node.id,
+              userId: caller.person.id,
+            }
+            return { ...node, basis: [owner] } as unknown as Granted<A>
+          }
+          if (
+            facts.state === 'suspended' &&
+            facts.memberRole !== null &&
+            action !== 'read'
+          ) {
+            return yield* Effect.fail(
+              suspendedError(facts.workspaceName, deployment, node.path),
+            )
+          }
+          return yield* denied(caller, node.path)
+        }
         const roles = roleSetOf(grants, owns)
         const data = node.origin === 'data'
         // People's data is read through private grants, a public data
@@ -457,7 +564,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           return null
         }
         const facts = yield* treeFacts(caller, treeId, asOf)
-        if (facts === null) return null
+        if (facts === null || facts.state !== 'live') return null
         let scopePath: string | null = null
         if (caller.via.kind === 'agent' && caller.via.scope !== null) {
           const scopeNode = yield* query(() =>
@@ -473,6 +580,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         const email = caller.person?.email.toLowerCase() ?? null
         const member = facts.memberRole === null ? 0 : 1
         const admin = facts.memberRole === 'admin'
+        const teams = JSON.stringify(member === 1 ? facts.teams : [])
         return (column: (name: 'tree_id' | 'path' | 'origin') => SQL): SQL => {
           const scope =
             scopePath === null
@@ -485,7 +593,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             where s.tree_id = ${treeId}
               and (s.target_kind = 'anyone'
                 or (s.target_kind = 'email' and s.target = ${email})
-                or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1))
+                or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1)
+                or (s.target_kind = 'team' and s.target in (select value from json_each(${teams}))))
               and ${asOf === null ? sql`1` : sql`s.grant_order <= ${asOf}`}
               and ${underColumn(column('path'), sql`a.path`)}
               and (s.role <> 'respond' or ${column('origin')} = 'authored')
@@ -600,12 +709,25 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         const person = caller.person
         const row = yield* query(() =>
           DB.prepare(
-            'select role from workspace_members where workspace_id = ? and user_id = ?',
+            `select m.role, w.suspended_at as suspendedAt, w.deleted_at as deletedAt
+             from workspace_members m join workspaces w on w.id = m.workspace_id
+             where m.workspace_id = ? and m.user_id = ?`,
           )
             .bind(workspace.id, person.id)
-            .first<{ role: 'admin' | 'member' }>(),
+            .first<{
+              role: 'admin' | 'member'
+              suspendedAt: number | null
+              deletedAt: number | null
+            }>(),
         )
-        if (row === null) return yield* denied(caller, workspace.name)
+        if (row === null || row.deletedAt !== null) {
+          return yield* denied(caller, workspace.name)
+        }
+        if (row.suspendedAt !== null) {
+          return yield* Effect.fail(
+            suspendedError(workspace.name, deployment, workspace.name),
+          )
+        }
         if (
           caller.via.kind === 'agent' &&
           (caller.via.scope !== null || caller.via.readOnly)

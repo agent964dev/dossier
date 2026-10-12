@@ -91,6 +91,38 @@ export const join = (
     Date.now(),
   )
 
+/** A team of the workspace, with its members. */
+export const team = async (
+  ws: { readonly id: string },
+  name: string,
+  members: readonly Person[] = [],
+) => {
+  const id = crypto.randomUUID()
+  await exec(
+    'insert into teams (id, workspace_id, name, created_by, created_at) values (?, ?, ?, ?, ?)',
+    id,
+    ws.id,
+    name,
+    members[0]?.id ??
+      (
+        await env.DB.prepare('select created_by from workspaces where id = ?')
+          .bind(ws.id)
+          .first<{ created_by: string }>()
+      )?.created_by,
+    Date.now(),
+  )
+  for (const who of members) await inTeam({ id }, who)
+  return { id, name }
+}
+
+export const inTeam = (t: { readonly id: string }, who: Person) =>
+  exec(
+    'insert into team_members (team_id, user_id, created_at) values (?, ?, ?)',
+    t.id,
+    who.id,
+    Date.now(),
+  )
+
 /** An agent key of the person, and the caller a request with it becomes. */
 export const agent = async (
   who: Person,
@@ -250,7 +282,7 @@ export const treeOf = async (workspaceName: string, name: string) =>
 export const share = (
   treeId: string,
   nodeId: string,
-  targetKind: 'email' | 'workspace' | 'anyone',
+  targetKind: 'email' | 'workspace' | 'anyone' | 'team',
   target: string,
   role: 'read' | 'respond' | 'write',
   by: Person,

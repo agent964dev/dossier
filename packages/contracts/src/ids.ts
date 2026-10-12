@@ -68,3 +68,6 @@ export type PushNumber = typeof PushNumber.Type
 /** 32 random bytes in base64url after `dsk_`, shown once when created. */
 export const AgentKeySecret = Schema.TemplateLiteral('dsk_', Schema.String)
 export type AgentKeySecret = typeof AgentKeySecret.Type
+
+export const TeamId = Schema.String.pipe(Schema.brand('TeamId'))
+export type TeamId = typeof TeamId.Type

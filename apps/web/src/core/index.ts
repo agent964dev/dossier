@@ -63,7 +63,28 @@ export {
   type AgentServed,
   type AgentType,
 } from './agent-version.ts'
-export { People, type PeopleService, type TreeSharing } from './people.ts'
+export {
+  People,
+  type AdminOverview,
+  type AdminWorkspaceRow,
+  type DeletionPreview,
+  type InvitationRow,
+  type MemberRow,
+  type PeopleService,
+  type TeamDetail,
+  type TeamRef,
+  type TeamSummary,
+  type TreeSharing,
+  type WorkspaceRole,
+} from './people.ts'
+export {
+  Settings,
+  type DeploymentSettings,
+  type Health,
+  type HealthCheck,
+  type SettingsService,
+  type WorkspaceCreation,
+} from './settings.ts'
 export {
   Pages,
   parseRange,
@@ -105,8 +126,11 @@ export {
   type Revision,
 } from './data.ts'
 export {
+  bytesText,
   DEFAULT_LIMITS,
+  DEFAULT_RETENTION_DAYS,
   Limits,
+  LimitValuesSchema,
   type LimitsService,
   type LimitValues,
   type Rate,

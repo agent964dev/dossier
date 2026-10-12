@@ -21,6 +21,7 @@ import { Access } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
+import { claimStatements } from './invitations.ts'
 import { hmacSha256, newId, newKeySecret, sha256Hex } from './ids.ts'
 import { TreeStore } from './tree-store.ts'
 import {
@@ -154,6 +155,18 @@ export interface SignInService {
     DossierError<'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
+  /**
+   * Revokes the person's agent keys, ends every session and device login,
+   * removes their Google accounts and marks them deleted, in one batch. The
+   * person stays as a row: the versions they pushed name them.
+   */
+  readonly closeAccount: (detail?: {
+    readonly [count: string]: number
+  }) => Effect.Effect<
+    { readonly keys: number; readonly sessions: number },
+    DossierError<'sign_in_required' | 'unavailable'>,
+    CurrentCaller
+  >
 }
 
 export class SignIn extends Context.Tag('SignIn')<SignIn, SignInService>() {}
@@ -274,6 +287,18 @@ export const SignInLive: Layer.Layer<
         }
         if (action === 'link-account') {
           const existing = await accountsOf(existingUserId)
+          // A person who deleted their account has nothing left to guard:
+          // they come back as a new person would, with nothing.
+          if (existing.length === 0) {
+            const gone = await database
+              .select({ deletedAt: schema.people.deletedAt })
+              .from(schema.people)
+              .where(eq(schema.people.userId, existingUserId))
+              .get()
+            if (gone !== undefined && gone.deletedAt !== null) {
+              return { allow: true }
+            }
+          }
           const decision = decideLink(
             authorityOf(claims),
             existing.map((a) => ({
@@ -317,6 +342,9 @@ export const SignInLive: Layer.Layer<
         const at = now()
         const authority = authorityOf(claims)
         const seedSuperAdmin = newUser && config.superAdmins.has(claims.email)
+        // A configured super admin who deleted their account is one again.
+        const reseedSuperAdmin =
+          !newUser && config.superAdmins.has(claims.email)
         const DB = bindings.DB
         // An account's join is finished once its Google details are recorded,
         // which happens at the end of this batch. Every join statement below
@@ -399,11 +427,27 @@ export const SignInLive: Layer.Layer<
                email_authority = excluded.email_authority,
                hosted_domain = excluded.hosted_domain, observed_at = excluded.observed_at`,
           ).bind(accountId, claims.email, authority, claims.hd ?? null, at),
+          // A person who deleted their account comes back with nothing.
+          DB.prepare(
+            `insert into person_history (id, user_id, kind, detail_json, created_at)
+             select ?1, ?2, 'returned', ?3, ?4
+             where exists (select 1 from people where user_id = ?2 and deleted_at is not null)`,
+          ).bind(newId(), userId, JSON.stringify({ accountId }), at),
+          ...(reseedSuperAdmin
+            ? [
+                DB.prepare(
+                  `insert into super_admins (user_id, added_by, created_at)
+                   select ?1, null, ?2
+                   where exists (select 1 from people where user_id = ?1 and deleted_at is not null)
+                   on conflict (user_id) do nothing`,
+                ).bind(userId, at),
+              ]
+            : []),
           DB.prepare(
             `insert into people (user_id, email_authority, first_sign_in_at, last_sign_in_at)
              values (?1, ?2, ?3, ?3)
              on conflict (user_id) do update set email_authority = excluded.email_authority,
-               last_sign_in_at = excluded.last_sign_in_at`,
+               last_sign_in_at = excluded.last_sign_in_at, deleted_at = null`,
           ).bind(userId, authority, at),
           ...(seedSuperAdmin
             ? [
@@ -426,6 +470,8 @@ export const SignInLive: Layer.Layer<
                   at,
                 ),
               ]),
+          // Invitations to the person's email become memberships.
+          ...claimStatements(DB, { id: userId }, at),
         ])
       },
     }
@@ -984,6 +1030,66 @@ export const SignInLive: Layer.Layer<
             return yield* fail('not_found', 'No such agent key.')
           }
           yield* revoke(person.id, id)
+        }),
+
+      closeAccount: (detail = {}) =>
+        Effect.gen(function* () {
+          const { person, via } = yield* signedInPerson
+          if (via.kind !== 'browser') {
+            return yield* fail(
+              'sign_in_required',
+              'An account is deleted in account settings.',
+              'Sign in with Google and open account settings.',
+            )
+          }
+          const at = yield* Clock.currentTimeMillis
+          const DB = bindings.DB
+          const counted = yield* query(() =>
+            DB.prepare(
+              `select
+                 (select count(*) from agent_keys where user_id = ?1 and revoked_at is null) as keys,
+                 (select count(*) from session where user_id = ?1) as sessions`,
+            )
+              .bind(person.id)
+              .first<{ keys: number; sessions: number }>(),
+          )
+          const counts = {
+            keys: counted?.keys ?? 0,
+            sessions: counted?.sessions ?? 0,
+          }
+          yield* query(() =>
+            DB.batch([
+              DB.prepare(
+                `update agent_keys set revoked_at = ?2
+                 where user_id = ?1 and revoked_at is null`,
+              ).bind(person.id, at),
+              DB.prepare(
+                `update device_code set status = 'denied'
+                 where user_id = ? and status in ('pending', 'approved')`,
+              ).bind(person.id),
+              DB.prepare('delete from session where user_id = ?').bind(
+                person.id,
+              ),
+              // Their Google details go with the accounts.
+              DB.prepare('delete from account where user_id = ?').bind(
+                person.id,
+              ),
+              DB.prepare(
+                `update people set deleted_at = ?2
+                 where user_id = ?1 and deleted_at is null`,
+              ).bind(person.id, at),
+              DB.prepare(
+                `insert into person_history (id, user_id, kind, detail_json, created_at)
+                 values (?, ?, 'deleted', ?, ?)`,
+              ).bind(
+                newId(),
+                person.id,
+                JSON.stringify({ ...detail, ...counts }),
+                at,
+              ),
+            ]),
+          )
+          return counts
         }),
 
       signOutEverywhere: () =>

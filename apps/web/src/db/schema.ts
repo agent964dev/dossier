@@ -189,7 +189,7 @@ export const personHistory = sqliteTable(
     index('person_history_user_idx').on(t.userId, t.createdAt),
     check(
       'person_history_kind_check',
-      sql`${t.kind} in ('linked', 'takeover', 'email_kept', 'signed_out_everywhere', 'key_created', 'key_revoked')`,
+      sql`${t.kind} in ('linked', 'takeover', 'email_kept', 'signed_out_everywhere', 'key_created', 'key_revoked', 'deleted', 'returned')`,
     ),
   ],
 )
@@ -284,6 +284,111 @@ export const workspaceMembers = sqliteTable(
     check(
       'workspace_members_role_check',
       sql`${t.role} in ('admin', 'member')`,
+    ),
+  ],
+)
+
+/** A workspace's teams: shares to a team reach its members. */
+export const teams = sqliteTable(
+  'teams',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /** Shown as typed, trimmed; unique in the workspace whatever its case. */
+    name: text('name').notNull(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('teams_workspace_name_unique').on(
+      t.workspaceId,
+      sql`lower(${t.name})`,
+    ),
+    check(
+      'teams_name_check',
+      sql`length(${t.name}) between 1 and 60 and ${t.name} = trim(${t.name})`,
+    ),
+  ],
+)
+
+export const teamMembers = sqliteTable(
+  'team_members',
+  {
+    teamId: text('team_id')
+      .notNull()
+      .references(() => teams.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    createdAt: integer('created_at').notNull(),
+    /** Set by a trigger from grant_clock when the row is written. */
+    grantOrder: integer('grant_order'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.userId] }),
+    index('team_members_user_idx').on(t.userId),
+  ],
+)
+
+/** An email an admin invited; it becomes a membership at sign-in. */
+export const invitations = sqliteTable(
+  'invitations',
+  {
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /** Lower-cased; matched against the person's current email. */
+    email: text('email').notNull(),
+    /** The teams the person joins with it. */
+    teamIdsJson: text('team_ids_json').notNull().default('[]'),
+    invitedBy: text('invited_by')
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.email] }),
+    index('invitations_email_idx').on(t.email),
+  ],
+)
+
+/** What super admins saved; absent keys read as the defaults. */
+export const deploymentSettings = sqliteTable(
+  'deployment_settings',
+  {
+    key: text('key').primaryKey(),
+    valueJson: text('value_json').notNull(),
+    updatedBy: text('updated_by').references(() => user.id),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => [
+    check(
+      'deployment_settings_key_check',
+      sql`${t.key} in ('workspace_creation', 'limits', 'retention_days')`,
+    ),
+  ],
+)
+
+/** The listed people who may create workspaces: emails and domains. */
+export const workspaceCreators = sqliteTable(
+  'workspace_creators',
+  {
+    /** 'sara@acme.com' or 'acme.com', lower-cased. */
+    entry: text('entry').primaryKey(),
+    kind: text('kind').notNull(),
+    addedBy: text('added_by')
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    check(
+      'workspace_creators_kind_check',
+      sql`${t.kind} in ('email', 'domain')`,
     ),
   ],
 )
@@ -661,6 +766,7 @@ export const changeGuards = sqliteTable(
       sql`${t.reason} <> 'mergeable' or ${t.ok} = 1`,
     ),
     check('change_guard_size', sql`${t.reason} <> 'size' or ${t.ok} = 1`),
+    check('change_guard_admins', sql`${t.reason} <> 'admins' or ${t.ok} = 1`),
   ],
 )
 
