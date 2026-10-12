@@ -117,6 +117,16 @@ export interface AccessService {
   readonly roleOn: (
     node: NodeRow,
   ) => Effect.Effect<RoleSet, never, CurrentCaller>
+  /**
+   * Whether the caller reads the node now through grants that already
+   * existed at `at` (epoch ms): shares, and the workspace standing behind a
+   * workspace share or an admin's write, created no later than then. A grant
+   * made after `at`, or removed and made again, does not count.
+   */
+  readonly readsAsOf: (
+    node: NodeRow,
+    at: number,
+  ) => Effect.Effect<boolean, never, CurrentCaller>
   /** Agrees with require('read') on every node of the tree. */
   readonly readable: (
     treeId: TreeId,
@@ -237,20 +247,26 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       )
 
     /** The tree's live workspace and the caller's place in it, or null. */
-    const treeFacts = (caller: Caller, treeId: TreeId) =>
+    const treeFacts = (
+      caller: Caller,
+      treeId: TreeId,
+      asOf: number | null = null,
+    ) =>
       query(() =>
         DB.prepare(
           `select t.workspace_id as workspaceId,
              (select role from workspace_members m
-               where m.workspace_id = t.workspace_id and m.user_id = ?2) as memberRole
+               where m.workspace_id = t.workspace_id and m.user_id = ?2
+                 and (?3 is null or m.created_at <= ?3)) as memberRole
            from trees t join workspaces w on w.id = t.workspace_id
            where t.id = ?1 and t.deleted_at is null and w.deleted_at is null`,
         )
-          .bind(treeId, caller.person?.id ?? '')
+          .bind(treeId, caller.person?.id ?? '', asOf)
           .first<TreeFacts>(),
       )
 
-    const roleOn = (node: NodeRow) =>
+    /** The caller's roles on a node, counting only grants made by `asOf`. */
+    const roleAt = (node: NodeRow, asOf: number | null) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (caller.via.kind === 'system') return EMPTY
@@ -258,7 +274,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         if (caller.via.kind === 'handle' && caller.via.treeId !== node.treeId) {
           return EMPTY
         }
-        const facts = yield* treeFacts(caller, node.treeId)
+        const facts = yield* treeFacts(caller, node.treeId, asOf)
         if (facts === null) return EMPTY
         const paths = ancestorPaths(node.path)
         const ancestors = yield* query(() =>
@@ -284,9 +300,10 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             : (yield* query(() =>
                 DB.prepare(
                   `select id, target_kind as targetKind, target, role from shares
-                   where node_id in (${ids.map(() => '?').join(', ')})`,
+                   where node_id in (${ids.map(() => '?').join(', ')})
+                     and (? is null or created_at <= ?)`,
                 )
-                  .bind(...ids)
+                  .bind(...ids, asOf, asOf)
                   .all<{
                     id: ShareId
                     targetKind: 'email' | 'team' | 'workspace' | 'anyone'
@@ -325,6 +342,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         }
         return roleSetOf(grants)
       })
+
+    const roleOn = (node: NodeRow) => roleAt(node, null)
 
     const require = <A extends Action>(
       action: A,
@@ -372,7 +391,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
      * Phase 2's condition for the nodes of a tree the caller may read, over
      * the table `column` names: the caller's grants, without reach.
      */
-    const grantedWhere = (treeId: TreeId) =>
+    const grantedWhere = (treeId: TreeId, asOf: number | null = null) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (
@@ -381,7 +400,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         ) {
           return null
         }
-        const facts = yield* treeFacts(caller, treeId)
+        const facts = yield* treeFacts(caller, treeId, asOf)
         if (facts === null) return null
         let scopePath: string | null = null
         if (caller.via.kind === 'agent' && caller.via.scope !== null) {
@@ -411,6 +430,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               and (s.target_kind = 'anyone'
                 or (s.target_kind = 'email' and s.target = ${email})
                 or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1))
+              and ${asOf === null ? sql`1` : sql`s.created_at <= ${asOf}`}
               and ${underColumn(column('path'), sql`a.path`)}
               and (s.role <> 'respond' or ${column('origin')} = 'authored'))`
         }
@@ -430,11 +450,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
     }
 
     /** Read on an authored `_` node through a node it is reached from. */
-    const reached = (node: NodeRow) =>
+    const reached = (node: NodeRow, asOf: number | null = null) =>
       Effect.gen(function* () {
         const split = underscoreSplit(node.path)
         if (split === null || node.origin !== 'authored') return null
-        const grants = yield* grantedWhere(node.treeId)
+        const grants = yield* grantedWhere(node.treeId, asOf)
         if (grants === null) return null
         const condition = reachFrom(grants, node.treeId, sql`${split.from}`)
         const found = yield* query(() =>
@@ -448,6 +468,18 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         return found.length === 0
           ? null
           : ({ kind: 'reach', from: split.from } satisfies Basis)
+      })
+
+    const readsAsOf = (node: NodeRow, at: number) =>
+      Effect.gen(function* () {
+        const roles = yield* roleAt(node, at)
+        if (
+          roles.caps.has('read') ||
+          (roles.caps.has('read-authored') && node.origin === 'authored')
+        ) {
+          return true
+        }
+        return (yield* reached(node, at)) !== null
       })
 
     const readable = (treeId: TreeId) =>
@@ -513,7 +545,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         } satisfies Membership
       })
 
-    return { require, roleOn, readable, member }
+    return { require, roleOn, readsAsOf, readable, member }
   }),
 )
 

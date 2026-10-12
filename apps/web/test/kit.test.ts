@@ -578,3 +578,45 @@ describe('what a view issues with a composed page', () => {
     ).toContain('Guides v2')
   })
 })
+
+describe('an open tab after a later push', () => {
+  it('opens layouts and `_` files it was never issued only for a reader whose grant predates the view', async () => {
+    const w = await world()
+    const early = await sharedWith(w, [{ path: '', role: 'read' }])
+    const late = await sharedWith(w, [{ path: 'plan.html', role: 'read' }])
+    const a = await handleFor(early, w.treeId, 'plan')
+    const b = await handleFor(late, w.treeId, 'plan')
+    expect(b.seq).toBe(a.seq)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const guides = (await nodeAt(w.treeId, 'guides'))!
+    await share(
+      w.treeId,
+      guides.id,
+      'email',
+      late.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    await w.repush({
+      'guides/_layout.html':
+        '<nav class="sidebar">Guides v2</nav><main><slot></slot></main>',
+      'guides/_components/shared.js': 'export const from = "guides v2"',
+    })
+    // Neither viewed the guide at this sequence: the reader who could read
+    // it then still opens it as it was, layouts and `_` files included.
+    const old = htmlOf(
+      await frame(a.handle, w.treeId, a.seq, 'guides/setup/install'),
+    )
+    expect(old).toContain('<nav class="sidebar">Guides</nav>')
+    expect(
+      await frame(a.handle, w.treeId, a.seq, 'guides/_components/shared.js'),
+    ).toMatchObject({ kind: 'file' })
+    // The reader given the guides after the view could not read them then.
+    expect(await frame(b.handle, w.treeId, b.seq, 'guides/setup/install')).toBe(
+      'not_found',
+    )
+    expect(
+      await frame(b.handle, w.treeId, b.seq, 'guides/_components/shared.js'),
+    ).toBe('not_found')
+  })
+})

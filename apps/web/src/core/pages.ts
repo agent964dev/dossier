@@ -857,9 +857,21 @@ export const PagesLive: Layer.Layer<
      * Whether the handle may open these nodes at a sequence (for a page: the
      * page and every tree layout composed into it there). Each must be one a
      * view issued to this handle at that sequence, or unchanged since then
-     * (nothing replaced, so nothing recovered), or one the caller writes:
-     * history is for write holders.
+     * (nothing replaced, so nothing recovered), or one the caller already
+     * read through a grant held when the sequence was first issued to this
+     * handle, or one the caller writes: history is for write holders.
      */
+    /** When a view first issued this sequence to the handle, or null. */
+    const firstIssued = (handleHash: string, seq: AuthoredSeq) =>
+      query(() =>
+        DB.prepare(
+          `select min(created_at) as at from view_handle_nodes
+           where handle_hash = ? and seq = ?`,
+        )
+          .bind(handleHash, seq)
+          .first<{ at: number | null }>(),
+      ).pipe(Effect.map((row) => row?.at ?? null))
+
     const opensAt = (
       handleHash: string,
       seq: AuthoredSeq,
@@ -890,6 +902,11 @@ export const PagesLive: Layer.Layer<
               .first<{ sha: string | null }>(),
           )
           if (now !== null && now.sha === version.blobSha256) continue
+          // A grant the caller already held when this sequence was first
+          // issued to the handle: they could read the node while it was
+          // current, so an open tab keeps it.
+          const first = yield* firstIssued(handleHash, seq)
+          if (first !== null && (yield* access.readsAsOf(node, first))) continue
           const writes = yield* access
             .require('write', node)
             .pipe(Effect.isSuccess)

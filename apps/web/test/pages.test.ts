@@ -621,9 +621,15 @@ describe('what a handle may recover', () => {
     )
     expect(logo).toMatchObject({ kind: 'file' })
     // A page it only links to is not issued: following the link is a view.
+    const notes = (await nodeAt(w.treeId, 'notes/index.html'))!
+    expect(await count('view_handle_nodes', 'node_id = ?', notes.id)).toBe(0)
+    // It still opens at that sequence: the reader's share predates the view,
+    // so they could read it while it was current.
     expect(
-      await atTime(frame(grant.handle, w.treeId, grant.seq, 'notes', true)),
-    ).toBe('not_found')
+      htmlOf(
+        await atTime(frame(grant.handle, w.treeId, grant.seq, 'notes', true)),
+      ),
+    ).toContain('<p>Notes</p>')
   })
 
   it('issues what a page loads as it was at the sequence the view captured', async () => {
@@ -769,11 +775,24 @@ describe('what a handle may recover', () => {
     const kit = {
       '_theme.css': ':root { --accent: teal; }',
       'guides/_theme.css': ':root { --accent: crimson; }',
-      // The page loads no theme, so the view issues none.
+      // No page loads a theme, so no view issues one.
       'guides/page.html': '<title>Guide</title><p>Guide</p>',
     }
     await w.repush(kit)
     const { caller: reader } = await someone()
+    const plan = (await nodeAt(w.treeId, 'plan.html'))!
+    await share(
+      w.treeId,
+      plan.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    // The guides come to the reader only after the view, so at the viewed
+    // sequence their theme was never the reader's.
+    await new Promise((resolve) => setTimeout(resolve, 5))
     const guides = (await nodeAt(w.treeId, 'guides'))!
     await share(
       w.treeId,
@@ -783,7 +802,6 @@ describe('what a handle may recover', () => {
       'read',
       w.owner.person!,
     )
-    const grant = await atTime(view(reader, w.treeId, 'guides/page'))
     await w.repush({ ...kit, 'guides/_theme.css': ':root { --accent: gold; }' })
     expect(
       await atTime(
@@ -830,6 +848,95 @@ describe('what a handle may recover', () => {
         path,
       ).toMatchObject({ kind: 'file' })
     }
+  })
+
+  it('opens a file an open tab imports later for a reader whose share predates the view, never for one shared after', async () => {
+    const w = await world()
+    const page = {
+      'module.html':
+        '<!doctype html><title>Module</title><script type="module">import("./lazy.js")</script>',
+      'lazy.js': 'export const v = 1',
+    }
+    await w.repush(page)
+    const root = (await nodeAt(w.treeId, ''))!
+    const moduleNode = (await nodeAt(w.treeId, 'module.html'))!
+    const { caller: early } = await someone()
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      early.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const { caller: late } = await someone()
+    await share(
+      w.treeId,
+      moduleNode.id,
+      'email',
+      late.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const a = await atTime(view(early, w.treeId, 'module'))
+    const b = await atTime(view(late, w.treeId, 'module'))
+    expect(b.seq).toBe(a.seq)
+    // The import is in script text, so no view issues it.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      late.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    await w.repush({ ...page, 'lazy.js': 'export const v = 2' })
+
+    const kept = await atTime(frame(a.handle, w.treeId, a.seq, 'lazy.js'))
+    expect(kept).toMatchObject({ kind: 'file' })
+    expect(await atTime(frame(b.handle, w.treeId, b.seq, 'lazy.js'))).toBe(
+      'not_found',
+    )
+  })
+
+  it('counts a share revoked and made again after the view as new', async () => {
+    const w = await world()
+    const page = {
+      'module.html':
+        '<!doctype html><title>Module</title><script type="module">import("./lazy.js")</script>',
+      'lazy.js': 'export const v = 1',
+    }
+    await w.repush(page)
+    const root = (await nodeAt(w.treeId, ''))!
+    const { caller: reader } = await someone()
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'module'))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await exec(
+      'delete from shares where node_id = ? and target = ?',
+      root.id,
+      reader.person!.email,
+    )
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    await w.repush({ ...page, 'lazy.js': 'export const v = 2' })
+    expect(
+      await atTime(frame(grant.handle, w.treeId, grant.seq, 'lazy.js')),
+    ).toBe('not_found')
   })
 
   it('answers an old redirect only when its target may be opened at that sequence', async () => {
