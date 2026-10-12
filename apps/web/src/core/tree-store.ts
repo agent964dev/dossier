@@ -314,10 +314,17 @@ export interface ChangeSet {
       readonly comment: NodeHandle | NodeRow
       readonly email: string
       readonly path: string
+      /** Holds while the person still reads the page, checked in the batch. */
+      readonly reads: Statement
     },
   ) => void
   /** Fails the change unless what the grant rests on still holds. */
   readonly holds: (granted: Granted<Action>) => void
+  /**
+   * Fails the change unless the comment still holds its text: a revision
+   * never brings back a comment deleted since it was read.
+   */
+  readonly guardCommentText: (comment: NodeRow) => void
   /**
    * 'withdrawn': every version's content deleted, one content-free
    * 'withdrawn' version left, the node deleted, its operations reduced to
@@ -528,7 +535,7 @@ const under = (column: string, prefix: string): string =>
 const isKitPath = (path: string): boolean =>
   path.split('/').some((segment) => segment.startsWith('_'))
 
-interface Statement {
+export interface Statement {
   readonly sql: string
   readonly binds: readonly unknown[]
   /** Reads the statement's rows once the batch has run. */
@@ -1722,6 +1729,8 @@ export const TreeStoreLive: Layer.Layer<
           readonly condition: Statement
         }[] = []
         const events: NewEvent[] = []
+        /** That each person mentioned still reads the page. */
+        const mentionGuards: Statement[] = []
         /** Mentions rows, each keyed by the seq of the event at `event`. */
         const mentioned: {
           readonly event: number
@@ -2292,6 +2301,8 @@ export const TreeStoreLive: Layer.Layer<
 
           mention: (page, m) => {
             bases.push(everyBasis(page.basis, person.id))
+            // The read rule is large: each check is a statement of its own.
+            mentionGuards.push(m.reads)
             events.push({ type: 'mention', path: m.path, node: m.comment })
             mentioned.push({
               event: events.length - 1,
@@ -2305,6 +2316,17 @@ export const TreeStoreLive: Layer.Layer<
 
           holds: (granted) => {
             bases.push(everyBasis(granted.basis, person.id))
+          },
+
+          guardCommentText: (comment) => {
+            stateGuards.push({
+              sql: `exists (select 1 from nodes n join node_versions v
+                      on v.id = n.current_version_id
+                      where n.id = ? and n.deleted_at is null
+                        and json_type(v.json_value, '$.text') = 'text'
+                        and json_extract(v.json_value, '$.text') <> '')`,
+              binds: [comment.id],
+            })
           },
 
           guardUnnamed: (g) => {
@@ -2426,6 +2448,9 @@ export const TreeStoreLive: Layer.Layer<
           ...(stateGuards.length === 0
             ? []
             : [guardRow(`${guardId}:state`, 'state', allOf(stateGuards))]),
+          ...mentionGuards.map((g, i) =>
+            guardRow(`${guardId}:mention${i}`, 'state', g),
+          ),
           ...dataGuards.map((g, i) =>
             guardRow(`${guardId}:${g.reason}${i}`, g.reason, g.condition),
           ),

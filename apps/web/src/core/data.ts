@@ -66,6 +66,7 @@ import {
   type DocRow,
   type FormRow,
   type NodeHandle,
+  type Statement,
   type VersionHandle,
   DATA_FILE_TOO_LARGE,
 } from './tree-store.ts'
@@ -1836,19 +1837,6 @@ export const DataLive: Layer.Layer<
             const found = yield* store.treeById(i.tree)
             if (found === null) return yield* Effect.fail(notFound(i.path))
             const tree = found.tree
-            // The page the writer is on, as they saw it: its push is the
-            // one the comment records.
-            const seen = yield* store.fileAt(tree.id, i.page, i.seq)
-            const readsSeen =
-              seen !== null &&
-              seen.node.origin === 'authored' &&
-              (yield* access.require('read', seen.node).pipe(Effect.isSuccess))
-            if (seen === null || !readsSeen) {
-              return yield* Effect.fail(
-                forbidden(i.page, 'This page cannot write here.'),
-              )
-            }
-            const seenPush = yield* pushNumberOf(seen.version)
             const noPage = dossierError(
               'invalid',
               `${fromPageFolder(folder)}/ belongs to no page.`,
@@ -1872,14 +1860,50 @@ export const DataLive: Layer.Layer<
                     : dossierError(e.code, e.message, e.fix, i.path),
                 ),
               )
-            const provenance = { seenPush, opId: i.opId }
-            /** Who of these could read the page: the writer never counts. */
-            const mentionable = (emails: readonly string[]) =>
-              Effect.filter(emails, (m) =>
-                m === email
-                  ? Effect.succeed(false)
-                  : access.couldRead(m, page.node),
+            // A page writes its own comments, so the push a comment
+            // records is always its page's.
+            if (i.page.replace(/^\/+/, '') !== pageOfCommentsFolder(folder)) {
+              return yield* Effect.fail(
+                forbidden(i.path, 'A page writes only its own comments.'),
               )
+            }
+            // An agent key writes only within what it reaches.
+            if (!(yield* access.withinScope(tree.id, folder))) {
+              return yield* Effect.fail(
+                forbidden(i.path, 'This agent key does not reach here.'),
+              )
+            }
+            // The page as the writer saw it: its push is the one the
+            // comment records.
+            const seen = yield* store.fileAt(tree.id, i.page, i.seq)
+            const readsSeen =
+              seen !== null &&
+              seen.node.origin === 'authored' &&
+              (yield* access.require('read', seen.node).pipe(Effect.isSuccess))
+            if (seen === null || !readsSeen) {
+              return yield* Effect.fail(
+                forbidden(i.page, 'This page cannot write here.'),
+              )
+            }
+            const seenPush = yield* pushNumberOf(seen.version)
+            const provenance = { seenPush, opId: i.opId }
+            /**
+             * Who of these could read the page, with the check the batch
+             * makes again: the writer never counts.
+             */
+            const mentionable = (emails: readonly string[]) =>
+              Effect.gen(function* () {
+                const out: { email: string; reads: Statement }[] = []
+                for (const m of emails) {
+                  if (m === email) continue
+                  if (!(yield* access.couldRead(m, page.node))) continue
+                  out.push({
+                    email: m,
+                    reads: yield* access.couldReadCondition(m, page.node),
+                  })
+                }
+                return out
+              })
             const answer = (version: VersionHandle) =>
               Effect.gen(function* () {
                 const raw = yield* versionById(versionIdOf(version))
@@ -1984,7 +2008,7 @@ export const DataLive: Layer.Layer<
                       })
                       cs.event({ type: 'comment', path, node })
                       for (const m of mentioned) {
-                        cs.mention(granted, { comment: node, email: m, path })
+                        cs.mention(granted, { comment: node, path, ...m })
                       }
                       return { version }
                     }),
@@ -2049,6 +2073,7 @@ export const DataLive: Layer.Layer<
                   .change(tree.id, (cs) =>
                     Effect.sync(() => {
                       cs.holds(granted)
+                      cs.guardCommentText(mine)
                       const version = cs.mergeJson(
                         mine,
                         parsed as JsonObject,
@@ -2064,8 +2089,8 @@ export const DataLive: Layer.Layer<
                       for (const m of added) {
                         cs.mention(granted, {
                           comment: mine,
-                          email: m,
                           path: target,
+                          ...m,
                         })
                       }
                       return { version }

@@ -11,6 +11,7 @@ import {
   type WorkspaceId,
 } from '@dossier/contracts'
 import { sql, type SQL } from 'drizzle-orm'
+import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core'
 import { Context, Effect, Layer } from 'effect'
 
 import { db } from '../db/client.ts'
@@ -175,6 +176,23 @@ export interface AccessService {
   readonly readableByGrants: (
     treeId: TreeId,
   ) => Effect.Effect<ReadableNodes, never, CurrentCaller>
+  /**
+   * couldRead as a condition for a change's batch, so a grant lost after
+   * the check fails the change rather than mention someone who no longer
+   * reads the node. Bound with plain `?`.
+   */
+  readonly couldReadCondition: (
+    email: string,
+    node: NodeRow,
+  ) => Effect.Effect<{ readonly sql: string; readonly binds: unknown[] }>
+  /**
+   * Whether a tree path lies within what the caller's agent key reaches:
+   * always, for every other caller.
+   */
+  readonly withinScope: (
+    treeId: TreeId,
+    path: string,
+  ) => Effect.Effect<boolean, never, CurrentCaller>
   /**
    * Whether the person with this email, or anyone who comes to hold it,
    * could read the node now: the rule of roleOn, without a key's or a
@@ -980,6 +998,67 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         } satisfies Membership
       })
 
+    const withinScope = (treeId: TreeId, path: string) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        if (caller.via.kind !== 'agent' || caller.via.scope === null) {
+          return true
+        }
+        const scope = yield* query(() =>
+          DB.prepare(
+            'select path from nodes where id = ? and tree_id = ? and deleted_at is null',
+          )
+            .bind(caller.via.kind === 'agent' ? caller.via.scope : '', treeId)
+            .first<{ path: string }>(),
+        )
+        return scope !== null && isUnder(path, scope.path)
+      })
+
+    const couldReadCondition = (email: string, node: NodeRow) =>
+      Effect.gen(function* () {
+        const tree = yield* query(() =>
+          DB.prepare(
+            'select workspace_id as workspaceId from trees where id = ?',
+          )
+            .bind(node.treeId)
+            .first<{ workspaceId: string }>(),
+        )
+        if (tree === null) return { sql: '0', binds: [] }
+        const W = lit(tree.workspaceId)
+        const E = lit(email.toLowerCase())
+        // The person's facts as the columns of one row, so the rule reads
+        // them as plain columns and stays as shallow as with literals.
+        const facts: CallerFacts = {
+          email: sql.raw('mc.email'),
+          person: sql.raw('mc.person'),
+          member: sql.raw('mc.member'),
+          admin: sql.raw('mc.admin'),
+          teams: sql.raw('mc.teams'),
+          within: () => sql`1`,
+        }
+        const condition = tight`exists (select 1 from trees t join workspaces w on w.id = t.workspace_id
+            where t.id = ${lit(node.treeId)} and t.deleted_at is null
+              and w.deleted_at is null and w.suspended_at is null)
+          and exists (select 1 from (select p.person, ${E} as email,
+                (select count(*) from workspace_members m
+                  where m.workspace_id = ${W} and m.user_id = p.person) as member,
+                (select count(*) from workspace_members m
+                  where m.workspace_id = ${W} and m.user_id = p.person
+                    and m.role = 'admin') as admin,
+                (select json_group_array(tm.team_id) from team_members tm
+                  join teams tt on tt.id = tm.team_id
+                  join workspace_members wm on wm.workspace_id = tt.workspace_id
+                    and wm.user_id = tm.user_id
+                  where tt.workspace_id = ${W} and tm.user_id = p.person) as teams
+              from (select (select u.id from "user" u join people pp on pp.user_id = u.id
+                  where lower(u.email) = ${E} and pp.deleted_at is null limit 1) as person) p) mc,
+              nodes
+            where "nodes"."id" = ${lit(node.id)} and "nodes"."deleted_at" is null
+              and ${readableOn(node.treeId, tree.workspaceId, facts)(nodeColumn)})`
+        const query_ = new SQLiteSyncDialect().sqlToQuery(condition)
+        return { sql: query_.sql, binds: query_.params }
+      })
+
     const couldRead = (email: string, node: NodeRow) =>
       Effect.gen(function* () {
         const asking = yield* CurrentCaller
@@ -1016,7 +1095,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       roleOn,
       heldOn,
       readsAsOf,
+      withinScope,
       couldRead,
+      couldReadCondition,
       readable,
       readableByGrants,
       member,

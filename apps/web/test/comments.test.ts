@@ -17,14 +17,14 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
   Data,
   mentionedInTree,
-  mentionedOnPage,
   Pages,
   People,
-  Shares,
   unseenMentions,
   type Caller,
 } from '../src/core/index.ts'
-import { count, rows } from './support/d1.ts'
+import { homeModel } from '../src/server/home-model.ts'
+import { listingModel } from '../src/server/listing-model.ts'
+import { beforeBatch, count, exec, rows } from './support/d1.ts'
 import {
   pageWith,
   pushForms,
@@ -32,7 +32,7 @@ import {
   seqOf,
   type FormTree,
 } from './support/forms.ts'
-import { harness } from './support/harness.ts'
+import { harness, testRuntime } from './support/harness.ts'
 import { runAs, sessionFor } from './support/people.ts'
 import {
   agent,
@@ -40,6 +40,7 @@ import {
   join,
   nodeAt,
   person,
+  pushAll,
   ref,
   share,
   visitorCaller,
@@ -660,7 +661,11 @@ describe('mentions', () => {
   })
 
   it('says "mentioned you" on the tree row, the listing row and the Shared with me row until the page is opened or the comment is deleted', async () => {
-    const tree = await pushForms(owner, ws, FILES)
+    // No form here: "waiting for your answer" would stand before a mention.
+    const tree = await pushForms(owner, ws, {
+      'plan.html': PLAN,
+      'other.html': FILES['other.html'],
+    })
     const sara = await given(tree, 'respond')
     // Lina is a member, reading the tree through the workspace.
     const lina = await person('lina')
@@ -696,34 +701,45 @@ describe('mentions', () => {
       path: 'plan.comments/',
       patch: comment('Lina, the price?', { mentions: [linaEmail] }),
     })
-    let mentions = await unseen(lina)
-    expect(mentionedInTree(mentions, tree.treeId)).toBe(true)
-    expect(mentionedOnPage(mentions, tree.treeId, 'plan.html')).toBe(true)
-    expect(mentionedOnPage(mentions, tree.treeId, 'other.html')).toBe(false)
+    // What Lina's home and the tree's listing show.
+    const screens = async () => {
+      const home = await runAs(linaBrowser, homeModel({ w: ws.name }))
+      const listing = await runAs(
+        linaBrowser,
+        listingModel({ workspace: ws.name, tree: tree.name, path: '' }),
+      )
+      return {
+        tree: home.trees.find((t) => t.name === tree.name)?.mentioned,
+        pages: Object.fromEntries(
+          listing.pages.map((page) => [page.path, page.mentioned]),
+        ),
+      }
+    }
+    expect(await screens()).toEqual({
+      tree: true,
+      pages: { 'other.html': false, 'plan.html': true },
+    })
     await open(minutes(2))
-    mentions = await unseen(lina)
-    expect(mentionedInTree(mentions, tree.treeId)).toBe(false)
-    expect(mentionedOnPage(mentions, tree.treeId, 'plan.html')).toBe(false)
+    expect(await screens()).toEqual({
+      tree: false,
+      pages: { 'other.html': false, 'plan.html': false },
+    })
 
     // Sara's email share shows on her home under Shared with me.
+    // Her home's Shared with me row, from its read model.
     const shared = async () =>
-      (
-        await runAs(
-          sara.caller,
-          Effect.flatMap(Shares, (s) => s.sharedWithMe()),
-        )
-      )
-        .filter((row) => row.tree.id === tree.treeId)
-        .map((row) => row.mentioned)
-    expect(await shared()).toEqual([false])
+      (await runAs(sara.caller, homeModel({ w: null }))).shared
+        .filter((row) => row.from === ws.name && row.place === tree.name)
+        .map((row) => row.label)
+    expect(await shared()).toEqual([null])
     const toSara = await write(minutes(3), ownerBrowser, tree, {
       path: 'plan.comments/',
       patch: comment('Sara, see the plan.', { mentions: [sara.email] }),
     })
-    expect(await shared()).toEqual([true])
+    expect(await shared()).toEqual(['mentioned you'])
     // Deleting the comment clears it.
     await withdraw(ownerBrowser, tree, toSara.path)
-    expect(await shared()).toEqual([false])
+    expect(await shared()).toEqual([null])
 
     // A mention edited away no longer counts either.
     const again = await write(minutes(70), sara.caller, tree, {
@@ -780,5 +796,120 @@ describe('what an agent reads', () => {
     expect(folder.text).toContain('Comment deleted.')
     const page = await read(`${ws.name}/${tree.name}/plan`)
     expect(page.kind === 'page' && page.pointer.comments).toBe(2)
+  })
+})
+
+describe('changes that race a comment', () => {
+  it('never brings back a comment deleted while its edit was on the way', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond')
+    const mine = await write(T0, sara.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Soon deleted.'),
+    })
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes('json_patch('),
+            () => withdraw(sara.caller, tree, mine.path).then(() => {}),
+          ),
+        },
+      }),
+    )
+    expect(
+      await writeFailure(sara.caller, tree, {
+        path: mine.path,
+        patch: { text: 'Edited after all?' },
+      }),
+    ).toMatchObject({ code: 'invalid', message: 'This comment was deleted.' })
+    const versions = await versionsOf(tree.treeId, mine.path)
+    expect(versions).toHaveLength(1)
+    expect(JSON.parse(versions[0]!.json!)).toMatchObject({ text: '' })
+  })
+
+  it('writes no mention for someone whose access went while the comment was on the way', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond')
+    const lina = await given(tree, 'read', '', 'lina')
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes('insert into mentions'),
+            async () => {
+              await exec(
+                'delete from shares where tree_id = ? and target = ?',
+                tree.treeId,
+                lina.email,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    // On the real clock: the write starts again after a short wait.
+    const input = await writeInput(tree, {
+      path: 'plan.comments/',
+      patch: comment('Lina?', { mentions: [lina.email] }),
+    })
+    const written = await runAs(
+      sara.caller,
+      Effect.flatMap(Data, (data) => data.write(input)),
+    )
+    expect((written.data as { mentions: string[] }).mentions).toEqual([
+      lina.email,
+    ])
+    expect(await mentionRows(tree.treeId)).toBe(0)
+    expect(
+      await count('events', "tree_id = ? and type = 'mention'", tree.treeId),
+    ).toBe(0)
+  })
+})
+
+describe('where a comment may go', () => {
+  it('keeps an agent key to its scope, and a page to its own comments', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond')
+    const scoped = await agent(sara.who, {
+      scope: (await nodeAt(tree.treeId, 'plan.html'))!.id,
+    })
+    expect(
+      await writeFailure(scoped, tree, {
+        path: 'plan.comments/',
+        patch: comment('From a key scoped to the page alone.'),
+      }),
+    ).toMatchObject({ code: 'forbidden' })
+    expect(
+      await count('nodes', "tree_id = ? and origin = 'data'", tree.treeId),
+    ).toBe(0)
+    // Another page writes no comments of this one, nor records its push.
+    expect(
+      await writeFailure(sara.caller, tree, {
+        page: 'other.html',
+        path: 'plan.comments/',
+        patch: comment('From the other page.'),
+      }),
+    ).toMatchObject({ code: 'forbidden' })
+  })
+
+  it('refuses a push of authored files into a page’s comments folder', async () => {
+    const ownerKey = await agent(owner)
+    const name = `c${crypto.randomUUID().slice(0, 8)}`
+    const refused = await pushAll(ownerKey, `${ws.name}/${name}`, {
+      'plan.html': PLAN,
+      'plan.comments/readme.txt': 'Squatting the comments.',
+    }).then(
+      () => null,
+      (error: unknown) => String(error),
+    )
+    expect(refused).toContain(
+      "plan.comments/readme.txt is inside plan.comments/, a page's comments folder",
+    )
+    expect(
+      await count('trees', 'name = ? and workspace_id = ?', name, ws.id),
+    ).toBe(0)
   })
 })
