@@ -48,11 +48,34 @@ const tempDir = async (): Promise<string> => {
   return dir
 }
 afterEach(async () => {
+  // A download still in flight may write as a folder goes: retry its removal.
   await Promise.all(
-    temporary.map((dir) => rm(dir, { recursive: true, force: true })),
+    temporary.map((dir) =>
+      rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 }),
+    ),
   )
   temporary = []
 })
+
+/** Every path under a folder, links not followed. */
+const contentsOf = async (dir: string): Promise<string> =>
+  JSON.stringify(
+    (await readdir(dir, { recursive: true }).catch(() => [])).sort(),
+  )
+
+/**
+ * Waits until nothing under the folders changes for a while, so downloads a
+ * refused pull left in flight have finished before the test checks them.
+ */
+const settled = async (...dirs: string[]): Promise<void> => {
+  let last = ''
+  for (let tries = 0; tries < 50; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    const now = (await Promise.all(dirs.map(contentsOf))).join('|')
+    if (now === last) return
+    last = now
+  }
+}
 
 /** Writes each file, creating its folders. */
 const layout = async (dir: string, files: Record<string, string>) => {
@@ -482,6 +505,9 @@ describe('Sync.pull', () => {
 
     expect(error.message).toContain('answers')
     expect(await readdir(outside)).toEqual([])
+    // Nor once the downloads still in flight have finished.
+    await settled(dir, outside)
+    expect(await readdir(outside)).toEqual([])
   })
 
   it('refuses a folder swapped for a symbolic link while its file downloads', async () => {
@@ -502,6 +528,9 @@ describe('Sync.pull', () => {
     const error = await fail((sync) => sync.pull({ target: target(), dir }))
 
     expect(error.message).toContain('answers')
+    expect(await readdir(outside)).toEqual([])
+    // Nor once the downloads still in flight have finished.
+    await settled(dir, outside)
     expect(await readdir(outside)).toEqual([])
   })
 })
