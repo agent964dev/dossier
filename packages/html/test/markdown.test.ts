@@ -17,7 +17,7 @@ const pair = (name: string) => ({
 
 describe('toMarkdown', () => {
   it('has a version that stored conversions are keyed by', () => {
-    expect(MARKDOWN_VERSION).toBe(1)
+    expect(MARKDOWN_VERSION).toBe(2)
   })
 
   it('holds a golden pair for every rule', () => {
@@ -25,7 +25,9 @@ describe('toMarkdown', () => {
       'code',
       'forms',
       'fragment',
+      'hidden',
       'own-heading',
+      'ownership',
       'parts',
       'prose',
       'svg',
@@ -149,5 +151,79 @@ describe('toMarkdown', () => {
       '# Install\n\nRun the installer, then sign in.\n\nTakes two minutes',
     )
     expect(md).not.toContain('Acme')
+  })
+
+  it('drops comments and hidden parts, keeping what the page reveals on find', () => {
+    const md = toMarkdown(pair('hidden').page)
+    for (const gone of [
+      'Draft',
+      "author's note",
+      'Pricing',
+      'Secret price list',
+      'Secret field',
+      'Also hidden',
+      '<!--',
+    ]) {
+      expect(md).not.toContain(gone)
+    }
+    expect(md).toContain('Visible text stays.')
+    expect(md).toContain('Found by searching the page')
+  })
+
+  it('never takes a label from the contents of a control inside it, however deep', () => {
+    const md = toMarkdown(pair('ownership').page)
+    expect(md).toContain('- Message (textarea)\n')
+    expect(md).toContain('- Size (select): Small, Large\n')
+    expect(md).not.toContain('Value someone typed')
+  })
+
+  it('gives each form the controls it owns, wherever they sit, and none it does not', () => {
+    const md = toMarkdown(pair('ownership').page)
+    expect(md).toContain(
+      [
+        '### Form: Booking',
+        '',
+        '- Message (textarea)',
+        '- Size (select): Small, Large',
+        '- When (date)',
+        '- Trucks (select): No trucks, One',
+        '- Region (select, required): Erbil, Anywhere',
+        '',
+      ].join('\n'),
+    )
+    expect(md).toContain(
+      '### Form: Feedback\n\n- Moved to feedback (text)\n- Rating (number)',
+    )
+    expect(md).not.toContain('Stray')
+    expect(md).not.toContain('Nine')
+    expect(md).not.toContain('Choose a region')
+  })
+
+  it('lists every option a person can send: an empty value counts unless it is a required select’s leading placeholder', () => {
+    const select = (attrs: string, options: string) =>
+      toMarkdown(
+        `<form action="a/"><select name="s" aria-label="S" ${attrs}>${options}</select></form>`,
+      )
+    expect(
+      select('', '<option value="">None</option><option>One</option>'),
+    ).toContain('- S (select): None, One')
+    expect(
+      select('required', '<option value="">Pick</option><option>One</option>'),
+    ).toContain('- S (select, required): One')
+    expect(
+      select(
+        'required multiple',
+        '<option value="">None</option><option>One</option>',
+      ),
+    ).toContain('- S (select, multiple, required): None, One')
+    expect(
+      select(
+        'required',
+        '<optgroup label="G"><option value="">None</option></optgroup><option>One</option>',
+      ),
+    ).toContain('- S (select, required): None, One')
+    expect(
+      select('', '<option disabled>Gone</option><option>One</option>'),
+    ).toContain('- S (select): One')
   })
 })

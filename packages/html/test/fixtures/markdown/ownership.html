@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head><title>Booking</title></head>
+<body>
+<form id="booking" action="bookings/" aria-label="Booking">
+  <label>Message <span class="wrap"><textarea name="message">Value someone typed</textarea></span></label>
+  <label>Size <span><select name="size"><option>Small</option><option>Large</option></select></span></label>
+  <label for="when">When</label>
+  <input id="moved" name="moved" form="feedback" aria-label="Moved to feedback">
+</form>
+<p>Fields placed elsewhere in the page still belong to their form.</p>
+<input id="when" name="when" type="date" form="booking">
+<label>Trucks
+  <select name="trucks" form="booking">
+    <option value="">No trucks</option>
+    <option value="1">One</option>
+    <option value="9" disabled>Nine, not offered</option>
+  </select>
+</label>
+<select name="region" form="booking" aria-label="Region" required>
+  <option value="">Choose a region</option>
+  <option>Erbil</option>
+  <option value="">Anywhere</option>
+</select>
+<input name="stray" form="no-such-form" aria-label="Stray">
+<form id="feedback" action="feedback/" aria-label="Feedback">
+  <label>Rating <input type="number" name="rating"></label>
+</form>
+</body>
+</html>

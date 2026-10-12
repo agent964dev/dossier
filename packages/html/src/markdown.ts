@@ -28,7 +28,7 @@ import { parse } from 'parse5'
 import { isCustomElementName } from './kit.ts'
 
 /** Bumped whenever the generated text changes for the same page. */
-export const MARKDOWN_VERSION: number = 1
+export const MARKDOWN_VERSION: number = 2
 
 /** A line Dossier writes as it stands, never escaped. */
 interface Line {
@@ -54,19 +54,53 @@ const classes = (element: Element): readonly string[] => {
 
 const isElement = (node: HastNodes): node is Element => node.type === 'element'
 
-/** The text a node holds, with runs of white space as one space. */
-const textOf = (node: HastNodes): string => {
+/**
+ * The text a node holds, with runs of white space as one space, leaving out
+ * the subtrees of any element named in `without`.
+ */
+const textOf = (
+  node: HastNodes,
+  without: ReadonlySet<string> = SKIPPED,
+): string => {
   const parts: string[] = []
   const walk = (at: HastNodes) => {
     if (at.type === 'text') parts.push(at.value)
     else if (at.type === 'element' || at.type === 'root') {
-      if (at.type === 'element' && SKIPPED.has(at.tagName)) return
+      if (at.type === 'element' && without.has(at.tagName)) return
       for (const child of at.children) walk(child)
     }
   }
   walk(node)
   return parts.join('').replace(/\s+/g, ' ').trim()
 }
+
+/**
+ * A `hidden` element is not part of the page as people see it, except
+ * `hidden="until-found"`, which the browser reveals when someone searches.
+ */
+const isHidden = (element: Element): boolean => {
+  const value = element.properties.hidden
+  return (
+    value !== undefined &&
+    value !== null &&
+    value !== false &&
+    value !== 'until-found'
+  )
+}
+
+/**
+ * The page without what no reader sees: comments, scripts, styles,
+ * templates, noscript and every hidden subtree. Every later rule reads this.
+ */
+const visible = (element: Element): Element => ({
+  ...element,
+  children: element.children.flatMap((child): ElementContent[] => {
+    if (child.type === 'comment') return []
+    if (!isElement(child)) return [child]
+    if (SKIPPED.has(child.tagName) || isHidden(child)) return []
+    return [visible(child)]
+  }),
+})
 
 /** The source inside an element as written, for code, Mermaid and TeX. */
 const rawTextOf = (node: HastNodes): string => {
@@ -156,31 +190,108 @@ const descendants = (
   return found
 }
 
-/** The text of a label, without the controls inside it. */
-const labelText = (label: Element): string => {
-  const copy: Element = {
-    ...label,
-    children: label.children.filter(
-      (child) =>
-        !(
-          isElement(child) &&
-          ['select', 'textarea', 'input', 'datalist'].includes(child.tagName)
-        ),
-    ),
-  }
-  return textOf(copy)
+/** Elements whose contents are values or choices, never a label's words. */
+const VALUE_HOLDERS: ReadonlySet<string> = new Set([
+  ...SKIPPED,
+  'select',
+  'textarea',
+  'datalist',
+  'option',
+  'optgroup',
+])
+
+/** The text of a label, without the contents of any control inside it. */
+const labelText = (label: Element): string => textOf(label, VALUE_HOLDERS)
+
+type Placed = { readonly element: Element; readonly above: Element[] }
+
+/** Where each form's controls are and what the page's labels say. */
+interface Forms {
+  /** Each form's controls in document order, wherever they sit. */
+  readonly controls: ReadonlyMap<Element, readonly Placed[]>
+  /** `<label for>` text by the id it names, the first label winning. */
+  readonly labelsFor: ReadonlyMap<string, string>
 }
 
-/** A form's questions in order: its labels, types and options, never a value. */
-const formFields = (form: Element): readonly Field[] => {
-  const all = descendants(form)
+const FORM_CONTROLS: ReadonlySet<string> = new Set([
+  'input',
+  'select',
+  'textarea',
+])
+
+/**
+ * Which form owns each control, as the browser decides: the form its
+ * `form` attribute names by id, or none when no form has that id; else the
+ * form it sits in.
+ */
+const formsOf = (root: Element): Forms => {
+  const all = descendants(root)
+  const byId = new Map<string, Element>()
   const labelsFor = new Map<string, string>()
   for (const { element } of all) {
+    const id = element.tagName === 'form' ? prop(element, 'id') : null
+    if (id !== null && !byId.has(id)) byId.set(id, element)
     const target = element.tagName === 'label' ? prop(element, 'htmlFor') : null
     if (target !== null && !labelsFor.has(target)) {
       labelsFor.set(target, labelText(element))
     }
   }
+  const controls = new Map<Element, Placed[]>()
+  for (const placed of all) {
+    if (!FORM_CONTROLS.has(placed.element.tagName)) continue
+    const named = prop(placed.element, 'form')
+    const owner =
+      named !== null
+        ? byId.get(named)
+        : [...placed.above].reverse().find((el) => el.tagName === 'form')
+    if (owner === undefined) continue
+    const list = controls.get(owner) ?? []
+    list.push(placed)
+    controls.set(owner, list)
+  }
+  return { controls, labelsFor }
+}
+
+/**
+ * The options a person can choose and send: every enabled option with text,
+ * an empty value included, except a required single select's leading
+ * empty-valued option written directly in it, which HTML treats as the
+ * select's placeholder and sending refuses.
+ */
+const selectOptions = (select: Element): readonly string[] => {
+  const options = descendants(select).filter(
+    ({ element }) => element.tagName === 'option',
+  )
+  const single =
+    prop(select, 'multiple') === null &&
+    Number(prop(select, 'size') ?? '1') <= 1
+  const placeholder =
+    prop(select, 'required') !== null && single ? options[0] : undefined
+  return options
+    .filter(({ element, above }) => {
+      if (prop(element, 'disabled') !== null) return false
+      if (
+        above.some(
+          (el) => el.tagName === 'optgroup' && prop(el, 'disabled') !== null,
+        )
+      ) {
+        return false
+      }
+      return !(
+        placeholder !== undefined &&
+        element === placeholder.element &&
+        above[above.length - 1] === select &&
+        prop(element, 'value') === ''
+      )
+    })
+    .map(({ element }) => textOf(element))
+    .filter((text) => text !== '')
+}
+
+/** A form's questions in order: its labels, types and options, never a value. */
+const formFields = (form: Element, forms: Forms): readonly Field[] => {
+  const all = forms.controls.get(form) ?? []
+  const { labelsFor } = forms
   const labelOf = (control: Element, above: readonly Element[]): string => {
     const id = prop(control, 'id')
     const byFor = id === null ? undefined : labelsFor.get(id)
@@ -264,14 +375,7 @@ const formFields = (form: Element): readonly Field[] => {
         break
       }
       case 'select': {
-        const options = descendants(element)
-          .map(({ element: option }) => option)
-          .filter(
-            (option) =>
-              option.tagName === 'option' && prop(option, 'value') !== '',
-          )
-          .map(textOf)
-          .filter((text) => text !== '')
+        const options = [...selectOptions(element)]
         fields.push({
           label: labelOf(element, above),
           type:
@@ -319,9 +423,9 @@ const formName = (form: Element): string | null => {
 
 const text = (value: string) => ({ type: 'text' as const, value })
 
-const formNodes = (form: Element): RootContent[] => {
+const formNodes = (form: Element, forms: Forms): RootContent[] => {
   const name = formName(form)
-  const items: ListItem[] = formFields(form).map((field) => {
+  const items: ListItem[] = formFields(form, forms).map((field) => {
     const kind = [field.type, ...(field.required ? ['required'] : [])].join(
       ', ',
     )
@@ -358,7 +462,7 @@ const formNodes = (form: Element): RootContent[] => {
  * conversion: SVG, Mermaid, math, forms and parts without text. Other
  * elements keep their children, rewritten the same way.
  */
-const prepare = (node: Element): Element => {
+const prepare = (node: Element, forms: Forms): Element => {
   const children: (ElementContent | Line)[] = []
   for (const child of node.children) {
     if (!isElement(child)) {
@@ -391,7 +495,7 @@ const prepare = (node: Element): Element => {
     if (tag === 'form') {
       children.push({
         type: 'dossierForm',
-        nodes: formNodes(child),
+        nodes: formNodes(child, forms),
       } as unknown as ElementContent)
       continue
     }
@@ -409,7 +513,7 @@ const prepare = (node: Element): Element => {
         children.push(line(`[${kind}]`, false))
       continue
     }
-    children.push(prepare(child))
+    children.push(prepare(child, forms))
   }
   return { ...node, children: children as ElementContent[] }
 }
@@ -447,7 +551,8 @@ export const toMarkdown = (source: string): string => {
   const body = html === null ? null : find(html, 'body')
   const title = head === null ? null : find(head, 'title')
   const titleText = title === null ? '' : textOf(title)
-  const prepared = body === null ? null : prepare({ ...body, tagName: 'div' })
+  const seen = body === null ? null : visible({ ...body, tagName: 'div' })
+  const prepared = seen === null ? null : prepare(seen, formsOf(seen))
   const root: HastRoot = {
     type: 'root',
     children: prepared === null ? [] : prepared.children,

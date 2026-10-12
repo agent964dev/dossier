@@ -231,6 +231,11 @@ describe('a page without a companion', () => {
     )
 
     await env.BLOBS.delete(key)
+    // What an earlier converter stored is never served.
+    await env.BLOBS.put(
+      `derived/markdown/${MARKDOWN_VERSION - 1}/${sha}.md`,
+      'From an earlier converter',
+    )
     expect(page(await read(owner, at('diagram'))).text).toBe(expected)
     expect(await (await env.BLOBS.get(key))?.text()).toBe(toMarkdown(DIAGRAM))
   })
