@@ -1,10 +1,14 @@
 // The shell and page client's shared vocabulary. Plain TypeScript that
-// imports only ./codes.ts, so the page client's bundle carries no Effect.
-import type { ErrorCode, ErrorFields } from './codes.ts'
+// imports only ./codes.ts at run time, so the page client's bundle carries no
+// Effect.
+import type { DocWire } from './api.ts'
+import { isErrorCode, type ErrorCode, type ErrorFields } from './codes.ts'
 
+export type { DocWire } from './api.ts'
 export {
   ERRORS,
   exitCodeFor,
+  isErrorCode,
   statusFor,
   type ErrorCode,
   type ErrorFields,
@@ -15,6 +19,169 @@ export type {
   BaseGrammar,
   BaseLibraries,
 } from './base.ts'
+
+export type Json =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly Json[]
+  | { readonly [key: string]: Json }
+export type JsonObject = { readonly [key: string]: Json }
+
+/** A file field's stored value: an upload in the writer's own folder. */
+export interface UploadRef {
+  /** Relative to the writer's own folder in the target: 'files/cv.pdf'. */
+  readonly file: string
+  readonly name: string
+  readonly size: number
+  readonly type: string
+}
+
+/** Which form a send is for: the page or layout holding it, its target and id. */
+export interface FormRef {
+  /** The node ID of the page or layout the form sits in. */
+  readonly host: string
+  /** A tree path: 'questions/answers/' for a folder, 'board.json' for a file. */
+  readonly target: string
+  readonly id: string | null
+}
+
+/** A form Dossier manages, in the composed page's bootstrap. */
+export interface FormInfo extends FormRef {
+  /** The value of the form's data-dossier-form. */
+  readonly n: number
+  readonly kind: 'person' | 'entries' | 'shared'
+  /** ISO 8601. */
+  readonly closesAt: string | null
+  readonly closed: boolean
+}
+
+/** The key of a form's drafts and pending sends. */
+export const formKey = (form: FormRef): string =>
+  `${form.host}|${form.target}|${form.id ?? ''}`
+
+/** A form's unsent values by field name: lists for several values. */
+export type DraftValues = Readonly<Record<string, string | readonly string[]>>
+
+/**
+ * One value of a send: text, a file the shell uploads first, or an upload
+ * already stored (a file field kept as it was).
+ */
+export type SendValue = string | File | UploadRef
+
+export interface SendRequest {
+  readonly form: FormRef
+  /** The tree's sequence the page was served at. */
+  readonly seq: number
+  readonly entries: readonly (readonly [string, SendValue])[]
+  readonly submitter: { readonly name: string; readonly value: string } | null
+  readonly opId: string
+}
+
+/** A send the shell keeps until it is answered: after sign-in, or online. */
+export interface PendingSend extends SendRequest {
+  /** The page's tree path: 'questions/index.html'. */
+  readonly page: string
+  /** Who sent it; null for a visitor. */
+  readonly by: string | null
+  /** ISO 8601. */
+  readonly savedAt: string
+}
+
+const treePath = (path: string): string => path.replace(/^\/+/, '')
+
+const isSegmentName = (name: string): boolean =>
+  name !== '' &&
+  name !== '.' &&
+  name !== '..' &&
+  !name.includes('/') &&
+  // oxlint-disable-next-line no-control-regex
+  !/[\u0000-\u001f\u007f]/.test(name)
+
+/**
+ * A path a page names, as a tree path: relative to the page like a URL, `/`
+ * from the tree's root, and `~` standing for the viewer's email. A folder
+ * keeps its trailing slash. Null when it leaves the tree, names nothing, or
+ * holds `~` with no email.
+ */
+export const resolvePath = (
+  pagePath: string,
+  input: string,
+  email: string | null,
+): string | null => {
+  if (input.includes('~') && email === null) return null
+  const page = treePath(pagePath)
+  const folder = input.startsWith('/')
+    ? []
+    : page.includes('/')
+      ? page.slice(0, page.lastIndexOf('/')).split('/')
+      : []
+  const parts = input.split('/')
+  const isFolder =
+    input === '' ||
+    input.endsWith('/') ||
+    parts[parts.length - 1] === '.' ||
+    parts[parts.length - 1] === '..'
+  const out = [...folder]
+  for (const raw of parts) {
+    const part = raw.replaceAll('~', email ?? '')
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (out.length === 0) return null
+      out.pop()
+      continue
+    }
+    if (!isSegmentName(part)) return null
+    out.push(part)
+  }
+  if (out.length === 0) return isFolder ? '' : null
+  return isFolder ? `${out.join('/')}/` : out.join('/')
+}
+
+/** The Doc shape page code sees. */
+export interface Doc<T = Json> {
+  /** Relative to the page, like a URL: 'answers/sara@acme.com.json'. */
+  readonly path: string
+  readonly data: T
+  /**
+   * The writer's email for data; for an authored file the pusher's email to
+   * members of the tree's workspace and to the pusher, else the pusher's name.
+   */
+  readonly by: string
+  /** ISO 8601. */
+  readonly at: string
+  /** The push the writer saw (data), or that wrote it (authored). */
+  readonly push: number
+}
+
+/** A tree path as a path relative to the page: 'board.json' → '../board.json'. */
+export const relativeToPage = (pagePath: string, path: string): string => {
+  const from = treePath(pagePath).split('/').slice(0, -1)
+  const to = treePath(path).split('/')
+  let common = 0
+  while (
+    common < from.length &&
+    common < to.length - 1 &&
+    from[common] === to[common]
+  ) {
+    common += 1
+  }
+  const up = from.length - common
+  return `${'../'.repeat(up)}${to.slice(common).join('/')}`
+}
+
+/** The one conversion from the wire to what page code sees. */
+export const docFromWire = <T = Json>(
+  wire: DocWire,
+  pagePath: string,
+): Doc<T> => ({
+  path: relativeToPage(pagePath, wire.path),
+  data: wire.data as T,
+  by: wire.by,
+  at: wire.at,
+  push: wire.push,
+})
 
 export const BRIDGE_VERSION = 1 as const
 /** The prefix of the boot data the shell puts in a top page's window.name. */
@@ -78,12 +245,18 @@ export interface PageBootstrap {
   readonly kit: Readonly<Record<string, string>>
   /** The kit tags the composed page uses, which the client imports at once. */
   readonly used: readonly string[]
+  /** The forms Dossier manages, by their data-dossier-form number. */
+  readonly forms: readonly FormInfo[]
 }
 
 /** In a top page's window.name, after WINDOW_NAME_PREFIX. */
 export interface TopBoot {
   readonly v: 1
   readonly me: Me | null
+  /** This viewer's drafts on this page, by formKey. */
+  readonly drafts: Readonly<Record<string, DraftValues>>
+  /** The formKeys whose pending send the shell is replaying. */
+  readonly resume: readonly string[]
 }
 
 /** Page client → window.top, with exactly one transferred MessagePort. */
@@ -97,11 +270,40 @@ export interface Hello {
   readonly nested: boolean
 }
 
-export type ShellToPage = {
-  readonly type: 'welcome'
-  readonly v: 1
-  readonly me: Me | null
-}
+export type ShellToPage =
+  | {
+      readonly type: 'welcome'
+      readonly v: 1
+      readonly me: Me | null
+      readonly drafts: Readonly<Record<string, DraftValues>>
+      readonly resume: readonly string[]
+    }
+  /** The answer to a request, by its id. */
+  | {
+      readonly type: 'result'
+      readonly id: number
+      readonly ok: true
+      readonly value: unknown
+    }
+  | {
+      readonly type: 'result'
+      readonly id: number
+      readonly ok: false
+      readonly error: ErrorFields
+    }
+  /** The answer to a pending send the shell replayed, by formKey. */
+  | {
+      readonly type: 'resumed'
+      readonly form: string
+      readonly ok: true
+      readonly value: unknown
+    }
+  | {
+      readonly type: 'resumed'
+      readonly form: string
+      readonly ok: false
+      readonly error: ErrorFields
+    }
 
 export type PageToShell =
   | {
@@ -114,6 +316,32 @@ export type PageToShell =
   | { readonly type: 'open'; readonly path: string; readonly hash: string }
   /** Anything else, opened at the top. */
   | { readonly type: 'navigate'; readonly href: string }
+  /** A path the page names, as resolvePath reads it. */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'read'
+      readonly path: string
+    }
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'send'
+      readonly send: SendRequest
+    }
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'withdraw'
+      readonly path: string
+      readonly opId: string
+    }
+  /** A form's unsent values, or null once there are none. */
+  | {
+      readonly type: 'draft'
+      readonly form: string
+      readonly values: DraftValues | null
+    }
 
 const isRecord = (data: unknown): data is Record<string, unknown> =>
   typeof data === 'object' && data !== null && !Array.isArray(data)
@@ -136,11 +364,85 @@ export const isHello = (data: unknown): data is Hello =>
   isString(data.path) &&
   typeof data.nested === 'boolean'
 
-export const isShellToPage = (data: unknown): data is ShellToPage =>
-  isRecord(data) &&
-  data.type === 'welcome' &&
-  data.v === BRIDGE_VERSION &&
-  (data.me === null || isMe(data.me))
+const isStringList = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every(isString)
+
+const isDraftValues = (value: unknown): value is DraftValues =>
+  isRecord(value) &&
+  Object.values(value).every((v) => isString(v) || isStringList(v))
+
+const isDrafts = (
+  value: unknown,
+): value is Readonly<Record<string, DraftValues>> =>
+  isRecord(value) && Object.values(value).every(isDraftValues)
+
+const isErrorFields = (value: unknown): value is ErrorFields =>
+  isRecord(value) &&
+  isErrorCode(value.code) &&
+  isString(value.message) &&
+  (value.fix === null || isString(value.fix)) &&
+  (value.path === null || isString(value.path))
+
+/** An answer's outcome: a value, or the error fields. */
+const isOutcome = (data: Record<string, unknown>): boolean =>
+  data.ok === true
+    ? 'value' in data
+    : data.ok === false && isErrorFields(data.error)
+
+export const isShellToPage = (data: unknown): data is ShellToPage => {
+  if (!isRecord(data)) return false
+  switch (data.type) {
+    case 'welcome':
+      return (
+        data.v === BRIDGE_VERSION &&
+        (data.me === null || isMe(data.me)) &&
+        isDrafts(data.drafts) &&
+        isStringList(data.resume)
+      )
+    case 'result':
+      return Number.isInteger(data.id) && isOutcome(data)
+    case 'resumed':
+      return isString(data.form) && isOutcome(data)
+    default:
+      return false
+  }
+}
+
+const isFormRef = (value: unknown): value is FormRef =>
+  isRecord(value) &&
+  isString(value.host) &&
+  isString(value.target) &&
+  (value.id === null || isString(value.id))
+
+const isUploadRef = (value: unknown): value is UploadRef =>
+  isRecord(value) &&
+  isString(value.file) &&
+  isString(value.name) &&
+  typeof value.size === 'number' &&
+  isString(value.type)
+
+const isSendValue = (value: unknown): value is SendValue =>
+  isString(value) ||
+  isUploadRef(value) ||
+  (typeof File !== 'undefined' && value instanceof File)
+
+export const isSendRequest = (value: unknown): value is SendRequest =>
+  isRecord(value) &&
+  isFormRef(value.form) &&
+  Number.isInteger(value.seq) &&
+  Array.isArray(value.entries) &&
+  value.entries.every(
+    (entry: unknown) =>
+      Array.isArray(entry) &&
+      entry.length === 2 &&
+      isString(entry[0]) &&
+      isSendValue(entry[1]),
+  ) &&
+  (value.submitter === null ||
+    (isRecord(value.submitter) &&
+      isString(value.submitter.name) &&
+      isString(value.submitter.value))) &&
+  isString(value.opId)
 
 export const isPageToShell = (data: unknown): data is PageToShell => {
   if (!isRecord(data)) return false
@@ -151,6 +453,23 @@ export const isPageToShell = (data: unknown): data is PageToShell => {
       return isString(data.path) && isString(data.hash)
     case 'navigate':
       return isString(data.href)
+    case 'request':
+      if (!Number.isInteger(data.id)) return false
+      switch (data.op) {
+        case 'read':
+          return isString(data.path)
+        case 'send':
+          return isSendRequest(data.send)
+        case 'withdraw':
+          return isString(data.path) && isString(data.opId)
+        default:
+          return false
+      }
+    case 'draft':
+      return (
+        isString(data.form) &&
+        (data.values === null || isDraftValues(data.values))
+      )
     default:
       return false
   }
@@ -163,7 +482,12 @@ export const readTopBoot = (name: string): TopBoot | null => {
     const value: unknown = JSON.parse(name.slice(WINDOW_NAME_PREFIX.length))
     if (!isRecord(value) || value.v !== BRIDGE_VERSION) return null
     if (value.me !== null && !isMe(value.me)) return null
-    return { v: 1, me: value.me }
+    return {
+      v: 1,
+      me: value.me,
+      drafts: isDrafts(value.drafts) ? value.drafts : {},
+      resume: isStringList(value.resume) ? value.resume : [],
+    }
   } catch {
     return null
   }

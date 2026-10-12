@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(7)
+    expect(page.v).toBe(8)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })
@@ -384,7 +384,10 @@ describe('forms', () => {
   const text = slicer(source)
 
   it('summarises each form in order', () => {
-    expect(page.forms.map(({ range: _range, ...form }) => form)).toEqual([
+    const summaries = page.forms.map(
+      ({ range: _range, fields: _fields, ...form }) => form,
+    )
+    expect(summaries).toEqual([
       {
         line: 2,
         id: 'main',
@@ -393,6 +396,7 @@ describe('forms', () => {
         entries: 'one',
         closes: null,
         closed: false,
+        title: null,
       },
       {
         line: 5,
@@ -402,6 +406,7 @@ describe('forms', () => {
         entries: 'many',
         closes: '2026-10-20T18:00+03:00',
         closed: false,
+        title: null,
       },
       {
         line: 8,
@@ -411,6 +416,7 @@ describe('forms', () => {
         entries: 'one',
         closes: null,
         closed: true,
+        title: null,
       },
       {
         line: 11,
@@ -420,8 +426,19 @@ describe('forms', () => {
         entries: 'one',
         closes: null,
         closed: false,
+        title: null,
       },
     ])
+  })
+
+  it('lists each form’s named fields', () => {
+    expect(page.forms.map((form) => form.fields.map((f) => f.name))).toEqual([
+      ['choice'],
+      [],
+      [],
+      [],
+    ])
+    expect(page.forms[0]?.fields[0]?.type).toBe('text')
   })
 
   it('covers each whole form', () => {

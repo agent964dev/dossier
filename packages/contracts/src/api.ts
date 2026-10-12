@@ -11,6 +11,8 @@ import {
   AgentKeyId,
   AgentKeySecret,
   AuthoredSeq,
+  NodeId,
+  OpId,
   PushId,
   PushNumber,
   Sha256,
@@ -237,6 +239,8 @@ export const ViewGrantSchema = Schema.Struct({
   /** The tree's authored sequence the frame opens. */
   seq: AuthoredSeq,
   role: Schema.Literal('read', 'respond', 'write'),
+  /** The tree path of the page or file the frame opens. */
+  path: Schema.String,
 })
 export type ViewGrant = typeof ViewGrantSchema.Type
 
@@ -356,6 +360,116 @@ export class ReadGroup extends HttpApiGroup.make('read')
       .addSuccess(ReadResult),
   ) {}
 
+export const FormRefSchema = Schema.Struct({
+  /** The page or a layout of its composition at the send's sequence. */
+  host: NodeId,
+  /** As the server derived it; a target that differs is form_changed. */
+  target: Schema.String,
+  id: Schema.NullOr(Schema.String),
+})
+
+export const UploadRefSchema = Schema.Struct({
+  /** Relative to the writer's own folder in the target: 'files/cv.pdf'. */
+  file: Schema.String,
+  name: Schema.String,
+  size: Schema.Int.pipe(Schema.nonNegative()),
+  type: Schema.String,
+})
+
+export const SendPayload = Schema.Struct({
+  tree: TreeId,
+  /** The page's tree path: 'questions/index.html'. */
+  page: Schema.String,
+  /** The tree's sequence the page was served at. */
+  seq: AuthoredSeq,
+  form: FormRefSchema,
+  entries: Schema.Array(
+    Schema.Tuple(Schema.String, Schema.Union(Schema.String, UploadRefSchema)),
+  ),
+  submitter: Schema.NullOr(
+    Schema.Struct({ name: Schema.String, value: Schema.String }),
+  ),
+  /** One of the caller's entries to revise; plain forms send null. */
+  entry: Schema.NullOr(Schema.String),
+  opId: OpId,
+})
+export type SendPayload = typeof SendPayload.Type
+
+/** doc null: the answer was withdrawn since. */
+export const SendResult = Schema.Struct({
+  doc: Schema.NullOr(DocWire),
+  replayed: Schema.Boolean,
+})
+export type SendResult = typeof SendResult.Type
+
+export const UploadParams = Schema.Struct({
+  tree: TreeId,
+  page: Schema.String,
+  seq: Schema.NumberFromString,
+  host: Schema.optional(NodeId),
+  target: Schema.optional(Schema.String),
+  id: Schema.optional(Schema.String),
+  /** The file field's name. */
+  field: Schema.optional(Schema.String),
+  name: Schema.String,
+  type: Schema.String,
+  size: Schema.NumberFromString,
+  sha256: Sha256,
+  opId: OpId,
+})
+export type UploadParams = typeof UploadParams.Type
+
+export const UploadResult = Schema.Struct({
+  /** The tree path of the stored file. */
+  path: Schema.String,
+  ...UploadRefSchema.fields,
+})
+export type UploadResult = typeof UploadResult.Type
+
+export const DataReadResult = Schema.Union(
+  /** A file; missing and unreadable are both null. */
+  Schema.Struct({ file: Schema.NullOr(DocWire) }),
+  /** A folder: every readable data file below it. */
+  Schema.Struct({ files: Schema.Array(DocWire) }),
+)
+export type DataReadResult = typeof DataReadResult.Type
+
+export const WithdrawPayload = Schema.Struct({
+  tree: TreeId,
+  /** The data file's tree path. */
+  path: Schema.String,
+  opId: OpId,
+})
+
+export class DataGroup extends HttpApiGroup.make('data')
+  // invalid | closed | form_changed | forbidden | not_found |
+  // sign_in_required | too_large | not_mergeable | rate_limited
+  .add(
+    HttpApiEndpoint.post('send', '/data/send')
+      .setPayload(SendPayload)
+      .addSuccess(SendResult),
+  )
+  // The body is the file's bytes, at most the upload limit. invalid | closed
+  // | form_changed | forbidden | not_found | sign_in_required | too_large |
+  // rate_limited | blob_reclaiming
+  .add(
+    HttpApiEndpoint.put('upload', '/data/upload')
+      .setUrlParams(UploadParams)
+      .addSuccess(UploadResult, { status: 201 }),
+  )
+  // not_found | forbidden | sign_in_required
+  .add(
+    HttpApiEndpoint.post('withdraw', '/data/withdraw')
+      .setPayload(WithdrawPayload)
+      .addSuccess(Schema.Void, { status: 204 }),
+  )
+  // Never not_found: missing and unreadable read as nothing.
+  .add(
+    HttpApiEndpoint.get('read', '/data/read')
+      .setUrlParams(Schema.Struct({ tree: TreeId, path: Schema.String }))
+      .addSuccess(DataReadResult),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -364,5 +478,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(FilesGroup)
   .add(ViewGroup)
   .add(ReadGroup)
+  .add(DataGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

@@ -8,7 +8,13 @@
 // page's folder, and the head rules drop repeated head items. A complete page
 // with no layout keeps all of its own bytes around those edits.
 
-import type { Attr, HeadItem, HtmlAnalysis, Range } from './analyze.ts'
+import type {
+  Attr,
+  FormSummary,
+  HeadItem,
+  HtmlAnalysis,
+  Range,
+} from './analyze.ts'
 import type { LibraryName } from './libraries.ts'
 import {
   isRelativeUrl,
@@ -19,7 +25,7 @@ import {
 } from './urls.ts'
 
 /** Bumped whenever composing changes what it makes of the same input. */
-export const COMPOSER_VERSION: number = 4
+export const COMPOSER_VERSION: number = 5
 
 export interface Source {
   readonly source: string
@@ -34,6 +40,16 @@ export interface Found {
   readonly tags: readonly string[]
   /** The base libraries the page and its layouts use, sorted, once each. */
   readonly libraries: readonly LibraryName[]
+  /**
+   * Every form the composed document holds, in its order: `n` is its
+   * data-dossier-form number, `source` its index in the chain (the layouts,
+   * outermost first, then the page).
+   */
+  readonly forms: readonly {
+    readonly n: number
+    readonly source: number
+    readonly form: FormSummary
+  }[]
 }
 
 export interface ComposeInput {
@@ -196,20 +212,43 @@ const asAttributeText = (url: string, quoted: boolean): string =>
   )
 
 /**
- * Every edit of one source: charset metas, dropped items, layout URLs, and
- * for a fragment inside a slot, what keeps it there.
+ * A character none of the sources hold, which marks where each form and the
+ * injected tags go until the composed document is known.
+ */
+const markOf = (chain: readonly Source[]): string => {
+  for (let code = 0xe000; code <= 0xf8ff; code++) {
+    const mark = String.fromCharCode(code)
+    if (chain.every((owner) => !owner.source.includes(mark))) return mark
+  }
+  throw new Error('Every private-use character appears in the sources.')
+}
+
+/** The attribute each form gets, holding its marker until it is numbered. */
+const formMarker = (mark: string, source: number, form: number): string =>
+  ` data-dossier-form="${mark}${source}.${form}${mark}"`
+
+/**
+ * Every edit of one source: charset metas, dropped items, layout URLs, each
+ * form's marker, and for a fragment inside a slot, what keeps it there.
  */
 const editsOf = (
   owner: Source,
   page: Source,
   role: { readonly isLayout: boolean; readonly sealed: boolean },
   dropped: readonly Range[],
+  marker: (form: number) => string,
 ): Edit[] => {
   const { analysis } = owner
   const edits: Edit[] = [
     ...analysis.charsetMetas.map((r) => ({ ...r, text: '' })),
     ...dropped.map((r) => ({ ...r, text: '' })),
   ]
+  analysis.forms.forEach((form, index) => {
+    const at = form.range.start + '<form'.length
+    if (owner.source.slice(form.range.start, at).toLowerCase() === '<form') {
+      edits.push({ start: at, end: at, text: marker(index) })
+    }
+  })
   if (role.sealed) {
     edits.push(...analysis.seal.edits)
     for (const close of analysis.seal.head) {
@@ -323,6 +362,7 @@ export const layoutsOf = <S extends { readonly analysis: HtmlAnalysis }>(
 export const compose = (input: ComposeInput): string => {
   const { page, layouts } = input
   const chain = [...layouts, page]
+  const mark = markOf(chain)
   const dropped = droppedItems(chain)
   // Every source below the outermost sits inside a slot.
   const edits = chain.map((owner, index) =>
@@ -331,13 +371,39 @@ export const compose = (input: ComposeInput): string => {
       page,
       { isLayout: index < chain.length - 1, sealed: index > 0 },
       dropped[index] ?? [],
+      (n) => formMarker(mark, index, n),
     ),
   )
   const sealOf = (index: number): string =>
     index > 0 ? (chain[index]?.analysis.seal.body ?? '') : ''
-  const inject =
-    CHARSET +
-    input.inject({ tags: tagsOf(chain), libraries: librariesOf(chain) })
+  const inject = `${mark}inject${mark}`
+
+  // Numbers the forms that made it into the document, in its order, then
+  // writes the injected tags with everything found.
+  const finish = (marked: string): string => {
+    const forms: Found['forms'][number][] = []
+    const markers = new RegExp(`${mark}(\\d+)\\.(\\d+)${mark}`, 'g')
+    const numbered = marked.replace(
+      markers,
+      (_, source: string, at: string) => {
+        const form = chain[Number(source)]?.analysis.forms[Number(at)]
+        if (form === undefined) throw new Error('A form marker names no form.')
+        forms.push({ n: forms.length, source: Number(source), form })
+        return String(forms.length - 1)
+      },
+    )
+    const where = numbered.indexOf(inject)
+    const tags =
+      CHARSET +
+      input.inject({
+        tags: tagsOf(chain),
+        libraries: librariesOf(chain),
+        forms,
+      })
+    return (
+      numbered.slice(0, where) + tags + numbered.slice(where + inject.length)
+    )
+  }
 
   if (layouts.length === 0) {
     if (!page.analysis.complete) {
@@ -345,10 +411,12 @@ export const compose = (input: ComposeInput): string => {
     }
     // A complete page alone keeps its own bytes around the edits.
     const at = headStart(page.analysis)
-    return applyEdits(page.source, 0, page.source.length, [
-      ...(edits[0] ?? []),
-      { start: at, end: at, text: inject },
-    ])
+    return finish(
+      applyEdits(page.source, 0, page.source.length, [
+        ...(edits[0] ?? []),
+        { start: at, end: at, text: inject },
+      ]),
+    )
   }
 
   const outer = layouts[0]!
@@ -392,9 +460,9 @@ export const compose = (input: ComposeInput): string => {
         )
   const htmlAttrs = mergeAttrs(chain.map((s) => s.analysis.html.attrs))
   const bodyAttrs = mergeAttrs(chain.map((s) => s.analysis.body.attrs))
-  return (
+  return finish(
     `${doctype}<html${htmlAttrs}><head>${inject}${head}</head>` +
-    `<body${bodyAttrs}>${body}</body></html>`
+      `<body${bodyAttrs}>${body}</body></html>`,
   )
 }
 

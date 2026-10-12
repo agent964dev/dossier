@@ -13,6 +13,10 @@ export interface LimitValues {
   readonly pushesPerMinute: number
   /** Per person. */
   readonly sendsPerMinute: number
+  /** One file uploaded through a form. */
+  readonly uploadBytes: number
+  /** One data file written by a form or the page client. */
+  readonly dataFileBytes: number
 }
 
 const MiB = 1024 * 1024
@@ -23,6 +27,8 @@ export const DEFAULT_LIMITS: LimitValues = {
   pushBytes: 500 * MiB,
   pushesPerMinute: 30,
   sendsPerMinute: 30,
+  uploadBytes: 10 * MiB,
+  dataFileBytes: 1 * MiB,
 }
 
 export type Rate = 'push' | 'send'

@@ -12,6 +12,7 @@ const TITLES = [
   'Components',
   'Base layer',
   'Embedding',
+  'Forms',
   'Agent versions',
   'Reading',
 ]

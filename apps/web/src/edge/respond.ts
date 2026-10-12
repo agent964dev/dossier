@@ -372,7 +372,14 @@ export const frameResponse = (served: Served): Response => {
       const headers = contentHeaders(cache)
       headers.set('content-type', served.contentType)
       headers.set('etag', `"${served.etag}"`)
-      if (served.download) headers.set('content-disposition', 'attachment')
+      if (served.download) {
+        headers.set(
+          'content-disposition',
+          !('filename' in served) || served.filename === undefined
+            ? 'attachment'
+            : `attachment; filename*=UTF-8''${encodeURIComponent(served.filename)}`,
+        )
+      }
       if (served.range === null) {
         headers.set('content-length', String(served.size))
         return new Response(served.body, { status: 200, headers })

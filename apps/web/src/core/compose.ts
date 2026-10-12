@@ -5,6 +5,7 @@ import { Access, AccessLive } from './access.ts'
 import { BaseLayer, BaseLayerLive } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { Config, ConfigLive } from './config.ts'
+import { Data, DataLive } from './data.ts'
 import { Files, FilesLive } from './files.ts'
 import { Limits, LimitsLive } from './limits.ts'
 import { PageCache, PageCacheLive } from './page-cache.ts'
@@ -29,6 +30,7 @@ export type CoreServices =
   | Pages
   | BaseLayer
   | PageCache
+  | Data
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -58,6 +60,7 @@ export const makeLayer = (
     PushLive,
     PeopleLive,
     PagesLive.pipe(Layer.provideMerge(FilesLive)),
+    DataLive,
   ).pipe(Layer.provideMerge(auth))
 }
 

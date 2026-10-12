@@ -656,7 +656,78 @@ export const changeGuards = sqliteTable(
     check('change_guard_basis', sql`${t.reason} <> 'basis' or ${t.ok} = 1`),
     check('change_guard_blob', sql`${t.reason} <> 'blob' or ${t.ok} = 1`),
     check('change_guard_state', sql`${t.reason} <> 'state' or ${t.ok} = 1`),
+    check(
+      'change_guard_mergeable',
+      sql`${t.reason} <> 'mergeable' or ${t.ok} = 1`,
+    ),
+    check('change_guard_size', sql`${t.reason} <> 'size' or ${t.ok} = 1`),
   ],
+)
+
+// Forms.
+
+/**
+ * A form's rules, stored by the version of the page or layout that holds
+ * it, so a send is checked against the form as the person saw it.
+ */
+export const forms = sqliteTable(
+  'forms',
+  {
+    /** The page or layout version. */
+    hostVersionId: text('host_version_id')
+      .notNull()
+      .references(() => nodeVersions.id),
+    hostNodeId: text('host_node_id')
+      .notNull()
+      .references(() => nodes.id),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** A tree path: 'answers/' for a folder, 'decisions.json' for a file. */
+    targetPath: text('target_path').notNull(),
+    /** The form's id, or '' when it has none. */
+    formKey: text('form_key').notNull(),
+    kind: text('kind').notNull(),
+    /** From data-closes, epoch ms. */
+    closesAt: integer('closes_at'),
+    /** data-closed. */
+    closed: integer('closed', { mode: 'boolean' }).notNull(),
+    line: integer('line').notNull(),
+    /** The legend of its first fieldset, or its aria-label. */
+    title: text('title'),
+    /** FormSchema as JSON. */
+    schemaJson: text('schema_json').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.hostVersionId, t.targetPath, t.formKey] }),
+    index('forms_tree_target_idx').on(t.treeId, t.targetPath),
+    index('forms_host_node_idx').on(t.hostNodeId),
+    check(
+      'forms_kind_check',
+      sql`${t.kind} in ('person', 'entries', 'shared')`,
+    ),
+  ],
+)
+
+/** A push's forms, staged before the commit writes them set-wise. */
+export const pushForms = sqliteTable(
+  'push_forms',
+  {
+    pushId: text('push_id')
+      .notNull()
+      .references(() => pushes.id, { onDelete: 'cascade' }),
+    /** The page or layout inside the tree. */
+    path: text('path').notNull(),
+    targetPath: text('target_path').notNull(),
+    formKey: text('form_key').notNull(),
+    kind: text('kind').notNull(),
+    closesAt: integer('closes_at'),
+    closed: integer('closed', { mode: 'boolean' }).notNull(),
+    line: integer('line').notNull(),
+    title: text('title'),
+    schemaJson: text('schema_json').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.pushId, t.path, t.targetPath, t.formKey] })],
 )
 
 // Viewing pages.

@@ -15,6 +15,7 @@ import {
   type ViewGrant,
 } from '@dossier/contracts'
 import type {
+  FormInfo,
   PageBootstrap,
   RoleName,
   ShellBoot,
@@ -22,10 +23,14 @@ import type {
 import {
   ANALYZER_VERSION,
   bootstrapTags,
+  closesAt,
   compose,
   COMPOSER_VERSION,
+  formKind,
   layoutsOf,
   relativeFrom,
+  resolveFormAction,
+  type Found,
   type HtmlAnalysis,
   type Source,
 } from '@dossier/html'
@@ -79,6 +84,8 @@ export type Served =
         readonly length: number
       } | null
       readonly download: boolean
+      /** The name a download is saved as. */
+      readonly filename?: string
       readonly cache: 'pinned' | 'private'
     }
   | { readonly kind: 'notModified'; readonly etag: string }
@@ -173,13 +180,17 @@ const MAX_LOADED = 200
 /** How often a view reads again when another one changed the handle. */
 const ISSUE_ATTEMPTS = 4
 
-/** Whether these roles read the node: respond reads authored files only. */
+/**
+ * Whether these roles read the node: respond reads authored files only, and
+ * people's data is read through private grants or by its writer.
+ */
 const readsWith = (
   roles: RoleSet,
   node: { readonly origin: string },
 ): boolean =>
-  roles.caps.has('read') ||
-  (roles.caps.has('read-authored') && node.origin === 'authored')
+  node.origin === 'data'
+    ? roles.privateCaps.has('read') || roles.owns
+    : roles.caps.has('read') || roles.caps.has('read-authored')
 
 /**
  * A denial names only the path that was asked, never the node it resolved
@@ -302,6 +313,35 @@ export const parseRange = (
 
 const folderOf = (path: string): string =>
   path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+
+/**
+ * The forms Dossier manages in a composed page, alike for every viewer: each
+ * form of the page or a tree layout with a target, by its number.
+ */
+const formsOf = (
+  found: Found['forms'],
+  chain: readonly Source[],
+  hosts: ReadonlyMap<Source, NodeRow>,
+): FormInfo[] =>
+  found.flatMap(({ n, source, form }) => {
+    const owner = chain[source]
+    const host = owner === undefined ? undefined : hosts.get(owner)
+    if (host === undefined || form.action === null) return []
+    const target = resolveFormAction(host.path, form.action)
+    if ('problem' in target) return []
+    const closes = form.closes === null ? null : closesAt(form.closes)
+    return [
+      {
+        n,
+        host: host.id,
+        target: target.kind === 'folder' ? `${target.target}/` : target.target,
+        id: form.id,
+        kind: formKind(form, target),
+        closesAt: closes === null ? null : new Date(closes).toISOString(),
+        closed: form.closed,
+      },
+    ]
+  })
 
 export const PagesLive: Layer.Layer<
   Pages,
@@ -802,6 +842,7 @@ export const PagesLive: Layer.Layer<
               expiresAt: new Date(h.expiresAt).toISOString(),
               seq,
               role: highest(roles),
+              path: resolved.node.path,
             } satisfies ViewGrant
           }
           console.error('The tree kept moving while a view was issued', {
@@ -820,14 +861,33 @@ export const PagesLive: Layer.Layer<
               .first<{ number: number | null }>(),
           ).pipe(Effect.map((row) => row?.number ?? 0))
 
-    /** A file's bytes at a pinned sequence, with ranges and ETags. */
+    /**
+     * A file's bytes at a pinned sequence, with ranges and ETags. People's
+     * data is never shown as a page: a JSON value is answered as JSON, and an
+     * upload only as a download.
+     */
     const serveFile = (
       path: string,
       version: VersionRow,
       i: { readonly range: string | null; readonly ifNoneMatch: string | null },
+      node?: NodeRow,
     ) =>
       Effect.gen(function* () {
         const sha = version.blobSha256
+        const data = node?.origin === 'data'
+        if (data && sha === null && version.jsonValue !== null) {
+          const bytes = new TextEncoder().encode(version.jsonValue)
+          return {
+            kind: 'file',
+            body: new Response(bytes).body!,
+            size: bytes.length,
+            etag: `v-${version.id}`,
+            contentType: 'application/json',
+            range: null,
+            download: false,
+            cache: 'private',
+          } satisfies Served
+        }
         if (sha === null) return yield* Effect.fail(notFound(path))
         if (etagMatches(i.ifNoneMatch, sha)) {
           return { kind: 'notModified', etag: sha } satisfies Served
@@ -854,10 +914,13 @@ export const PagesLive: Layer.Layer<
           body: object.body,
           size,
           etag: sha,
-          contentType: version.contentType ?? 'application/octet-stream',
+          contentType: data
+            ? 'application/octet-stream'
+            : (version.contentType ?? 'application/octet-stream'),
           range,
-          download: false,
-          cache: 'pinned',
+          download: data,
+          ...(data && node !== undefined ? { filename: node.name } : {}),
+          cache: data ? 'private' : 'pinned',
         } satisfies Served
       })
 
@@ -985,12 +1048,16 @@ export const PagesLive: Layer.Layer<
           folder,
         }
         const tree: Source[] = []
+        /** Each source's page or layout node, for its forms. */
+        const hosts = new Map<Source, NodeRow>([[page, i.node]])
         for (const link of i.chain) {
-          tree.push({
+          const layout: Source = {
             source: yield* textOf(i.node.path, link.version),
             analysis: link.analysis,
             folder: link.folder,
-          })
+          }
+          tree.push(layout)
+          hosts.set(layout, link.node)
         }
         const layouts = page.analysis.complete
           ? []
@@ -1008,10 +1075,11 @@ export const PagesLive: Layer.Layer<
               : base.url(found.path)
         }
         const push = yield* pushNumberOf(i.version)
+        const chain = [...layouts, page]
         const html = compose({
           page,
           layouts,
-          inject: ({ tags, libraries }) => {
+          inject: ({ tags, libraries, forms }) => {
             const used = tags.filter((tag) => Object.hasOwn(urls, tag))
             const bootstrap: PageBootstrap = {
               v: 1,
@@ -1024,6 +1092,7 @@ export const PagesLive: Layer.Layer<
               base: base.version,
               kit: urls,
               used,
+              forms: formsOf(forms, chain, hosts),
             }
             // The components the page uses, then each library it uses, which
             // the page client imports once it finds the library's markup.
@@ -1221,7 +1290,7 @@ export const PagesLive: Layer.Layer<
           } satisfies Served
         }
         if (target.kind === 'file') {
-          return yield* serveFile(i.path, target.version, i)
+          return yield* serveFile(i.path, target.version, i, target.node)
         }
         const analysis = parts.analysis!
         const chain = parts.chain

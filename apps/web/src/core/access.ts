@@ -58,6 +58,12 @@ export type Basis =
    * node's `_` part starts. Never a basis for a change.
    */
   | { readonly kind: 'reach'; readonly from: string }
+  /** The writer of a data node, who may always read and withdraw it. */
+  | {
+      readonly kind: 'owner'
+      readonly nodeId: NodeId
+      readonly userId: PersonId
+    }
 
 export type Capability = 'read' | 'read-authored' | 'respond' | 'write'
 
@@ -81,9 +87,14 @@ export interface RoleSet {
   readonly roles: ReadonlySet<Role>
   /** What every grant together allows; actions are checked against these. */
   readonly caps: ReadonlySet<Capability>
-  /** The same from grants that are not public; data rules read these. */
+  /**
+   * What reaches people's data: grants that are not public, and public ones
+   * that sit on a data node (a data folder made public itself).
+   */
   readonly privateCaps: ReadonlySet<Capability>
   readonly basis: readonly Basis[]
+  /** The caller wrote this data node: it is theirs to read and withdraw. */
+  readonly owns: boolean
 }
 
 declare const granted: unique symbol
@@ -160,10 +171,11 @@ const allows = (action: Action, roles: RoleSet): boolean => {
     case 'read':
       return roles.caps.has('read') || roles.caps.has('read-authored')
     case 'read-data':
-      return roles.privateCaps.has('read')
+      return roles.privateCaps.has('read') || roles.owns
+    case 'withdraw-own':
+      return roles.owns
     case 'respond':
     case 'comment':
-    case 'withdraw-own':
       return roles.caps.has('respond')
     case 'write':
     case 'share':
@@ -173,40 +185,49 @@ const allows = (action: Action, roles: RoleSet): boolean => {
   }
 }
 
-/** The bases that give an action, kept on the Granted for the commit guard. */
-const basisFor = (action: Action, roles: RoleSet): readonly Basis[] => {
-  const gives = (basis: Basis): Role =>
-    basis.kind === 'share'
-      ? basis.role
-      : basis.kind === 'admin'
-        ? 'write'
-        : 'read'
+interface Grant {
+  readonly basis: Basis
+  readonly role: Role
+  /** The share sits on a data node. */
+  readonly onData: boolean
+}
+
+/**
+ * The bases that give an action, kept on the Granted for the commit guard.
+ * The owner's own basis stands for what only ownership gives.
+ */
+const basisFor = (
+  action: Action,
+  roles: RoleSet,
+  grants: readonly Grant[],
+  owner: Basis | null,
+): readonly Basis[] => {
+  if (action === 'withdraw-own') return owner === null ? [] : [owner]
   // Reach is never part of a role set; it is granted beside one.
-  return roles.basis.filter((basis) =>
-    allows(action, roleSetOf([{ basis, role: gives(basis) }])),
-  )
+  const shared = grants
+    .filter((g) => allows(action, roleSetOf([g], false)))
+    .map((g) => g.basis)
+  return owner !== null &&
+    (action === 'read' || action === 'read-data') &&
+    roles.owns
+    ? [...shared, owner]
+    : shared
 }
 
-const EMPTY: RoleSet = {
-  roles: new Set(),
-  caps: new Set(),
-  privateCaps: new Set(),
-  basis: [],
-}
-
-const roleSetOf = (
-  grants: readonly { readonly basis: Basis; readonly role: Role }[],
-): RoleSet => ({
+const roleSetOf = (grants: readonly Grant[], owns: boolean): RoleSet => ({
   roles: new Set(grants.map((g) => g.role)),
   caps: capabilitiesOf(grants.map((g) => g.role)),
   privateCaps: capabilitiesOf(
     grants
       .filter(
-        (g) => !(g.basis.kind === 'share' && g.basis.targetKind === 'anyone'),
+        (g) =>
+          g.onData ||
+          !(g.basis.kind === 'share' && g.basis.targetKind === 'anyone'),
       )
       .map((g) => g.role),
   ),
   basis: grants.map((g) => g.basis),
+  owns,
 })
 
 const signInRequired = (path: string | null) =>
@@ -267,17 +288,21 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           .first<TreeFacts>(),
       )
 
-    /** The caller's roles on a node, counting only grants at or below order `asOf`. */
-    const roleAt = (node: NodeRow, asOf: number | null) =>
+    /**
+     * The caller's grants on a node, counting only grants at or below order
+     * `asOf`, and whether they own it.
+     */
+    const grantsOn = (node: NodeRow, asOf: number | null = null) =>
       Effect.gen(function* () {
+        const none = { grants: [] as Grant[], owns: false }
         const caller = yield* CurrentCaller
-        if (caller.via.kind === 'system') return EMPTY
+        if (caller.via.kind === 'system') return none
         // A view handle reaches only the tree whose content host it serves.
         if (caller.via.kind === 'handle' && caller.via.treeId !== node.treeId) {
-          return EMPTY
+          return none
         }
         const facts = yield* treeFacts(caller, node.treeId, asOf)
-        if (facts === null) return EMPTY
+        if (facts === null) return none
         const paths = ancestorPaths(node.path)
         const ancestors = yield* query(() =>
           DB.prepare(
@@ -293,7 +318,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           caller.via.scope !== null &&
           !ids.includes(caller.via.scope)
         ) {
-          return EMPTY
+          return none
         }
         const email = caller.person?.email.toLowerCase() ?? null
         const shares =
@@ -301,9 +326,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             ? []
             : (yield* query(() =>
                 DB.prepare(
-                  `select id, target_kind as targetKind, target, role from shares
-                   where node_id in (${ids.map(() => '?').join(', ')})
-                     and (? is null or grant_order <= ?)`,
+                  `select s.id, s.target_kind as targetKind, s.target, s.role,
+                     n.origin = 'data' as onData
+                   from shares s join nodes n on n.id = s.node_id
+                   where s.node_id in (${ids.map(() => '?').join(', ')})
+                     and (? is null or s.grant_order <= ?)`,
                 )
                   .bind(...ids, asOf, asOf)
                   .all<{
@@ -311,9 +338,10 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                     targetKind: 'email' | 'team' | 'workspace' | 'anyone'
                     target: string
                     role: Role
+                    onData: number
                   }>(),
               )).results
-        const grants: { basis: Basis; role: Role }[] = []
+        const grants: Grant[] = []
         for (const share of shares) {
           const matches =
             share.targetKind === 'anyone' ||
@@ -324,6 +352,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           if (!matches) continue
           grants.push({
             role: share.role,
+            onData: share.onData === 1,
             basis: {
               kind: 'share',
               shareId: share.id,
@@ -335,6 +364,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         if (facts.memberRole === 'admin' && caller.person !== null) {
           grants.push({
             role: 'write',
+            onData: false,
             basis: {
               kind: 'admin',
               workspaceId: facts.workspaceId,
@@ -342,8 +372,20 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             },
           })
         }
-        return roleSetOf(grants)
+        // Whatever their role, people may read and withdraw what they wrote.
+        const owns =
+          caller.person !== null &&
+          node.origin === 'data' &&
+          node.deletedAt === null &&
+          node.ownerId === caller.person.id
+        return { grants, owns }
       })
+
+    /** The caller's roles on a node, counting only grants made by `asOf`. */
+    const roleAt = (node: NodeRow, asOf: number | null) =>
+      Effect.map(grantsOn(node, asOf), ({ grants, owns }) =>
+        roleSetOf(grants, owns),
+      )
 
     const roleOn = (node: NodeRow) => roleAt(node, null)
 
@@ -354,11 +396,19 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (isMissing(node)) return yield* denied(caller, node.path)
-        const roles = yield* roleOn(node)
-        const reads =
-          roles.caps.has('read') ||
-          (roles.caps.has('read-authored') && node.origin === 'authored')
-        if (!reads) {
+        const { grants, owns } = yield* grantsOn(node)
+        const roles = roleSetOf(grants, owns)
+        const data = node.origin === 'data'
+        // People's data is read through private grants, a public data
+        // folder, or ownership; authored files through any grant.
+        const reads = data
+          ? roles.privateCaps.has('read') || owns
+          : roles.caps.has('read') || roles.caps.has('read-authored')
+        // Answering into a shared file needs respond, not read: the form
+        // that targets it already says it is there.
+        const answers =
+          action === 'respond' && data && roles.caps.has('respond')
+        if (!reads && !answers) {
           // A `_` file is read through any node it is reached from.
           const reach = action === 'read' ? yield* reached(node) : null
           if (reach === null) return yield* denied(caller, node.path)
@@ -378,14 +428,18 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             ),
           )
         }
-        if (!allows(action, roles)) {
+        if (action !== 'read' && !allows(action, roles)) {
           return yield* Effect.fail(
             dossierError('forbidden', undefined, null, node.path),
           )
         }
+        const owner: Basis | null =
+          owns && caller.person !== null
+            ? { kind: 'owner', nodeId: node.id, userId: caller.person.id }
+            : null
         return {
           ...node,
-          basis: basisFor(action, roles),
+          basis: basisFor(action, roles, grants, owner),
         } as unknown as Granted<A>
       })
 
@@ -434,8 +488,37 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                 or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1))
               and ${asOf === null ? sql`1` : sql`s.grant_order <= ${asOf}`}
               and ${underColumn(column('path'), sql`a.path`)}
-              and (s.role <> 'respond' or ${column('origin')} = 'authored'))`
+              and (s.role <> 'respond' or ${column('origin')} = 'authored')
+              and (s.target_kind <> 'anyone' or ${column('origin')} = 'authored'
+                or a.origin = 'data'))`
         }
+      })
+
+    /** The data nodes the caller wrote, within what its key reaches. */
+    const ownedWhere = (treeId: TreeId) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const person = caller.person
+        if (
+          person === null ||
+          caller.via.kind === 'system' ||
+          (caller.via.kind === 'handle' && caller.via.treeId !== treeId)
+        ) {
+          return null
+        }
+        let scope = sql`1`
+        if (caller.via.kind === 'agent' && caller.via.scope !== null) {
+          const scopeNode = yield* query(() =>
+            DB.prepare(
+              'select path from nodes where id = ? and tree_id = ? and deleted_at is null',
+            )
+              .bind(caller.via.kind === 'agent' ? caller.via.scope : '', treeId)
+              .first<{ path: string }>(),
+          )
+          if (scopeNode === null) return null
+          scope = underColumn(sql`${nodes.path}`, sql`${scopeNode.path}`)
+        }
+        return sql`${nodes.origin} = 'data' and ${nodes.ownerId} = ${person.id} and ${scope}`
       })
 
     /** The live nodes of the tree at or below `from` the caller may read. */
@@ -475,12 +558,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
     const readsAsOf = (node: NodeRow, order: number) =>
       Effect.gen(function* () {
         const roles = yield* roleAt(node, order)
-        if (
-          roles.caps.has('read') ||
-          (roles.caps.has('read-authored') && node.origin === 'authored')
-        ) {
-          return true
-        }
+        const reads =
+          node.origin === 'data'
+            ? roles.privateCaps.has('read') || roles.owns
+            : roles.caps.has('read') || roles.caps.has('read-authored')
+        if (reads) return true
         return (yield* reached(node, order)) !== null
       })
 
@@ -495,8 +577,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               ? sql`${nodes.path}`
               : sql`${nodes.origin}`,
         )
+        const owned = (yield* ownedWhere(treeId)) ?? sql`0`
         return {
-          where: sql`${nodes.treeId} = ${treeId} and ((${own}) or (
+          where: sql`${nodes.treeId} = ${treeId} and ((${own}) or (${owned}) or (
             ${nodes.origin} = 'authored' and ${nodes.underscoreFrom} is not null
             and ${reachFrom(grants, treeId, sql`${nodes.underscoreFrom}`)}))`,
         } satisfies ReadableNodes

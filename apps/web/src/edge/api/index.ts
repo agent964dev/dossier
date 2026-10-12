@@ -8,6 +8,7 @@ import {
   type Caller,
   type CoreRuntime,
 } from '../../core/index.ts'
+import { DataApiLive } from './data.ts'
 import { DeviceLive } from './device.ts'
 import { FilesLive } from './files.ts'
 import { MeLive } from './me.ts'
@@ -31,6 +32,7 @@ const build = async (runtime: CoreRuntime): Promise<ApiHandler> => {
       FilesLive,
       ViewLive,
       ReadLive,
+      DataApiLive,
     ]),
     Layer.provide(Layer.succeedContext(core.context)),
     // Every request passes its own caller; this one only satisfies the build.

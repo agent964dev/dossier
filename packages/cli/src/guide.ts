@@ -6,6 +6,7 @@ import agentVersions from './guide/agent-versions.md' with { type: 'text' }
 import baseLayer from './guide/base-layer.md' with { type: 'text' }
 import components from './guide/components.md' with { type: 'text' }
 import embedding from './guide/embedding.md' with { type: 'text' }
+import forms from './guide/forms.md' with { type: 'text' }
 import kitFiles from './guide/kit-files.md' with { type: 'text' }
 import layouts from './guide/layouts.md' with { type: 'text' }
 import reading from './guide/reading.md' with { type: 'text' }
@@ -46,6 +47,7 @@ const CONVENTIONS: readonly string[] = [
   components,
   baseLayer,
   embedding,
+  forms,
   agentVersions,
   reading,
 ]

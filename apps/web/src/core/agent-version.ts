@@ -758,8 +758,8 @@ export const makeReader = (deps: ReaderDeps) => {
           ? 'application/json'
           : 'application/octet-stream')
       const size = file.version.size ?? 0
-      if (file.node.origin === 'data') {
-        const json = file.version.jsonValue ?? 'null'
+      if (file.node.origin === 'data' && file.version.jsonValue !== null) {
+        const json = file.version.jsonValue
         return {
           kind: 'file',
           path: file.node.path,
@@ -839,7 +839,9 @@ export const makeReader = (deps: ReaderDeps) => {
       ref.path,
       Effect.gen(function* () {
         const t = yield* target(ref)
-        if (t.kind === 'file' && t.node.origin !== 'data') {
+        // Authored files and uploads come back as downloads; a JSON data
+        // file as its text.
+        if (t.kind === 'file' && t.version.blobSha256 !== null) {
           const sha = t.version.blobSha256
           const object =
             sha === null ? null : yield* query(() => BLOBS.get(blobKey(sha)))

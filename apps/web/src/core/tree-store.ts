@@ -6,13 +6,22 @@ import {
   type EventType,
   type LinkRef,
   type NodeId,
+  type OpId,
+  type PersonId,
   type PushId,
   type PushNumber,
   type Sha256,
   type ShareId,
   type TreeId,
+  type VersionId,
 } from '@dossier/contracts'
-import { MARKDOWN_VERSION, toMarkdown, type HtmlAnalysis } from '@dossier/html'
+import type { JsonObject } from '@dossier/contracts/bridge'
+import {
+  MARKDOWN_VERSION,
+  toMarkdown,
+  type FormSchema,
+  type HtmlAnalysis,
+} from '@dossier/html'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
 
@@ -28,6 +37,7 @@ import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { newId, newTreeId } from './ids.ts'
+import { Limits } from './limits.ts'
 import {
   analysisOf,
   lookupUnderscore,
@@ -157,6 +167,68 @@ export interface NewShare {
 /** Who holds a blob until its change commits. */
 export type HoldKind = 'push' | 'upload' | 'restore' | 'move'
 
+declare const versionHandle: unique symbol
+/** A version written in this change, named before it has a row. */
+export type VersionHandle = { readonly [versionHandle]: 'VersionHandle' }
+
+/** A data folder or file a change creates; folders on the way come with it. */
+export interface NewDataNode {
+  /** Inside the tree. */
+  readonly path: string
+  readonly kind: 'file' | 'folder'
+  /** The writer it belongs to; null for a shared file nobody owns. */
+  readonly owner: PersonId | null
+}
+
+/** What every data version records beside its content. */
+export interface DataProvenance {
+  /** The push of the page the writer saw. */
+  readonly seenPush: PushNumber
+  readonly opId: OpId
+}
+
+export type NewDataVersion = DataProvenance &
+  (
+    | { readonly json: JsonObject }
+    | {
+        readonly blob: {
+          readonly sha256: Sha256
+          readonly size: number
+          readonly contentType: string
+          /** The upload's verified hold, which the change releases. */
+          readonly hold: { readonly kind: 'upload'; readonly id: string }
+        }
+      }
+  )
+
+export interface NewOperation {
+  /** The person's id. */
+  readonly principal: string
+  /** '<tree id>:<target folder or file path>'. */
+  readonly scope: string
+  readonly opId: OpId
+  readonly result: VersionHandle | 'withdrawn'
+}
+
+/** A form's rules as a push stored them, by the version that holds it. */
+export interface FormRow {
+  readonly hostVersionId: VersionId
+  readonly hostNodeId: NodeId
+  readonly treeId: TreeId
+  readonly targetPath: string
+  readonly formKey: string
+  readonly kind: 'person' | 'entries' | 'shared'
+  readonly closesAt: number | null
+  readonly closed: boolean
+  readonly line: number
+  readonly title: string | null
+  readonly schema: FormSchema
+}
+
+export type OperationResult =
+  | { readonly state: 'stored'; readonly version: VersionRow }
+  | { readonly state: 'withdrawn' }
+
 /** The steps of one change; nothing runs until the change commits. */
 export interface ChangeSet {
   /** Fails the change if an authored file under `path` changed after `base`. */
@@ -170,12 +242,49 @@ export interface ChangeSet {
   ) => void
   readonly grant: (on: Granted<'share'> | NodeHandle, share: NewShare) => void
   readonly revoke: (on: Granted<'share'>, shareId: ShareId) => void
+  /**
+   * A data folder or file at `node.path`; folders missing on the way are
+   * created as data folders nobody owns. `under` is what the writer holds.
+   */
+  readonly createData: (
+    under: Granted<'respond' | 'write'>,
+    node: NewDataNode,
+  ) => NodeHandle
+  /** A new version of a data file: a JSON value or an upload's bytes. */
+  readonly putData: (
+    node: NodeHandle | Granted<'respond' | 'write'>,
+    version: NewDataVersion,
+  ) => VersionHandle
+  /** Merges a JSON object into the file's value as RFC 7396 says. */
+  readonly mergeJson: (
+    node: NodeHandle | Granted<'respond' | 'write'>,
+    patch: JsonObject,
+    provenance: DataProvenance,
+  ) => VersionHandle
+  /**
+   * 'withdrawn': every version's content deleted, one content-free
+   * 'withdrawn' version left, the node deleted, its operations reduced to
+   * 'withdrawn', and its blobs' references counted down.
+   */
+  readonly markDeleted: (
+    node: Granted<'withdraw-own'>,
+    mode: 'withdrawn',
+  ) => void
+  /** Records a data write's result under its operation ID. */
+  readonly operation: (op: NewOperation) => void
+  /** The forms the push staged, for the versions it leaves current. */
+  readonly putForms: (pushId: PushId) => void
   /** Required: a change with no event never commits. */
   readonly event: (e: NewEvent) => void
 }
 
 export type ChangeFailure = DossierError<
-  'stale_head' | 'conflict' | 'blob_reclaiming' | 'unavailable'
+  | 'stale_head'
+  | 'conflict'
+  | 'blob_reclaiming'
+  | 'not_mergeable'
+  | 'too_large'
+  | 'unavailable'
 >
 
 export interface TreeStoreService {
@@ -244,6 +353,35 @@ export interface TreeStoreService {
     holder: { readonly kind: HoldKind; readonly id: string },
     sha256: Sha256,
   ) => Effect.Effect<void>
+  /** Lets go of a hold whose change will not commit, verified or not. */
+  readonly releaseHold: (
+    holder: { readonly kind: HoldKind; readonly id: string },
+    sha256: Sha256,
+  ) => Effect.Effect<void>
+  /**
+   * A file's version: authored, as it stood at a sequence; without one, or
+   * for a data file, live now.
+   */
+  readonly fileAt: (
+    treeId: TreeId,
+    path: string,
+    at?: AuthoredSeq,
+  ) => Effect.Effect<
+    { readonly node: NodeRow; readonly version: VersionRow } | null,
+    DossierError<'unavailable'>
+  >
+  /** The forms a page or layout version holds, or that send to a target. */
+  readonly forms: (
+    q:
+      | { readonly hostVersionId: VersionId }
+      | { readonly treeId: TreeId; readonly target: string },
+  ) => Effect.Effect<readonly FormRow[], DossierError<'unavailable'>>
+  /** What an operation ID stored, if anything. */
+  readonly operationResult: (key: {
+    readonly principal: string
+    readonly scope: string
+    readonly opId: OpId
+  }) => Effect.Effect<OperationResult | null, DossierError<'unavailable'>>
   /** One D1 batch: the change and its events, or nothing. */
   readonly change: <A, E>(
     treeId: TreeId | null,
@@ -306,6 +444,25 @@ const handleId = (h: NodeHandle): NodeId => (h as unknown as HandleValue).id
 const makeHandle = (id: NodeId): NodeHandle =>
   ({ handle: true, id }) satisfies HandleValue as unknown as NodeHandle
 
+interface VersionValue {
+  readonly version: true
+  readonly id: VersionId
+  readonly nodeId: NodeId
+}
+
+const makeVersionHandle = (id: VersionId, nodeId: NodeId): VersionHandle =>
+  ({
+    version: true,
+    id,
+    nodeId,
+  }) satisfies VersionValue as unknown as VersionHandle
+
+const versionOfHandle = (h: VersionHandle): VersionValue =>
+  h as unknown as VersionValue
+
+const parentPath = (path: string): string =>
+  path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+
 /** The caller's key or session is still what Access saw. */
 const callerLive = (caller: Caller, now: number): Statement => {
   switch (caller.via.kind) {
@@ -358,6 +515,12 @@ const basisHolds = (basis: Basis, personId: string): Statement => {
     // Reach gives read only, which no change rests on.
     case 'reach':
       return { sql: '0', binds: [] }
+    case 'owner':
+      return {
+        sql: `exists (select 1 from nodes where id = ? and owner_id = ?
+                and deleted_at is null)`,
+        binds: [basis.nodeId, basis.userId],
+      }
   }
 }
 
@@ -392,7 +555,7 @@ const allOf = (parts: readonly Statement[]): Statement =>
 /** A guard row; its CHECK constraint fails the batch when `ok` is not 1. */
 const guardRow = (
   guardId: string,
-  reason: 'head' | 'basis' | 'blob' | 'state',
+  reason: 'head' | 'basis' | 'blob' | 'state' | 'mergeable' | 'size',
   condition: Statement,
 ): Statement => ({
   sql: `insert into change_guards (id, reason, ok)
@@ -408,6 +571,20 @@ const failureOf = (error: unknown): ChangeFailure => {
       'stale_head',
       'Someone pushed to this path while this change was being made.',
       'Pull the path, then push again, or push with --force.',
+    )
+  }
+  if (text.includes('change_guard_mergeable')) {
+    return dossierError(
+      'not_mergeable',
+      'This file does not hold a JSON object, so values cannot be merged into it.',
+      'Replace the whole file instead.',
+    )
+  }
+  if (text.includes('change_guard_size')) {
+    return dossierError(
+      'too_large',
+      'This would make the data file larger than a data file may be.',
+      'A super admin can raise it.',
     )
   }
   if (text.includes('change_guard_blob')) {
@@ -556,6 +733,22 @@ const stagedWrites = (i: {
   }))
 }
 
+const NODE_COLUMNS = `id, tree_id, parent_id, name, path, depth, kind, origin, owner_id,
+  current_version_id, created_at, deleted_at`
+const VERSION_COLUMNS = `id, node_id, tree_id, revision, authored_seq, state, blob_sha256,
+  json_value, size, content_type, author_id, key_id, push_id, seen_push_number, op_id,
+  created_at`
+/** The next revision of the node bound as ?2. */
+const NEXT_REVISION =
+  'coalesce((select max(r.revision) from node_versions r where r.node_id = ?2), 0) + 1'
+
+/** A live data file. */
+const liveDataFile = (nodeId: NodeId): Statement => ({
+  sql: `exists (select 1 from nodes where id = ? and deleted_at is null
+          and kind = 'file' and origin = 'data')`,
+  binds: [nodeId],
+})
+
 const highestParam = (text: string): number => {
   let max = 0
   for (const match of text.matchAll(/\?(\d+)/g)) {
@@ -589,13 +782,14 @@ export const linkPathOf = (path: string, folder: boolean): string => {
 export const TreeStoreLive: Layer.Layer<
   TreeStore,
   never,
-  Bindings | Access | BaseLayer
+  Bindings | Access | BaseLayer | Limits
 > = Layer.effect(
   TreeStore,
   Effect.gen(function* () {
     const context = yield* Effect.context<Bindings | BaseLayer>()
     const bindings = yield* Bindings
     const access = yield* Access
+    const limits = yield* Limits
     const { DB, BLOBS } = bindings
     const database = db(bindings)
 
@@ -735,15 +929,31 @@ export const TreeStoreLive: Layer.Layer<
         ),
       )
 
-    /** An authored or data file's live version now, or at a sequence. */
+    /** A live file now: authored or data. */
+    const liveFile = (treeId: TreeId, path: string) =>
+      Effect.gen(function* () {
+        const node = yield* liveNode(treeId, path)
+        if (node === null || node.kind !== 'file') return null
+        const version = yield* versionOf(node)
+        return version === null ? null : { node, version }
+      })
+
+    /**
+     * An authored file as it stood at a sequence, or any file live now
+     * without one. People's data has no sequence: at any sequence, a data
+     * file is read as it is now.
+     */
     const fileAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
       Effect.gen(function* () {
-        if (at === undefined) {
-          const node = yield* liveNode(treeId, path)
-          if (node === null || node.kind !== 'file') return null
-          const version = yield* versionOf(node)
-          return version === null ? null : { node, version }
-        }
+        if (at === undefined) return yield* liveFile(treeId, path)
+        const authored = yield* authoredFileAt(treeId, path, at)
+        if (authored !== null) return authored
+        const live = yield* liveFile(treeId, path)
+        return live !== null && live.node.origin === 'data' ? live : null
+      })
+
+    const authoredFileAt = (treeId: TreeId, path: string, at: AuthoredSeq) =>
+      Effect.gen(function* () {
         const row = yield* read(() =>
           database
             .select({ node: schema.nodes, version: schema.nodeVersions })
@@ -878,11 +1088,14 @@ export const TreeStoreLive: Layer.Layer<
             joinPath(ref.path, 'index.html'),
             at,
           )
-          if (index !== null) return page(index)
+          if (index !== null && index.node.origin === 'authored') {
+            return page(index)
+          }
           return { kind: 'folder', node: folder, tree: t } satisfies Resolved
         }
         const html = yield* fileAt(t.id, `${ref.path}.html`, at)
-        if (html !== null) return page(html)
+        // People's data is never a page, whatever its name.
+        if (html !== null && html.node.origin === 'authored') return page(html)
         const folder = yield* folderAt(t.id, ref.path, at)
         if (folder !== null) {
           return {
@@ -894,7 +1107,12 @@ export const TreeStoreLive: Layer.Layer<
         }
         const file = yield* fileAt(t.id, ref.path, at)
         if (file === null) return missing()
-        if (file.node.name.endsWith('.html')) return page(file)
+        if (
+          file.node.origin === 'authored' &&
+          file.node.name.endsWith('.html')
+        ) {
+          return page(file)
+        }
         return { kind: 'file', ...file, tree: t } satisfies Resolved
       })
 
@@ -1072,6 +1290,82 @@ export const TreeStoreLive: Layer.Layer<
           .run(),
       ).pipe(Effect.asVoid, Effect.orDie)
 
+    const releaseHold = (
+      holder: { readonly kind: HoldKind; readonly id: string },
+      sha256: Sha256,
+    ) =>
+      read(() =>
+        DB.prepare(
+          `delete from blob_holds where holder_kind = ? and holder_id = ?
+               and sha256 = ?`,
+        )
+          .bind(holder.kind, holder.id, sha256)
+          .run(),
+      ).pipe(Effect.asVoid, Effect.orDie)
+
+    const forms: TreeStoreService['forms'] = (q) =>
+      Effect.gen(function* () {
+        const f = schema.forms
+        const rows = yield* read(() =>
+          database
+            .select()
+            .from(f)
+            .where(
+              'hostVersionId' in q
+                ? eq(f.hostVersionId, q.hostVersionId)
+                : and(eq(f.treeId, q.treeId), eq(f.targetPath, q.target)),
+            )
+            .orderBy(f.line)
+            .all(),
+        )
+        return rows.map((row): FormRow => ({
+          hostVersionId: row.hostVersionId as VersionId,
+          hostNodeId: row.hostNodeId as NodeId,
+          treeId: row.treeId as TreeId,
+          targetPath: row.targetPath,
+          formKey: row.formKey,
+          kind: row.kind as FormRow['kind'],
+          closesAt: row.closesAt,
+          closed: row.closed,
+          line: row.line,
+          title: row.title,
+          schema: JSON.parse(row.schemaJson) as FormSchema,
+        }))
+      })
+
+    const operationResult: TreeStoreService['operationResult'] = (key) =>
+      Effect.gen(function* () {
+        const row = yield* read(() =>
+          DB.prepare(
+            `select result_state as state, result_version_id as versionId
+             from operations where principal = ? and scope = ? and op_id = ?`,
+          )
+            .bind(key.principal, key.scope, key.opId)
+            .first<{
+              state: 'stored' | 'withdrawn'
+              versionId: string | null
+            }>(),
+        )
+        if (row === null) return null
+        if (row.state === 'withdrawn' || row.versionId === null) {
+          return { state: 'withdrawn' } satisfies OperationResult
+        }
+        const versionId = row.versionId
+        const version = yield* read(() =>
+          database
+            .select()
+            .from(schema.nodeVersions)
+            .where(eq(schema.nodeVersions.id, versionId))
+            .get(),
+        )
+        return version === undefined
+          ? ({ state: 'withdrawn' } satisfies OperationResult)
+          : ({
+              state: 'stored',
+              version: version as VersionRow,
+            } satisfies OperationResult)
+      })
+
     const list = (folder: Granted<'read'>, depth: 'one' | 'all') =>
       Effect.gen(function* () {
         const readable = yield* access.readable(folder.treeId)
@@ -1187,6 +1481,15 @@ export const TreeStoreLive: Layer.Layer<
         )
         const version = yield* versionOf(file).pipe(Effect.orDie)
         const sha = version?.blobSha256 ?? null
+        // A JSON data file's value lives in D1, not in a blob.
+        if (version !== null && sha === null && version.jsonValue !== null) {
+          return {
+            version,
+            body: version.jsonValue,
+            size: new TextEncoder().encode(version.jsonValue).length,
+            etag: `v-${version.id}`,
+          } satisfies FileBody
+        }
         if (version === null || sha === null) {
           return yield* Effect.fail(gone)
         }
@@ -1216,6 +1519,7 @@ export const TreeStoreLive: Layer.Layer<
           return yield* Effect.die(new Error('a change needs a person'))
         }
         const now = yield* Clock.currentTimeMillis
+        const { dataFileBytes } = yield* limits.current()
         const guardId = newId()
         const keyId = caller.via.kind === 'agent' ? caller.via.keyId : null
         let treeId = startTree
@@ -1231,6 +1535,11 @@ export const TreeStoreLive: Layer.Layer<
         /** Checked after the writes: the tree came out as the change meant. */
         const outcomes: Statement[] = []
         const bases: Statement[] = []
+        /** Data checks made before any write: a JSON object, a size. */
+        const dataGuards: {
+          readonly reason: 'mergeable' | 'size'
+          readonly condition: Statement
+        }[] = []
         const events: NewEvent[] = []
         let authored = 0
         let pushCount = 0
@@ -1380,6 +1689,272 @@ export const TreeStoreLive: Layer.Layer<
             })
           },
 
+          createData: (holder, node) => {
+            const t = tid()
+            bases.push(everyBasis(holder.basis, person.id))
+            const id = newId() as NodeId
+            const segments = node.path.split('/')
+            // Folders on the way, each only where nothing lives yet.
+            for (let depth = 1; depth < segments.length; depth += 1) {
+              const path = segments.slice(0, depth).join('/')
+              writes.push({
+                sql: `insert into nodes (${NODE_COLUMNS})
+                      select lower(hex(randomblob(16))), ?1,
+                        (select p.id from nodes p where p.tree_id = ?1 and p.path = ?2
+                           and p.deleted_at is null),
+                        ?3, ?4, ?5, 'folder', 'data', null, null, ?6, null
+                      where not exists (select 1 from nodes n where n.tree_id = ?1
+                        and n.path = ?4 and n.deleted_at is null)`,
+                binds: [
+                  t,
+                  parentPath(path),
+                  segments[depth - 1],
+                  path,
+                  depth,
+                  now,
+                ],
+              })
+            }
+            writes.push({
+              sql: `insert into nodes (${NODE_COLUMNS})
+                    values (?1, ?2,
+                      (select p.id from nodes p where p.tree_id = ?2 and p.path = ?3
+                         and p.deleted_at is null),
+                      ?4, ?5, ?6, ?7, 'data', ?8, null, ?9, null)`,
+              binds: [
+                id,
+                t,
+                parentPath(node.path),
+                segments[segments.length - 1],
+                node.path,
+                segments.length,
+                node.kind,
+                node.owner,
+                now,
+              ],
+            })
+            // It sits in a live folder, as the path says.
+            outcomes.push({
+              sql: `exists (select 1 from nodes n join nodes p on p.id = n.parent_id
+                      where n.id = ? and n.deleted_at is null and p.kind = 'folder'
+                        and p.deleted_at is null)`,
+              binds: [id],
+            })
+            return makeHandle(id)
+          },
+
+          putData: (target, version) => {
+            const t = tid()
+            const nodeId = isHandle(target) ? handleId(target) : target.id
+            if (!isHandle(target)) {
+              bases.push(everyBasis(target.basis, person.id))
+              stateGuards.push(liveDataFile(nodeId))
+            }
+            const versionId = newId() as VersionId
+            if ('json' in version) {
+              const text = JSON.stringify(version.json)
+              dataGuards.push({
+                reason: 'size',
+                condition: {
+                  sql: 'length(cast(json(?) as blob)) <= ?',
+                  binds: [text, dataFileBytes],
+                },
+              })
+              writes.push({
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select ?1, ?2, ?3, ${NEXT_REVISION}, null, 'live', null, json(?4),
+                        length(cast(json(?4) as blob)), 'application/json', ?5, ?6, null,
+                        ?7, ?8, ?9`,
+                binds: [
+                  versionId,
+                  nodeId,
+                  t,
+                  text,
+                  person.id,
+                  keyId,
+                  version.seenPush,
+                  version.opId,
+                  now,
+                ],
+              })
+            } else {
+              const { blob } = version
+              blobGuards.push({
+                sql: `exists (select 1 from blobs where sha256 = ? and state = 'live')
+                      and exists (select 1 from blob_holds where holder_kind = ?
+                        and holder_id = ? and sha256 = ? and verified = 1)`,
+                binds: [blob.sha256, blob.hold.kind, blob.hold.id, blob.sha256],
+              })
+              writes.push(
+                {
+                  sql: `insert into node_versions (${VERSION_COLUMNS})
+                        select ?1, ?2, ?3, ${NEXT_REVISION}, null, 'live', ?4, null,
+                          (select size from blobs where sha256 = ?4), ?5, ?6, ?7, null,
+                          ?8, ?9, ?10`,
+                  binds: [
+                    versionId,
+                    nodeId,
+                    t,
+                    blob.sha256,
+                    blob.contentType,
+                    person.id,
+                    keyId,
+                    version.seenPush,
+                    version.opId,
+                    now,
+                  ],
+                },
+                {
+                  sql: 'update blobs set ref_count = ref_count + 1 where sha256 = ?',
+                  binds: [blob.sha256],
+                },
+                {
+                  sql: `delete from blob_holds where holder_kind = ? and holder_id = ?
+                          and sha256 = ?`,
+                  binds: [blob.hold.kind, blob.hold.id, blob.sha256],
+                },
+              )
+            }
+            writes.push({
+              sql: 'update nodes set current_version_id = ? where id = ?',
+              binds: [versionId, nodeId],
+            })
+            return makeVersionHandle(versionId, nodeId)
+          },
+
+          mergeJson: (target, patch, provenance) => {
+            const t = tid()
+            const nodeId = isHandle(target) ? handleId(target) : target.id
+            if (!isHandle(target)) {
+              bases.push(everyBasis(target.basis, person.id))
+              stateGuards.push(liveDataFile(nodeId))
+            }
+            const current = `(select v.json_value from nodes n
+              join node_versions v on v.id = n.current_version_id
+              where n.id = ? and v.state = 'live')`
+            const text = JSON.stringify(patch)
+            dataGuards.push(
+              {
+                reason: 'mergeable',
+                condition: {
+                  sql: `json_type(${current}) = 'object' and json_type(json(?)) = 'object'`,
+                  binds: [nodeId, text],
+                },
+              },
+              {
+                reason: 'size',
+                condition: {
+                  sql: `length(cast(json_patch(${current}, json(?)) as blob)) <= ?`,
+                  binds: [nodeId, text, dataFileBytes],
+                },
+              },
+            )
+            const versionId = newId() as VersionId
+            writes.push(
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select ?1, ?2, ?3, ${NEXT_REVISION}, null, 'live', null, merged,
+                        length(cast(merged as blob)), 'application/json', ?5, ?6, null,
+                        ?7, ?8, ?9
+                      from (select json_patch((select v.json_value from nodes n
+                          join node_versions v on v.id = n.current_version_id
+                          where n.id = ?2 and v.state = 'live'), json(?4)) as merged)`,
+                binds: [
+                  versionId,
+                  nodeId,
+                  t,
+                  text,
+                  person.id,
+                  keyId,
+                  provenance.seenPush,
+                  provenance.opId,
+                  now,
+                ],
+              },
+              {
+                sql: 'update nodes set current_version_id = ? where id = ?',
+                binds: [versionId, nodeId],
+              },
+            )
+            return makeVersionHandle(versionId, nodeId)
+          },
+
+          markDeleted: (node, mode) => {
+            const t = tid()
+            if (mode !== 'withdrawn') throw new Error(`no ${mode} mode yet`)
+            bases.push(everyBasis(node.basis, person.id))
+            stateGuards.push(liveDataFile(node.id))
+            const versionId = newId() as VersionId
+            writes.push(
+              {
+                // The bytes of uploads lose this file's references; a purge
+                // reclaims what nothing else holds.
+                sql: `update blobs set ref_count = ref_count -
+                        (select count(*) from node_versions v where v.node_id = ?1
+                           and v.blob_sha256 = blobs.sha256)
+                      where sha256 in (select blob_sha256 from node_versions
+                        where node_id = ?1 and blob_sha256 is not null)`,
+                binds: [node.id],
+              },
+              {
+                sql: 'delete from node_versions where node_id = ?',
+                binds: [node.id],
+              },
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      values (?1, ?2, ?3, 1, null, 'withdrawn', null, null, null, null,
+                        ?4, ?5, null, null, null, ?6)`,
+                binds: [versionId, node.id, t, person.id, keyId, now],
+              },
+              {
+                sql: `update nodes set deleted_at = ?, current_version_id = ?
+                      where id = ?`,
+                binds: [now, versionId, node.id],
+              },
+              {
+                sql: `update operations set result_state = 'withdrawn',
+                        result_version_id = null
+                      where result_node_id = ?`,
+                binds: [node.id],
+              },
+            )
+          },
+
+          operation: (op) => {
+            const result =
+              op.result === 'withdrawn' ? null : versionOfHandle(op.result)
+            writes.push({
+              sql: `insert into operations (principal, scope, op_id, result_node_id,
+                      result_version_id, result_state, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?)`,
+              binds: [
+                op.principal,
+                op.scope,
+                op.opId,
+                result?.nodeId ?? null,
+                result?.id ?? null,
+                result === null ? 'withdrawn' : 'stored',
+                now,
+              ],
+            })
+          },
+
+          putForms: (pushId) => {
+            const t = tid()
+            writes.push({
+              sql: `insert into forms (host_version_id, host_node_id, tree_id, target_path,
+                      form_key, kind, closes_at, closed, line, title, schema_json)
+                    select n.current_version_id, n.id, ?1, f.target_path, f.form_key, f.kind,
+                      f.closes_at, f.closed, f.line, f.title, f.schema_json
+                    from push_forms f join nodes n on n.tree_id = ?1 and n.path = f.path
+                      and n.deleted_at is null and n.kind = 'file' and n.origin = 'authored'
+                      and n.current_version_id is not null
+                    where f.push_id = ?2
+                    on conflict do nothing`,
+              binds: [t, pushId],
+            })
+          },
+
           event: (e) => {
             events.push(e)
           },
@@ -1406,6 +1981,9 @@ export const TreeStoreLive: Layer.Layer<
           ...(stateGuards.length === 0
             ? []
             : [guardRow(`${guardId}:state`, 'state', allOf(stateGuards))]),
+          ...dataGuards.map((g, i) =>
+            guardRow(`${guardId}:${g.reason}${i}`, g.reason, g.condition),
+          ),
           {
             sql: `update trees set authored_seq = authored_seq + ?, event_seq = event_seq + ?,
                       push_count = push_count + ? where id = ?`,
@@ -1496,6 +2074,10 @@ export const TreeStoreLive: Layer.Layer<
       holdBlob,
       confirmHold,
       dropHold,
+      releaseHold,
+      fileAt,
+      forms,
+      operationResult,
       change,
     } satisfies TreeStoreService
   }),

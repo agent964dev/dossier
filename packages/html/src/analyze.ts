@@ -8,13 +8,15 @@ import {
   isTemplate,
   parseDocument,
 } from './parse.ts'
+import { formFields } from './fields.ts'
+import type { FieldRule } from './forms.ts'
 import { isCustomElementName } from './kit.ts'
 import { codeLanguageOf, type LibraryName } from './libraries.ts'
 import { type BodyClose, findRepairs } from './repairs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 7
+export const ANALYZER_VERSION: number = 8
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -80,6 +82,13 @@ export interface FormSummary {
   readonly closes: string | null
   /** data-closed present. */
   readonly closed: boolean
+  /**
+   * The legend of the form's first <fieldset>, else its aria-label, with
+   * whitespace collapsed; null when it has neither.
+   */
+  readonly title: string | null
+  /** One rule per field name, in the order the names first appear. */
+  readonly fields: readonly FieldRule[]
   readonly range: Range
 }
 export interface Repair {
@@ -337,6 +346,7 @@ export const analyze = (source: string): HtmlAnalysis => {
   const headLoc = head?.sourceCodeLocation ?? null
   const bodyLoc = body?.sourceCodeLocation ?? null
 
+  const fieldsByForm = formFields(document)
   const charsetMetas: Range[] = []
   const tags = new Set<string>()
   const libraries = new Set<LibraryName>()
@@ -430,6 +440,7 @@ export const analyze = (source: string): HtmlAnalysis => {
     const loc = element.sourceCodeLocation
     if (!loc) return
     const method = attrOf(element, 'method')?.trim().toLowerCase() ?? ''
+    const own = fieldsByForm.get(element)
     forms.push({
       line: loc.startLine,
       id: attrOf(element, 'id'),
@@ -441,6 +452,8 @@ export const analyze = (source: string): HtmlAnalysis => {
           : 'one',
       closes: attrOf(element, 'data-closes'),
       closed: attrOf(element, 'data-closed') !== null,
+      title: own?.title ?? null,
+      fields: own?.fields ?? [],
       range:
         outerRange(element, source.length) ??
         at(loc.startOffset, loc.endOffset),

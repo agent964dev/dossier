@@ -12,11 +12,15 @@ import {
 import {
   ANALYZER_VERSION as ANALYZER,
   checkPush,
+  closesAt,
   componentPath,
   describeProblems,
+  formKind,
+  formSchema,
   isKitName,
   isPageFile,
   pathProblems,
+  resolveFormAction,
   type HtmlAnalysis,
   type PushFile,
   type PushProblem,
@@ -33,7 +37,7 @@ import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
-import { blobKey, TreeStore, type ChangeFailure } from './tree-store.ts'
+import { blobKey, TreeStore } from './tree-store.ts'
 
 export interface ManifestFile {
   /** Inside the pushed folder. */
@@ -150,6 +154,14 @@ const MiB = 1024 * 1024
 /** Rows a single INSERT … SELECT FROM json_each writes at most. */
 const CHUNK = 400
 
+const chunked = <T>(list: readonly T[]): T[][] => {
+  const out: T[][] = []
+  for (let at = 0; at < list.length; at += CHUNK) {
+    out.push(list.slice(at, at + CHUNK))
+  }
+  return out
+}
+
 const CONTENT_TYPES: Record<string, string> = {
   html: 'text/html; charset=utf-8',
   css: 'text/css; charset=utf-8',
@@ -209,6 +221,39 @@ const depthOf = (path: string) => (path === '' ? 0 : path.split('/').length)
 const isUnder = (path: string, folder: string) =>
   folder === '' || path === folder || path.startsWith(`${folder}/`)
 
+/** A page, or a layout: the HTML files whose forms people answer. */
+const holdsForms = (path: string) =>
+  isPageFile(path) &&
+  (path === '_layout.html' ||
+    path.endsWith('/_layout.html') ||
+    !path.split('/').some(isKitName))
+
+/** The rows of `push_forms` for the pushed pages and layouts. */
+const formRowsOf = (files: readonly PushFile[]) =>
+  files.flatMap(({ path, analysis }) =>
+    holdsForms(path)
+      ? analysis.forms.flatMap((form) => {
+          if (form.action === null) return []
+          const found = resolveFormAction(path, form.action)
+          if ('problem' in found) return []
+          return [
+            {
+              path,
+              target:
+                found.kind === 'folder' ? `${found.target}/` : found.target,
+              key: form.id ?? '',
+              kind: formKind(form, found),
+              closesAt: form.closes === null ? null : closesAt(form.closes),
+              closed: form.closed ? 1 : 0,
+              line: form.line,
+              title: form.title,
+              schema: JSON.stringify(formSchema(form)),
+            },
+          ]
+        })
+      : [],
+  )
+
 const bytes = (n: number) =>
   n >= MiB ? `${Math.round((n / MiB) * 10) / 10} MiB` : `${n} bytes`
 
@@ -235,6 +280,11 @@ class Retry extends Data.TaggedError('Retry')<{
   readonly error: DossierError
   readonly contention: boolean
 }> {}
+
+/** What a push's change can fail with. */
+type PushChangeFailure = DossierError<
+  'stale_head' | 'conflict' | 'blob_reclaiming' | 'too_large' | 'unavailable'
+>
 
 /** How often a commit checks again when other pushes keep landing. */
 const COMMIT_TRIES = 8
@@ -1128,6 +1178,29 @@ export const PushLive: Layer.Layer<
         }
         const plan = { ...changes, warnings: check.warnings }
 
+        // Every form of the pushed pages and layouts, staged for the change
+        // to record by the versions it leaves current.
+        const pushed = new Set(manifest.keys())
+        const formRows = formRowsOf(pages.filter((p) => pushed.has(p.path)))
+        yield* query(() =>
+          DB.batch([
+            DB.prepare('delete from push_forms where push_id = ?').bind(pushId),
+            ...chunked(formRows).map((chunk) =>
+              DB.prepare(
+                `insert into push_forms (push_id, path, target_path, form_key, kind,
+                   closes_at, closed, line, title, schema_json)
+                 select ?1, json_extract(j.value, '$.path'),
+                   json_extract(j.value, '$.target'), json_extract(j.value, '$.key'),
+                   json_extract(j.value, '$.kind'), json_extract(j.value, '$.closesAt'),
+                   json_extract(j.value, '$.closed'), json_extract(j.value, '$.line'),
+                   json_extract(j.value, '$.title'), json_extract(j.value, '$.schema')
+                 from json_each(?2) j
+                 where true on conflict do nothing`,
+              ).bind(pushId, JSON.stringify(chunk)),
+            ),
+          ]),
+        )
+
         const committed = yield* store
           .change(tree?.id ?? null, (cs) =>
             Effect.sync(() => {
@@ -1144,22 +1217,32 @@ export const PushLive: Layer.Layer<
                 }
               }
               cs.putStaged(root ?? (target as Granted<'write'>), pushId)
+              cs.putForms(pushId)
               cs.event({ type: 'push', path: push.path, pushId })
               return {}
             }),
           )
           .pipe(
             Effect.catchAll(
-              (error): Effect.Effect<never, ChangeFailure | Retry> =>
-                error.code === 'stale_head' || error.code === 'conflict'
+              (error): Effect.Effect<never, PushChangeFailure | Retry> => {
+                // A push merges no data.
+                if (error.code === 'not_mergeable') return Effect.die(error)
+                const failure = error as PushChangeFailure
+                return failure.code === 'stale_head' ||
+                  failure.code === 'conflict'
                   ? Effect.flatMap(
                       treeMoved(push, tree).pipe(Effect.orDie),
-                      (moved): Effect.Effect<never, ChangeFailure | Retry> =>
+                      (
+                        moved,
+                      ): Effect.Effect<never, PushChangeFailure | Retry> =>
                         moved
-                          ? Effect.fail(new Retry({ error, contention: true }))
-                          : Effect.fail(error),
+                          ? Effect.fail(
+                              new Retry({ error: failure, contention: true }),
+                            )
+                          : Effect.fail(failure),
                     )
-                  : Effect.fail(error),
+                  : Effect.fail(failure)
+              },
             ),
           )
         const number = yield* query(() =>

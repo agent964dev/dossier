@@ -1,0 +1,257 @@
+[
+  {
+    "send": "every field filled in, typed by its kind",
+    "form": 0,
+    "entries": [
+      ["name", "Sara Ali"],
+      ["secret", "abcd"],
+      ["email", "sara@acme.com, ali@acme.com"],
+      ["site", "https://acme.example/"],
+      ["phone", "+964 750 1234"],
+      ["query", "workshops"],
+      ["colour", "#336699"],
+      ["source", "anything at all"],
+      ["mystery", "free text"],
+      ["guests", "3"],
+      ["budget", "12.5"],
+      ["amount", "0.333"],
+      ["volume", "7"],
+      ["seats", ""],
+      ["day", "2026-11-05"],
+      ["start", "09:30"],
+      ["meeting", "2026-11-05T09:30"],
+      ["month", "2026-11"],
+      ["week", "2026-W45"],
+      ["meal", "fish"],
+      ["workshops", "html"],
+      ["workshops", "css"],
+      ["agree", "on"],
+      ["size", "s"],
+      ["topics", "Design"],
+      ["topics", "code"],
+      ["notes", "Bring water."],
+      ["photo", { "file": "f1", "name": "me.HEIC", "size": 2048, "type": "" }],
+      ["papers", { "file": "f2", "name": "cv.pdf", "size": 100, "type": "application/pdf" }],
+      ["papers", { "file": "f3", "name": "Letter.docx", "size": 200, "type": "application/octet-stream" }],
+      ["referral", "a friend"]
+    ],
+    "submitter": { "name": "decision", "value": "yes" },
+    "expect": {
+      "ok": true,
+      "values": {
+        "name": "Sara Ali",
+        "secret": "abcd",
+        "email": "sara@acme.com, ali@acme.com",
+        "site": "https://acme.example/",
+        "phone": "+964 750 1234",
+        "query": "workshops",
+        "colour": "#336699",
+        "source": "anything at all",
+        "mystery": "free text",
+        "guests": 3,
+        "budget": 12.5,
+        "amount": 0.333,
+        "volume": 7,
+        "seats": null,
+        "day": "2026-11-05",
+        "start": "09:30",
+        "meeting": "2026-11-05T09:30",
+        "month": "2026-11",
+        "week": "2026-W45",
+        "meal": "fish",
+        "workshops": ["html", "css"],
+        "agree": true,
+        "size": "s",
+        "topics": ["Design", "code"],
+        "notes": "Bring water.",
+        "photo": { "file": "f1", "name": "me.HEIC", "size": 2048, "type": "" },
+        "papers": [
+          { "file": "f2", "name": "cv.pdf", "size": 100, "type": "application/pdf" },
+          { "file": "f3", "name": "Letter.docx", "size": 200, "type": "application/octet-stream" }
+        ],
+        "decision": "yes",
+        "referral": "a friend"
+      }
+    }
+  },
+  {
+    "send": "only the required fields, with an empty optional one",
+    "form": 0,
+    "entries": [
+      ["name", "Jo"],
+      ["email", "jo@acme.com"],
+      ["site", ""],
+      ["guests", "1"],
+      ["day", "2026-10-01"],
+      ["meal", "veg"],
+      ["agree", "yes"],
+      ["size", "XS"]
+    ],
+    "submitter": null,
+    "expect": {
+      "ok": true,
+      "values": {
+        "name": "Jo",
+        "email": "jo@acme.com",
+        "site": "",
+        "guests": 1,
+        "day": "2026-10-01",
+        "meal": "veg",
+        "workshops": [],
+        "agree": true,
+        "size": "XS",
+        "topics": []
+      }
+    }
+  },
+  {
+    "send": "nothing at all",
+    "form": 0,
+    "entries": [],
+    "submitter": null,
+    "expect": {
+      "ok": false,
+      "problems": [
+        { "field": "name", "message": "Fill in this field." },
+        { "field": "email", "message": "Fill in this field." },
+        { "field": "guests", "message": "Fill in this field." },
+        { "field": "day", "message": "Fill in this field." },
+        { "field": "meal", "message": "Choose an option." },
+        { "field": "agree", "message": "Check this box to go on." },
+        { "field": "size", "message": "Choose an option." }
+      ]
+    }
+  },
+  {
+    "send": "required fields sent empty, the select left on its placeholder",
+    "form": 0,
+    "entries": [
+      ["name", ""],
+      ["email", ""],
+      ["guests", ""],
+      ["day", ""],
+      ["meal", "veg"],
+      ["agree", ""],
+      ["size", ""]
+    ],
+    "submitter": null,
+    "expect": {
+      "ok": false,
+      "problems": [
+        { "field": "name", "message": "Fill in this field." },
+        { "field": "email", "message": "Fill in this field." },
+        { "field": "guests", "message": "Fill in this field." },
+        { "field": "day", "message": "Fill in this field." },
+        { "field": "size", "message": "Choose an option." }
+      ]
+    }
+  },
+  {
+    "send": "every rule broken once, each problem naming its field in send order",
+    "form": 0,
+    "entries": [
+      ["nickname", "SA"],
+      ["name", "S"],
+      ["secret", "AB12"],
+      ["email", "sara@acme.com, not-an-email"],
+      ["site", "acme.example"],
+      ["colour", "blue"],
+      ["guests", "11"],
+      ["budget", "1.25"],
+      ["volume", "12"],
+      ["amount", "1e"],
+      ["day", "2026-02-30"],
+      ["start", "08:59"],
+      ["week", "2026-W54"],
+      ["meal", "chicken"],
+      ["workshops", "html"],
+      ["workshops", "js"],
+      ["size", "xl"],
+      ["query", "abcdefghijklmnopqrstuvwxyzabcdefghijklmno"],
+      ["photo", { "file": "f1", "name": "notes.txt", "size": 5, "type": "text/plain" }],
+      ["decision", "yes"],
+      ["notes", { "file": "f2", "name": "notes.txt", "size": 5, "type": "text/plain" }],
+      ["papers", "cv.pdf"],
+      ["referral", "a"],
+      ["referral", "b"],
+      ["nickname", "again"]
+    ],
+    "submitter": { "name": "decision", "value": "never" },
+    "expect": {
+      "ok": false,
+      "problems": [
+        { "field": "nickname", "message": "This form has no field named nickname." },
+        { "field": "name", "message": "Use at least 2 characters." },
+        { "field": "secret", "message": "Match the requested format." },
+        { "field": "email", "message": "Enter an email address." },
+        { "field": "site", "message": "Enter a URL." },
+        { "field": "colour", "message": "Enter a valid value." },
+        { "field": "guests", "message": "Enter a value of 10 or less." },
+        { "field": "budget", "message": "Enter a valid value." },
+        { "field": "volume", "message": "Enter a value of 11 or less." },
+        { "field": "amount", "message": "Enter a number." },
+        { "field": "day", "message": "Enter a valid value." },
+        { "field": "start", "message": "Enter 09:00 or later." },
+        { "field": "week", "message": "Enter a valid value." },
+        { "field": "meal", "message": "Choose one of the options offered." },
+        { "field": "workshops", "message": "Choose one of the options offered." },
+        { "field": "size", "message": "Choose one of the options offered." },
+        { "field": "query", "message": "Use at most 40 characters." },
+        { "field": "photo", "message": "Choose a file of a type this field accepts." },
+        { "field": "decision", "message": "This form has no field named decision." },
+        { "field": "notes", "message": "Send text, not a file." },
+        { "field": "papers", "message": "Send a file, not text." },
+        { "field": "referral", "message": "Send only one value for this field." },
+        { "field": "decision", "message": "Choose one of the options offered." },
+        { "field": "agree", "message": "Check this box to go on." }
+      ]
+    }
+  },
+  {
+    "send": "a button the form does not have",
+    "form": 0,
+    "entries": [
+      ["name", "Jo"],
+      ["email", "jo@acme.com"],
+      ["guests", "2"],
+      ["day", "2026-12-31"],
+      ["meal", "on"],
+      ["agree", "on"],
+      ["size", "l"]
+    ],
+    "submitter": { "name": "delete", "value": "" },
+    "expect": {
+      "ok": false,
+      "problems": [
+        { "field": "delete", "message": "This form has no button named delete." }
+      ]
+    }
+  },
+  {
+    "send": "mixed controls, a field of another form and an image button",
+    "form": 1,
+    "entries": [
+      ["rating", "4"],
+      ["mixed", "on"],
+      ["pick", "b"]
+    ],
+    "submitter": { "name": "go", "value": "" },
+    "expect": {
+      "ok": true,
+      "values": { "rating": 4, "mixed": true, "pick": "b", "go": "" }
+    }
+  },
+  {
+    "send": "a field that belongs to another form",
+    "form": 1,
+    "entries": [["comment", "Nice"], ["rating", "0"]],
+    "submitter": null,
+    "expect": {
+      "ok": false,
+      "problems": [
+        { "field": "comment", "message": "This form has no field named comment." },
+        { "field": "rating", "message": "Enter a value of 1 or more." }
+      ]
+    }
+  }
+]

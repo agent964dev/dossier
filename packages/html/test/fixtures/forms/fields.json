@@ -1,0 +1,630 @@
+[
+  {
+    "line": 6,
+    "action": "answers/",
+    "title": "Your details",
+    "fields": [
+      {
+        "name": "name",
+        "type": "text",
+        "label": "Full name",
+        "required": true,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": 2,
+        "maxLength": 80,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "secret",
+        "type": "text",
+        "label": "Password",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": "[a-z]{4,}",
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "email",
+        "type": "email",
+        "label": "Email",
+        "required": true,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": true,
+        "options": []
+      },
+      {
+        "name": "site",
+        "type": "url",
+        "label": "Your website",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "phone",
+        "type": "tel",
+        "label": "Phone",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": "\\+?[0-9 ]{7,15}",
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "query",
+        "type": "search",
+        "label": "Search terms",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": 40,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "colour",
+        "type": "color",
+        "label": "Favourite colour",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "source",
+        "type": "hidden",
+        "label": null,
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "mystery",
+        "type": "text",
+        "label": "Mystery",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "guests",
+        "type": "number",
+        "label": "Guests",
+        "required": true,
+        "min": "1",
+        "max": "10",
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "budget",
+        "type": "number",
+        "label": "Budget",
+        "required": false,
+        "min": "0",
+        "max": null,
+        "step": "0.5",
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "amount",
+        "type": "number",
+        "label": "Any amount",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": "any",
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "volume",
+        "type": "range",
+        "label": "Volume",
+        "required": false,
+        "min": "0",
+        "max": "11",
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "seats",
+        "type": "number",
+        "label": "Seats",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "day",
+        "type": "date",
+        "label": "Day",
+        "required": true,
+        "min": "2026-10-01",
+        "max": "2026-12-31",
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "start",
+        "type": "time",
+        "label": "Start",
+        "required": false,
+        "min": "09:00",
+        "max": "17:30",
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "meeting",
+        "type": "datetime-local",
+        "label": "Meeting",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "month",
+        "type": "month",
+        "label": "Month",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "week",
+        "type": "week",
+        "label": "Week",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "meal",
+        "type": "radio",
+        "label": "Meal",
+        "required": true,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": [
+          {
+            "value": "veg",
+            "label": "Vegetarian"
+          },
+          {
+            "value": "fish",
+            "label": "Fish"
+          },
+          {
+            "value": "on",
+            "label": "No meal"
+          }
+        ]
+      },
+      {
+        "name": "workshops",
+        "type": "checkboxes",
+        "label": "Workshops",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": [
+          {
+            "value": "html",
+            "label": "HTML"
+          },
+          {
+            "value": "css",
+            "label": "CSS"
+          }
+        ]
+      },
+      {
+        "name": "agree",
+        "type": "checkbox",
+        "label": "I agree to the terms",
+        "required": true,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "size",
+        "type": "select",
+        "label": "T-shirt size",
+        "required": true,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": [
+          {
+            "value": "",
+            "label": "Choose one"
+          },
+          {
+            "value": "XS",
+            "label": "XS"
+          },
+          {
+            "value": "s",
+            "label": "Small size"
+          },
+          {
+            "value": "l",
+            "label": "Large"
+          }
+        ]
+      },
+      {
+        "name": "topics",
+        "type": "select-multiple",
+        "label": "Topics",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": true,
+        "options": [
+          {
+            "value": "Design",
+            "label": "Design"
+          },
+          {
+            "value": "code",
+            "label": "Code"
+          }
+        ]
+      },
+      {
+        "name": "notes",
+        "type": "textarea",
+        "label": "Notes",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": 200,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "photo",
+        "type": "file",
+        "label": "Photo",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": "image/*,.heic",
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "papers",
+        "type": "file",
+        "label": "Papers",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": "application/pdf, .DOCX",
+        "multiple": true,
+        "options": []
+      },
+      {
+        "name": "decision",
+        "type": "submit",
+        "label": null,
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": [
+          {
+            "value": "yes",
+            "label": "Count me in"
+          },
+          {
+            "value": "maybe",
+            "label": "Maybe"
+          },
+          {
+            "value": "no",
+            "label": "no"
+          }
+        ]
+      },
+      {
+        "name": "referral",
+        "type": "text",
+        "label": "Referral",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      }
+    ]
+  },
+  {
+    "line": 82,
+    "action": "feedback/",
+    "title": "Quick feedback",
+    "fields": [
+      {
+        "name": "rating",
+        "type": "number",
+        "label": "Rating",
+        "required": false,
+        "min": "1",
+        "max": "5",
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "mixed",
+        "type": "checkbox",
+        "label": null,
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      },
+      {
+        "name": "pick",
+        "type": "radio",
+        "label": null,
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": [
+          {
+            "value": "a",
+            "label": "a"
+          },
+          {
+            "value": "b",
+            "label": "b"
+          }
+        ]
+      },
+      {
+        "name": "go",
+        "type": "submit",
+        "label": null,
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": [
+          {
+            "value": "",
+            "label": "Go"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "line": 92,
+    "action": "other/",
+    "title": null,
+    "fields": [
+      {
+        "name": "comment",
+        "type": "text",
+        "label": "Comment",
+        "required": false,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      }
+    ]
+  },
+  {
+    "line": 93,
+    "action": "later/",
+    "title": null,
+    "fields": [
+      {
+        "name": "later",
+        "type": "text",
+        "label": "Later",
+        "required": true,
+        "min": null,
+        "max": null,
+        "step": null,
+        "minLength": null,
+        "maxLength": null,
+        "pattern": null,
+        "accept": null,
+        "multiple": false,
+        "options": []
+      }
+    ]
+  }
+]

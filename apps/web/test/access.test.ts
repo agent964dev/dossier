@@ -360,12 +360,13 @@ const PATHS = [
   '_inbox/x.json',
 ]
 
-const DATA = new Set([
-  'a/answers',
-  'a/answers/p.json',
-  'f/_old/notes.json',
-  '_inbox',
-  '_inbox/x.json',
+/** People's data, by the writer each belongs to. */
+const DATA = new Map<string, 'member' | 'outsider' | null>([
+  ['a/answers', null],
+  ['a/answers/p.json', 'outsider'],
+  ['f/_old/notes.json', 'member'],
+  ['_inbox', null],
+  ['_inbox/x.json', 'outsider'],
 ])
 
 interface Scenario {
@@ -458,9 +459,9 @@ const plantTree = async (
     const file = path.slice(path.lastIndexOf('/') + 1).includes('.')
     statements.push(
       env.DB.prepare(
-        `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, created_at,
-           deleted_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, owner_id,
+           created_at, deleted_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         treeId,
@@ -470,6 +471,9 @@ const plantTree = async (
         path.split('/').length,
         file ? 'file' : 'folder',
         DATA.has(path) ? 'data' : 'authored',
+        ((writer) => (writer == null ? null : (built?.[writer].id ?? null)))(
+          DATA.get(path),
+        ),
         now,
         s.deleted === index ? now : null,
       ),
@@ -528,13 +532,30 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
         matches(given.kind) &&
         live(pathAt(given.at)) &&
         isUnder(path, pathAt(given.at)) &&
-        (given.role !== 'respond' || origin(path) === 'authored'),
+        (given.role !== 'respond' || origin(path) === 'authored') &&
+        // Public grants read data only from a data node made public.
+        (given.kind !== 'anyone' ||
+          origin(path) === 'authored' ||
+          origin(pathAt(given.at)) === 'data'),
     )
   }
+  /** The person the caller is, for what they wrote. */
+  const who =
+    s.caller === 'member' || s.caller === 'readonly'
+      ? 'member'
+      : s.caller === 'outsider' || s.caller === 'scoped'
+        ? 'outsider'
+        : null
+  const owns = (path: string): boolean =>
+    who !== null &&
+    origin(path) === 'data' &&
+    DATA.get(path) === who &&
+    live(scope) &&
+    isUnder(path, scope)
   const all = ['', ...PATHS].filter(live)
   const readable = new Set<string>()
   for (const path of all) {
-    if (direct(path)) {
+    if (direct(path) || owns(path)) {
       readable.add(path)
       continue
     }
@@ -548,6 +569,128 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
   return readable
 }
 
+describe('people’s data', () => {
+  /** A data node written straight into D1, as a send leaves one. */
+  const plantData = async (
+    w: World,
+    path: string,
+    owner: Person | null,
+    kind: 'file' | 'folder' = 'file',
+  ) => {
+    const parent = path.slice(0, path.lastIndexOf('/'))
+    const id = crypto.randomUUID()
+    await exec(
+      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, owner_id,
+         created_at)
+       values (?, ?, (select id from nodes where tree_id = ? and path = ? and deleted_at is null),
+         ?, ?, ?, ?, 'data', ?, ?)`,
+      id,
+      w.treeId,
+      w.treeId,
+      parent,
+      path.slice(path.lastIndexOf('/') + 1),
+      path,
+      path.split('/').length,
+      kind,
+      owner?.id ?? null,
+      Date.now(),
+    )
+    if (kind === 'file') {
+      const version = crypto.randomUUID()
+      await exec(
+        `insert into node_versions (id, node_id, tree_id, revision, state, json_value, size,
+           content_type, author_id, created_at)
+         values (?, ?, ?, 1, 'live', '{}', 2, 'application/json', ?, ?)`,
+        version,
+        id,
+        w.treeId,
+        (owner ?? w.creator).id,
+        Date.now(),
+      )
+      await exec(
+        'update nodes set current_version_id = ? where id = ?',
+        version,
+        id,
+      )
+    }
+    return id
+  }
+
+  it('lets the writer read and withdraw their own data with no share, and nobody else withdraw it', async () => {
+    const w = await world()
+    await plantData(w, 'plans/answers', null, 'folder')
+    await plantData(w, 'plans/answers/o.json', w.outsider)
+    const outsider = await agent(w.outsider)
+    expect(await attempt(outsider, at(w, 'plans/answers/o.json'))).toBe('ok')
+    expect(await attempt(outsider, at(w, 'plans/q3.html'))).toBe('not_found')
+    const withdraws = (caller: Caller) =>
+      runAs(
+        caller,
+        Effect.gen(function* () {
+          const resolved = yield* (yield* TreeStore).locate(
+            ref(at(w, 'plans/answers/o.json')),
+          )
+          if ('missing' in resolved) throw new Error('missing')
+          return yield* (yield* Access).require('withdraw-own', resolved.node)
+        }).pipe(
+          Effect.map((granted) => granted.basis),
+          Effect.catchAll((error) => Effect.succeed(error.code)),
+        ),
+      )
+    expect(await withdraws(outsider)).toEqual([
+      expect.objectContaining({ kind: 'owner', userId: w.outsider.id }),
+    ])
+    // The creator reads everything but withdraws only their own.
+    expect(await withdraws(await agent(w.creator))).toBe('forbidden')
+    expect(await withdraws(await agent(w.outsider, { readOnly: true }))).toBe(
+      'forbidden',
+    )
+  })
+
+  it('keeps answers from respondents and public readers, unless a data folder is itself public', async () => {
+    const w = await world()
+    const answers = await plantData(w, 'plans/answers', null, 'folder')
+    await plantData(w, 'plans/answers/m.json', w.member)
+    await share(
+      w.treeId,
+      await w.node(''),
+      'email',
+      w.outsider.email,
+      'respond',
+      w.creator,
+    )
+    await share(w.treeId, await w.node(''), 'anyone', '*', 'read', w.creator)
+    const outsider = await agent(w.outsider)
+    expect(await attempt(outsider, at(w, 'plans/q3.html'))).toBe('ok')
+    expect(await attempt(outsider, at(w, 'plans/answers/m.json'))).toBe(
+      'not_found',
+    )
+    expect(await attempt(visitorCaller(), at(w, 'plans/answers/m.json'))).toBe(
+      'sign_in_required',
+    )
+    const readsData = (caller: Caller, path: string) =>
+      runAs(
+        caller,
+        Effect.gen(function* () {
+          const resolved = yield* (yield* TreeStore).locate(ref(at(w, path)))
+          if ('missing' in resolved) throw new Error('missing')
+          return yield* (yield* Access).require('read-data', resolved.node)
+        }).pipe(
+          Effect.map(() => 'ok' as const),
+          Effect.catchAll((error) => Effect.succeed(error.code)),
+        ),
+      )
+    expect(await readsData(outsider, 'plans/')).toBe('forbidden')
+    expect(await readsData(await agent(w.creator), 'plans/')).toBe('ok')
+    // The data folder made public: anyone reads it.
+    await share(w.treeId, answers as NodeId, 'anyone', '*', 'read', w.creator)
+    expect(await attempt(visitorCaller(), at(w, 'plans/answers/m.json'))).toBe(
+      'ok',
+    )
+    expect(await readsData(outsider, 'plans/answers/')).toBe('ok')
+  })
+})
+
 describe('the list check', () => {
   it('reaches the `_` files above a shared page, never a sibling folder’s or data', () => {
     const reached = expectedReadable({
@@ -558,9 +701,12 @@ describe('the list check', () => {
       scopeAt: -1,
       deleted: null,
     })
+    // Their own answers are theirs to read, by ownership and not by reach.
     expect([...reached].sort()).toEqual([
+      '_inbox/x.json',
       '_layout.html',
       'a/_theme.css',
+      'a/answers/p.json',
       'a/b/_components',
       'a/b/_components/x-y.js',
       'a/b/c.html',

@@ -94,6 +94,17 @@ export {
 // The lookup itself stays inside core; its answers' shapes do not.
 export type { KitComponent, KitFound, KitItem, LayoutLink } from './lookup.ts'
 export {
+  Data,
+  DataLive,
+  safeName,
+  type DataService,
+  type FormResponses,
+  type PageForms,
+  type ResponseRow,
+  type Responses,
+  type Revision,
+} from './data.ts'
+export {
   DEFAULT_LIMITS,
   Limits,
   type LimitsService,

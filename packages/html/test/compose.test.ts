@@ -5,6 +5,7 @@ import {
   analyze,
   bootstrapTags,
   compose,
+  type Found,
   layoutsOf,
   type Source,
 } from '../src/index.ts'
@@ -78,8 +79,8 @@ const expectServedShape = (html: string): void => {
   ])
 }
 
-it('is the fourth version of the composer', () => {
-  expect(COMPOSER_VERSION).toBe(4)
+it('is the fifth version of the composer', () => {
+  expect(COMPOSER_VERSION).toBe(5)
 })
 
 describe('a complete document', () => {
@@ -407,6 +408,10 @@ describe('layouts', () => {
           .filter((u) => u.relative && !u.underscore)
           .map((u) => u.range),
         ...(analysis.slot === null ? [] : [analysis.slot]),
+        ...analysis.forms.map((form) => ({
+          start: form.range.start + '<form'.length,
+          end: form.range.start + '<form'.length,
+        })),
       ].sort((a, b) => a.start - b.start)
       const out: string[] = []
       let pos = analysis.body.content.start
@@ -438,7 +443,7 @@ describe('the layout URL rewrite', () => {
       '<a href="../../../">',
       '<img src="../../../logo.svg"',
       'srcset="../../../logo.svg 1x, ../../../logo@2x.png 2x"',
-      '<form action="../../../feedback/">',
+      '<form data-dossier-form="0" action="../../../feedback/">',
       '<link rel="icon" href="../../../favicon.svg">',
       '<script src="../../../vendor/site.js">',
       '<link rel="stylesheet" href="../../../vendor/a.css">',
@@ -717,5 +722,114 @@ describe('a layout srcset with a separator written as a reference', () => {
       'logo.svg',
       'brief.pdf',
     ])
+  })
+})
+
+describe('forms', () => {
+  const formSource = (path: string, folder: string): Source => {
+    const text = fixture(`forms/${path}`)
+    return { source: text, analysis: analyze(text), folder }
+  }
+  const page = formSource('team/signup.html', 'team')
+  const layouts = [
+    formSource('_layout.html', ''),
+    formSource('team/_layout.html', 'team'),
+  ]
+  const seen: Found[] = []
+  const html = compose({
+    page,
+    layouts,
+    inject: (found) => {
+      seen.push(found)
+      return ''
+    },
+  })
+
+  it('composes the golden document', () => {
+    expect(html).toBe(fixture('forms/team/signup.expected.html'))
+  })
+
+  it('number every form in the document in its order', () => {
+    const forms = elements(parse(html)).filter((e) => e.tagName === 'form')
+    expect(
+      forms.map((form) => [
+        attrsOf(form)['data-dossier-form'],
+        attrsOf(form).action,
+      ]),
+    ).toEqual([
+      ['0', '../search/'],
+      ['1', 'people/'],
+      ['2', 'answers/'],
+      ['4', 'votes.json'],
+      ['5', '../feedback/'],
+    ])
+    expect(html).toContain(
+      '<template><form data-dossier-form="3" action="later/">',
+    )
+    expect(html).toContain('<FORM data-dossier-form="5" action="../feedback/">')
+  })
+
+  it('hand inject each form with where it came from, before and after the slot', () => {
+    expect(seen).toHaveLength(1)
+    const found = seen[0]!
+    expect(found.tags).toEqual([])
+    expect(
+      found.forms.map(({ n, source: from, form }) => [n, from, form.action]),
+    ).toEqual([
+      [0, 0, 'search/'],
+      [1, 1, 'people/'],
+      [2, 2, 'answers/'],
+      [3, 2, 'later/'],
+      [4, 2, 'votes.json'],
+      [5, 0, 'feedback/'],
+    ])
+    expect(found.forms[2]?.form).toBe(page.analysis.forms[0])
+    expect(found.forms[5]?.form).toBe(layouts[0]!.analysis.forms[2])
+  })
+
+  it('drop a form in slot fallback content the page replaces', () => {
+    expect(layouts[0]!.analysis.forms[1]?.action).toBe('fallback/')
+    expect(html).not.toContain('fallback/')
+    expect(seen[0]!.forms.map(({ form }) => form.action)).not.toContain(
+      'fallback/',
+    )
+  })
+
+  it('mark the forms of a complete page served alone', () => {
+    const written =
+      '<!doctype html><title>Vote</title>\n<form action="a/"></form>\n<Form\naction="b/"><input name="x"></Form>'
+    const found: Found[] = []
+    const out = compose({
+      page: { source: written, analysis: analyze(written), folder: '' },
+      layouts: [],
+      inject: (f) => {
+        found.push(f)
+        return `<!-- ${f.forms.length} forms -->`
+      },
+    })
+    expect(out).toBe(
+      '<!doctype html><meta charset="utf-8"><!-- 2 forms --><title>Vote</title>\n' +
+        '<form data-dossier-form="0" action="a/"></form>\n' +
+        '<Form data-dossier-form="1"\naction="b/"><input name="x"></Form>',
+    )
+    expect(found[0]?.forms.map(({ n, source: s }) => [n, s])).toEqual([
+      [0, 0],
+      [1, 0],
+    ])
+  })
+
+  it('give the same bytes every time, whatever private characters the page holds', () => {
+    expect(compose({ page, layouts, inject })).toBe(
+      compose({ page, layouts, inject }),
+    )
+    const written = `<!doctype html><p>${String.fromCharCode(0xe000)}0.0${String.fromCharCode(0xe000)}</p><form action="a/"></form>`
+    const out = compose({
+      page: { source: written, analysis: analyze(written), folder: '' },
+      layouts: [],
+      inject: () => '',
+    })
+    expect(out).toContain(
+      `<p>${String.fromCharCode(0xe000)}0.0${String.fromCharCode(0xe000)}</p><form data-dossier-form="0" action="a/">`,
+    )
   })
 })
