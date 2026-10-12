@@ -485,25 +485,30 @@ export const PagesLive: Layer.Layer<
     ) =>
       Effect.gen(function* () {
         const sha = page.version.blobSha256
-        const analysis =
-          sha === null ? null : yield* store.analysis(sha as Sha256)
+        // The page's text is read while its layouts are looked up.
+        const [analysis, source] = yield* Effect.all(
+          [
+            sha === null ? Effect.succeed(null) : store.analysis(sha as Sha256),
+            textOf(page.node.path, page.version),
+          ],
+          { concurrency: 'unbounded' },
+        )
         if (analysis === null) return null
         const chain = yield* composedLayouts({
           treeId: page.tree.id,
           page: { node: page.node, version: page.version, analysis },
           at: page.tree.authoredSeq as AuthoredSeq,
         }).pipe(Effect.provide(context))
-        const layouts: PreviewSource[] = []
-        for (const link of [...chain].reverse()) {
-          layouts.push({
-            source: yield* textOf(link.node.path, link.version),
-            analysis: link.analysis,
-          })
-        }
-        const raw = previewOf(
-          { source: yield* textOf(page.node.path, page.version), analysis },
-          layouts,
+        const layouts: PreviewSource[] = yield* Effect.forEach(
+          [...chain].reverse(),
+          (link) =>
+            Effect.map(textOf(link.node.path, link.version), (text) => ({
+              source: text,
+              analysis: link.analysis,
+            })),
+          { concurrency: 'unbounded' },
         )
+        const raw = previewOf({ source, analysis }, layouts)
         return {
           title: raw.title ?? page.node.name.replace(/\.html$/, ''),
           description: raw.description,
@@ -602,6 +607,7 @@ export const PagesLive: Layer.Layer<
             Effect.gen(function* () {
               let resolved = yield* store.resolve(ref)
               if ('missing' in resolved) return yield* denied(resolved)
+              let publicPage = false
               if (resolved.kind === 'kit') {
                 const chosen = yield* kitChoice(resolved, 'read')
                 if (chosen === null) {
@@ -626,7 +632,22 @@ export const PagesLive: Layer.Layer<
                   tree: resolved.tree,
                 }
               } else {
-                yield* asDenied(access.require('read', resolved.node))
+                // Read access, and whether anyone may read the page, together.
+                const [granted, anyone] = yield* Effect.all(
+                  [
+                    Effect.either(
+                      asDenied(access.require('read', resolved.node)),
+                    ),
+                    resolved.kind === 'page'
+                      ? isPublic(resolved.node)
+                      : Effect.succeed(false),
+                  ],
+                  { concurrency: 'unbounded' },
+                )
+                if (Either.isLeft(granted)) {
+                  return yield* Effect.fail(granted.left)
+                }
+                publicPage = anyone
               }
               const caller = yield* CurrentCaller
               switch (resolved.kind) {
@@ -649,7 +670,7 @@ export const PagesLive: Layer.Layer<
                       : linkPathOf(resolved.node.path, false)
                   const person = caller.person
                   const preview =
-                    resolved.kind === 'page' && (yield* isPublic(resolved.node))
+                    resolved.kind === 'page' && publicPage
                       ? yield* previewFor(resolved, ref)
                       : null
                   return {
@@ -1340,31 +1361,44 @@ export const PagesLive: Layer.Layer<
         if (hit !== null) return hit
         // A page pinned before a move composes where it stood then.
         const folder = folderOf(i.path)
+        // The page's and its layouts' texts, the base layout, the kit and
+        // the push's number, read together.
+        const [pageText, layoutTexts, baseLayout, items, push] =
+          yield* Effect.all(
+            [
+              textOf(i.path, i.version),
+              Effect.forEach(i.chain, (link) => textOf(i.path, link.version), {
+                concurrency: 'unbounded',
+              }),
+              i.analysis.complete ? Effect.succeed(null) : base.layout(),
+              kitAt({ treeId: i.key.treeId, folder, at: i.key.seq }).pipe(
+                Effect.provide(context),
+              ),
+              pushNumberOf(i.version),
+            ],
+            { concurrency: 'unbounded' },
+          )
         const page: Source = {
-          source: yield* textOf(i.path, i.version),
+          source: pageText,
           analysis: i.analysis,
           folder,
         }
         const tree: Source[] = []
         /** Each source's page or layout node, for its forms. */
         const hosts = new Map<Source, NodeRow>([[page, i.node]])
-        for (const link of i.chain) {
+        i.chain.forEach((link, at) => {
           const layout: Source = {
-            source: yield* textOf(i.path, link.version),
+            source: layoutTexts[at]!,
             analysis: link.analysis,
             folder: link.folder,
           }
           tree.push(layout)
           hosts.set(layout, link.node)
-        }
-        const layouts = page.analysis.complete
-          ? []
-          : layoutsOf(page, [...tree].reverse(), yield* base.layout())
-        const items = yield* kitAt({
-          treeId: i.key.treeId,
-          folder,
-          at: i.key.seq,
-        }).pipe(Effect.provide(context))
+        })
+        const layouts =
+          baseLayout === null
+            ? []
+            : layoutsOf(page, [...tree].reverse(), baseLayout)
         const urls: Record<string, string> = {}
         for (const [tag, found] of Object.entries(kitMap(items))) {
           urls[tag] =
@@ -1372,7 +1406,6 @@ export const PagesLive: Layer.Layer<
               ? relativeFrom(folder, found.path)
               : base.url(found.path)
         }
-        const push = yield* pushNumberOf(i.version)
         const chain = [...layouts, page]
         const html = compose({
           page,

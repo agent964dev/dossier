@@ -1308,19 +1308,99 @@ export const PushLive: Layer.Layer<
           membership,
         } = yield* authorize(push)
         const shares = JSON.parse(push.shares_json ?? '[]') as NewShare[]
-        const notHeld = yield* query(() =>
-          DB.prepare(
-            `select f.path from push_files f where f.push_id = ?1
-               and not exists (select 1 from blob_holds h where h.holder_kind = 'push'
-                                 and h.holder_id = ?1 and h.sha256 = f.sha256
-                                 and h.verified = 1)
-               and not exists (select 1 from node_versions v where v.tree_id = ?2
-                                 and v.blob_sha256 = f.sha256)
-             order by f.path limit 21`,
-          )
-            .bind(pushId, tree?.id ?? '')
-            .all<{ path: string }>(),
-        ).pipe(Effect.map((r) => r.results.map((row) => row.path)))
+        // What the checks below read, read together; they still decide in
+        // the same order.
+        const [
+          notHeld,
+          verified,
+          limit,
+          growth,
+          manifestRows,
+          all,
+          live,
+          shared,
+          since,
+        ] = yield* Effect.all(
+          [
+            query(() =>
+              DB.prepare(
+                `select f.path from push_files f where f.push_id = ?1
+                   and not exists (select 1 from blob_holds h where h.holder_kind = 'push'
+                                     and h.holder_id = ?1 and h.sha256 = f.sha256
+                                     and h.verified = 1)
+                   and not exists (select 1 from node_versions v where v.tree_id = ?2
+                                     and v.blob_sha256 = f.sha256)
+                 order by f.path limit 21`,
+              )
+                .bind(pushId, tree?.id ?? '')
+                .all<{ path: string }>(),
+            ).pipe(Effect.map((r) => r.results.map((row) => row.path))),
+            // Every file's size is its verified bytes', and the limits count
+            // those.
+            query(() =>
+              DB.prepare(
+                `select f.path, f.size, b.size as stored from push_files f
+                 join blobs b on b.sha256 = f.sha256 where f.push_id = ?`,
+              )
+                .bind(pushId)
+                .all<{ path: string; size: number; stored: number }>(),
+            ).pipe(Effect.map((r) => r.results)),
+            limits.current(),
+            // The verified bytes of files new at their paths, checked again
+            // against the storage now.
+            query(() =>
+              DB.prepare(
+                `select coalesce(sum(b.size), 0) as bytes from push_files f
+                 join blobs b on b.sha256 = f.sha256
+                 where f.push_id = ?1 and not exists (
+                   select 1 from nodes n join node_versions v on v.id = n.current_version_id
+                   where n.tree_id = ?2 and n.path = f.path and n.deleted_at is null
+                     and v.blob_sha256 = f.sha256)`,
+              )
+                .bind(pushId, tree?.id ?? '')
+                .first<{ bytes: number }>(),
+            ),
+            query(() =>
+              DB.prepare(
+                `select f.path, f.sha256, a.json from push_files f
+                 left join analyses a on a.sha256 = f.sha256 and a.analyzer = 'html' and a.version = ?2
+                 where f.push_id = ?1`,
+              )
+                .bind(pushId, ANALYZER)
+                .all<{ path: string; sha256: Sha256; json: string | null }>(),
+            ),
+            tree === null
+              ? Effect.succeed([])
+              : query(() =>
+                  DB.prepare(
+                    `select path, kind, origin from nodes
+                     where tree_id = ? and deleted_at is null and depth > 0`,
+                  )
+                    .bind(tree.id)
+                    .all<{
+                      path: string
+                      kind: 'file' | 'folder'
+                      origin: string
+                    }>(),
+                ).pipe(Effect.map((r) => r.results)),
+            tree === null
+              ? Effect.succeed([] as LiveFile[])
+              : liveUnder(tree.id, push.path),
+            tree === null
+              ? Effect.succeed(false)
+              : query(() =>
+                  DB.prepare(
+                    'select 1 as one from shares where tree_id = ? limit 1',
+                  )
+                    .bind(tree.id)
+                    .first(),
+                ).pipe(Effect.map((row) => row !== null)),
+            tree !== null && push.force === 0
+              ? pushedSince(tree.id, push.path, push.base_seq ?? 0)
+              : Effect.succeed([] as string[]),
+          ],
+          { concurrency: 'unbounded' },
+        )
         if (notHeld.length > 0) {
           return yield* Effect.fail(
             dossierError(
@@ -1331,16 +1411,6 @@ export const PushLive: Layer.Layer<
             ),
           )
         }
-
-        // Every file's size is its verified bytes', and the limits count those.
-        const verified = yield* query(() =>
-          DB.prepare(
-            `select f.path, f.size, b.size as stored from push_files f
-             join blobs b on b.sha256 = f.sha256 where f.push_id = ?`,
-          )
-            .bind(pushId)
-            .all<{ path: string; size: number; stored: number }>(),
-        ).pipe(Effect.map((r) => r.results))
         const forged = verified.find((f) => f.size !== f.stored)
         if (forged !== undefined) {
           return yield* Effect.fail(
@@ -1352,7 +1422,6 @@ export const PushLive: Layer.Layer<
             ),
           )
         }
-        const limit = yield* limits.current()
         // The limits as they stand now, which may have changed since stage.
         if (verified.length > limit.pushFiles) {
           return yield* Effect.fail(
@@ -1374,51 +1443,13 @@ export const PushLive: Layer.Layer<
                 ),
           )
         }
-        // The verified bytes of files new at their paths, checked again
-        // against the storage now.
-        const growth = yield* query(() =>
-          DB.prepare(
-            `select coalesce(sum(b.size), 0) as bytes from push_files f
-             join blobs b on b.sha256 = f.sha256
-             where f.push_id = ?1 and not exists (
-               select 1 from nodes n join node_versions v on v.id = n.current_version_id
-               where n.tree_id = ?2 and n.path = f.path and n.deleted_at is null
-                 and v.blob_sha256 = f.sha256)`,
-          )
-            .bind(pushId, tree?.id ?? '')
-            .first<{ bytes: number }>(),
-        )
         if ((growth?.bytes ?? 0) > 0) {
           yield* limits.requireStorage(ws.id, growth?.bytes ?? 0)
         }
 
-        const manifestRows = yield* query(() =>
-          DB.prepare(
-            `select f.path, f.sha256, a.json from push_files f
-             left join analyses a on a.sha256 = f.sha256 and a.analyzer = 'html' and a.version = ?2
-             where f.push_id = ?1`,
-          )
-            .bind(pushId, ANALYZER)
-            .all<{ path: string; sha256: Sha256; json: string | null }>(),
-        )
         const manifest = new Map(
           manifestRows.results.map((r) => [r.path, r.sha256]),
         )
-        const all =
-          tree === null
-            ? []
-            : yield* query(() =>
-                DB.prepare(
-                  `select path, kind, origin from nodes
-                   where tree_id = ? and deleted_at is null and depth > 0`,
-                )
-                  .bind(tree.id)
-                  .all<{
-                    path: string
-                    kind: 'file' | 'folder'
-                    origin: string
-                  }>(),
-              ).pipe(Effect.map((r) => r.results))
         const kinds = new Map<string, ReturnType<TreeView['kindAt']>>()
         for (const node of all) {
           if (isUnder(node.path, push.path) && node.origin !== 'data') continue
@@ -1443,7 +1474,6 @@ export const PushLive: Layer.Layer<
         // Every page of the tree as it will be, not only the pushed ones: a
         // push elsewhere can break a form that targets its path.
         const pages = yield* pagesAfter(push, tree, manifestRows.results)
-        const live = tree === null ? [] : yield* liveUnder(tree.id, push.path)
         const changes = planOf(live, manifest, tree === null)
         const baseComponents = baseLayer.components()
         const check = checkPush(
@@ -1496,13 +1526,6 @@ export const PushLive: Layer.Layer<
           return out
         }
         const after = carried(needs)
-        const shared =
-          tree !== null &&
-          (yield* query(() =>
-            DB.prepare('select 1 as one from shares where tree_id = ? limit 1')
-              .bind(tree.id)
-              .first(),
-          )) !== null
         const narrowed =
           shared &&
           [
@@ -1521,14 +1544,10 @@ export const PushLive: Layer.Layer<
             )
           })
 
-        const baseSeq = push.base_seq ?? 0
-        if (tree !== null && push.force === 0) {
-          const since = yield* pushedSince(tree.id, push.path, baseSeq)
-          if (since.length > 0) {
-            return yield* Effect.fail(
-              staleHead(ws.name, tree.name, push.path, since),
-            )
-          }
+        if (tree !== null && since.length > 0) {
+          return yield* Effect.fail(
+            staleHead(ws.name, tree.name, push.path, since),
+          )
         }
         const plan = { ...changes, warnings: check.warnings }
 
@@ -1589,7 +1608,7 @@ export const PushLive: Layer.Layer<
                 // fails the batch, and the commit checks again.
                 cs.guardHead('', tree.authoredSeq as AuthoredSeq)
                 if (push.force === 0) {
-                  cs.guardHead(push.path, baseSeq as AuthoredSeq)
+                  cs.guardHead(push.path, (push.base_seq ?? 0) as AuthoredSeq)
                 }
               }
               const folder = cs.putStaged(

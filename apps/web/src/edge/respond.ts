@@ -352,6 +352,8 @@ export const renderShell = (boot: ShellBoot): Response => {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 ${previewTags(boot)}
 <link rel="icon" href="/_/app/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="${escapeHtml(boot.contentOrigin)}">
+<link rel="preconnect" href="${escapeHtml(boot.contentOrigin)}" crossorigin>
 <style>html,body{margin:0;height:100%}iframe{display:block;border:0;width:100%;height:100%}</style>
 <script type="application/json" id="dossier-shell">${data}</script>
 <script type="module" src="/_/base/${encodeURIComponent(boot.base)}/shell.js"></script>
@@ -391,8 +393,11 @@ const contentHeaders = (cache: string): Headers =>
   })
 
 const PAGE_CACHE = 'private, no-cache'
-/** A file at a pinned sequence never changes. */
-const PINNED_CACHE = 'private, max-age=86400'
+/**
+ * A file at a pinned sequence never changes, so a reload need not ask again
+ * within the day the view handle in its URL lives.
+ */
+const PINNED_CACHE = 'private, max-age=86400, immutable'
 
 /** A frame request that fails: plain text, never a redirect to sign-in. */
 export const frameFailure = (status: 404 | 503): Response => {

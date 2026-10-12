@@ -59,8 +59,12 @@ export const LIMITS = {
   totalBytes: 500 * MiB,
 } as const
 
-/** Files in flight at once, up or down. */
-const IN_FLIGHT = 6
+/**
+ * Files in flight at once, up or down: each waits mostly on the network, so
+ * more at once finish a push of many small files sooner. A push holds at most
+ * 500 MiB in all, so this bounds what is read into memory at once too.
+ */
+const IN_FLIGHT = 16
 /** Uploads a purge holds are tried again this many times, waiting longer. */
 const RECLAIM_TRIES = 5
 const RECLAIM_WAIT_MS = 2_000

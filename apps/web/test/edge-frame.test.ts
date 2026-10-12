@@ -236,7 +236,7 @@ describe('the frame route', () => {
 
     const file = await frame(owner, `/_/v/${handle}/1/brief.pdf`)
     expect(file.status).toBe(200)
-    expectContentHeaders(file, 'private, max-age=86400')
+    expectContentHeaders(file, 'private, max-age=86400, immutable')
     expect(file.headers.get('accept-ranges')).toBe('bytes')
     expect(await file.text()).toBe(PDF)
   })
@@ -426,7 +426,9 @@ describe('HTML on either host', () => {
   it('leaves other responses’ caching as it was', async () => {
     const handle = await handleOf(owner)
     const pdf = await frame(owner, `/_/v/${handle}/1/brief.pdf`)
-    expect(pdf.headers.get('cache-control')).toBe('private, max-age=86400')
+    expect(pdf.headers.get('cache-control')).toBe(
+      'private, max-age=86400, immutable',
+    )
   })
 })
 

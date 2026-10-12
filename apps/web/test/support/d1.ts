@@ -194,8 +194,9 @@ export const beforeRead = (
 }
 
 /**
- * A database that runs `after` once, right after the first `all()` of a
- * statement whose SQL matches returns: a change between two reads.
+ * A database that runs `after` once, right after the first read of a
+ * statement whose SQL matches returns: its `all()`, or the batch it is read
+ * in. A change between two reads.
  */
 export const afterRead = (
   database: D1Database,
@@ -203,8 +204,15 @@ export const afterRead = (
   after: () => Promise<unknown>,
 ): D1Database => {
   let armed = true
-  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
-    new Proxy(statement, {
+  const real = new WeakMap<object, D1PreparedStatement>()
+  const matching = new WeakSet<object>()
+  const fire = async () => {
+    if (!armed) return
+    armed = false
+    await after()
+  }
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => {
+    const proxy: D1PreparedStatement = new Proxy(statement, {
       get(target, property) {
         if (property === 'bind') {
           return (...values: unknown[]) => wrap(target.bind(...values))
@@ -212,10 +220,7 @@ export const afterRead = (
         if (property === 'all') {
           return async () => {
             const result = await target.all()
-            if (armed) {
-              armed = false
-              await after()
-            }
+            await fire()
             return result
           }
         }
@@ -223,12 +228,25 @@ export const afterRead = (
         return typeof value === 'function' ? value.bind(target) : value
       },
     })
+    real.set(proxy, statement)
+    matching.add(proxy)
+    return proxy
+  }
   return new Proxy(database, {
     get(target, property) {
       if (property === 'prepare') {
         return (query: string) => {
           const statement = target.prepare(query)
           return matches(query) ? wrap(statement) : statement
+        }
+      }
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          const results = await target.batch(
+            statements.map((s) => real.get(s) ?? s),
+          )
+          if (statements.some((s) => matching.has(s))) await fire()
+          return results
         }
       }
       const value = Reflect.get(target, property, target) as unknown
