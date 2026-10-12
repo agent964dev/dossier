@@ -808,6 +808,19 @@ describe('the list check', () => {
               deleted: null,
             },
           ],
+          // The same on the root for a read-only key: the respond share is
+          // the one kept, and respond never reads the data file _inbox.
+          [
+            {
+              shares: [
+                { at: -1, kind: 'workspace', role: 'respond' },
+                { at: -1, kind: 'workspace', role: 'read' },
+              ],
+              caller: 'readonly',
+              scopeAt: 0,
+              deleted: null,
+            },
+          ],
         ],
       },
     )
