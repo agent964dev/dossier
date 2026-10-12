@@ -534,15 +534,15 @@ export const makeChanges = (deps: ChangesDeps) => {
         const allLive = yield* liveNodes(tree.id)
         // The comments of the pages it removes go with them, so a later
         // page at the same path starts with none.
+        const commentsOfRemoved = remove
+          .filter(isPageFile)
+          .map((r) => commentsFolderOf(r.path).slice(0, -1))
         const retired = new Set(
           allLive
-            .filter((n) =>
-              remove.some(
-                (r) =>
-                  isPageFile(r) &&
-                  n.origin === 'data' &&
-                  isUnder(n.path, commentsFolderOf(r.path).slice(0, -1)),
-              ),
+            .filter(
+              (n) =>
+                n.origin === 'data' &&
+                commentsOfRemoved.some((folder) => isUnder(n.path, folder)),
             )
             .map((n) => n.id),
         )
@@ -745,6 +745,7 @@ export const makeChanges = (deps: ChangesDeps) => {
           folders: [...folders.values()],
           empty: empty.filter((n) => n.deletedAt === null || folders.has(n.id)),
           retire,
+          commentsOfRemoved,
           tree: tree.deletedAt !== null,
           forms,
         }

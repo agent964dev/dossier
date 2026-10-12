@@ -227,6 +227,11 @@ export interface RestorePlan {
    * everything in them), deleted with them before anything comes back.
    */
   readonly retire: readonly NodeRow[]
+  /**
+   * The comments folder paths of the pages it removes, with or without
+   * comments: nothing may be live in them after it but what it retires.
+   */
+  readonly commentsOfRemoved: readonly string[]
   /** A deleted tree, live again with its root. */
   readonly tree: boolean
   /**
@@ -3017,17 +3022,34 @@ export const TreeStoreLive: Layer.Layer<
                 binds: [folders, t],
               },
               {
-                // The comments it retires are live, and nothing new was
-                // written in their folders meanwhile.
+                // The comments it retires are live.
                 sql: `not exists (select 1 from json_each(?) j
                         left join nodes n on n.id = j.value
-                        where n.id is null or n.deleted_at is not null or n.tree_id <> ?)
-                      and not exists (select 1 from json_each(?) j
-                        join nodes f on f.id = j.value and f.kind = 'folder'
-                        join nodes c on c.parent_id = f.id and c.deleted_at is null
-                        where c.id not in (select value from json_each(?)))`,
-                binds: [retire, t, retire, retire],
+                        where n.id is null or n.deleted_at is not null or n.tree_id <> ?)`,
+                binds: [retire, t],
               },
+              // Nothing new was written in a removed page's comments folder
+              // meanwhile, a first comment included: one guard each.
+              ...made.commentsOfRemoved.map((folder) => ({
+                sql: `not exists (select 1 from nodes c
+                        where c.tree_id = ? and c.origin = 'data' and c.deleted_at is null
+                          and (c.path = ? or substr(c.path, 1, length(?) + 1) = ? || '/')
+                          and c.id not in (select value from json_each(?)))`,
+                binds: [
+                  t,
+                  folder,
+                  folder,
+                  folder,
+                  JSON.stringify(
+                    made.retire
+                      .filter(
+                        (n) =>
+                          n.path === folder || n.path.startsWith(`${folder}/`),
+                      )
+                      .map((n) => n.id),
+                  ),
+                ],
+              })),
             )
             // Their bytes are still there and nobody is reclaiming them.
             blobGuards.push({

@@ -11,12 +11,14 @@ import type {
   TreeId,
 } from '@dossier/contracts'
 import type { JsonObject } from '@dossier/contracts/bridge'
+import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { Data, Files, TreeStore, type Caller } from '../src/core/index.ts'
+import { beforeBatch, recordingStatements, rows } from './support/d1.ts'
 import { pageWith, pushForms, seqOf, type FormTree } from './support/forms.ts'
-import { harness } from './support/harness.ts'
+import { harness, testRuntime } from './support/harness.ts'
 import { runAs, sessionFor } from './support/people.ts'
 import {
   nodeAt,
@@ -266,6 +268,52 @@ describe('a page deleted and another pushed at its path', () => {
     await pushTree(tree, { 'plan.html': PLAN, 'other.html': OTHER })
     await expectFreshPage(tree, sara.who, rami)
   })
+
+  it('takes a first comment written while the restore was on the way', async () => {
+    const tree = await pushForms(owner, ws, { 'other.html': OTHER })
+    await pushTree(tree, { 'plan.html': PLAN, 'other.html': OTHER })
+    const sara = await given(tree, 'plan.html', 'respond', 'sara')
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => sql.includes("json_extract(j.value, '$.from')"),
+            async () => {
+              await commentAs(sara.caller, tree, 'Private: written meanwhile')
+            },
+          ),
+        },
+      }),
+    )
+    await restore(ownerBrowser, tree, '', { push: 1 })
+    expect(await nodeAt(tree.treeId, 'plan.html')).toBeUndefined()
+    expect(
+      await rows(
+        `select path from nodes where tree_id = ? and deleted_at is null
+           and (path = 'plan.comments' or path like 'plan.comments/%')`,
+        tree.treeId,
+      ),
+    ).toEqual([])
+  })
+
+  it('removes 300 pages in one restore within D1’s limits', async () => {
+    const tree = await pushForms(owner, ws, { 'other.html': OTHER })
+    const pages: Record<string, string> = { 'other.html': OTHER }
+    for (let n = 0; n < 300; n += 1) pages[`p/page-${n}.html`] = PLAN
+    await pushTree(tree, pages)
+    expect(await nodeAt(tree.treeId, 'p/page-299.html')).toBeDefined()
+    const recorded = recordingStatements(env.DB)
+    harness.use(testRuntime({ env: { DB: recorded.db } }))
+    await restore(ownerBrowser, tree, '', { push: 1 })
+    expect(await nodeAt(tree.treeId, 'p/page-0.html')).toBeUndefined()
+    const bytes = (text: string) => new TextEncoder().encode(text).byteLength
+    expect(
+      recorded
+        .seen()
+        .filter((s) => s.binds.length > 100 || bytes(s.sql) > 100_000),
+    ).toEqual([])
+  }, 120_000)
 })
 
 describe('restoring a deleted page', () => {
