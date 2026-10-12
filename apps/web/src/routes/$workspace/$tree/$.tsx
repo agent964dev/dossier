@@ -277,7 +277,8 @@ function Listing({ view }: { view: ListingView }) {
               ))}
             </ol>
           </nav>
-          <div className="flex items-center justify-between gap-3">
+          {/* The actions go below a name too long to sit beside them. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <h1 className="min-w-0 font-clash text-[2rem] leading-tight font-semibold tracking-[-0.03em] break-words text-neutral-50">
               {view.folder.name}
             </h1>
