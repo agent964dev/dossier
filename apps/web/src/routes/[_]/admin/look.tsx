@@ -22,6 +22,7 @@ import {
 } from 'react'
 
 import { AppHeader } from '../../../components/app-header'
+import { HostName } from '../../../components/host-name'
 import { NoAccessScreen } from '../../../components/no-access'
 import { SectionLabel } from '../../../components/section-label'
 import {
@@ -212,8 +213,8 @@ function LookScreen({ view }: { view: LookView }) {
       />
       <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 pt-6 pb-16 sm:px-6">
         <div className="flex flex-col gap-2">
-          <p className="font-mono text-xs break-all text-neutral-500">
-            {view.deployment} <span aria-hidden>/</span>{' '}
+          <p className="font-mono text-xs break-words text-neutral-500">
+            <HostName host={view.deployment} /> <span aria-hidden>/</span>{' '}
             <a
               href="/_/admin"
               className="rounded-sm underline-offset-4 outline-none hover:text-neutral-300 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
