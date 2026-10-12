@@ -674,8 +674,13 @@ export const WebhooksLive: Layer.Layer<
         yield* sendDeliveries(yield* insertPending(pairs, at))
       })
 
-    /** Marks a delivery skipped, sending nothing. */
-    const skip = (m: DeliveryKey, why: string) =>
+    const keyBinds = (m: DeliveryKey) => [m.treeId, m.seq, m.webhookId] as const
+
+    /**
+     * Marks a delivery skipped, sending nothing, only while this attempt
+     * still holds it: a stale attempt never undoes one that claimed since.
+     */
+    const skip = (m: DeliveryKey, claimId: string, why: string) =>
       Effect.gen(function* () {
         console.log(
           JSON.stringify({
@@ -691,14 +696,12 @@ export const WebhooksLive: Layer.Layer<
             `update webhook_deliveries set state = 'skipped', claim_id = null,
                claimed_until = null
              where event_tree_id = ? and event_seq = ? and webhook_id = ?
-               and state = 'pending'`,
+               and state = 'pending' and claim_id = ?`,
           )
-            .bind(m.treeId, m.seq, m.webhookId)
+            .bind(m.treeId, m.seq, m.webhookId, claimId)
             .run(),
         )
       })
-
-    const keyBinds = (m: DeliveryKey) => [m.treeId, m.seq, m.webhookId] as const
 
     /** Lets a claim go early, so a retry need not wait out its lease. */
     const release = (m: DeliveryKey, claimId: string) =>
@@ -787,35 +790,35 @@ export const WebhooksLive: Layer.Layer<
             .first<WebhookRow>(),
         )
         if (hook === null) {
-          yield* skip(m, 'webhook gone')
+          yield* skip(m, claim.claimId, 'webhook gone')
           return message.ack()
         }
         // One read of the event, its tree and the workspace it is in now:
         // the rechecks below rest on the same moment.
         const facts = yield* system.eventForDelivery(m.treeId, m.seq)
         if (facts === null) {
-          yield* skip(m, 'event gone')
+          yield* skip(m, claim.claimId, 'event gone')
           return message.ack()
         }
         if (facts.tree.workspaceId !== hook.workspaceId) {
-          yield* skip(m, 'tree moved')
+          yield* skip(m, claim.claimId, 'tree moved')
           return message.ack()
         }
         if (
           facts.workspace.deletedAt !== null ||
           facts.workspace.suspendedAt !== null
         ) {
-          yield* skip(m, 'workspace not live')
+          yield* skip(m, claim.claimId, 'workspace not live')
           return message.ack()
         }
         const type = facts.event.type as EventType
         if (!eventsOf(hook.eventsJson).includes(type)) {
-          yield* skip(m, 'event no longer chosen')
+          yield* skip(m, claim.claimId, 'event no longer chosen')
           return message.ack()
         }
         const url = webhookUrl(hook.url, rules)
         if (url === null) {
-          yield* skip(m, 'url refused')
+          yield* skip(m, claim.claimId, 'url refused')
           return message.ack()
         }
         const pushId = facts.event.pushId
@@ -897,44 +900,73 @@ export const WebhooksLive: Layer.Layer<
         )
         const last = !result.ok && attempts >= MAX_ATTEMPTS
         const delay = RETRY_DELAYS_SECONDS[attempts - 1] ?? 0
-        const recorded = yield* query('record a delivery', () =>
-          DB.prepare(
-            `update webhook_deliveries set attempts = ?1, last_status = ?2,
-               last_error = ?3, state = ?4, next_at = ?5, delivered_at = ?6,
-               claim_id = null, claimed_until = null
-             where event_tree_id = ?7 and event_seq = ?8 and webhook_id = ?9
-               and claim_id = ?10 and state = 'pending'
-             returning attempts`,
-          )
-            .bind(
+        // The delivery's result and the webhook's health commit together,
+        // and only for the attempt still holding the claim: the delivery is
+        // marked with a token of this claim, health changes only where that
+        // token stands (and the webhook still has the URL the request went
+        // to), and the token is then cleared. A failed batch writes nothing
+        // and the retry sends again.
+        const recordToken = `done:${claim.claimId}`
+        const results = yield* query('record a delivery', () =>
+          DB.batch([
+            DB.prepare(
+              `update webhook_deliveries set attempts = ?1, last_status = ?2,
+                 last_error = ?3, state = ?4, next_at = ?5, delivered_at = ?6,
+                 claim_id = ?7, claimed_until = null
+               where event_tree_id = ?8 and event_seq = ?9 and webhook_id = ?10
+                 and claim_id = ?11 and state = 'pending'
+               returning attempts`,
+            ).bind(
               attempts,
               result.status,
               result.ok ? null : result.error,
               result.ok ? 'delivered' : last ? 'failed' : 'pending',
               result.ok || last ? done : done + delay * 1000,
               result.ok ? done : null,
+              recordToken,
               ...keyBinds(m),
               claim.claimId,
-            )
-            .first(),
+            ),
+            result.ok
+              ? DB.prepare(
+                  `update webhooks set failing_since = null, consecutive_failures = 0,
+                     last_success_at = ?1
+                   where id = ?2 and url = ?3 and exists (
+                     select 1 from webhook_deliveries where event_tree_id = ?4
+                       and event_seq = ?5 and webhook_id = ?2 and claim_id = ?6)`,
+                ).bind(
+                  done,
+                  m.webhookId,
+                  hook.url,
+                  m.treeId,
+                  m.seq,
+                  recordToken,
+                )
+              : DB.prepare(
+                  `update webhooks set consecutive_failures = consecutive_failures + 1,
+                     failing_since = coalesce(failing_since, ?1), last_error = ?2,
+                     last_error_at = ?1
+                   where id = ?3 and url = ?4 and exists (
+                     select 1 from webhook_deliveries where event_tree_id = ?5
+                       and event_seq = ?6 and webhook_id = ?3 and claim_id = ?7)`,
+                ).bind(
+                  done,
+                  result.error,
+                  m.webhookId,
+                  hook.url,
+                  m.treeId,
+                  m.seq,
+                  recordToken,
+                ),
+            DB.prepare(
+              `update webhook_deliveries set claim_id = null
+               where event_tree_id = ? and event_seq = ? and webhook_id = ?
+                 and claim_id = ?`,
+            ).bind(...keyBinds(m), recordToken),
+          ]),
         )
         // The claim was lost meanwhile: whoever holds it now records.
-        if (recorded === null) return message.ack()
-        // Health belongs to the receiver the request went to: an attempt
-        // at a URL since edited away says nothing about the new one.
-        yield* query('record a webhook’s health', () =>
-          (result.ok
-            ? DB.prepare(
-                `update webhooks set failing_since = null, consecutive_failures = 0,
-                   last_success_at = ?1 where id = ?2 and url = ?3`,
-              ).bind(done, m.webhookId, hook.url)
-            : DB.prepare(
-                `update webhooks set consecutive_failures = consecutive_failures + 1,
-                   failing_since = coalesce(failing_since, ?1), last_error = ?2,
-                   last_error_at = ?1 where id = ?3 and url = ?4`,
-              ).bind(done, result.error, m.webhookId, hook.url)
-          ).run(),
-        )
+        if ((results[0]?.results.length ?? 0) === 0) return message.ack()
         if (result.ok || last) return message.ack()
         return message.retry({ delaySeconds: delay })
       })

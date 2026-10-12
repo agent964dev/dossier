@@ -18,7 +18,7 @@ import {
   type WebhookMessage,
 } from '../src/core/index.ts'
 import { WEBHOOK_SWEEP } from '../src/jobs/scheduled.ts'
-import { exec, failingStatements, rows } from './support/d1.ts'
+import { beforeRead, exec, failingStatements, rows } from './support/d1.ts'
 import { harness, testRuntime } from './support/harness.ts'
 import { sessionFor } from './support/people.ts'
 import { at, DAY, HOUR, MINUTE, pushAt } from './support/purge.ts'
@@ -458,6 +458,95 @@ describe('the consumer', () => {
     ])
     await consumeAt(runtime, T + 33 * SECOND, sent)
     expect(next.received()).toHaveLength(1)
+  })
+
+  it('never lets a stale attempt skip a delivery another attempt has claimed since', async () => {
+    harness.use(runtime)
+    const s = await space()
+    const T = Date.now()
+    const host = receiver.host()
+    const hook = await addAt(T, s, host.url)
+    queue.take()
+    await pushPage(T + SECOND, s)
+    await consumeAt(runtime, T + 2 * SECOND, queue.take())
+    const sent = deliverOf(queue.take(), hook.webhook.id)
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    host.during(() => held)
+    let second: ReturnType<typeof consumeAt> | undefined
+    // Attempt A claims, then stalls before its recheck. Its lease runs out,
+    // attempt B claims and sends, and only then does A read the workspace,
+    // suspended meanwhile.
+    const stalled = beforeRead(
+      env.DB,
+      (q) => q.includes('as nodeKind'),
+      async () => {
+        second = consumeAt(runtime, T + 64 * SECOND, sent)
+        while (host.received().length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        await exec(
+          'update workspaces set suspended_at = ? where id = ?',
+          T,
+          s.ws.id,
+        )
+      },
+    )
+    await consumeAt(
+      testRuntime({ env: { WEBHOOKS: queue.queue, DB: stalled } }),
+      T + 3 * SECOND,
+      sent,
+    )
+    release()
+    await second
+    host.during(async () => {})
+    expect(host.received()).toHaveLength(1)
+    expect(await deliveries(hook.webhook.id)).toMatchObject([
+      { state: 'delivered', attempts: 1, last_status: 200 },
+    ])
+  })
+
+  it('records a delivery and its webhook’s health together, or neither', async () => {
+    harness.use(runtime)
+    const s = await space()
+    const T = Date.now()
+    const host = receiver.host(500, 500, 500)
+    const hook = await addAt(T, s, host.url)
+    queue.take()
+    await pushPage(T + SECOND, s)
+    await consumeAt(runtime, T + 2 * SECOND, queue.take())
+    const sent = deliverOf(queue.take(), hook.webhook.id)
+    let now = T + 3 * SECOND
+    for (let n = 1; n <= FAILING_AFTER; n += 1) {
+      await consumeAt(runtime, now, sent)
+      now += RETRY_DELAYS_SECONDS[n - 1]! * SECOND
+    }
+    expect((await listAt(now, s)).webhooks[0]!.failing).not.toBeNull()
+    // The receiver answers, but writing the webhook's health fails.
+    const broken = testRuntime({
+      env: {
+        WEBHOOKS: queue.queue,
+        DB: failingStatements(env.DB, (q) =>
+          q.includes('update webhooks set failing_since = null'),
+        ),
+      },
+    })
+    const failed = await consumeAt(broken, now, sent)
+    expect(failed.retryMessages).toHaveLength(1)
+    expect(await deliveries(hook.webhook.id)).toMatchObject([
+      { state: 'pending', attempts: FAILING_AFTER },
+    ])
+    const retried = await consumeAt(runtime, now + 31 * SECOND, sent)
+    expect(retried.explicitAcks).toEqual(retried.ids)
+    expect(await deliveries(hook.webhook.id)).toMatchObject([
+      { state: 'delivered', attempts: FAILING_AFTER + 1 },
+    ])
+    expect((await listAt(now + 31 * SECOND, s)).webhooks[0]).toMatchObject({
+      failing: null,
+      lastSuccessAt: now + 31 * SECOND,
+    })
   })
 
   it('names a timeout, a redirect it did not follow and a refused connection', async () => {
