@@ -2,6 +2,7 @@ import {
   contentOrigin,
   dossierError,
   isNodeName,
+  parseTarget,
   MAX_DEPTH,
   type AuthoredSeq,
   type DossierError,
@@ -493,12 +494,38 @@ export const PagesLive: Layer.Layer<
         } catch {
           return null
         }
-        if (url.origin !== 'https://tree.invalid') {
+        let at: TreeRef | null
+        if (url.origin === 'https://tree.invalid') {
+          at = treeRefOf(page.tree.id, url.pathname.slice(1))
+        } else if (url.origin === config.origin.origin) {
+          // This deployment's own URLs, however spelled, pass the same
+          // check: a file route's path, or a link into this tree.
+          const named =
+            url.pathname === '/_/api/file'
+              ? (url.searchParams.get('path') ?? '')
+              : url.href
+          const target = parseTarget(named, config.origin)
+          if (
+            target === null ||
+            target.workspace !== ref.workspace ||
+            target.tree !== ref.tree
+          ) {
+            return null
+          }
+          at = { treeId: page.tree.id, path: target.path, folder: false }
+        } else if (
+          url.hostname === config.contentHost.replace('{tree}', page.tree.id) ||
+          url.hostname.endsWith(
+            config.contentHost.replace('{tree}', '').split(':')[0] ?? '',
+          )
+        ) {
+          // A content host's URL names a frame, never a preview.
+          return null
+        } else {
           return url.protocol === 'https:' || url.protocol === 'http:'
             ? url.href
             : null
         }
-        const at = treeRefOf(page.tree.id, url.pathname.slice(1))
         if (at === null || at.folder) return null
         const found = yield* store.resolve(at)
         if ('missing' in found) return null

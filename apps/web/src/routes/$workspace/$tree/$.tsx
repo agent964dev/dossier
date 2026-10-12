@@ -249,7 +249,7 @@ function Listing({ view }: { view: ListingView }) {
   const answered = view.pages.some((page) => page.responses !== null)
   return (
     <div className="min-h-dvh">
-      <AppHeader email={view.me.email} />
+      <AppHeader email={view.me?.email ?? null} />
       <main className="mx-auto flex max-w-4xl flex-col gap-6 px-4 pt-6 pb-16 sm:px-6">
         <div className="flex flex-col gap-2">
           <nav aria-label="Breadcrumbs">

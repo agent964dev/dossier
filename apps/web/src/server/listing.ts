@@ -27,7 +27,8 @@ interface PushStamp {
 /** What a folder's listing shows; every action is one the viewer may take. */
 export interface ListingView {
   readonly deployment: string
-  readonly me: { readonly email: string; readonly name: string }
+  /** Null for a visitor listing a public folder. */
+  readonly me: { readonly email: string; readonly name: string } | null
   readonly crumbs: readonly { readonly name: string; readonly href: string }[]
   readonly folder: {
     readonly name: string
@@ -116,12 +117,8 @@ export const listingView = createServerFn({ method: 'GET' })
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         const config = yield* Config
+        // A visitor lists what anyone may read; Files refuses the rest.
         const me = caller.person
-        if (me === null) {
-          return yield* Effect.fail(
-            dossierError('sign_in_required', 'Sign in to open this.'),
-          )
-        }
         const ref = parseTarget(
           `${data.workspace}/${data.tree}/${data.path === '' ? '' : `${data.path}/`}`,
           config.origin,
@@ -186,10 +183,15 @@ export const listingView = createServerFn({ method: 'GET' })
           }))
         const segments = ref.path === '' ? [] : ref.path.split('/')
         const crumbs = [
-          {
-            name: ref.workspace,
-            href: `/?w=${encodeURIComponent(ref.workspace)}`,
-          },
+          // A visitor has no workspace home to go to.
+          ...(me === null
+            ? []
+            : [
+                {
+                  name: ref.workspace,
+                  href: `/?w=${encodeURIComponent(ref.workspace)}`,
+                },
+              ]),
           { name: ref.tree, href: at('', 'folder') },
           ...segments.slice(0, -1).map((name, index) => ({
             name,
@@ -201,7 +203,7 @@ export const listingView = createServerFn({ method: 'GET' })
         const folderPath = ref.path === '' ? '' : `${ref.path}/`
         return {
           deployment: config.deploymentName,
-          me: { email: me.email, name: me.name },
+          me: me === null ? null : { email: me.email, name: me.name },
           crumbs,
           folder: {
             name: segments[segments.length - 1] ?? ref.tree,

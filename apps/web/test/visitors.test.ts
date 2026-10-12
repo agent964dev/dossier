@@ -6,10 +6,10 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { Access, Pages, TreeStore } from '../src/core/index.ts'
 import { VISITOR_COOKIE } from '../src/edge/caller.ts'
-import { Browser } from './support/browser.ts'
+import { Browser, signedIn } from './support/browser.ts'
 import { beforeBatch, count, exec, rows } from './support/d1.ts'
 import { harness, ORIGIN, testRuntime } from './support/harness.ts'
-import { runAs } from './support/people.ts'
+import { fresh, runAs } from './support/people.ts'
 import {
   agent,
   dataFile,
@@ -121,6 +121,33 @@ describe('a visitor on the main host', () => {
       `/_/sign-in?next=${encodeURIComponent(`/${ws.name}/acme/private`)}`,
     )
     expect(response.headers.getSetCookie()).toEqual([])
+  })
+
+  it('shows someone who opens a private page a shell that names only the deployment', async () => {
+    const identity = fresh()
+    await share(
+      treeId,
+      (await nodeAt(treeId, 'private.html'))!.id,
+      'email',
+      identity.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const reader = await signedIn(identity)
+    const response = await reader.fetch(`/${ws.name}/acme/private`)
+    expect(response.status).toBe(200)
+    const html = await response.text()
+    expect(html).toContain('<title>dossier.test</title>')
+    expect(html).not.toContain('<title>Salaries</title>')
+    for (const key of [
+      'description',
+      'og:title',
+      'og:description',
+      'og:image',
+      'og:site_name',
+    ]) {
+      expect(metaOf(html, key)).toBeNull()
+    }
   })
 })
 
