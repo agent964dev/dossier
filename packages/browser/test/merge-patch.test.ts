@@ -115,7 +115,8 @@ describe('composeMergePatch', () => {
     // Both outcomes are exercised.
     expect(composed).toBeGreaterThan(1000)
     expect(refused).toBeGreaterThan(100)
-  })
+    // Five thousand pairs take a few seconds when every suite runs at once.
+  }, 30_000)
 
   test('null, then an object under the same key, has no single patch', () => {
     expect(composeMergePatch({ a: null }, { a: { new: 2 } })).toBeNull()
