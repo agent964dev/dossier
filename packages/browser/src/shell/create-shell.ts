@@ -96,6 +96,8 @@ export const createShell = (
   let linkPath = boot.linkPath
   let renewedAt = 0
   let loads = 0
+  /** The navigation whose page the frame shows now. */
+  let shown = 0
   let disposed = false
   let renewTimer: number | undefined
   let retryTimer: number | undefined
@@ -132,7 +134,10 @@ export const createShell = (
   }
 
   const load = async (path: string, hash: string): Promise<void> => {
+    // A new navigation: the page in the frame no longer moves the address,
+    // and a reload planned for an earlier failure is off.
     const current = ++loads
+    win.clearTimeout(retryTimer)
     let grant: ViewGrant
     try {
       grant = await api.view({ tree: boot.tree.id, path })
@@ -141,6 +146,8 @@ export const createShell = (
       return
     }
     if (current !== loads || disposed) return
+    win.clearTimeout(retryTimer)
+    shown = current
     handle = grant.handle
     framedHandle = grant.handle
     role = grant.role
@@ -175,10 +182,13 @@ export const createShell = (
     }
   }
 
-  const onPageMessage = (data: unknown): void => {
+  const onPageMessage = (data: unknown, navigation: number): void => {
     if (!isPageToShell(data)) return
     switch (data.type) {
       case 'location':
+        // Only the page of the navigation in progress, if any, has the
+        // address: an older page reporting late would overwrite it.
+        if (navigation !== loads) return
         linkPath = data.path
         setUrl('replace', treePrefix + data.path + hashOf(data.hash))
         doc.title = data.title || boot.deployment.name
@@ -214,7 +224,10 @@ export const createShell = (
     if (!data.nested) {
       // A new top page: the frame's previous document and its pages are gone.
       closePorts()
-      port.addEventListener('message', (message) => onPageMessage(message.data))
+      const navigation = shown
+      port.addEventListener('message', (message) =>
+        onPageMessage(message.data, navigation),
+      )
       port.start()
     }
     ports.add(port)

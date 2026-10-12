@@ -394,6 +394,64 @@ describe('createShell', () => {
     it.shell.dispose()
   })
 
+  test('keeps the address of a pending navigation when the old page reports late', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    let refuse: (error: unknown) => void = () => {}
+    it.view.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject
+        }),
+    )
+    page.postMessage({ type: 'open', path: 'plan', hash: '' })
+    await flush()
+    const address = () => it.win.location.pathname + it.win.location.hash
+    expect(address()).toBe('/agent964/acme/plan')
+    // The old page is still in the frame and reports its own location.
+    page.postMessage({
+      type: 'location',
+      path: 'questions/',
+      hash: '#late',
+      title: 'Old',
+    })
+    await flush()
+    expect(address()).toBe('/agent964/acme/plan')
+    // A refused view reloads at the asked link, which then shows no access.
+    refuse(
+      new DossierError({
+        code: 'not_found',
+        message: 'No.',
+        fix: null,
+        path: null,
+      }),
+    )
+    await flush()
+    expect(it.reload).toHaveBeenCalledTimes(1)
+    expect(address()).toBe('/agent964/acme/plan')
+    it.shell.dispose()
+  })
+
+  test('forgets a pending reload once a later load succeeds', async () => {
+    vi.useFakeTimers()
+    const failure = new DossierError({
+      code: 'unavailable',
+      message: 'Down.',
+      fix: null,
+      path: null,
+    })
+    const it = openShell({ grants: [failure, grant('h1', 9)] })
+    await it.shell.start()
+    it.win.history.pushState(null, '', '/agent964/acme/plan')
+    it.win.dispatchEvent(new it.win.PopStateEvent('popstate'))
+    await flush()
+    expect(it.frame().src).toBe('https://t1-dev.content.test/_/v/h1/9/plan')
+    vi.advanceTimersByTime(RETRY_DELAY * 2)
+    expect(it.reload).not.toHaveBeenCalled()
+    it.shell.dispose()
+  })
+
   test('renews the handle every hour without reloading the page', async () => {
     vi.useFakeTimers()
     const it = openShell({ grants: [grant('h1', 7), grant('h2', 7)] })
