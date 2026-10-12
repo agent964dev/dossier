@@ -430,14 +430,21 @@ repository's fixture from the repository root:
 
 ### The same steps on dev
 
-For `dossier-next-dev`, every Wrangler command gets `--env dev` (or runs with
-`CLOUDFLARE_ENV=dev`), and the names are the dev ones from section 1. From
+For `dossier-next-dev`, every Wrangler command gets `--env dev --config
+wrangler.jsonc`, and the names are the dev ones from section 1. Deploy dev only
+with `bun run deploy:dev`, which builds for dev first.
+
+Never run `wrangler deploy --env dev`, or any Wrangler command with `--env dev`
+but without `--config wrangler.jsonc`, after a build made with `CLOUDFLARE_ENV`
+unset (`bun run build`, the release). Wrangler then reads the built
+configuration in `dist/`, which names the production Worker `dossier`, and
+ignores `--env dev` without a warning: the command acts on production. From
 `apps/web`:
 
 | Step | Command on dev                                                                                  |
 | ---- | ----------------------------------------------------------------------------------------------- |
 | 2.4  | `bunx wrangler d1 create dossier-next-dev --location eeur`, then the new id into `env.dev`      |
-| 2.6  | `bunx wrangler secret list --env dev` (the secrets already exist)                               |
+| 2.6  | `bunx wrangler secret list --env dev --config wrangler.jsonc` (the secrets already exist)       |
 | 2.7  | `bunx wrangler d1 migrations apply dossier-next-dev --remote --env dev --config wrangler.jsonc` |
 | 2.8  | `bun run deploy:dev` (build, base-layer copy to `dossier-next-dev`, migrations, deploy)         |
 | 2.9  | `xh https://dossier-next-dev.tech964.workers.dev/_/api/health`                                  |
@@ -721,7 +728,11 @@ deletes.
 ## 5. Day-2 operations
 
 Commands in this section run from `apps/web` with `CLOUDFLARE_ENV` unset, and
-use production's names. For dev, add `--env dev` and use the dev names.
+use production's names. For dev, add `--env dev`, keep `--config
+wrangler.jsonc`, and use the dev names. A Wrangler command without `--config
+wrangler.jsonc` reads the last build's configuration in `dist/` and ignores
+`--env dev` when that build was for production, so it would act on production;
+deploy dev only with `bun run deploy:dev`.
 
 ### Health
 
