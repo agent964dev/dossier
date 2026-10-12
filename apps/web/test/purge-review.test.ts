@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { Effect } from 'effect'
+import { Clock, Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Files, Purge, TreeStore } from '../src/core/index.ts'
 import { PurgeBudget } from '../src/core/purge.ts'
@@ -25,6 +25,26 @@ import {
 import { agent, person, ref, sha256Of, workspace } from './support/trees.ts'
 
 const T = Date.UTC(2026, 9, 8, 9)
+
+/** A clock that stands still until the test moves it. */
+const manualClock = (start: number) => {
+  let now = start
+  const real = Clock.make()
+  const clock: Clock.Clock = {
+    [Clock.ClockTypeId]: Clock.ClockTypeId,
+    unsafeCurrentTimeMillis: () => now,
+    unsafeCurrentTimeNanos: () => BigInt(now) * 1_000_000n,
+    currentTimeMillis: Effect.sync(() => now),
+    currentTimeNanos: Effect.sync(() => BigInt(now) * 1_000_000n),
+    sleep: (duration) => real.sleep(duration),
+  }
+  return {
+    clock,
+    advance: (ms: number) => {
+      now += ms
+    },
+  }
+}
 afterEach(() => harness.reset())
 
 describe('independent Phase 11 purge probes', () => {
@@ -42,27 +62,35 @@ describe('independent Phase 11 purge probes', () => {
       )
       await putBlob(sha, text)
     }
+    // The purge's clock moves only when a blob's bytes are deleted: each
+    // delete takes 4 ms of a 100 ms budget, whatever the machine is doing.
+    const clock = manualClock(Date.now())
     let deletes = 0
     const BLOBS = beforeDelete(
       env.BLOBS,
       (list) => list.some((key) => keys.has(key)),
       async () => {
         deletes += 1
-        await new Promise((resolve) => setTimeout(resolve, 4))
+        clock.advance(4)
       },
     )
     const runtime = testRuntime({ env: { BLOBS } })
-    const result = await runtime.runPromise(
-      Effect.flatMap(Purge, (p) => p.run('weekly')).pipe(
-        Effect.provideService(SystemJob, {
-          job: 'purge',
-          runId: crypto.randomUUID(),
-        }),
-        Effect.provideService(PurgeBudget, { statements: 800, millis: 100 }),
-      ),
-    )
-    expect(deletes).toBeLessThan(50)
-    expect(result.remaining).toBe(true)
+    const weekly = (budget: { statements: number; millis: number }) =>
+      runtime.runPromise(
+        Effect.flatMap(Purge, (p) => p.run('weekly')).pipe(
+          Effect.provideService(SystemJob, {
+            job: 'purge',
+            runId: crypto.randomUUID(),
+          }),
+          Effect.provideService(PurgeBudget, budget),
+          Effect.withClock(clock.clock),
+        ),
+      )
+    const result = await weekly({ statements: 800, millis: 100 })
+    // It stopped between blobs once 100 ms had passed, not after the batch
+    // of fifty it had claimed.
+    expect(deletes).toBe(25)
+    expect(result).toMatchObject({ remaining: true, blobs: 25 })
     // The claims it had no time for wait in its checkpoint, and the next run
     // removes them.
     const row = (await lastRunRow())!
@@ -72,17 +100,10 @@ describe('independent Phase 11 purge probes', () => {
       claimed: string[]
     }
     expect(left.step).toBe('blobs')
-    expect(left.claimed.length).toBe(50 - result.blobs)
-    const rest = await runtime.runPromise(
-      Effect.flatMap(Purge, (p) => p.run('weekly')).pipe(
-        Effect.provideService(SystemJob, {
-          job: 'purge',
-          runId: crypto.randomUUID(),
-        }),
-      ),
-    )
-    expect(rest.remaining).toBe(false)
-    expect(result.blobs + rest.blobs).toBe(50)
+    expect(left.claimed).toHaveLength(25)
+    clock.advance(MINUTE)
+    const rest = await weekly({ statements: 800, millis: 25_000 })
+    expect(rest).toMatchObject({ remaining: false, blobs: 25 })
     for (const key of keys) expect(await stored(key)).toBe(false)
   })
   it('cleans an abandoned unverified upload hold after the decided one-day bound', async () => {
