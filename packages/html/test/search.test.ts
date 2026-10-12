@@ -3,6 +3,7 @@ import {
   normalizeSearchText,
   SEARCH_TEXT_MAX_BYTES,
   searchEntries,
+  searchNameOf,
   searchText,
   type TreeView,
 } from '../src/index.ts'
@@ -106,6 +107,17 @@ describe('normalizing search text', () => {
   it('leaves Latin accents to the tokenizer', () => {
     expect(normalizeSearchText('Café')).toBe('Café')
     expect(normalizeSearchText('Cafe\u0301')).toBe('Café')
+  })
+
+  it('leaves out NUL and the other control characters', () => {
+    expect(normalizeSearchText('erbil\u0000')).toBe('erbil')
+    expect(normalizeSearchText('a\u0007b\u001fc\u007f')).toBe('abc')
+  })
+
+  it('folds a name as search compares names: without marks or accents, in lower case', () => {
+    expect(searchNameOf('مُسْتَوْدَعُ أَرْبِيل')).toBe('مستودع اربيل')
+    expect(searchNameOf('Café-Menu.PDF')).toBe('cafe-menu.pdf')
+    expect(searchNameOf('Cafe\u0301')).toBe('cafe')
   })
 
   it('makes each run of white space one space', () => {

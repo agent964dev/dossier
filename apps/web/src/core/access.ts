@@ -895,7 +895,9 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             person: lit(caller.person?.id ?? null),
             member: lit(member ? 1 : 0),
             admin: lit(facts.memberRole === 'admin' ? 1 : 0),
-            teams: lit(JSON.stringify(member ? facts.teams : [])),
+            // Bound, not written in: a person in many teams would make
+            // the rule, which names them in each of its arms, too long.
+            teams: sql`${JSON.stringify(member ? facts.teams : [])}`,
             // The scope's path by its node, so a long path is written once
             // per use rather than spelled out in full each time.
             within: (path: SQL) =>

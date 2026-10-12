@@ -25,6 +25,8 @@ afterEach(() => {
   host.remove()
 })
 
+let entered = 0
+
 function Harness({ start }: { start: string }) {
   const [text, setText] = useState(start)
   return (
@@ -34,6 +36,9 @@ function Harness({ start }: { start: string }) {
       onChange={(next) => {
         seen.push(next)
         setText(next)
+      }}
+      onEnter={() => {
+        entered += 1
       }}
     />
   )
@@ -57,13 +62,14 @@ const typeValue = (value: string, caret = value.length) =>
     field.dispatchEvent(new Event('input', { bubbles: true }) as never)
   })
 
-const key = (name: string) =>
+const key = (name: string, composing = false) =>
   act(() => {
     input().dispatchEvent(
       new KeyboardEvent('keydown', {
         key: name,
         bubbles: true,
         cancelable: true,
+        isComposing: composing,
       }) as never,
     )
   })
@@ -107,5 +113,19 @@ describe('the search field', () => {
     expect(seen.at(-1)).toBe('')
     expect(input().value).toBe('')
     expect(label()).toBeNull()
+  })
+
+  it('leaves Enter, Esc and Backspace to an input method while it composes', () => {
+    entered = 0
+    act(() => root.render(<Harness start="in erbil" />))
+    act(() => input().setSelectionRange(0, 0))
+    key('Enter', true)
+    key('Escape', true)
+    key('Backspace', true)
+    expect(entered).toBe(0)
+    expect(seen).toEqual([])
+    expect(label()).not.toBeNull()
+    key('Enter')
+    expect(entered).toBe(1)
   })
 })

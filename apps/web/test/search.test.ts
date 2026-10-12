@@ -6,6 +6,7 @@ import type {
   TreeId,
 } from '@dossier/contracts'
 import { SELF } from 'cloudflare:test'
+import { env } from 'cloudflare:workers'
 import { Effect, FastCheck as fc } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
@@ -16,8 +17,8 @@ import {
   type Caller,
   type SearchPage,
 } from '../src/core/index.ts'
-import { count, exec, rows } from './support/d1.ts'
-import { harness, ORIGIN } from './support/harness.ts'
+import { count, exec, recordingStatements, rows } from './support/d1.ts'
+import { harness, ORIGIN, testRuntime } from './support/harness.ts'
 import { keySecretFor } from './support/keys.ts'
 import { runAs } from './support/people.ts'
 import { at, DAY, MINUTE, purgeAt, pushAt } from './support/purge.ts'
@@ -851,4 +852,149 @@ describe('agreement with the point check', () => {
       { numRuns: 25 },
     )
   }, 120_000)
+})
+
+describe('limits and edges', () => {
+  it('drops a page moved under a `_` folder or out of being a page, and a folder of pages moved under one', async () => {
+    const tag = word('hidden')
+    const t = await world({
+      'one.html': page(`${tag} one`, '<p>One.</p>'),
+      'two.html': page(`${tag} two`, '<p>Two.</p>'),
+      'drafts/three.html': page(`${tag} three`, '<p>Three.</p>'),
+      'keep.html': page('Keep', '<p>Keep.</p>'),
+    })
+    expect(places(await search(t.key, tag))).toHaveLength(3)
+    const mv = (from: string, to: string) =>
+      runAs(
+        t.key,
+        Effect.flatMap(Files, (f) =>
+          f.mv({
+            from: ref(`${t.ws.name}/${t.name}/${from}`),
+            to: ref(`${t.ws.name}/${t.name}/${to}`),
+          }),
+        ),
+      )
+    await mv('one.html', '_kit/one.html')
+    await mv('two.html', 'two.txt')
+    await mv('drafts', '_archive/drafts')
+    expect((await search(t.key, tag)).results).toEqual([])
+    expect((await search(t.key, tag, 'content')).results).toEqual([])
+    expect(await count('search_docs', 'tree_id = ?', t.treeId)).toBe(1)
+  })
+
+  it('keeps every search statement within D1’s limits for a member of 200 teams', async () => {
+    const tag = word('teams')
+    const t = await world({
+      'plan.html': page(`${tag} plan`, `<p>${tag} text.</p>`),
+      'plan.md': `${tag} companion\n`,
+    })
+    const member = await person('member')
+    await join(t.ws, member)
+    const statements: D1PreparedStatement[] = []
+    for (let n = 0; n < 200; n += 1) {
+      const id = crypto.randomUUID()
+      statements.push(
+        env.DB.prepare(
+          'insert into teams (id, workspace_id, name, created_by, created_at) values (?, ?, ?, ?, ?)',
+        ).bind(id, t.ws.id, `Team ${n}`, t.owner.id, Date.now()),
+        env.DB.prepare(
+          'insert into team_members (team_id, user_id, created_at) values (?, ?, ?)',
+        ).bind(id, member.id, Date.now()),
+      )
+    }
+    await env.DB.batch(statements)
+    await share(
+      t.treeId,
+      (await nodeAt(t.treeId, ''))!.id,
+      'workspace',
+      t.ws.id,
+      'read',
+      t.owner,
+    )
+    const recorded = recordingStatements(env.DB)
+    harness.use(testRuntime({ env: { DB: recorded.db } }))
+    const key = await agent(member)
+    expect(places(await search(key, tag, 'content'))).toEqual([
+      `${t.name}/plan.html`,
+    ])
+    expect(places(await search(key, `${tag} companion`, 'content'))).toEqual([
+      `${t.name}/plan.html`,
+    ])
+    expect(places(await search(key, tag))).toEqual([`${t.name}/plan.html`])
+    const bytes = (text: string) => new TextEncoder().encode(text).byteLength
+    const widest = Math.max(...recorded.seen().map((s) => bytes(s.sql)))
+    const mostBinds = Math.max(...recorded.seen().map((s) => s.binds.length))
+    expect(widest).toBeLessThan(100_000)
+    expect(mostBinds).toBeLessThanOrEqual(100)
+  })
+
+  it('keeps every value an index statement binds under D1’s 2 MB', async () => {
+    // Deep paths: each entry of the index carries its path several times.
+    const folder = Array.from(
+      { length: 30 },
+      (_, n) => `${String(n).padStart(2, '0')}${'d'.repeat(230)}`,
+    ).join('/')
+    const files: Record<string, string> = {}
+    for (let n = 0; n < 160; n += 1) {
+      files[`${folder}/${'p'.repeat(200)}${n}.html`] = `<title>p${n}</title>`
+    }
+    const owner = await person('owner')
+    const ws = await workspace(owner)
+    const recorded = recordingStatements(env.DB)
+    harness.use(testRuntime({ env: { DB: recorded.db } }))
+    const pushed = await pushAll(
+      await agent(owner),
+      `${ws.name}/s${crypto.randomUUID().slice(0, 8)}`,
+      files,
+    )
+    if (!('number' in pushed)) throw new Error('the push did not commit')
+    const index = recorded
+      .seen()
+      .filter((s) => s.sql.includes('insert into search_docs'))
+    expect(index.length).toBeGreaterThan(0)
+    for (const statement of index) {
+      for (const value of statement.binds) {
+        if (typeof value !== 'string') continue
+        expect(new TextEncoder().encode(value).byteLength).toBeLessThan(
+          1_000_000,
+        )
+      }
+    }
+    expect(
+      (await rows('select 1 from search_docs where tree_id = ?', pushed.treeId))
+        .length,
+    ).toBe(160)
+  }, 120_000)
+
+  it('finds folders and files by names written with Arabic marks or Latin accents', async () => {
+    const tag = word('n')
+    const t = await world({
+      [`${tag}/مُسْتَوْدَعُ أَرْبِيل/plan.html`]: page('Plan', '<p>Plan.</p>'),
+      [`${tag}/Café-menu.pdf`]: 'pdf bytes',
+    })
+    const inTag = (p: SearchPage) =>
+      places(p).filter((place) => place.includes(`/${tag}/`))
+    // The page below it is found by its path too.
+    expect(inTag(await search(t.key, 'مستودع'))).toEqual([
+      `${t.name}/${tag}/مُسْتَوْدَعُ أَرْبِيل/plan.html`,
+      `${t.name}/${tag}/مُسْتَوْدَعُ أَرْبِيل`,
+    ])
+    expect(inTag(await search(t.key, 'cafe-me'))).toEqual([
+      `${t.name}/${tag}/Café-menu.pdf`,
+    ])
+    expect(inTag(await search(t.key, 'CAFÉ'))).toEqual([
+      `${t.name}/${tag}/Café-menu.pdf`,
+    ])
+  })
+
+  it('reads a query with a NUL or other control characters as if they were not there', async () => {
+    const tag = word('nul')
+    const t = await world({ 'plan.html': page(`${tag} plan`, '<p>Hi.</p>') })
+    expect(places(await search(t.key, `${tag}\u0000`))).toEqual([
+      `${t.name}/plan.html`,
+    ])
+    expect(
+      places(await search(t.key, `\u0000${tag}\u0007`, 'content')),
+    ).toEqual([`${t.name}/plan.html`])
+  })
 })

@@ -39,7 +39,7 @@ import { getBlob } from './blob-keys.ts'
 import { newId, sha256Hex } from './ids.ts'
 import { Bindings } from './bindings.ts'
 import { formRowsOf } from './push.ts'
-import { indexEntries } from './search-index.ts'
+import { indexEntries, namesOf } from './search-index.ts'
 import {
   neededAfter,
   type HtmlAfter,
@@ -711,6 +711,13 @@ export const makeChanges = (deps: ChangesDeps) => {
               cs.restore(granted, plan)
               cs.putPageNeeds(needs.needs, needs.narrowed)
               cs.indexPages(search)
+              cs.indexNames(
+                namesOf(
+                  revive
+                    .filter((r) => r.node.origin === 'authored')
+                    .map((r) => r.node.path),
+                ),
+              )
               cs.event({
                 type: 'restore',
                 path: node.path,
@@ -1138,6 +1145,7 @@ export const makeChanges = (deps: ChangesDeps) => {
               )
               cs.putPageNeeds(needs.needs, needs.narrowed)
               cs.indexPages(search)
+              cs.indexNames(namesOf([dest]))
               cs.event({
                 type: 'move',
                 path: node.path,

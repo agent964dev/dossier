@@ -472,8 +472,6 @@ export const nodes = sqliteTable(
       .where(sql`${t.deletedAt} is null`),
     index('nodes_tree_path_idx').on(t.treeId, t.path),
     index('nodes_parent_idx').on(t.parentId),
-    // Search finds folders and attachments by the start of their name.
-    index('nodes_name_nocase_idx').on(sql`${t.name} collate nocase`),
     check('nodes_kind_check', sql`${t.kind} in ('folder', 'file')`),
     check('nodes_origin_check', sql`${t.origin} in ('authored', 'data')`),
     check(
@@ -1168,4 +1166,24 @@ export const searchDocs = sqliteTable(
     index('search_docs_tree_idx').on(t.treeId),
     index('search_docs_companion_idx').on(t.companionNodeId),
   ],
+)
+
+/**
+ * Folders' and files' names as search compares them: without marks or
+ * accents, in lower case (searchNameOf), which SQLite cannot fold itself.
+ * Written by the change that names the node; a node without a row is
+ * compared by its own name.
+ */
+export const searchNames = sqliteTable(
+  'search_names',
+  {
+    nodeId: text('node_id')
+      .primaryKey()
+      .references(() => nodes.id, { onDelete: 'cascade' }),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    name: text('name').notNull(),
+  },
+  (t) => [index('search_names_tree_idx').on(t.treeId)],
 )

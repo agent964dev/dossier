@@ -256,3 +256,40 @@ export const countingStatements = (
   })
   return { db, count: () => statements }
 }
+
+/**
+ * A database that records every statement it prepares, with the values
+ * bound to it: to check statements against D1's limits on size and on
+ * bound values.
+ */
+export const recordingStatements = (
+  database: D1Database,
+): {
+  readonly db: D1Database
+  readonly seen: () => readonly {
+    readonly sql: string
+    readonly binds: readonly unknown[]
+  }[]
+} => {
+  const seen: { sql: string; binds: unknown[] }[] = []
+  const db = new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => {
+          const entry = { sql: query, binds: [] as unknown[] }
+          seen.push(entry)
+          const statement = target.prepare(query)
+          const bind = statement.bind.bind(statement)
+          statement.bind = (...values: unknown[]) => {
+            entry.binds = values
+            return bind(...values)
+          }
+          return statement
+        }
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return { db, seen: () => seen }
+}

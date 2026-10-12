@@ -33,6 +33,13 @@ const ALEF_FORMS = /[\u0623\u0625\u0622\u0671]/g
 const SNIPPET_MARKS = /[\uE000\uE001]/g
 
 /**
+ * Control characters other than white space: a NUL would end the query
+ * where SQLite reads it, and none of them is ever a word.
+ */
+// oxlint-disable-next-line no-control-regex
+const CONTROLS = /[\u0000-\u0008\u000E-\u001F\u007F]/g
+
+/**
  * Text as both the index and every query see it: NFC, without Arabic marks
  * and tatweel, every alef form as a bare alef, and each run of white space
  * one space.
@@ -43,7 +50,20 @@ export const normalizeSearchText = (text: string): string =>
     .replace(ARABIC_MARKS, '')
     .replace(ALEF_FORMS, '\u0627')
     .replace(SNIPPET_MARKS, '')
+    .replace(CONTROLS, '')
     .replace(/\s+/g, ' ')
+
+/**
+ * A folder's or file's name as search compares names, which SQLite cannot
+ * fold itself: normalized, then without any accent or mark, in lower case.
+ * A query is folded the same way.
+ */
+export const searchNameOf = (name: string): string =>
+  normalizeSearchText(name)
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .normalize('NFC')
+    .toLowerCase()
 
 /** At most SEARCH_TEXT_MAX_BYTES of UTF-8, never cutting a character. */
 const capped = (text: string): string => {

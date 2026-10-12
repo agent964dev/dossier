@@ -4,6 +4,7 @@
 import type { Sha256, TreeId } from '@dossier/contracts'
 import {
   normalizeSearchText,
+  searchNameOf,
   SEARCH_TEXT_VERSION,
   searchEntries,
   searchText,
@@ -170,5 +171,28 @@ export const indexEntries = (i: {
     }
     return entries
   })
+
+/**
+ * How search compares the names of these nodes and every folder above
+ * them: the nodes a change created or renamed.
+ */
+export const namesOf = (
+  paths: readonly string[],
+): { readonly path: string; readonly name: string }[] => {
+  const all = new Set<string>()
+  for (const path of paths) {
+    const segments = path.split('/')
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      all.add(segments.slice(0, depth).join('/'))
+    }
+  }
+  return [...all]
+    .filter((path) => path !== '')
+    .sort()
+    .map((path) => ({
+      path,
+      name: searchNameOf(path.slice(path.lastIndexOf('/') + 1)),
+    }))
+}
 
 export type { SearchEntry }

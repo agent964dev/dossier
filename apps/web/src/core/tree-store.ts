@@ -470,6 +470,13 @@ export interface ChangeSet {
    * the change's other writes, so the versions they read are the new ones.
    */
   readonly indexPages: (entries: readonly SearchEntry[]) => void
+  /**
+   * Records how search compares these authored nodes' names (searchNameOf
+   * of each one's name), for the nodes the change created or renamed.
+   */
+  readonly indexNames: (
+    names: readonly { readonly path: string; readonly name: string }[],
+  ) => void
   /** Required: a change with no event never commits. */
   readonly event: (e: NewEvent) => void
 }
@@ -643,8 +650,42 @@ export class TreeStore extends Context.Tag('TreeStore')<
   TreeStoreService
 >() {}
 
-/** Search entries per statement pair; each pair is two statements. */
-const SEARCH_INDEX_CHUNK = 500
+/**
+ * Search entries in chunks of at most 500 and about 512 KiB of JSON each:
+ * each chunk is bound as one value, and D1 takes values up to 2 MB.
+ */
+export const searchChunks = <T>(
+  entries: readonly T[],
+  limits: { readonly count: number; readonly bytes: number } = {
+    count: 500,
+    bytes: 524_288,
+  },
+): string[] => {
+  const out: string[] = []
+  let chunk: string[] = []
+  let bytes = 2
+  const flush = () => {
+    if (chunk.length > 0) out.push(`[${chunk.join(',')}]`)
+    chunk = []
+    bytes = 2
+  }
+  for (const entry of entries) {
+    const text = JSON.stringify(entry)
+    const size = encoder.encode(text).byteLength + 1
+    if (
+      chunk.length >= limits.count ||
+      (chunk.length > 0 && bytes + size > limits.bytes)
+    ) {
+      flush()
+    }
+    chunk.push(text)
+    bytes += size
+  }
+  flush()
+  return out
+}
+
+const encoder = new TextEncoder()
 
 /** The R2 key of a page's generated agent version, never a visible file. */
 export const markdownKey = (sha256: string): string =>
@@ -3221,15 +3262,16 @@ export const TreeStoreLive: Layer.Layer<
 
           indexPages: (entries) => {
             const t = tid()
-            for (let at = 0; at < entries.length; at += SEARCH_INDEX_CHUNK) {
-              const chunk = JSON.stringify(
-                entries.slice(at, at + SEARCH_INDEX_CHUNK),
-              )
+            for (const chunk of searchChunks(entries)) {
               searchWrites.push(
                 {
-                  sql: `delete from search_docs where node_id in (
-                          select n.id from json_each(?2) j join nodes n on n.tree_id = ?1
-                            and n.path = json_extract(j.value, '$.path'))`,
+                  // By the path each row was indexed at, and by the node at
+                  // the path now: a page that moved or stopped being one
+                  // leaves with its old path.
+                  sql: `delete from search_docs where tree_id = ?1 and (
+                          path in (select json_extract(j.value, '$.path') from json_each(?2) j)
+                          or node_id in (select n.id from json_each(?2) j join nodes n
+                            on n.tree_id = ?1 and n.path = json_extract(j.value, '$.path')))`,
                   binds: [t, chunk],
                 },
                 {
@@ -3268,6 +3310,22 @@ export const TreeStoreLive: Layer.Layer<
                   binds: [t, chunk, SEARCH_TEXT_VERSION],
                 },
               )
+            }
+          },
+
+          indexNames: (names) => {
+            const t = tid()
+            for (const chunk of searchChunks(names)) {
+              searchWrites.push({
+                sql: `insert into search_names (node_id, tree_id, name)
+                      select n.id, n.tree_id, json_extract(j.value, '$.name')
+                      from json_each(?2) j join nodes n on n.tree_id = ?1
+                        and n.path = json_extract(j.value, '$.path')
+                        and n.deleted_at is null and n.origin = 'authored'
+                      where true
+                      on conflict (node_id) do update set name = excluded.name`,
+                binds: [t, chunk],
+              })
             }
           },
 

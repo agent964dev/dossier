@@ -44,7 +44,12 @@ import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
 import { jsAnalysisOf } from './lookup.ts'
-import { indexEntries, searchKindOf, searchTextOf } from './search-index.ts'
+import {
+  indexEntries,
+  namesOf,
+  searchKindOf,
+  searchTextOf,
+} from './search-index.ts'
 import { pageNeedsOf, type PageNeed, type PageNeedRow } from './page-needs.ts'
 import { Shares } from './shares.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
@@ -1573,6 +1578,7 @@ export const PushLive: Layer.Layer<
               cs.putForms(pushId)
               cs.putPageNeeds(needs, narrowed)
               cs.indexPages(search)
+              cs.indexNames(namesOf([...manifest.keys()]))
               // A failed commit grants nothing: the shares are in its batch.
               for (const share of shares) cs.grant(folder, share)
               if (shares.length > 0) {

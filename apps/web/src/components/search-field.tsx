@@ -85,6 +85,9 @@ export const SearchField = forwardRef<
 
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     const field = event.currentTarget
+    // While an input method composes (Arabic, Japanese, …), its keys are
+    // its own: Enter picks a candidate, Esc cancels it.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
     if (event.key === 'Escape') {
       if (value === '') return
       event.preventDefault()

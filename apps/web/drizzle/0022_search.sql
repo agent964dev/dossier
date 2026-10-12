@@ -18,7 +18,15 @@ CREATE TABLE `search_docs` (
 CREATE UNIQUE INDEX `search_docs_node_id_unique` ON `search_docs` (`node_id`);--> statement-breakpoint
 CREATE INDEX `search_docs_tree_idx` ON `search_docs` (`tree_id`);--> statement-breakpoint
 CREATE INDEX `search_docs_companion_idx` ON `search_docs` (`companion_node_id`);--> statement-breakpoint
-CREATE INDEX `nodes_name_nocase_idx` ON `nodes` ("name" collate nocase);--> statement-breakpoint
+CREATE TABLE `search_names` (
+	`node_id` text PRIMARY KEY NOT NULL,
+	`tree_id` text NOT NULL,
+	`name` text NOT NULL,
+	FOREIGN KEY (`node_id`) REFERENCES `nodes`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`tree_id`) REFERENCES `trees`(`id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `search_names_tree_idx` ON `search_names` (`tree_id`);--> statement-breakpoint
 -- By hand: the full-text index over search_docs, which holds the text
 -- (external content). Arabic marks are removed before text reaches it;
 -- remove_diacritics 2 folds Latin accents. D1 cannot export a database that

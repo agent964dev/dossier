@@ -14,7 +14,7 @@ import {
   type SearchMode,
   type TreeId,
 } from '@dossier/contracts'
-import { normalizeSearchText } from '@dossier/html'
+import { normalizeSearchText, searchNameOf } from '@dossier/html'
 import { sql, type SQL } from 'drizzle-orm'
 import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core'
 import { Context, Effect, Layer } from 'effect'
@@ -198,6 +198,17 @@ export const SearchLive: Layer.Layer<
         return rows.results
       })
 
+    /**
+     * The row's node is the page it indexed, as it is now: live, at the
+     * path and version indexed, and still a page (authored HTML outside
+     * every `_` folder). A row a change has not reached yet is never read.
+     */
+    const indexedPage = sql`nodes.deleted_at is null
+            and nodes.current_version_id = sdoc.version_id
+            and nodes.path = sdoc.path and nodes.origin = 'authored'
+            and nodes.kind = 'file' and nodes.underscore_from is null
+            and substr(nodes.path, -5) = '.html'`
+
     /** Pages whose own title, path or text holds every term. */
     const pagesStatement = (
       treeId: TreeId,
@@ -215,8 +226,7 @@ export const SearchLive: Layer.Layer<
           join workspaces sws on sws.id = stree.workspace_id
             and sws.deleted_at is null and sws.suspended_at is null
           where search_pages match ${match} and sdoc.tree_id = ${treeId}
-            and nodes.deleted_at is null
-            and nodes.current_version_id = sdoc.version_id
+            and ${indexedPage}
             and (${where})
           order by found_rank, nodes.path limit ${limit}`
 
@@ -241,8 +251,7 @@ export const SearchLive: Layer.Layer<
           join workspaces sws on sws.id = stree.workspace_id
             and sws.deleted_at is null and sws.suspended_at is null
           where search_pages match ${match} and sdoc.tree_id = ${treeId}
-            and nodes.deleted_at is null
-            and nodes.current_version_id = sdoc.version_id
+            and ${indexedPage}
             and (${where})
             and sdoc.companion_node_id is not null
             and exists (select 1 from nodes
@@ -258,17 +267,21 @@ export const SearchLive: Layer.Layer<
       words: readonly string[],
       limit: number,
     ) => {
-      const [first = '', ...rest] = words
+      const folded = words.map(searchNameOf)
+      const [first = '', ...rest] = folded
+      // Names as search compares them, or as written for a node named
+      // before search kept them.
+      const name = sql`coalesce(sname.name, lower(nodes.name))`
       const others = rest.map(
-        (word) =>
-          sql` and nodes.name like ${`%${likeText(word)}%`} escape '\\'`,
+        (word) => sql` and ${name} like ${`%${likeText(word)}%`} escape '\\'`,
       )
       return sql`select nodes.* from nodes
+          left join search_names sname on sname.node_id = nodes.id
           where nodes.tree_id = ${treeId} and nodes.deleted_at is null
             and nodes.origin = 'authored' and nodes.depth > 0
             and nodes.underscore_from is null
             and (nodes.kind = 'folder' or substr(nodes.path, -5) <> '.html')
-            and nodes.name like ${`${likeText(first)}%`} escape '\\'${sql.join(others, sql``)}
+            and ${name} like ${`${likeText(first)}%`} escape '\\'${sql.join(others, sql``)}
             and (${where})
           order by nodes.kind = 'file', nodes.name collate nocase, nodes.path
           limit ${limit}`
