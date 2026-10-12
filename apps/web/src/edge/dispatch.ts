@@ -31,6 +31,7 @@ import {
 } from '../core/index.ts'
 import { apiHandlerFor } from './api/index.ts'
 import {
+  bearerOf,
   callerFor,
   frameCallerFor,
   framePathOf,
@@ -183,7 +184,7 @@ export const serve = async (
   const agentAsked =
     kind === 'link' &&
     (acceptsMarkdown(request.headers.get('accept')) ||
-      /^Bearer\s/i.test(request.headers.get('authorization') ?? ''))
+      bearerOf(request.headers.get('authorization')).kind !== 'none')
 
   try {
     const response = await route()

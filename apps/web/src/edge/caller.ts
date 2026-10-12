@@ -10,7 +10,24 @@ import { Effect } from 'effect'
 import { Pages, SignIn, type Caller } from '../core/index.ts'
 import type { RequestKind } from './dispatch.ts'
 
-const BEARER = /^Bearer\s+(\S+)$/i
+/**
+ * The one reading of `Authorization` for agent keys, shared by
+ * authentication and the link route's agent intent: no Bearer scheme, one
+ * key, or a Bearer header of any other shape, which fails closed.
+ */
+export type BearerHeader =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'key'; readonly secret: string }
+  | { readonly kind: 'malformed' }
+
+export const bearerOf = (header: string | null): BearerHeader => {
+  const value = (header ?? '').trim()
+  if (!/^bearer(?:[\t ]|$)/i.test(value)) return { kind: 'none' }
+  const parts = value.split(/[\t ]+/)
+  return parts.length === 2 && parts[1] !== ''
+    ? { kind: 'key', secret: parts[1]! }
+    : { kind: 'malformed' }
+}
 const BEARER_KINDS: ReadonlySet<RequestKind> = new Set([
   'link',
   'api-read',
@@ -77,9 +94,18 @@ export const callerFor = (
   Effect.gen(function* () {
     const signIn = yield* SignIn
     const requestId = requestIdOf(request)
-    const bearer = BEARER.exec(request.headers.get('authorization') ?? '')
-    if (bearer !== null && BEARER_KINDS.has(kind)) {
-      const principal = yield* signIn.agent(bearer[1] ?? '')
+    const bearer = bearerOf(request.headers.get('authorization'))
+    // A Bearer header that is not one key is refused, never read past for
+    // the session cookie.
+    if (bearer.kind === 'malformed' && BEARER_KINDS.has(kind)) {
+      return yield* fail(
+        'sign_in_required',
+        'The Authorization header must be "Bearer <agent key>".',
+        'Send one agent key, or run dossier login to get one.',
+      )
+    }
+    if (bearer.kind === 'key' && BEARER_KINDS.has(kind)) {
+      const principal = yield* signIn.agent(bearer.secret)
       if (principal === null) {
         return yield* fail(
           'sign_in_required',

@@ -1,4 +1,5 @@
 import { SELF } from 'cloudflare:test'
+import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
@@ -11,7 +12,7 @@ import { Browser, signedIn } from './support/browser.ts'
 import { harness, ORIGIN } from './support/harness.ts'
 import { everything } from './support/keys.ts'
 import { callerOf, fresh, runAs } from './support/people.ts'
-import { agent, pushAll, workspace } from './support/trees.ts'
+import { agent, pushAll, ref, workspace } from './support/trees.ts'
 
 afterEach(() => harness.reset())
 
@@ -168,5 +169,124 @@ describe('a link asked by an agent', () => {
       bodies.push({ ...body.error, path: null })
     }
     expect(bodies[0]).toEqual(bodies[1])
+  })
+})
+
+describe('a malformed Bearer header', () => {
+  /** The owner's key reaching only notes/, as settings would mint it. */
+  const scopedKey = async () =>
+    (
+      await runAs(
+        await callerOf(owner),
+        Effect.flatMap(SignIn, (signIn) =>
+          signIn.createKey({
+            name: 'notes only',
+            reach: { kind: 'node', ref: ref(`${base}/notes/`) },
+            readOnly: false,
+          }),
+        ),
+      )
+    ).secret
+
+  /** Ages the owner's session past the renewal age, so a lookup renews it. */
+  const ageSession = async () => {
+    const token = decodeURIComponent(owner.sessionToken() ?? '').split('.')[0]
+    await env.DB.prepare('update session set expires_at = ? where token = ?')
+      .bind(Date.now() + 30 * 86_400_000 - 2 * 3_600_000, token)
+      .run()
+  }
+
+  const malformed = (secret: string) => [
+    `Bearer ${secret} extra-token`,
+    'Bearer',
+    'Bearer ',
+    `bearer\t${secret}\textra`,
+  ]
+
+  it('fails closed on a link: 401 and the error body, never the session cookie', async () => {
+    const secret = await scopedKey()
+    // The scoped key alone cannot read the private sibling; the cookie can.
+    expect((await withKey(`/${base}/plan`, secret)).status).toBe(404)
+    await ageSession()
+    const control = await owner.fetch(`/${base}/plan`, {
+      headers: { accept: 'text/markdown' },
+    })
+    expect(control.status).toBe(200)
+    expect(control.headers.getSetCookie()).not.toEqual([])
+    for (const header of malformed(secret)) {
+      await ageSession()
+      const response = await owner.fetch(`/${base}/plan`, {
+        headers: { authorization: header },
+      })
+      expect(response.status, header).toBe(401)
+      expect(response.headers.getSetCookie(), header).toEqual([])
+      expect(await response.json()).toMatchObject({
+        error: { code: 'sign_in_required' },
+      })
+    }
+  })
+
+  it('fails closed on the API the same way', async () => {
+    const secret = await scopedKey()
+    for (const header of malformed(secret)) {
+      await ageSession()
+      const response = await owner.fetch(
+        `/_/api/read?path=${encodeURIComponent(`${base}/plan`)}`,
+        { purpose: 'read', headers: { authorization: header } },
+      )
+      expect(response.status, header).toBe(401)
+      expect(response.headers.getSetCookie(), header).toEqual([])
+    }
+  })
+
+  it('leaves another scheme to the cookie rules, as before', async () => {
+    const response = await owner.fetch(`/${base}/plan`, {
+      headers: { authorization: 'Basic dXNlcjpwYXNz', accept: 'text/markdown' },
+    })
+    expect(response.status).toBe(200)
+  })
+})
+
+describe('a folder beside a page of the same name', () => {
+  it('reads open/ as the folder and open as the page, for a key scoped to the folder too', async () => {
+    const caller = await callerOf(owner)
+    const ws = await workspace(caller.person!)
+    committed(
+      await pushAll(await agent(caller.person!), `${ws.name}/twins`, {
+        'open.html': '<title>Open page</title><p>The page</p>',
+        'open/note.txt': 'A note in the folder',
+      }),
+    )
+    const read = async (path: string, secret: string) => {
+      const response = await SELF.fetch(
+        `${ORIGIN}/_/api/read?path=${encodeURIComponent(path)}`,
+        { headers: { authorization: `Bearer ${secret}` } },
+      )
+      return { status: response.status, body: (await response.json()) as never }
+    }
+    expect((await read(`${ws.name}/twins/open/`, key)).body).toMatchObject({
+      kind: 'folder',
+      path: 'open',
+    })
+    expect((await read(`${ws.name}/twins/open`, key)).body).toMatchObject({
+      kind: 'page',
+      path: 'open.html',
+    })
+    const scoped = (
+      await runAs(
+        caller,
+        Effect.flatMap(SignIn, (signIn) =>
+          signIn.createKey({
+            name: 'open only',
+            reach: { kind: 'node', ref: ref(`${ws.name}/twins/open/`) },
+            readOnly: true,
+          }),
+        ),
+      )
+    ).secret
+    const own = await read(`${ws.name}/twins/open/`, scoped)
+    expect(own.status).toBe(200)
+    expect(own.body).toMatchObject({ kind: 'folder', path: 'open' })
+    expect((await read(`${ws.name}/twins/open`, scoped)).status).toBe(404)
   })
 })
