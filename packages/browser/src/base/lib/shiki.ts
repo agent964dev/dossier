@@ -2,7 +2,7 @@
 // shared Shiki. The tokens go into the page's own <code> element, each
 // coloured with a --dossier-code- variable, so code follows the page's
 // color-scheme and needs no stylesheet. Code reads left to right unless the
-// author set dir on the <pre>.
+// author set dir on the <pre>, which keyboards can focus to scroll.
 import { codeLanguageOf } from '@dossier/html/libraries'
 
 import type { LibraryContext } from '../../page-client/libraries.ts'
@@ -60,5 +60,10 @@ export const render = async (
     code.setAttribute('data-processed', '')
     const pre = code.parentElement
     if (pre !== null && !pre.hasAttribute('dir')) pre.setAttribute('dir', 'ltr')
+    // A long line scrolls inside the block (the base layer's style), so
+    // keyboards must reach it to scroll it.
+    if (pre !== null && !pre.hasAttribute('tabindex')) {
+      pre.setAttribute('tabindex', '0')
+    }
   }
 }
