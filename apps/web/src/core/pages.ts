@@ -15,6 +15,7 @@ import {
   type TreeId,
   type ViewGrant,
 } from '@dossier/contracts'
+import { blobObjectKey, getBlob } from './blob-keys.ts'
 import type {
   FormInfo,
   PageBootstrap,
@@ -61,7 +62,6 @@ import {
 } from './page-cache.ts'
 import type { MissingNode, NodeRow, TreeRow, VersionRow } from './rows.ts'
 import {
-  blobKey,
   linkPathOf,
   TreeStore,
   type Resolved,
@@ -1102,9 +1102,9 @@ export const PagesLive: Layer.Layer<
         if (range === 'unsatisfiable') {
           return { kind: 'unsatisfiable', size } satisfies Served
         }
-        const object = yield* query(() =>
+        const object = yield* query(async () =>
           BLOBS.get(
-            blobKey(sha),
+            await blobObjectKey(DB, sha),
             range === null
               ? {}
               : { range: { offset: range.offset, length: range.length } },
@@ -1134,7 +1134,7 @@ export const PagesLive: Layer.Layer<
       Effect.gen(function* () {
         const sha = version.blobSha256
         const object =
-          sha === null ? null : yield* query(() => BLOBS.get(blobKey(sha)))
+          sha === null ? null : yield* query(() => getBlob({ DB, BLOBS }, sha))
         if (object === null) {
           console.error('A blob is missing from R2', { sha256: sha })
           return yield* Effect.fail(notFound(path))

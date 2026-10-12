@@ -3,6 +3,7 @@
 // the closest answers a request made from the page. Internal to the core:
 // TreeStore, Pages, Files and Access import it, and it imports neither
 // TreeStore nor Access, reading the node and version tables directly.
+import { getBlob } from './blob-keys.ts'
 import type { AuthoredSeq, Sha256, TreeId } from '@dossier/contracts'
 import {
   analyze,
@@ -262,7 +263,7 @@ export const analysisOf = (sha256: Sha256) =>
         .first<{ json: string }>(),
     )
     if (stored !== null) return JSON.parse(stored.json) as HtmlAnalysis
-    const object = yield* read(() => BLOBS.get(`blobs/${sha256}`))
+    const object = yield* read(() => getBlob({ DB, BLOBS }, sha256))
     if (object === null) return null
     const result = analyze(yield* read(() => object.text()))
     const at = yield* Clock.currentTimeMillis
@@ -299,7 +300,7 @@ export const jsAnalysisOf = (sha256: Sha256) =>
         .first<{ json: string }>(),
     )
     if (stored !== null) return JSON.parse(stored.json) as JsAnalysis
-    const object = yield* read(() => BLOBS.get(`blobs/${sha256}`))
+    const object = yield* read(() => getBlob({ DB, BLOBS }, sha256))
     if (object === null) return null
     const result = analyzeJs(yield* read(() => object.text()))
     const at = yield* Clock.currentTimeMillis

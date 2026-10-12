@@ -62,6 +62,7 @@ export interface SystemStore {
   /** After the R2 delete: the blob's analyses and its row. */
   readonly finishBlob: (
     sha256: Sha256,
+    generation: string | null,
   ) => Effect.Effect<void, DossierError<'unavailable'>>
   /** Claims started before `olderThan`. */
   readonly staleClaims: (
@@ -84,7 +85,7 @@ export const RECORD_BATCH = 2000
  * caller can keep a run within its budget.
  */
 export const SYSTEM_STATEMENTS = {
-  expireStagedPushes: 7,
+  expireStagedPushes: 8,
   purgeDeletedNodes: 13 + 18 + 11,
   purgeRecords: 7,
   claimBlobs: 1,
@@ -140,10 +141,13 @@ const DOOMED_WORKSPACES = `with doomed(id) as (
       and not exists (select 1 from trees t where t.workspace_id = w.id)
   )`
 
-/** The staged pushes of the batch `?1` whose expiry `?2` has passed. */
 /** How long an upload may still be writing after its push expired. */
 export const UPLOAD_GRACE_MS = 60 * 60 * 1000
 
+/** How long an upload's hold lasts while its bytes are never verified. */
+export const ABANDONED_HOLD_MS = 24 * 60 * 60 * 1000
+
+/** The staged pushes of the batch `?1` whose expiry `?2` has passed. */
 const EXPIRED_PUSHES = `with doomed(id) as (
     select p.id from pushes p join json_each(?1) j on j.value = p.id
     where p.state = 'staged' and p.expires_at <= ?2
@@ -207,13 +211,21 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
                 and holder_id in (select id from pushes where state = 'expired')`,
         binds: [settled],
       }
+      // An upload that never wrote its bytes gives up its hold after a day,
+      // whatever held it; an upload that tries again renews its hold, so
+      // one still going is never caught here.
+      const abandoned = {
+        sql: `delete from blob_holds where verified = 0 and created_at <= ?1`,
+        binds: [now - ABANDONED_HOLD_MS],
+      }
       if (found.length === 0) {
-        yield* batch('let go of expired pushes’ holds', [earlier])
+        yield* batch('let go of expired pushes’ holds', [earlier, abandoned])
         return 0
       }
       const binds = [JSON.stringify(found), now, settled]
       const changes = yield* batch('expire pushes', [
         earlier,
+        abandoned,
         {
           sql: `${EXPIRED_PUSHES} delete from blob_holds
                 where holder_kind = 'push' and holder_id in (select id from doomed)
@@ -231,7 +243,7 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
           binds,
         },
       ])
-      return changes[5] ?? 0
+      return changes[6] ?? 0
     })
 
   /** One batch of deleted nodes, deepest first, with what hangs off them. */
@@ -518,16 +530,18 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
       return rows.results.map((r) => r.sha256)
     })
 
-  const finishBlob: SystemStore['finishBlob'] = (sha256) =>
+  const finishBlob: SystemStore['finishBlob'] = (sha256, generation) =>
     batch('finish a blob', [
       {
         sql: `delete from analyses where sha256 = ?1 and exists
-                (select 1 from blobs where sha256 = ?1 and state = 'reclaiming')`,
-        binds: [sha256],
+                (select 1 from blobs where sha256 = ?1 and state = 'reclaiming'
+                   and generation is ?2)`,
+        binds: [sha256, generation],
       },
       {
-        sql: `delete from blobs where sha256 = ?1 and state = 'reclaiming'`,
-        binds: [sha256],
+        sql: `delete from blobs where sha256 = ?1 and state = 'reclaiming'
+                and generation is ?2`,
+        binds: [sha256, generation],
       },
     ]).pipe(Effect.asVoid)
 

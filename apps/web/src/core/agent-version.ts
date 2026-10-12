@@ -3,6 +3,7 @@
 // line), a folder's listing with the kit for write holders, a data folder's
 // files with who wrote each, or a file. Pages.read and the link route's agent
 // branch both answer from here, so they return the same text.
+import { getBlob } from './blob-keys.ts'
 import {
   commentsFolderOf,
   dossierError,
@@ -39,7 +40,6 @@ import { entryWire, type FilesService } from './files.ts'
 import { composedLayouts, type KitFound, type KitItem } from './lookup.ts'
 import type { MissingNode, NodeRow, VersionRow } from './rows.ts'
 import {
-  blobKey,
   linkPathOf,
   type DocRow,
   type Entry,
@@ -442,7 +442,7 @@ export const makeReader = (deps: ReaderDeps) => {
     Effect.gen(function* () {
       if (version.blobSha256 === null) return version.jsonValue ?? ''
       const sha = version.blobSha256
-      const object = yield* query(() => BLOBS.get(blobKey(sha)))
+      const object = yield* query(() => getBlob({ DB, BLOBS }, sha))
       if (object === null) {
         console.error('A blob is missing from R2', { sha256: sha })
         return yield* Effect.fail(dossierError('unavailable'))
@@ -891,7 +891,9 @@ export const makeReader = (deps: ReaderDeps) => {
         if (t.kind === 'file' && t.version.blobSha256 !== null) {
           const sha = t.version.blobSha256
           const object =
-            sha === null ? null : yield* query(() => BLOBS.get(blobKey(sha)))
+            sha === null
+              ? null
+              : yield* query(() => getBlob({ DB, BLOBS }, sha))
           if (sha === null || object === null) {
             console.error('A blob is missing from R2', { sha256: sha })
             return yield* Effect.fail(dossierError('unavailable'))

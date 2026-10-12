@@ -26,6 +26,7 @@ import {
   TreeStore,
   type Caller,
 } from '../src/core/index.ts'
+import { SYSTEM_STATEMENTS } from '../src/core/system-store.ts'
 import { WEEKLY_PURGE } from '../src/jobs/scheduled.ts'
 import {
   beforeBatch,
@@ -50,17 +51,21 @@ import {
   at,
   beforeDelete,
   blobRow,
+  blobText,
   DAY,
   failureAt,
   HOUR,
   lastRunRow,
   MINUTE,
+  namesBlob,
   purgeAt,
   purgeFailureAt,
   pushAt,
+  putBlob,
   putBlobOf,
   stageAt,
   stored,
+  storedBlob,
   uploadAt,
 } from './support/purge.ts'
 import {
@@ -222,7 +227,7 @@ describe('what a purge removes', () => {
     expect(await count('events', 'tree_id = ?', treeId)).toBe(events)
     // gone.html's bytes were referenced by nothing else.
     expect(await blobRow(goneSha)).toBeNull()
-    expect(await stored(`blobs/${goneSha}`)).toBe(false)
+    expect(await storedBlob(goneSha)).toBe(false)
 
     // Twenty days on, later.html's deletion passes the cutoff too.
     await purgeAt(T0 + 51 * DAY)
@@ -276,7 +281,7 @@ describe('what a purge removes', () => {
     expect(await count('push_folders', 'push_id = ?', pushId)).toBe(0)
     // The bytes only that push held go; the tree's own stay.
     expect(await blobRow(await sha256Of(fresher))).toBeNull()
-    expect(await stored(`blobs/${await sha256Of(fresher)}`)).toBe(false)
+    expect(await storedBlob(await sha256Of(fresher))).toBe(false)
     expect(await blobRow(await sha256Of(kept))).toMatchObject({
       ref_count: 1,
       state: 'live',
@@ -340,7 +345,7 @@ describe('what a purge removes', () => {
       ),
     ).toBeUndefined()
     expect(await blobRow(sha)).toMatchObject({ ref_count: 1, state: 'live' })
-    expect(await stored(`blobs/${sha}`)).toBe(true)
+    expect(await storedBlob(sha)).toBe(true)
 
     await pushAt(
       T0 + 33 * DAY,
@@ -352,14 +357,14 @@ describe('what a purge removes', () => {
     await purgeAt(T0 + 65 * DAY)
     expect(await blobRow(sha)).toBeNull()
     expect(await count('analyses', 'sha256 = ?', sha)).toBe(0)
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
     for (let v = 1; v <= MARKDOWN_VERSION; v += 1) {
       expect(await stored(`derived/markdown/${v}/${sha}.md`)).toBe(false)
     }
     for (const key of others) expect(await stored(key)).toBe(true)
   })
 
-  it('keeps a blob while any hold stands, verified or not', async () => {
+  it('keeps a blob while a hold stands: verified, or unverified for a day', async () => {
     const { tag } = fresh()
     const text = `held ${tag}`
     const sha = await sha256Of(text)
@@ -369,7 +374,7 @@ describe('what a purge removes', () => {
     ) => run(Effect.flatMap(TreeStore, f))
     // An upload has taken its hold and is writing the bytes.
     await store((s) => s.holdBlob(holder, sha as Sha256, text.length))
-    await env.BLOBS.put(`blobs/${sha}`, text)
+    await putBlob(sha, text)
     expect(
       (
         await rows<{ verified: number }>(
@@ -378,18 +383,19 @@ describe('what a purge removes', () => {
         )
       )[0]?.verified,
     ).toBe(0)
-    const later = Date.now() + 40 * DAY
-    await purgeAt(later)
+    // Unverified, the hold stands for a day.
+    await purgeAt(Date.now() + 23 * HOUR)
     expect(await blobRow(sha)).toMatchObject({ state: 'live' })
-    expect(await stored(`blobs/${sha}`)).toBe(true)
+    expect(await storedBlob(sha)).toBe(true)
     await store((s) => s.confirmHold(holder, sha as Sha256, text.length))
+    const later = Date.now() + 40 * DAY
     await purgeAt(later + MINUTE)
     expect(await blobRow(sha)).toMatchObject({ state: 'live' })
     // The change it was for never commits: the hold goes, then the bytes.
     await store((s) => s.releaseHold(holder, sha as Sha256))
     await purgeAt(later + 2 * MINUTE)
     expect(await blobRow(sha)).toBeNull()
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
   })
 
   it('removes records past their life: old operations, Seen by and views, expired handles, day-old rate counts', async () => {
@@ -532,7 +538,7 @@ describe('bytes being reclaimed', () => {
       env: {
         BLOBS: beforeDelete(
           env.BLOBS,
-          (keys) => keys.includes(`blobs/${sha}`),
+          (keys) => namesBlob(keys, sha),
           async () => {
             // While the purge holds the claim: a push of the same bytes.
             const staged = await stageAt(Date.now(), other, target, {
@@ -556,7 +562,7 @@ describe('bytes being reclaimed', () => {
       Effect.flatMap(Push, (push) => push.commit(pushId!)),
     )
     expect(await blobRow(sha)).toMatchObject({ ref_count: 1, state: 'live' })
-    expect(await (await env.BLOBS.get(`blobs/${sha}`))?.text()).toBe(text)
+    expect(await blobText(sha)).toBe(text)
   })
 
   it('reclaims the bytes a withdrawal releases at once, without a run', async () => {
@@ -596,11 +602,11 @@ describe('bytes being reclaimed', () => {
       ],
     })
     expect(await blobRow(sha)).toMatchObject({ ref_count: 1, state: 'live' })
-    expect(await stored(`blobs/${sha}`)).toBe(true)
+    expect(await storedBlob(sha)).toBe(true)
     const runs = await count('purge_runs')
     await withdrawAs(browser, tree, `questions/answers/${owner.email}.json`)
     expect(await blobRow(sha)).toBeNull()
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
     expect(await count('purge_runs')).toBe(runs)
   })
 })
@@ -656,7 +662,7 @@ describe('runs', () => {
     expect(checkpoint.step).toBe('blobs')
     expect(checkpoint.claimed).toContain(sha)
     expect(await blobRow(sha)).toMatchObject({ state: 'reclaiming' })
-    expect(await stored(`blobs/${sha}`)).toBe(true)
+    expect(await storedBlob(sha)).toBe(true)
     const health = await run(Effect.flatMap(Settings, (s) => s.health()))
     expect(health.checks.find((c) => c.name === 'Purge')).toMatchObject({
       ok: false,
@@ -666,7 +672,7 @@ describe('runs', () => {
     const outcome = await purgeAt(T0 + 32 * DAY + MINUTE)
     expect(outcome.blobs).toBeGreaterThanOrEqual(1)
     expect(await blobRow(sha)).toBeNull()
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
     expect((await lastRunRow())!.state).toBe('done')
     const after = await run(Effect.flatMap(Settings, (s) => s.health()))
     expect(after.checks.find((c) => c.name === 'Purge')).toMatchObject({
@@ -721,7 +727,7 @@ describe('runs', () => {
       )[0],
     ).toEqual({ state: 'failed', error: 'It stopped before it finished.' })
     expect(await blobRow(sha)).toBeNull()
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
   })
 
   it('stops at its budget as partial, and the next run goes on from there', async () => {
@@ -744,7 +750,15 @@ describe('runs', () => {
 
     // Room for the lease, the expiry step and one batch of nodes.
     const partial = await purgeAt(T0 + 32 * DAY, {
-      budget: { statements: 3 + 7 + 1 + 43, millis: 25_000 },
+      budget: {
+        statements:
+          3 +
+          SYSTEM_STATEMENTS.expireStagedPushes +
+          1 +
+          SYSTEM_STATEMENTS.purgeDeletedNodes +
+          1,
+        millis: 25_000,
+      },
     })
     expect(partial).toMatchObject({ remaining: true, nodes: 100 })
     const row = (await lastRunRow())!
@@ -1086,13 +1100,13 @@ describe('restoring and purging', () => {
   ) => {
     expect(await nodeAt(t.treeId, 'gone.html')).toBeDefined()
     expect(await blobRow(t.sha)).toMatchObject({ state: 'live' })
-    expect(await (await env.BLOBS.get(`blobs/${t.sha}`))?.text()).toBe(t.text)
+    expect(await blobText(t.sha)).toBe(t.text)
   }
   const refusedAndGone = async (t: Awaited<ReturnType<typeof deletedPage>>) => {
     expect(await versionsOf(t.node)).toBe(0)
     expect(await count('node_versions', 'blob_sha256 = ?', t.sha)).toBe(0)
     expect(await blobRow(t.sha)).toBeNull()
-    expect(await stored(`blobs/${t.sha}`)).toBe(false)
+    expect(await storedBlob(t.sha)).toBe(false)
   }
 
   it('keeps a file restored before the purge, with its blob', async () => {
@@ -1177,7 +1191,7 @@ describe('claims and holds a run inherits', () => {
     )
     await purgeAt(t0 + 2 * HOUR)
     expect(await blobRow(sha)).toMatchObject({ state: 'live' })
-    expect(await stored(`blobs/${sha}`)).toBe(true)
+    expect(await storedBlob(sha)).toBe(true)
   })
 
   it('finishes a claim no checkpoint names, at the next run', async () => {
@@ -1193,10 +1207,10 @@ describe('claims and holds a run inherits', () => {
       t0 - DAY,
       t0 - 10 * MINUTE,
     )
-    await env.BLOBS.put(`blobs/${sha}`, text)
+    await putBlob(sha, text)
     await purgeAt(t0)
     expect(await blobRow(sha)).toBeNull()
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
   })
 
   it('keeps the hold of an upload still writing when its push expires, and lets it go after', async () => {
@@ -1214,13 +1228,13 @@ describe('claims and holds a run inherits', () => {
       await agent(owner),
       Effect.flatMap(TreeStore, (s) => s.holdBlob(holder, sha, text.length)),
     )
-    await env.BLOBS.put(`blobs/${sha}`, text)
+    await putBlob(sha, text)
     await purgeAt(t0 + DAY + MINUTE)
     expect(await blobRow(sha)).toMatchObject({ state: 'live' })
-    expect(await stored(`blobs/${sha}`)).toBe(true)
+    expect(await storedBlob(sha)).toBe(true)
     await purgeAt(t0 + DAY + 2 * HOUR)
     expect(await blobRow(sha)).toBeNull()
-    expect(await stored(`blobs/${sha}`)).toBe(false)
+    expect(await storedBlob(sha)).toBe(false)
     void store
   })
 })

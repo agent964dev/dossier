@@ -8,6 +8,7 @@
 // each module the page loads is named `dossier-export/<tree path>` (or
 // `dossier-export/base/<path>` for the base layer's) and the file's import
 // map maps each name to its data: URL.
+import { getBlob } from './blob-keys.ts'
 import {
   contentOrigin,
   dossierError,
@@ -43,7 +44,6 @@ import type { DataService } from './data.ts'
 import { jsAnalysisOf } from './lookup.ts'
 import type { NodeRow, VersionRow } from './rows.ts'
 import {
-  blobKey,
   linkPathOf,
   type Resolved,
   type TreeRef,
@@ -128,7 +128,7 @@ export interface ExporterDeps {
   readonly store: TreeStoreService
   readonly access: AccessService
   readonly data: DataService
-  readonly bindings: Pick<Env, 'BLOBS'>
+  readonly bindings: Pick<Env, 'BLOBS' | 'DB'>
   readonly context: Context.Context<
     BaseLayer | import('./bindings.ts').Bindings
   >
@@ -194,7 +194,7 @@ export const exportFilename = (path: string, treeName: string): string => {
  */
 export const exportStream = (
   plan: ExportPlan,
-  blobs: Pick<Env, 'BLOBS'>['BLOBS'],
+  blobs: Pick<Env, 'BLOBS' | 'DB'>,
 ): ReadableStream<Uint8Array> => {
   const encoder = new TextEncoder()
   const list = [...plan.pieces]
@@ -241,7 +241,7 @@ export const exportStream = (
         controller.enqueue(encoder.encode(piece.text))
         return
       }
-      const object = await blobs.get(blobKey(piece.sha256))
+      const object = await getBlob(blobs, piece.sha256)
       // Cancelled while R2 answered: the body it gave is never read.
       if (cancelled) {
         await object?.body.cancel()
@@ -278,7 +278,7 @@ export const makeExporter = (deps: ExporterDeps) => {
   const textOf = (sha: string) =>
     Effect.tryPromise({
       try: async () => {
-        const object = await bindings.BLOBS.get(blobKey(sha))
+        const object = await getBlob(bindings, sha)
         return object === null ? null : object.text()
       },
       catch: unavailable,
@@ -883,7 +883,7 @@ export const makeExporter = (deps: ExporterDeps) => {
       }
       return {
         kind: 'export',
-        html: exportStream(plan, bindings.BLOBS),
+        html: exportStream(plan, bindings),
         linked: plan.linked.map((link) => linkedPaths.get(link) ?? link),
         filename: exportFilename(pagePath, i.tree.name),
       } satisfies ExportServed

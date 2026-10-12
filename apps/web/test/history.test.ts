@@ -4,6 +4,7 @@ import type {
   Person,
   PushNumber,
 } from '@dossier/contracts'
+import { getBlob } from '../src/core/blob-keys.ts'
 import { SELF } from 'cloudflare:test'
 import { Effect } from 'effect'
 import { beforeAll, describe, expect, it } from 'vitest'
@@ -101,9 +102,10 @@ const liveText = async (treeId: string, path: string) => {
   )
   if (row === undefined) return null
   if (row.json !== null) return row.json
-  const object = await (
-    await import('cloudflare:workers')
-  ).env.BLOBS.get(`blobs/${row.sha}`)
+  const object = await getBlob(
+    (await import('cloudflare:workers')).env,
+    row.sha!,
+  )
   return object === null ? null : await object.text()
 }
 

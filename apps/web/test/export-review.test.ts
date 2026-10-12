@@ -185,7 +185,7 @@ describe('the export stream', () => {
         bytes: 0,
         linked: [],
       },
-      blobs,
+      { DB: env.DB, BLOBS: blobs },
     )
     const reader = stream.getReader()
     await reader.read()
@@ -251,7 +251,7 @@ describe('the export stream, after its second review', () => {
       }),
     } as unknown as R2Bucket
     const text = await Promise.race([
-      new Response(exportStream(plan, blobs)).text(),
+      new Response(exportStream(plan, { DB: env.DB, BLOBS: blobs })).text(),
       new Promise<string>((resolve) =>
         setTimeout(() => resolve('stalled'), 3000),
       ),
@@ -282,7 +282,7 @@ describe('the export stream, after its second review', () => {
             })
         }),
     } as unknown as R2Bucket
-    const reader = exportStream(plan, blobs).getReader()
+    const reader = exportStream(plan, { DB: env.DB, BLOBS: blobs }).getReader()
     await reader.read()
     const pending = reader.read()
     await new Promise((resolve) => setTimeout(resolve, 10))

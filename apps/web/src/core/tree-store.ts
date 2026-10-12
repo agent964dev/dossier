@@ -41,6 +41,7 @@ import type { Background } from './background.ts'
 import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { ChangeFeed, type CloseSockets, type Committed } from './change-feed.ts'
+import { getBlob, objectKey } from './blob-keys.ts'
 import { makeSystemStore, SystemJob, type SystemStore } from './system-store.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { openCursor, sealCursor } from './cursors.ts'
@@ -527,14 +528,15 @@ export interface TreeStoreService {
     opts: { readonly origin: 'data' | 'any' },
   ) => Effect.Effect<readonly DocRow[], never, CurrentCaller>
   /**
-   * Holds a blob before its bytes are written, so a purge leaves it alone.
-   * The hold counts for a commit only once `confirmHold` verifies it.
+   * Holds a blob before its bytes are written, so a purge leaves it alone,
+   * and answers the R2 key to write them at. The hold counts for a commit
+   * only once `confirmHold` verifies it; an attempt again renews it.
    */
   readonly holdBlob: (
     holder: { readonly kind: HoldKind; readonly id: string },
     sha256: Sha256,
     size: number,
-  ) => Effect.Effect<void, DossierError<'blob_reclaiming'>>
+  ) => Effect.Effect<string, DossierError<'blob_reclaiming'>>
   /** The bytes are in R2 and match their hash and size. */
   readonly confirmHold: (
     holder: { readonly kind: HoldKind; readonly id: string },
@@ -632,9 +634,6 @@ export class TreeStore extends Context.Tag('TreeStore')<
   TreeStore,
   TreeStoreService
 >() {}
-
-/** The R2 key of a blob's bytes. */
-export const blobKey = (sha256: string): string => `blobs/${sha256}`
 
 /** The R2 key of a page's generated agent version, never a visible file. */
 export const markdownKey = (sha256: string): string =>
@@ -1620,7 +1619,7 @@ export const TreeStoreLive: Layer.Layer<
       Effect.gen(function* () {
         const stored = yield* read(() => BLOBS.get(markdownKey(sha256)))
         if (stored !== null) return yield* read(() => stored.text())
-        const page = yield* read(() => BLOBS.get(blobKey(sha256)))
+        const page = yield* read(() => getBlob({ DB, BLOBS }, sha256))
         if (page === null) {
           console.error('A blob is missing from R2', { sha256 })
           return yield* Effect.fail(dossierError('unavailable'))
@@ -1730,20 +1729,25 @@ export const TreeStoreLive: Layer.Layer<
         const results = yield* read(() =>
           DB.batch([
             DB.prepare(
-              `insert into blobs (sha256, size, ref_count, state, first_seen_at)
-                 values (?, ?, 0, 'live', ?) on conflict do nothing`,
+              `insert into blobs (sha256, size, ref_count, state, first_seen_at, generation)
+                 values (?, ?, 0, 'live', ?, lower(hex(randomblob(8)))) on conflict do nothing`,
             ).bind(sha256, size, at),
             DB.prepare(
               `insert into blob_holds (holder_kind, holder_id, sha256, verified, created_at)
                  select ?, ?, ?, 0, ? where exists
                    (select 1 from blobs where sha256 = ? and state = 'live')
-                 on conflict do nothing`,
+                 on conflict (holder_kind, holder_id, sha256) do update
+                   set verified = 0, created_at = excluded.created_at`,
             ).bind(holder.kind, holder.id, sha256, at, sha256),
-            DB.prepare('select state from blobs where sha256 = ?').bind(sha256),
+            DB.prepare(
+              'select state, generation from blobs where sha256 = ?',
+            ).bind(sha256),
           ]),
         ).pipe(Effect.orDie)
-        const state = (results[2]?.results[0] as { state?: string } | undefined)
-          ?.state
+        const row = results[2]?.results[0] as
+          | { state?: string; generation?: string | null }
+          | undefined
+        const state = row?.state
         if (state !== 'live') {
           return yield* Effect.fail(
             dossierError(
@@ -1753,6 +1757,7 @@ export const TreeStoreLive: Layer.Layer<
             ),
           )
         }
+        return objectKey(sha256, row?.generation ?? null)
       })
 
     const confirmHold = (
@@ -1990,7 +1995,7 @@ export const TreeStoreLive: Layer.Layer<
         if (version === null || sha === null) {
           return yield* Effect.fail(gone)
         }
-        const object = yield* read(() => BLOBS.get(blobKey(sha))).pipe(
+        const object = yield* read(() => getBlob({ DB, BLOBS }, sha)).pipe(
           Effect.orDie,
         )
         if (object === null) {

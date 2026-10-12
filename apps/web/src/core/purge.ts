@@ -22,7 +22,8 @@ import {
   SystemJob,
   type SystemStore,
 } from './system-store.ts'
-import { blobKey, TreeStore } from './tree-store.ts'
+import { objectKey } from './blob-keys.ts'
+import { TreeStore } from './tree-store.ts'
 
 export interface PurgeOutcome {
   readonly runId: string
@@ -123,12 +124,14 @@ const emptyTally = (): Tally => ({
 })
 
 /**
- * Every R2 object stored under a blob's hash: the bytes, and the generated
- * Markdown of every converter version. fonts/, looks/ and base/ are not
- * blobs and are never named here.
+ * Every R2 object of one blob row: its generation's bytes, and the generated
+ * Markdown of every converter version. Bytes uploaded again after the row
+ * goes sit under a new generation, so they are never named here; generated
+ * Markdown is made again from the bytes when it is missing. fonts/, looks/
+ * and base/ are not blobs and are never named here.
  */
-const objectsOf = (sha256: Sha256): string[] => [
-  blobKey(sha256),
+const objectsOf = (sha256: Sha256, generation: string | null): string[] => [
+  objectKey(sha256, generation),
   ...Array.from(
     { length: MARKDOWN_VERSION },
     (_, at) => `derived/markdown/${at + 1}/${sha256}.md`,
@@ -213,6 +216,9 @@ export const PurgeLive: Layer.Layer<
      * Deletes a claimed blob's objects, then its rows. A run deletes only
      * while it still holds its lease: a run another took over stops here,
      * so two never finish one claim around a new upload of the same bytes.
+     * The delete names the claimed row's generation and the finish matches
+     * it, so one that arrives late, after the row went and the bytes were
+     * uploaded again, touches neither the new bytes nor the new row.
      */
     const reclaimOne = (
       system: SystemStore,
@@ -236,8 +242,18 @@ export const PurgeLive: Layer.Layer<
             )
           }
         }
-        yield* r2('delete', () => BLOBS.delete(objectsOf(sha256)))
-        yield* system.finishBlob(sha256)
+        const claim = yield* d1('read the claim', () =>
+          DB.prepare(
+            `select generation from blobs where sha256 = ? and state = 'reclaiming'`,
+          )
+            .bind(sha256)
+            .first<{ generation: string | null }>(),
+        )
+        if (claim === null) return
+        yield* r2('delete', () =>
+          BLOBS.delete(objectsOf(sha256, claim.generation)),
+        )
+        yield* system.finishBlob(sha256, claim.generation)
       })
 
     type Lease =
@@ -396,11 +412,32 @@ export const PurgeLive: Layer.Layer<
         })
 
         // 5. Blobs nothing references or holds.
-        const perBlob = 1 + SYSTEM_STATEMENTS.finishBlob
+        // The lease, the claim, and the finish.
+        const perBlob = 2 + SYSTEM_STATEMENTS.finishBlob
+        /**
+         * Reclaims the claims one by one while each fits the budget, with
+         * room to save the claims left; a run that stops saves them for the
+         * next.
+         */
+        const reclaimAll = (claimed: readonly Sha256[]) =>
+          Effect.gen(function* () {
+            for (const [at, sha256] of claimed.entries()) {
+              if (!(yield* fits(perBlob + 1))) {
+                yield* save({ step: 'blobs', claimed: claimed.slice(at) })
+                return false
+              }
+              yield* reclaimOne(system, sha256, runId)
+              spend(perBlob)
+              tally.blobs += 1
+            }
+            yield* save({ step: 'blobs', claimed: [] })
+            return true
+          })
         const blobs = Effect.gen(function* () {
           // The claims a stopped run left: nothing can take them back, so
           // their deletion goes on.
           if (checkpoint.claimed.length > 0) {
+            if (!(yield* fits(2))) return false
             spend(1)
             const still = yield* d1('read the claims left', () =>
               DB.prepare(
@@ -410,12 +447,9 @@ export const PurgeLive: Layer.Layer<
                 .bind(JSON.stringify(checkpoint.claimed))
                 .all<{ sha256: Sha256 }>(),
             )
-            for (const { sha256 } of still.results) {
-              yield* reclaimOne(system, sha256, runId)
-              spend(perBlob)
-              tally.blobs += 1
+            if (!(yield* reclaimAll(still.results.map((r) => r.sha256)))) {
+              return false
             }
-            yield* save({ step: 'blobs', claimed: [] })
           }
           // Claims a stopped run or reclaim left behind, whether or not a
           // checkpoint names them. A claimed blob is one nothing references
@@ -441,12 +475,7 @@ export const PurgeLive: Layer.Layer<
             const claimed = yield* system.claimBlobs(CLAIM_BATCH)
             if (claimed.length === 0) return true
             yield* save({ step: 'blobs', claimed })
-            for (const sha256 of claimed) {
-              yield* reclaimOne(system, sha256, runId)
-              spend(perBlob)
-              tally.blobs += 1
-            }
-            yield* save({ step: 'blobs', claimed: [] })
+            if (!(yield* reclaimAll(claimed))) return false
           }
         })
 

@@ -99,6 +99,13 @@
       "when": 1791801363308,
       "tag": "0018_history_purge",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1791808519571,
+      "tag": "0021_blob_generation",
+      "breakpoints": true
     }
   ]
 }

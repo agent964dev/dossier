@@ -61,7 +61,6 @@ import { Limits } from './limits.ts'
 import { Purge } from './purge.ts'
 import type { NodeRow, TreeRow, VersionRow } from './rows.ts'
 import {
-  blobKey,
   TreeStore,
   type ChangeFailure,
   type ChangeSet,
@@ -1187,13 +1186,13 @@ export const DataLive: Layer.Layer<
           id: `${person.id}:${i.opId}:${crypto.randomUUID()}`,
         } as const
         // The hold comes first, so a purge never takes the bytes being written.
-        yield* store.holdBlob(holder, i.sha256, i.size)
+        const objectAt = yield* store.holdBlob(holder, i.sha256, i.size)
         yield* Effect.tryPromise({
           try: async () => {
             const sized = new FixedLengthStream(i.size)
             const piped = i.body.pipeTo(sized.writable)
             await Promise.all([
-              BLOBS.put(blobKey(i.sha256), sized.readable, {
+              BLOBS.put(objectAt, sized.readable, {
                 sha256: i.sha256,
               }),
               piped,
@@ -1390,7 +1389,7 @@ export const DataLive: Layer.Layer<
             field,
           )
         // The hold comes first, so a purge never takes the bytes being written.
-        yield* store
+        const objectAt = yield* store
           .holdBlob(holder, i.sha256, i.size)
           .pipe(Effect.mapError(() => reclaiming()))
         yield* Effect.tryPromise({
@@ -1398,7 +1397,7 @@ export const DataLive: Layer.Layer<
             const sized = new FixedLengthStream(i.size)
             const piped = i.body.pipeTo(sized.writable)
             await Promise.all([
-              BLOBS.put(blobKey(i.sha256), sized.readable, {
+              BLOBS.put(objectAt, sized.readable, {
                 sha256: i.sha256,
               }),
               piped,

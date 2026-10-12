@@ -621,6 +621,13 @@ export const blobs = sqliteTable(
     state: text('state').notNull().default('live'),
     firstSeenAt: integer('first_seen_at').notNull(),
     reclaimStartedAt: integer('reclaim_started_at'),
+    /**
+     * Names this row's bytes in R2 (`blobs/<sha256>/<generation>`); null for
+     * bytes stored before generations, at `blobs/<sha256>`. A blob removed
+     * and uploaded again gets a new generation, so a late delete of the old
+     * bytes never reaches the new ones.
+     */
+    generation: text('generation'),
   },
   (t) => [
     check('blobs_state_check', sql`${t.state} in ('live', 'reclaiming')`),

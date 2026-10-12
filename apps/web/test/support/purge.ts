@@ -15,6 +15,7 @@ import {
   type CurrentCaller,
   type PurgeOutcome,
 } from '../../src/core/index.ts'
+import { blobObjectKey, getBlob } from '../../src/core/blob-keys.ts'
 import { PurgeBudget } from '../../src/core/purge.ts'
 import { SystemJob } from '../../src/core/system-store.ts'
 import { rows } from './d1.ts'
@@ -182,6 +183,26 @@ export const blobRow = async (sha256: string) =>
 /** Whether R2 holds an object at the key. */
 export const stored = async (key: string) =>
   (await env.BLOBS.head(key)) !== null
+
+/** Whether R2 holds a blob's bytes, under any generation. */
+export const storedBlob = async (sha256: string) =>
+  (await env.BLOBS.list({ prefix: `blobs/${sha256}` })).objects.some(
+    (o) => o.key === `blobs/${sha256}` || o.key.startsWith(`blobs/${sha256}/`),
+  )
+
+/** Writes a blob's bytes where its row says they live, as an upload does. */
+export const putBlob = async (sha256: string, text: string) =>
+  env.BLOBS.put(await blobObjectKey(env.DB, sha256), text)
+
+/** A blob's bytes as text, or null when R2 holds none. */
+export const blobText = async (sha256: string) =>
+  (await getBlob(env, sha256))?.text() ?? null
+
+/** Whether a delete names a blob's bytes, under any generation. */
+export const namesBlob = (keys: readonly string[], sha256: string) =>
+  keys.some(
+    (key) => key === `blobs/${sha256}` || key.startsWith(`blobs/${sha256}/`),
+  )
 
 /** The newest purge run's row. */
 export const lastRunRow = async () =>

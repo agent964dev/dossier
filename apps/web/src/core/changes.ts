@@ -34,6 +34,7 @@ import type { ChangeFeedService } from './change-feed.ts'
 import type { DataService } from './data.ts'
 import type { ChangeResult, MoveResult, RestorePoint } from './files.ts'
 import type { makeHistory } from './history.ts'
+import { getBlob } from './blob-keys.ts'
 import { newId, sha256Hex } from './ids.ts'
 import { formRowsOf } from './push.ts'
 import {
@@ -43,7 +44,6 @@ import {
 } from './page-needs-held.ts'
 import { ancestorPaths, type NodeRow, type VersionRow } from './rows.ts'
 import {
-  blobKey,
   nodeOfRaw,
   type ChangeFailure,
   type NewFormRow,
@@ -908,7 +908,7 @@ export const makeChanges = (deps: ChangesDeps) => {
       }[] = []
       for (const file of html) {
         if (!crosses(file.analysis, file.node.path, node.path)) continue
-        const object = yield* query(() => BLOBS.get(blobKey(file.sha)))
+        const object = yield* query(() => getBlob({ DB, BLOBS }, file.sha))
         if (object === null) continue
         const source = yield* query(() => object.text())
         const text = rewriteForMove(source, file.analysis, {
@@ -965,10 +965,10 @@ export const makeChanges = (deps: ChangesDeps) => {
       // Every way out but the commit lets go of what it held.
       const committed = yield* Effect.gen(function* () {
         for (const r of rewrites) {
-          yield* store.holdBlob(hold, r.sha, r.size)
+          const key = yield* store.holdBlob(hold, r.sha, r.size)
           held.push(r.sha)
           yield* query(() =>
-            BLOBS.put(blobKey(r.sha), r.text, {
+            BLOBS.put(key, r.text, {
               sha256: r.sha,
               httpMetadata: { contentType: r.file.type },
             }),

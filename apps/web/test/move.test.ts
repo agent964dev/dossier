@@ -1,4 +1,5 @@
 import type { AuthoredSeq, LinkRef, Person, TreeId } from '@dossier/contracts'
+import { getBlob } from '../src/core/blob-keys.ts'
 import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -97,7 +98,7 @@ const text = async (treeId: string, path: string) => {
     path,
   )
   if (row === undefined) return null
-  return (await env.BLOBS.get(`blobs/${row.sha}`))?.text() ?? null
+  return (await getBlob(env, row.sha))?.text() ?? null
 }
 
 const handleFor = (caller: Caller, treeId: TreeId, path: string) =>

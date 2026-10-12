@@ -47,7 +47,7 @@ import { jsAnalysisOf } from './lookup.ts'
 import { pageNeedsOf, type PageNeed, type PageNeedRow } from './page-needs.ts'
 import { Shares } from './shares.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
-import { blobKey, TreeStore, type NewShare } from './tree-store.ts'
+import { TreeStore, type NewShare } from './tree-store.ts'
 
 export interface ManifestFile {
   /** Inside the pushed folder. */
@@ -953,7 +953,7 @@ export const PushLive: Layer.Layer<
         const holder = { kind: 'push', id: push.id } as const
         // The hold comes first, so a purge never takes the blob while its
         // bytes are being written; it counts for the commit once verified.
-        yield* store.holdBlob(holder, i.sha256, i.size)
+        const key = yield* store.holdBlob(holder, i.sha256, i.size)
         // The bytes are always written, so the answer never tells whether
         // they were stored before.
         yield* Effect.tryPromise({
@@ -961,7 +961,7 @@ export const PushLive: Layer.Layer<
             const sized = new FixedLengthStream(i.size)
             const piped = i.body.pipeTo(sized.writable)
             const [put] = await Promise.all([
-              BLOBS.put(blobKey(i.sha256), sized.readable, {
+              BLOBS.put(key, sized.readable, {
                 sha256: i.sha256,
               }),
               piped,

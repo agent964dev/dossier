@@ -14,7 +14,7 @@ import { Clock, Effect } from 'effect'
 
 import type { Caller } from './caller.ts'
 import type { NodeRow, PushRow, TreeRow, VersionRow } from './rows.ts'
-import { blobKey } from './tree-store.ts'
+import { getBlob } from './blob-keys.ts'
 
 /** 50 lines a page of history. */
 export const LOG_PAGE = 50
@@ -99,7 +99,7 @@ export const makeHistory = (deps: HistoryDeps) => {
       }
       const sha = version.blobSha256
       if (sha === null) return ''
-      const object = yield* query(() => BLOBS.get(blobKey(sha)))
+      const object = yield* query(() => getBlob({ DB, BLOBS }, sha))
       if (object === null) return null
       const bytes = yield* query(() => object.arrayBuffer())
       if (bytes.byteLength > TEXT_BYTES) return null
