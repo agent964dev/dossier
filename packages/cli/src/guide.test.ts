@@ -20,6 +20,7 @@ const TITLES = [
   'Reading',
   'Sharing',
   'Export',
+  'History',
 ]
 
 describe('the agent guide', () => {
@@ -208,6 +209,40 @@ describe('the agent guide', () => {
         '`{ "file", "bytes", "linked" }`',
       ]) {
         expect(exporting).toContain(phrase)
+      }
+    } finally {
+      await cli.cleanup()
+    }
+  })
+
+  it('gives agents history: the five verbs and what deleting, restoring and moving keep', async () => {
+    const fetch = stubFetch(() => new Response(null, { status: 500 }))
+    const cli = await harness({ fetch: fetch.fetch })
+    try {
+      expect(await cli.run(['--agent-info'])).toBe(0)
+      const markdown = cli.stdout()
+      for (const usage of [
+        'dossier rm [--json] <path>',
+        'dossier mv [--json] <from> <to>',
+        'dossier log [--cursor text] [--json] <path>',
+        'dossier diff [--json] <path> [<from>] [<to>]',
+        'dossier restore --to text [--json] <path>',
+      ]) {
+        expect(markdown).toContain(usage)
+      }
+      const history = markdown.slice(markdown.indexOf('\n## History\n'))
+      for (const phrase of [
+        'dossier log agent964/acme/questions/ --cursor <c>',
+        'dossier diff agent964/acme/plan.html 11 12',
+        'dossier restore agent964/acme/plan.html --to 12',
+        'dossier mv agent964/acme studio/acme',
+        'within the retention period',
+        'just after it',
+        'keeps data written since',
+        'its old link keeps working',
+        'ends its team shares',
+      ]) {
+        expect(history).toContain(phrase)
       }
     } finally {
       await cli.cleanup()

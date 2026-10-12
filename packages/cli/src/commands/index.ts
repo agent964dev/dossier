@@ -1,10 +1,15 @@
 import { exportPage } from './export.ts'
+import { diff } from './diff.ts'
+import { log } from './log.ts'
 import { login } from './login.ts'
 import { logout } from './logout.ts'
 import { ls } from './ls.ts'
+import { mv } from './mv.ts'
 import { pull } from './pull.ts'
 import { push } from './push.ts'
 import { read } from './read.ts'
+import { restore } from './restore.ts'
+import { rm } from './rm.ts'
 import { share } from './share.ts'
 import { update } from './update.ts'
 import { watch } from './watch.ts'
@@ -18,9 +23,14 @@ export const verbs = [
   update,
   push,
   pull,
+  rm,
+  mv,
   share,
   ls,
   read,
   exportPage,
   watch,
+  log,
+  diff,
+  restore,
 ] as const

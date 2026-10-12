@@ -180,11 +180,16 @@ describe('the agent guide', () => {
       'update',
       'push',
       'pull',
+      'rm',
+      'mv',
       'share',
       'ls',
       'read',
       'export',
       'watch',
+      'log',
+      'diff',
+      'restore',
     ])
     expect(Object.keys(data.exitCodes)).toEqual([
       '0',
