@@ -47,6 +47,11 @@ const LIBRARIES: BaseLibraries = {
       export: '_components/dossier-copy.export.js',
       doc: '_components/dossier-copy.md',
     },
+    'dossier-comments': {
+      live: '_components/dossier-comments.js',
+      export: '_components/dossier-comments.export.js',
+      doc: '_components/dossier-comments.md',
+    },
   },
 }
 

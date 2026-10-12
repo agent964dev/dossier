@@ -4,7 +4,10 @@
 // files with who wrote each, or a file. Pages.read and the link route's agent
 // branch both answer from here, so they return the same text.
 import {
+  commentsFolderOf,
   dossierError,
+  pageOfCommentsFolder,
+  threadsText,
   type AuthoredSeq,
   type DocWire,
   type DossierError,
@@ -29,6 +32,7 @@ import { Clock, Context, Effect } from 'effect'
 import { db, schema } from '../db/client.ts'
 import type { AccessService } from './access.ts'
 import { BaseLayer } from './base-layer.ts'
+import { readThreads } from './comments.ts'
 import type { Bindings } from './bindings.ts'
 import type { CurrentCaller } from './caller.ts'
 import { entryWire, type FilesService } from './files.ts'
@@ -473,6 +477,32 @@ export const makeReader = (deps: ReaderDeps) => {
       return Number(rows[0]?.count ?? 0)
     })
 
+  /** The comments in a comments folder the caller can read, deleted ones aside. */
+  const countComments = (treeId: TreeId, folder: string) =>
+    Effect.gen(function* () {
+      const readable = yield* access.readable(treeId)
+      const n = schema.nodes
+      const rows = yield* query(() =>
+        db(bindings)
+          .select({ count: sql<number>`count(*)` })
+          .from(n)
+          .innerJoin(
+            schema.nodeVersions,
+            sql`${schema.nodeVersions.id} = ${n.currentVersionId}`,
+          )
+          .where(
+            sql`${n.treeId} = ${treeId} and ${n.deletedAt} is null and ${n.kind} = 'file'
+              and ${n.origin} = 'data'
+              and substr(${n.path}, 1, length(${folder}) + 1) = ${`${folder}/`}
+              and json_type(${schema.nodeVersions.jsonValue}, '$.text') = 'text'
+              and json_extract(${schema.nodeVersions.jsonValue}, '$.text') <> ''
+              and ${readable.where}`,
+          )
+          .all(),
+      )
+      return Number(rows[0]?.count ?? 0)
+    })
+
   /**
    * Where else an agent looks from a page: its forms' data and its comments,
    * with the layouts composed into it at `at`.
@@ -519,10 +549,9 @@ export const makeReader = (deps: ReaderDeps) => {
           files: yield* countReadable(page.tree.id, where, 'data'),
         })
       }
-      const comments = yield* countReadable(
+      const comments = yield* countComments(
         page.tree.id,
-        { below: `${page.node.path.replace(/\.html$/, '')}.comments` },
-        'any',
+        commentsFolderOf(page.node.path).slice(0, -1),
       )
       return { data, comments } satisfies Pointer
     })
@@ -698,6 +727,24 @@ export const makeReader = (deps: ReaderDeps) => {
         ref.tree,
         linkPathOf(folder.node.path, true),
       )
+      const page = pageOfCommentsFolder(folder.node.path)
+      if (folder.node.origin === 'data' && page !== null) {
+        yield* readOnly(access.require('read', folder.node))
+        const threads = yield* readThreads(
+          bindings,
+          access,
+          folder.node.treeId,
+          folder.node.path,
+        )
+        return {
+          kind: 'comments',
+          path: folder.node.path,
+          link,
+          page,
+          threads,
+          text: threadsText({ folder: folder.node.path, threads }),
+        } satisfies ReadResult
+      }
       if (folder.node.origin === 'data') {
         const granted = yield* readOnly(access.require('read', folder.node))
         const rows = yield* store.docs(granted, { origin: 'data' })

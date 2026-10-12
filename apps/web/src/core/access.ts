@@ -2,7 +2,9 @@ import {
   dossierError,
   type DossierError,
   type NodeId,
+  type Person,
   type PersonId,
+  type SessionId,
   type ShareId,
   type TeamId,
   type TreeId,
@@ -173,6 +175,15 @@ export interface AccessService {
   readonly readableByGrants: (
     treeId: TreeId,
   ) => Effect.Effect<ReadableNodes, never, CurrentCaller>
+  /**
+   * Whether the person with this email, or anyone who comes to hold it,
+   * could read the node now: the rule of roleOn, without a key's or a
+   * handle's narrowing. For mentions only.
+   */
+  readonly couldRead: (
+    email: string,
+    node: NodeRow,
+  ) => Effect.Effect<boolean, never, CurrentCaller>
   /** Agrees with require('read') on every node of the tree. */
   readonly readable: (
     treeId: TreeId,
@@ -969,11 +980,43 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         } satisfies Membership
       })
 
+    const couldRead = (email: string, node: NodeRow) =>
+      Effect.gen(function* () {
+        const asking = yield* CurrentCaller
+        const lower = email.toLowerCase()
+        const found = yield* query(() =>
+          DB.prepare(
+            `select u.id, u.name from "user" u join people p on p.user_id = u.id
+             where lower(u.email) = ? and p.deleted_at is null limit 1`,
+          )
+            .bind(lower)
+            .first<{ id: PersonId; name: string }>(),
+        )
+        // Someone without an account yet reads through shares to the email
+        // and anyone shares alone.
+        const person: Person = {
+          id: found?.id ?? ('' as PersonId),
+          email: lower,
+          name: found?.name ?? '',
+          image: null,
+        }
+        const as: Caller = {
+          person,
+          via: { kind: 'browser', sessionId: '' as SessionId },
+          requestId: asking.requestId,
+        }
+        const roles = yield* roleOn(node).pipe(
+          Effect.provideService(CurrentCaller, as),
+        )
+        return roles.reads
+      })
+
     return {
       require,
       roleOn,
       heldOn,
       readsAsOf,
+      couldRead,
       readable,
       readableByGrants,
       member,

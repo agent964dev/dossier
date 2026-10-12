@@ -595,4 +595,24 @@ describe('a page’s comments folder', () => {
     )
     expect(fine.problems).toEqual([])
   })
+
+  it('names the file, the line and the fix for a form sending to plan.comments/', () => {
+    const check = checkPush(
+      [
+        file(
+          'plan.html',
+          '<!doctype html>\n<p>Plan</p>\n<form action="plan.comments/"><textarea name="text"></textarea></form>',
+        ),
+      ],
+      treeOf(),
+    )
+    expect(check.problems).toEqual([
+      expect.objectContaining({
+        code: 'form_action_comments',
+        path: 'plan.html',
+        line: 3,
+        fix: 'Point the form at a folder or .json file of its own, such as action="answers/".',
+      }),
+    ])
+  })
 })

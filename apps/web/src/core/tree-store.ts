@@ -1,4 +1,6 @@
 import {
+  commentsFolderIn,
+  commentsFolderOf,
   dossierError,
   type AuthoredSeq,
   type EventsResponse,
@@ -16,7 +18,7 @@ import {
   type TreeId,
   type VersionId,
 } from '@dossier/contracts'
-import type { JsonObject } from '@dossier/contracts/bridge'
+import type { CommentEntry, JsonObject } from '@dossier/contracts/bridge'
 import {
   MARKDOWN_VERSION,
   toMarkdown,
@@ -29,6 +31,7 @@ import { Clock, Context, Effect, Layer } from 'effect'
 import { db, schema } from '../db/client.ts'
 import {
   Access,
+  type Action,
   type Basis,
   type Granted,
   type Membership,
@@ -274,7 +277,7 @@ export interface ChangeSet {
    * created as data folders nobody owns. `under` is what the writer holds.
    */
   readonly createData: (
-    under: Granted<'respond' | 'write'>,
+    under: Granted<'respond' | 'write' | 'comment'>,
     node: NewDataNode,
   ) => NodeHandle
   /** A new version of a data file: a JSON value or an upload's bytes. */
@@ -282,12 +285,39 @@ export interface ChangeSet {
     node: NodeHandle | Granted<'respond' | 'write'>,
     version: NewDataVersion,
   ) => VersionHandle
-  /** Merges a JSON object into the file's value as RFC 7396 says. */
+  /**
+   * Merges a JSON object into the file's value as RFC 7396 says. A writer
+   * revises their own comment through `withdraw-own`, its ownership.
+   */
   readonly mergeJson: (
-    node: NodeHandle | Granted<'respond' | 'write'>,
+    node: NodeHandle | Granted<'respond' | 'write' | 'withdraw-own'>,
     patch: JsonObject,
     provenance: DataProvenance,
   ) => VersionHandle
+  /**
+   * Deletes the content of every earlier version of a comment entry, leaves
+   * one live version holding `blanked` (its text '' and no mentions), and
+   * deletes the comment's mentions rows; the node and its path stay, so its
+   * thread still holds together.
+   */
+  readonly blank: (
+    comment: Granted<'withdraw-own' | 'delete-data'>,
+    blanked: CommentEntry,
+  ) => VersionHandle
+  /**
+   * A 'mention' event at `path` and the mentions row keyed by that event's
+   * seq, for a comment on the page the grant is on.
+   */
+  readonly mention: (
+    page: Granted<'comment'>,
+    m: {
+      readonly comment: NodeHandle | NodeRow
+      readonly email: string
+      readonly path: string
+    },
+  ) => void
+  /** Fails the change unless what the grant rests on still holds. */
+  readonly holds: (granted: Granted<Action>) => void
   /**
    * 'withdrawn': every version's content deleted, one content-free
    * 'withdrawn' version left, the node deleted, its operations reduced to
@@ -1692,6 +1722,13 @@ export const TreeStoreLive: Layer.Layer<
           readonly condition: Statement
         }[] = []
         const events: NewEvent[] = []
+        /** Mentions rows, each keyed by the seq of the event at `event`. */
+        const mentioned: {
+          readonly event: number
+          readonly commentId: string
+          readonly pageId: NodeId
+          readonly email: string
+        }[] = []
         /** Whose sockets the revoked shares close, as the batch read them. */
         const closing: (CloseSockets | null)[] = []
         let authored = 0
@@ -1954,6 +1991,18 @@ export const TreeStoreLive: Layer.Layer<
 
           createData: (holder, node) => {
             const t = tid()
+            // A grant on a page creates in no page's comments folder but its own.
+            const inComments = commentsFolderIn(node.path)
+            if (
+              inComments !== null &&
+              holder.origin === 'authored' &&
+              holder.kind === 'file' &&
+              `${inComments}/` !== commentsFolderOf(holder.path)
+            ) {
+              throw new Error(
+                'a page grant creates only in its comments folder',
+              )
+            }
             bases.push(everyBasis(holder.basis, person.id))
             const id = newId() as NodeId
             const segments = node.path.split('/')
@@ -2197,6 +2246,67 @@ export const TreeStoreLive: Layer.Layer<
             )
           },
 
+          blank: (comment, blanked) => {
+            const t = tid()
+            bases.push(everyBasis(comment.basis, person.id))
+            stateGuards.push(liveDataFile(comment.id))
+            const versionId = newId() as VersionId
+            const text = JSON.stringify(blanked)
+            writes.push(
+              {
+                // One version is left, keeping the push its writer saw.
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select ?1, ?2, ?3, ${NEXT_REVISION}, null, 'live', null, json(?4),
+                        length(cast(json(?4) as blob)), 'application/json', ?5, ?6, null,
+                        (select v.seen_push_number from nodes n
+                           join node_versions v on v.id = n.current_version_id
+                           where n.id = ?2),
+                        null, ?7`,
+                binds: [versionId, comment.id, t, text, person.id, keyId, now],
+              },
+              {
+                sql: 'update nodes set current_version_id = ? where id = ?',
+                binds: [versionId, comment.id],
+              },
+              {
+                sql: 'delete from node_versions where node_id = ? and id <> ?',
+                binds: [comment.id, versionId],
+              },
+              {
+                sql: 'update node_versions set revision = 1 where id = ?',
+                binds: [versionId],
+              },
+              {
+                // A replay of what wrote it answers the blank version.
+                sql: `update operations set result_version_id = ?
+                      where result_node_id = ? and result_state = 'stored'`,
+                binds: [versionId, comment.id],
+              },
+              {
+                sql: 'delete from mentions where comment_node_id = ?',
+                binds: [comment.id],
+              },
+            )
+            return makeVersionHandle(versionId, comment.id)
+          },
+
+          mention: (page, m) => {
+            bases.push(everyBasis(page.basis, person.id))
+            events.push({ type: 'mention', path: m.path, node: m.comment })
+            mentioned.push({
+              event: events.length - 1,
+              commentId: isHandle(m.comment)
+                ? handleId(m.comment)
+                : m.comment.id,
+              pageId: page.id,
+              email: m.email.toLowerCase(),
+            })
+          },
+
+          holds: (granted) => {
+            bases.push(everyBasis(granted.basis, person.id))
+          },
+
           guardUnnamed: (g) => {
             const t = tid()
             if (g.files.length === 0) return
@@ -2360,6 +2470,19 @@ export const TreeStoreLive: Layer.Layer<
               e.path,
               person.id,
               e.pushId ?? null,
+              now,
+            ],
+          })),
+          ...mentioned.map((m) => ({
+            sql: `insert into mentions (tree_id, event_seq, comment_node_id, page_node_id,
+                      email, created_at)
+                    values (?1, (select event_seq from trees where id = ?1) - ?2, ?3, ?4, ?5, ?6)`,
+            binds: [
+              t,
+              events.length - 1 - m.event,
+              m.commentId,
+              m.pageId,
+              m.email,
               now,
             ],
           })),

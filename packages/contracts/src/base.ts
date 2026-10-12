@@ -3,7 +3,10 @@
 // read it without Effect.
 
 /** The base layer's own components; a folder's component of the same tag wins. */
-export type BaseComponentTag = 'dossier-diff' | 'dossier-copy'
+export type BaseComponentTag =
+  | 'dossier-diff'
+  | 'dossier-copy'
+  | 'dossier-comments'
 
 /** A library's two builds: the one pages import, and one with no imports. */
 export interface BaseBuilds {

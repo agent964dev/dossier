@@ -3,6 +3,7 @@ import { FileText, Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
 import { HostName } from '../components/host-name'
+import { MentionedBadge } from '../components/mentioned-badge'
 import { AppHeader } from '../components/app-header'
 import { SectionLabel } from '../components/section-label'
 import { Note } from '../components/settings-parts'
@@ -116,7 +117,11 @@ function Trees({
               >
                 <span
                   aria-hidden
-                  className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-800/70 text-neutral-300"
+                  className={`flex size-8 shrink-0 items-center justify-center rounded-lg border ${
+                    tree.mentioned
+                      ? TILE['mentioned you']
+                      : 'border-border bg-neutral-800/70 text-neutral-300'
+                  }`}
                 >
                   <Folder className="size-4" />
                 </span>
@@ -127,6 +132,7 @@ function Trees({
                   <span className="block text-xs text-neutral-400">
                     {sharingLabel(tree.sharing)}
                   </span>
+                  {tree.mentioned ? <MentionedBadge className="mt-1" /> : null}
                 </span>
               </a>
             </li>
@@ -179,13 +185,10 @@ function SharedRow({ row }: { row: SharedWithMe }) {
             {row.place} · from {row.from} ·{' '}
             <time dateTime={row.date}>{DAY.format(new Date(row.date))}</time>
           </span>
-          {row.label === null ? null : (
-            <Badge
-              variant={
-                row.label === 'waiting for your answer' ? 'accent' : 'default'
-              }
-              className="mt-1"
-            >
+          {row.label === 'mentioned you' ? (
+            <MentionedBadge className="mt-1" />
+          ) : row.label === null ? null : (
+            <Badge variant="accent" className="mt-1">
               <span
                 aria-hidden
                 className="size-1.5 rounded-full bg-current shadow-[0_0_6px_currentColor]"

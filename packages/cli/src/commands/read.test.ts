@@ -1,3 +1,4 @@
+import { threadsText, type Thread } from '@dossier/contracts'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
@@ -192,6 +193,130 @@ describe('describeRead', () => {
     )
     expect(file('LICENSE', 1_000)).toBe(
       'LICENSE is a file, 1.0 KB. Download it with dossier pull.',
+    )
+  })
+})
+
+const PRICING: Thread = {
+  root: {
+    path: 'plan.comments/sara@acme.com/2026-10-10T09-14-03.json',
+    text: 'Per pallet or per truck?',
+    anchor: 'pricing',
+    label: 'Pricing',
+    pin: null,
+    replyTo: null,
+    stance: null,
+    mentions: ['lina@acme.com'],
+    by: 'sara@acme.com',
+    at: '2026-10-10T09:14:03.000Z',
+    push: 3,
+    edited: false,
+    deleted: false,
+  },
+  replies: [
+    {
+      path: 'plan.comments/lina@acme.com/2026-10-10T10-02-40.json',
+      text: 'Per truck from December.\nThe old price holds until then.',
+      anchor: 'pricing',
+      label: 'Pricing',
+      pin: null,
+      replyTo: 'plan.comments/sara@acme.com/2026-10-10T09-14-03.json',
+      stance: 'agree',
+      mentions: [],
+      by: 'lina@acme.com',
+      at: '2026-10-10T10:02:40.000Z',
+      push: 3,
+      edited: true,
+      deleted: false,
+    },
+  ],
+  resolved: true,
+  resolvedBy: 'lina@acme.com',
+  resolvedAt: '2026-10-11T08:02:11.000Z',
+}
+
+const MOCKUP: Thread = {
+  root: {
+    ...PRICING.root,
+    path: 'plan.comments/omar@acme.com/2026-10-11T12-00-00.json',
+    text: '',
+    anchor: 'mock',
+    label: null,
+    pin: { x: 0.4, y: 0.225 },
+    mentions: [],
+    by: 'omar@acme.com',
+    at: '2026-10-11T12:00:00.000Z',
+    push: 4,
+    deleted: true,
+  },
+  replies: [],
+  resolved: false,
+  resolvedBy: null,
+  resolvedAt: null,
+}
+
+const threadDocs = [PRICING, MOCKUP].map((data) => ({
+  path: data.root.path,
+  data,
+  by: data.root.by,
+  at: data.root.at,
+  push: data.root.push,
+}))
+
+const COMMENTS = {
+  kind: 'comments',
+  path: 'plan.comments',
+  link: 'https://dossier.acme.com/agent964/acme/plan.comments/',
+  page: 'plan.html',
+  threads: threadDocs,
+  text: threadsText({ folder: 'plan.comments', threads: threadDocs }),
+}
+
+describe('dossier read of a comments folder', () => {
+  it('prints threads with their anchor, state, writers, times and replies', async () => {
+    const cli = await setUp(() => Response.json(COMMENTS))
+
+    expect(await cli.run(['read', 'agent964/acme/plan.comments/'])).toBe(0)
+    expect(cli.stdout()).toBe(
+      [
+        '# plan.comments/ (2 threads)',
+        '',
+        '## On Pricing · resolved by lina@acme.com, 11 Oct 2026, 08:02 UTC',
+        '',
+        'sara@acme.com · 10 Oct 2026, 09:14 UTC · push 3',
+        '',
+        '> Per pallet or per truck?',
+        '',
+        'Reply from lina@acme.com · 10 Oct 2026, 10:02 UTC · push 3 · agree · edited',
+        '',
+        '> Per truck from December.',
+        '> The old price holds until then.',
+        '',
+        '## On #mock, pinned at 40% across, 23% down · open',
+        '',
+        'omar@acme.com · 11 Oct 2026, 12:00 UTC · push 4',
+        '',
+        'Comment deleted.',
+        '',
+      ].join('\n'),
+    )
+  })
+
+  it('gives every thread as a Doc with --json', async () => {
+    const cli = await setUp(() => Response.json(COMMENTS))
+
+    expect(
+      await cli.run(['read', 'agent964/acme/plan.comments/', '--json']),
+    ).toBe(0)
+    const printed = JSON.parse(cli.stdout())
+    expect(printed.kind).toBe('comments')
+    expect(printed.threads).toEqual(threadDocs)
+    expect(printed.threads[0].data.replies[0].replyTo).toBe(PRICING.root.path)
+  })
+
+  it('says there are no comments yet', () => {
+    expect(threadsText({ folder: 'a/plan.comments', threads: [] })).toBe(
+      'No comments yet.\n',
     )
   })
 })

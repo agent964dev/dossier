@@ -182,3 +182,10 @@ export {
   type SharesService,
 } from './shares.ts'
 export { newVisitorSecret, sha256Hex } from './ids.ts'
+export {
+  mentionedAt,
+  mentionedInTree,
+  mentionedOnPage,
+  unseenMentions,
+  type UnseenMention,
+} from './mentions.ts'

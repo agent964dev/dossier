@@ -4,6 +4,7 @@ import { Effect } from 'effect'
 
 import {
   Access,
+  Bindings,
   Config,
   CurrentCaller,
   Data,
@@ -12,6 +13,8 @@ import {
   Shares,
   type Entry,
   type SeenBy,
+  mentionedOnPage,
+  unseenMentions,
 } from '../core/index.ts'
 import { kitNames } from './kit-row.ts'
 import { runScreen, type ScreenFailure } from './run.ts'
@@ -51,6 +54,8 @@ export interface ListingView {
     readonly push: PushStamp | null
     /** Pages with forms, for people who read their answers. */
     readonly responses: { readonly count: number; readonly link: string } | null
+    /** A mention of the viewer waits unseen on the page. */
+    readonly mentioned: boolean
   }[]
   readonly folders: readonly {
     readonly name: string
@@ -143,13 +148,16 @@ export const listingView = createServerFn({ method: 'GET' })
         const entries = listing.entries
         const granted = yield* (yield* Access).require('read', listing.folder)
         const forms = yield* (yield* Data).pageForms(granted)
+        const mentions = yield* unseenMentions((yield* Bindings).DB, me)
         const pages = entries
           .filter((e) => e.kind === 'page')
           .map((e) => {
             const folder = e.node.kind === 'folder'
             const link = folder ? at(e.path, 'folder') : at(e.path, 'page')
             const answered = forms.get(e.node.id)?.people ?? null
+            const page = folder ? `${e.node.path}/index.html` : e.node.path
             return {
+              mentioned: mentionedOnPage(mentions, e.node.treeId, page),
               title: e.title ?? e.name,
               path: folder ? `${e.name}/` : e.name,
               link,

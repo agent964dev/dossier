@@ -855,6 +855,7 @@ describe('deleting an account', () => {
       submissions: 1,
       entries: 2,
       uploads: 0,
+      comments: 0,
       keys: 1,
       sessions: 1,
     })

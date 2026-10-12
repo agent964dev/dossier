@@ -22,6 +22,7 @@ import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
 import { underscoreSplit } from './lookup.ts'
+import { mentionedAt, unseenMentions } from './mentions.ts'
 import { People } from './people.ts'
 import {
   ancestorPaths,
@@ -66,7 +67,7 @@ export interface SharedRow {
   readonly sharedAt: number
   /** An open form at or below the node has nothing of the person's yet. */
   readonly waiting: boolean
-  /** Comments arrive later; false until then. */
+  /** A mention of the person waits unseen on a page at or below it. */
   readonly mentioned: boolean
 }
 
@@ -524,6 +525,7 @@ export const SharesLive: Layer.Layer<
           byNode.set(row.nodeId, seen)
         }
         const now = yield* Clock.currentTimeMillis
+        const mentions = yield* unseenMentions(DB, person).pipe(Effect.orDie)
         const out: SharedRow[] = []
         for (const [nodeId, seen] of byNode) {
           const node = yield* nodeById(nodeId)
@@ -585,7 +587,7 @@ export const SharesLive: Layer.Layer<
             roles: seen.roles,
             sharedAt: seen.at,
             waiting: responds && (yield* waitingAt(node, person.id, now)),
-            mentioned: false,
+            mentioned: mentionedAt(mentions, node),
           })
         }
         return out.sort(

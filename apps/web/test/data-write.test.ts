@@ -257,7 +257,7 @@ describe('a write', () => {
       'select type, path from events where tree_id = ? and seq > 1 order by seq',
       tree.treeId,
     )
-    expect(events.map((e) => e.type)).toEqual(['entry', 'entry', 'entry'])
+    expect(events.map((e) => e.type)).toEqual(['entry', 'entry', 'comment'])
   })
 
   it('lets a respond holder write a shared file, and refuses a read holder', async () => {

@@ -354,6 +354,15 @@ export const ReadResult = Schema.Union(
     ...Located,
     files: Schema.Array(DocWire),
   }),
+  /** A page's comments folder: its threads, assembled. */
+  Schema.Struct({
+    kind: Schema.Literal('comments'),
+    ...Located,
+    /** The page the comments are on, inside the tree. */
+    page: Schema.String,
+    /** One per thread: the root comment's path, and the Thread as data. */
+    threads: Schema.Array(DocWire),
+  }),
   Schema.Struct({
     kind: Schema.Literal('file'),
     path: Schema.String,

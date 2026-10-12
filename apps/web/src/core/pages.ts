@@ -973,15 +973,24 @@ export const PagesLive: Layer.Layer<
             const page = resolved.kind === 'page'
             // Public pages count views: one per load, never a renewal.
             const counted = page && !renewal && (yield* isPublic(resolved.node))
-            // Seen by moves at most once an hour per person and page.
+            // Seen by moves at most once an hour per person and page, or at
+            // once when a mention of them waits there unseen.
             const seen =
               page && person !== null
                 ? [
                     DB.prepare(
-                      `insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?)
+                      `insert into seen_by (node_id, user_id, last_seen_at) values (?1, ?2, ?3)
                      on conflict (node_id, user_id) do update set last_seen_at = excluded.last_seen_at
-                     where seen_by.last_seen_at < excluded.last_seen_at - ?`,
-                    ).bind(resolved.node.id, person.id, now, HOUR),
+                     where seen_by.last_seen_at < excluded.last_seen_at - ?4
+                       or exists (select 1 from mentions m where m.page_node_id = seen_by.node_id
+                         and m.email = lower(?5) and m.created_at > seen_by.last_seen_at)`,
+                    ).bind(
+                      resolved.node.id,
+                      person.id,
+                      now,
+                      HOUR,
+                      person.email,
+                    ),
                   ]
                 : []
             const h = yield* issue(owner, tree, seq, nodeIds, seen)

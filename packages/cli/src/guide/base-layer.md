@@ -22,6 +22,18 @@ page's agent version; `src="../brief/"` copies another page or a folder, and
 `label` names the button. `dossier read <folder>` shows write holders each
 base component's notes.
 
+`<dossier-comments></dossier-comments>` lets everyone who can respond on the
+page comment on it, and everyone who can open it read the comments: threads
+with replies, resolve and reopen, comments on any `section`, `figure`,
+heading, list item, table row or image with an `id` (`anchors="…"` sets
+which), pins on images and mockups (`pins="…"`), stances on replies
+(`stances="agree, reopen"`), and @mentions, which show "mentioned you" in
+Dossier and send no email. A comment follows its element into later pushes
+while the `id` stays, and shows under "On an earlier version" once it is gone,
+so keep ids stable. Comments live beside the page in `<page>.comments/`, one
+file per comment in each writer's folder; `dossier read plan.comments/` prints
+the threads, and `--json` gives one Doc per thread.
+
 Base components render into the page itself, with styles any page or kit CSS
 overrides, read the theme variables when the tree sets them (`--primary`,
 `--border`, `--radius`, `--ring`, `--font-mono`), and follow the page's

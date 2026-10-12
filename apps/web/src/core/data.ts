@@ -2,8 +2,10 @@
 // responses a page's forms collected. Every write goes through one
 // TreeStore change with its operation ID, so a retry never stores twice.
 import {
+  commentsFolderIn,
   dossierError,
   isNodeName,
+  pageOfCommentsFolder,
   MAX_DEPTH,
   type AuthoredSeq,
   type DataReadResult,
@@ -20,7 +22,7 @@ import {
   type UploadResult,
   type WritePayload,
 } from '@dossier/contracts'
-import type { Json, JsonObject } from '@dossier/contracts/bridge'
+import type { CommentEntry, Json, JsonObject } from '@dossier/contracts/bridge'
 import {
   acceptsFile,
   validateSend,
@@ -43,6 +45,15 @@ import {
 import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
+import {
+  blankOf,
+  commentFiles,
+  fromPageFolder,
+  isCommentValue,
+  parseCommentRevision,
+  parseCommentWrite,
+  readThreads,
+} from './comments.ts'
 import { newId } from './ids.ts'
 import { composedLayouts } from './lookup.ts'
 import { Limits } from './limits.ts'
@@ -50,6 +61,7 @@ import type { NodeRow, TreeRow, VersionRow } from './rows.ts'
 import {
   blobKey,
   TreeStore,
+  type ChangeFailure,
   type ChangeSet,
   type DocRow,
   type FormRow,
@@ -158,6 +170,8 @@ export interface MineCounts {
   readonly submissions: number
   readonly entries: number
   readonly uploads: number
+  /** Comments that still hold their text. */
+  readonly comments: number
 }
 
 export interface DataService {
@@ -202,6 +216,20 @@ export interface DataService {
     readonly path: string
     readonly opId: OpId
     readonly as?: string | null
+  }) => Effect.Effect<
+    void,
+    DossierError<
+      'not_found' | 'forbidden' | 'sign_in_required' | 'unavailable'
+    >,
+    CurrentCaller | Background
+  >
+  /**
+   * A write holder's delete of someone's comment: its text goes from every
+   * version and it stays in its thread as "Comment deleted".
+   */
+  readonly deleteComment: (i: {
+    readonly treeId: TreeId
+    readonly path: string
   }) => Effect.Effect<
     void,
     DossierError<
@@ -1444,6 +1472,56 @@ export const DataLive: Layer.Layer<
       return out
     }
 
+    /** The comment a data file of a comments folder holds, else null. */
+    const commentIn = (path: string, version: VersionRow) => {
+      if (commentsFolderIn(path) === null) return null
+      const value = parseJson(version.jsonValue)
+      return isCommentValue(value) ? value : null
+    }
+
+    /** Blanks a comment, with a comment event, as one change. */
+    const blanking = (
+      treeId: TreeId,
+      granted: Granted<'withdraw-own' | 'delete-data'>,
+      comment: CommentEntry,
+      op: {
+        readonly principal: string
+        readonly scope: string
+        readonly opId: OpId
+      } | null,
+    ) =>
+      retrying(
+        store.change(treeId, (cs) =>
+          Effect.sync(() => {
+            const version = cs.blank(granted, blankOf(comment))
+            if (op !== null) cs.operation({ ...op, result: version })
+            cs.event({ type: 'comment', path: granted.path, node: granted })
+            return {}
+          }),
+        ),
+      ).pipe(
+        Effect.asVoid,
+        Effect.mapError((error) =>
+          error.code === 'unavailable'
+            ? error
+            : (console.error('Deleting a comment failed', error.code),
+              dossierError('unavailable')),
+        ),
+      )
+
+    const deleteComment: DataService['deleteComment'] = (i) =>
+      Effect.gen(function* () {
+        yield* signedIn('Sign in to delete this.')
+        const file = yield* liveData(i.treeId, i.path)
+        const comment = file === null ? null : commentIn(i.path, file.version)
+        if (file === null || comment === null) {
+          return yield* Effect.fail(notFound(i.path))
+        }
+        const granted = yield* access.require('delete-data', file.node)
+        if (comment.text === '') return
+        yield* blanking(i.treeId, granted, comment, null)
+      }) as ReturnType<DataService['deleteComment']>
+
     const withdraw: DataService['withdraw'] = (i) =>
       Effect.gen(function* () {
         const person = yield* signedIn('Sign in to withdraw this.', i.as)
@@ -1471,6 +1549,17 @@ export const DataLive: Layer.Layer<
           )
         }
         const granted = yield* access.require('withdraw-own', file.node)
+        // A comment stays in its thread with its text gone.
+        const comment = commentIn(i.path, file.version)
+        if (comment !== null) {
+          if (comment.text === '') return
+          yield* blanking(i.treeId, granted, comment, {
+            principal: person.id,
+            scope,
+            opId: i.opId,
+          })
+          return
+        }
         const email = person.email.toLowerCase()
         // The folder an answer's uploads sit in: `answers/<email>` beside a
         // person file, the folder an entry is in.
@@ -1697,6 +1786,303 @@ export const DataLive: Layer.Layer<
             const stored = versionOfRaw(raw)
             return yield* answerOf(stored.path, stored.version)
           })
+        const storeFailure = (dataFileBytes: number) =>
+          Effect.mapError(
+            (
+              error: ChangeFailure,
+            ): DossierError<
+              | 'too_large'
+              | 'stale_head'
+              | 'conflict'
+              | 'not_mergeable'
+              | 'unavailable'
+            > =>
+              // Only the data file's own limit is reworded; the
+              // workspace's storage limit speaks for itself.
+              error.code === 'too_large' &&
+              error.message === DATA_FILE_TOO_LARGE
+                ? tooLargeData(dataFileBytes)
+                : error.code === 'blob_reclaiming'
+                  ? dossierError('unavailable')
+                  : (error as DossierError<
+                      | 'too_large'
+                      | 'stale_head'
+                      | 'conflict'
+                      | 'not_mergeable'
+                      | 'unavailable'
+                    >),
+          )
+        /**
+         * A comment, a resolve or a reopen as a new entry in the writer's
+         * own folder of the comments folder, or a revision of their own
+         * comment's text and mentions. Comment on the page decides.
+         */
+        const writeComment = (folder: string) =>
+          Effect.gen(function* () {
+            const isFolder = i.path.endsWith('/')
+            const target = bare(i.path)
+            const own = `${folder}/${email}`
+            const { dataFileBytes } = yield* limits.current()
+            if (i.replace) {
+              return yield* Effect.fail(
+                dossierError(
+                  'invalid',
+                  'A comment is revised, never replaced whole.',
+                  null,
+                  i.path,
+                ),
+              )
+            }
+            const found = yield* store.treeById(i.tree)
+            if (found === null) return yield* Effect.fail(notFound(i.path))
+            const tree = found.tree
+            // The page the writer is on, as they saw it: its push is the
+            // one the comment records.
+            const seen = yield* store.fileAt(tree.id, i.page, i.seq)
+            const readsSeen =
+              seen !== null &&
+              seen.node.origin === 'authored' &&
+              (yield* access.require('read', seen.node).pipe(Effect.isSuccess))
+            if (seen === null || !readsSeen) {
+              return yield* Effect.fail(
+                forbidden(i.page, 'This page cannot write here.'),
+              )
+            }
+            const seenPush = yield* pushNumberOf(seen.version)
+            const noPage = dossierError(
+              'invalid',
+              `${fromPageFolder(folder)}/ belongs to no page.`,
+              'Comment on a page, in the folder named after it.',
+              `${folder}/`,
+            )
+            const page = yield* store.fileAt(
+              tree.id,
+              pageOfCommentsFolder(folder)!,
+            )
+            if (page === null || page.node.origin !== 'authored') {
+              return yield* Effect.fail(noPage)
+            }
+            // A page the writer cannot read looks like no page at all.
+            const granted = yield* access
+              .require('comment', page.node)
+              .pipe(
+                Effect.mapError((e) =>
+                  e.code === 'not_found'
+                    ? noPage
+                    : dossierError(e.code, e.message, e.fix, i.path),
+                ),
+              )
+            const provenance = { seenPush, opId: i.opId }
+            /** Who of these could read the page: the writer never counts. */
+            const mentionable = (emails: readonly string[]) =>
+              Effect.filter(emails, (m) =>
+                m === email
+                  ? Effect.succeed(false)
+                  : access.couldRead(m, page.node),
+              )
+            const answer = (version: VersionHandle) =>
+              Effect.gen(function* () {
+                const raw = yield* versionById(versionIdOf(version))
+                if (raw === null) {
+                  return yield* Effect.fail(dossierError('unavailable'))
+                }
+                const stored = versionOfRaw(raw)
+                return yield* answerOf(stored.path, stored.version)
+              })
+
+            if (
+              isFolder &&
+              (target === folder || target.toLowerCase() === own)
+            ) {
+              const once = Effect.gen(function* () {
+                const again = yield* replay()
+                if (again !== null) return again
+                const existing = new Map<string, string>()
+                for (const file of yield* commentFiles(
+                  bindings,
+                  tree.id,
+                  folder,
+                  null,
+                )) {
+                  if (!isCommentValue(file.value)) continue
+                  existing.set(file.path, file.value.replyTo ?? file.path)
+                }
+                const parsed = parseCommentWrite(
+                  i.patch,
+                  fromPageFolder(folder),
+                  existing,
+                )
+                if ('invalid' in parsed) {
+                  return yield* Effect.fail(
+                    dossierError('invalid', parsed.invalid, null, parsed.path),
+                  )
+                }
+                const json = (
+                  parsed.kind === 'comment' ? parsed.entry : parsed.mark
+                ) as JsonObject
+                const stamp = entryStamp(yield* Clock.currentTimeMillis)
+                let path = `${own}/${stamp}.json`
+                for (
+                  let n = 2;
+                  (yield* liveNode(tree.id, path)) !== null;
+                  n += 1
+                ) {
+                  path = `${own}/${stamp}-${n}.json`
+                }
+                if (!isTreePath(path)) {
+                  return yield* Effect.fail(
+                    dossierError(
+                      'invalid',
+                      'This comment cannot be stored here.',
+                    ),
+                  )
+                }
+                // The comments folder is data, and the writer's folder theirs.
+                for (const at of [folder, own]) {
+                  const row = yield* folderOrFile(tree.id, at)
+                  if (
+                    row !== null &&
+                    (row.kind !== 'folder' ||
+                      row.origin !== 'data' ||
+                      (at === own &&
+                        row.ownerId !== null &&
+                        row.ownerId !== person.id))
+                  ) {
+                    return yield* Effect.fail(forbidden(path))
+                  }
+                }
+                const ownNode = yield* folderOrFile(tree.id, own)
+                const mentioned =
+                  parsed.kind === 'comment'
+                    ? yield* mentionable(parsed.entry.mentions)
+                    : []
+                yield* limits.requireStorage(
+                  tree.workspaceId,
+                  new TextEncoder().encode(JSON.stringify(json)).length,
+                )
+                const done = yield* store
+                  .change(tree.id, (cs) =>
+                    Effect.sync(() => {
+                      if (ownNode === null) {
+                        cs.createData(granted, {
+                          path: own,
+                          kind: 'folder',
+                          owner: person.id,
+                        })
+                      }
+                      const node = cs.createData(granted, {
+                        path,
+                        kind: 'file',
+                        owner: person.id,
+                      })
+                      const version = cs.putData(node, { ...provenance, json })
+                      cs.operation({
+                        principal: person.id,
+                        scope,
+                        opId: i.opId,
+                        result: version,
+                      })
+                      cs.event({ type: 'comment', path, node })
+                      for (const m of mentioned) {
+                        cs.mention(granted, { comment: node, email: m, path })
+                      }
+                      return { version }
+                    }),
+                  )
+                  .pipe(storeFailure(dataFileBytes))
+                return yield* answer(done.version)
+              })
+              return yield* retrying(once)
+            }
+
+            if (
+              !isFolder &&
+              folderOf(target).toLowerCase() === own &&
+              /\.json$/i.test(target)
+            ) {
+              const once = Effect.gen(function* () {
+                const again = yield* replay()
+                if (again !== null) return again
+                const file = yield* liveData(tree.id, target)
+                if (file === null) return yield* Effect.fail(notFound(i.path))
+                if (file.node.ownerId !== person.id) {
+                  return yield* Effect.fail(
+                    forbidden(i.path, "This is another person's comment."),
+                  )
+                }
+                const value = parseJson(file.version.jsonValue)
+                if (!isCommentValue(value)) {
+                  return yield* Effect.fail(
+                    dossierError(
+                      'invalid',
+                      'A resolve or reopen stays as it is; write a new one.',
+                      null,
+                      i.path,
+                    ),
+                  )
+                }
+                if (value.text === '') {
+                  return yield* Effect.fail(
+                    dossierError(
+                      'invalid',
+                      'This comment was deleted.',
+                      null,
+                      i.path,
+                    ),
+                  )
+                }
+                const parsed = parseCommentRevision(i.patch)
+                if ('invalid' in parsed) {
+                  return yield* Effect.fail(
+                    dossierError('invalid', parsed.invalid, null, parsed.path),
+                  )
+                }
+                const mine = yield* access.require('withdraw-own', file.node)
+                const before = new Set(value.mentions)
+                const added =
+                  parsed.mentions === undefined
+                    ? []
+                    : yield* mentionable(
+                        parsed.mentions.filter((m) => !before.has(m)),
+                      )
+                const done = yield* store
+                  .change(tree.id, (cs) =>
+                    Effect.sync(() => {
+                      cs.holds(granted)
+                      const version = cs.mergeJson(
+                        mine,
+                        parsed as JsonObject,
+                        provenance,
+                      )
+                      cs.operation({
+                        principal: person.id,
+                        scope,
+                        opId: i.opId,
+                        result: version,
+                      })
+                      cs.event({ type: 'comment', path: target, node: mine })
+                      for (const m of added) {
+                        cs.mention(granted, {
+                          comment: mine,
+                          email: m,
+                          path: target,
+                        })
+                      }
+                      return { version }
+                    }),
+                  )
+                  .pipe(storeFailure(dataFileBytes))
+                return yield* answer(done.version)
+              })
+              return yield* retrying(once)
+            }
+            return yield* Effect.fail(
+              forbidden(
+                i.path,
+                "A comments folder holds only comments, each in its writer's own folder.",
+              ),
+            )
+          })
         // A retry after a lost answer is answered before anything is counted.
         const early = yield* replay()
         if (early !== null) return early
@@ -1751,6 +2137,11 @@ export const DataLive: Layer.Layer<
           return yield* Effect.fail(
             forbidden(i.path, "This is another person's file."),
           )
+        }
+        // A page's comments folder takes the comment rules alone.
+        const commentsFolder = commentsFolderIn(bareTarget)
+        if (commentsFolder !== null) {
+          return yield* writeComment(commentsFolder)
         }
         const checked = yield* checkPage({
           treeId: i.tree,
@@ -2106,6 +2497,12 @@ export const DataLive: Layer.Layer<
           if (row === null || row.kind !== 'folder') return { files: [] }
           const granted = yield* access.require('read', row).pipe(Effect.option)
           if (granted._tag === 'None') return { files: [] }
+          // A page's comments come back as its threads, one Doc each.
+          if (pageOfCommentsFolder(path) !== null) {
+            return {
+              files: yield* readThreads(bindings, access, i.treeId, path),
+            }
+          }
           const prefix = path === '' ? '' : `${path}/`
           const docs = (yield* store.docs(granted.value, {
             origin: 'any',
@@ -2507,7 +2904,7 @@ export const DataLive: Layer.Layer<
         DB.prepare(
           `select n.id, n.tree_id, n.parent_id, n.name, n.path, n.depth, n.kind, n.origin,
              n.owner_id, n.current_version_id, n.created_at, n.deleted_at,
-             v.blob_sha256 is not null as upload,
+             v.blob_sha256 is not null as upload, v.json_value as json,
              coalesce(p.owner_id = n.owner_id, 0) as inOwnFolder
            from nodes n
            left join node_versions v on v.id = n.current_version_id
@@ -2519,20 +2916,36 @@ export const DataLive: Layer.Layer<
           .all<Record<string, unknown>>(),
       ).pipe(
         Effect.map((rows) =>
-          rows.results.map((raw) => ({
-            node: nodeOfRaw(raw),
-            kind: (raw.kind === 'folder'
-              ? 'folder'
-              : raw.upload === 1
-                ? 'upload'
-                : raw.inOwnFolder === 1
-                  ? 'entry'
-                  : 'submission') as
-              | 'folder'
-              | 'upload'
-              | 'entry'
-              | 'submission',
-          })),
+          rows.results.map((raw) => {
+            const node = nodeOfRaw(raw)
+            // Comments stay in their threads: one with text is blanked, a
+            // blank one, a resolve or reopen and the folders holding them
+            // stay as they are.
+            if (commentsFolderIn(node.path) !== null) {
+              const value =
+                raw.kind === 'file'
+                  ? parseJson(raw.json as string | null)
+                  : null
+              return isCommentValue(value) && value.text !== ''
+                ? { node, kind: 'comment' as const, comment: value }
+                : { node, kind: 'kept' as const, comment: null }
+            }
+            return {
+              node,
+              kind: (raw.kind === 'folder'
+                ? 'folder'
+                : raw.upload === 1
+                  ? 'upload'
+                  : raw.inOwnFolder === 1
+                    ? 'entry'
+                    : 'submission') as
+                | 'folder'
+                | 'upload'
+                | 'entry'
+                | 'submission',
+              comment: null,
+            }
+          }),
         ),
       )
 
@@ -2555,6 +2968,7 @@ export const DataLive: Layer.Layer<
       submissions: rows.filter((r) => r.kind === 'submission').length,
       entries: rows.filter((r) => r.kind === 'entry').length,
       uploads: rows.filter((r) => r.kind === 'upload').length,
+      comments: rows.filter((r) => r.kind === 'comment').length,
     })
 
     const mineCounts: DataService['mineCounts'] = () =>
@@ -2581,8 +2995,10 @@ export const DataLive: Layer.Layer<
           const granted: {
             readonly node: Granted<'withdraw-own'>
             readonly file: boolean
+            readonly comment: CommentEntry | null
           }[] = []
           for (const row of list) {
+            if (row.kind === 'kept') continue
             // A folder of theirs holding someone else's data stays.
             if (
               row.kind === 'folder' &&
@@ -2594,7 +3010,11 @@ export const DataLive: Layer.Layer<
               .require('withdraw-own', row.node)
               .pipe(Effect.option)
             if (ok._tag === 'Some') {
-              granted.push({ node: ok.value, file: row.kind !== 'folder' })
+              granted.push({
+                node: ok.value,
+                file: row.kind !== 'folder',
+                comment: row.comment,
+              })
             }
           }
           if (granted.length === 0) continue
@@ -2604,7 +3024,12 @@ export const DataLive: Layer.Layer<
             yield* retrying(
               store.change(treeId, (cs) =>
                 Effect.sync(() => {
-                  for (const { node, file } of chunk) {
+                  for (const { node, file, comment } of chunk) {
+                    if (comment !== null) {
+                      cs.blank(node, blankOf(comment))
+                      cs.event({ type: 'comment', path: node.path, node })
+                      continue
+                    }
                     cs.markDeleted(node, 'withdrawn')
                     if (file) {
                       cs.event({ type: 'withdrawal', path: node.path, node })
@@ -2643,6 +3068,7 @@ export const DataLive: Layer.Layer<
       withdraw,
       withdrawMine,
       mineCounts,
+      deleteComment,
       write,
       read,
       pageForms,

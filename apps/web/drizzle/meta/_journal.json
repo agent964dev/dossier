@@ -85,6 +85,13 @@
       "when": 1791795041934,
       "tag": "0016_sharing",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1791794153620,
+      "tag": "0017_mentions",
+      "breakpoints": true
     }
   ]
 }

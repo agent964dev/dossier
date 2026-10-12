@@ -1003,3 +1003,34 @@ export const rateCounters = sqliteTable('rate_counters', {
   windowStart: integer('window_start').notNull(),
   count: integer('count').notNull(),
 })
+
+/**
+ * Who a comment mentions, one row per mention event, so "mentioned you" is
+ * answered for a person across trees without reading comment files. Blanking
+ * a comment deletes its rows.
+ */
+export const mentions = sqliteTable(
+  'mentions',
+  {
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** The mention event's seq. */
+    eventSeq: integer('event_seq').notNull(),
+    commentNodeId: text('comment_node_id')
+      .notNull()
+      .references(() => nodes.id),
+    pageNodeId: text('page_node_id')
+      .notNull()
+      .references(() => nodes.id),
+    /** Lower-cased. */
+    email: text('email').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.treeId, t.eventSeq] }),
+    index('mentions_email_idx').on(t.email, t.createdAt),
+    index('mentions_page_idx').on(t.pageNodeId),
+    index('mentions_comment_idx').on(t.commentNodeId),
+  ],
+)

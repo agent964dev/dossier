@@ -3,6 +3,7 @@ import { createServerFn } from '@tanstack/react-start'
 import { Effect } from 'effect'
 
 import {
+  Bindings,
   Config,
   CurrentCaller,
   People,
@@ -12,6 +13,8 @@ import {
   type Membership,
   type SharedRow,
   type TreeSharing,
+  mentionedInTree,
+  unseenMentions,
 } from '../core/index.ts'
 import { runScreen } from './run.ts'
 
@@ -20,6 +23,8 @@ export interface HomeTree {
   /** The tree's link on this deployment, `/workspace/tree/`. */
   readonly href: string
   readonly sharing: TreeSharing
+  /** A mention of the viewer waits unseen on a page in the tree. */
+  readonly mentioned: boolean
 }
 
 /** A workspace in the workspace menu. */
@@ -122,6 +127,7 @@ export const homeView = createServerFn({ method: 'GET' })
         const trees =
           chosen === undefined ? [] : yield* people.trees(chosen.workspace)
         const shared = yield* (yield* Shares).sharedWithMe()
+        const mentions = yield* unseenMentions((yield* Bindings).DB, person)
         return {
           ...base,
           shared: shared.map(sharedRow),
@@ -138,6 +144,7 @@ export const homeView = createServerFn({ method: 'GET' })
               kind: 'folder',
             }),
             sharing,
+            mentioned: mentionedInTree(mentions, tree.id),
           })),
         } satisfies HomeView
       }),

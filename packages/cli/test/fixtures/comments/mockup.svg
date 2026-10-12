@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#efe4d2"/>
+  <rect x="24" y="24" width="592" height="48" rx="6" fill="#7a3b12"/>
+  <text x="44" y="56" font-family="Georgia, serif" font-size="22" fill="#fffaf2">Delivery dashboard</text>
+  <rect x="24" y="96" width="280" height="240" rx="6" fill="#ffffff" stroke="#d9cbb6"/>
+  <rect x="336" y="96" width="280" height="110" rx="6" fill="#ffffff" stroke="#d9cbb6"/>
+  <rect x="336" y="226" width="280" height="110" rx="6" fill="#ffffff" stroke="#d9cbb6"/>
+  <text x="44" y="130" font-family="Georgia, serif" font-size="16" fill="#2b2118">Trucks per region</text>
+  <text x="356" y="130" font-family="Georgia, serif" font-size="16" fill="#2b2118">Price per truck</text>
+  <text x="356" y="260" font-family="Georgia, serif" font-size="16" fill="#2b2118">Next delivery</text>
+</svg>

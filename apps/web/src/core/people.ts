@@ -98,7 +98,7 @@ export interface DeletionPreview {
   readonly submissions: number
   readonly entries: number
   readonly uploads: number
-  /** 0 until comments exist. */
+  /** Comments that still hold their text, which deletion blanks. */
   readonly comments: number
   readonly keys: number
   readonly sessions: number
@@ -1661,7 +1661,6 @@ export const PeopleLive: Layer.Layer<
         )
         return {
           ...counts,
-          comments: 0,
           keys: held?.keys ?? 0,
           sessions: held?.sessions ?? 0,
           workspaces: names.map((n) => n.name),
@@ -1710,12 +1709,13 @@ export const PeopleLive: Layer.Layer<
                where tm.user_id = ?1`,
           ).bind(me.id, me.email),
         )).map((row) => row.id)
-        const totals = { submissions: 0, entries: 0, uploads: 0 }
+        const totals = { submissions: 0, entries: 0, uploads: 0, comments: 0 }
         for (let tried = 1; ; tried += 1) {
           const withdrawn = yield* data.withdrawMine()
           totals.submissions += withdrawn.submissions
           totals.entries += withdrawn.entries
           totals.uploads += withdrawn.uploads
+          totals.comments += withdrawn.comments
           const at = yield* Clock.currentTimeMillis
           const held = yield* first<{ keys: number; sessions: number }>(
             DB.prepare(
@@ -1754,11 +1754,19 @@ export const PeopleLive: Layer.Layer<
                      and (not exists (select 1 from super_admins where user_id = ?2)
                        or exists (select 1 from super_admins where user_id <> ?2))`,
                 ).bind(adminsId, me.id),
+                // Nothing of theirs lives but their comments, blanked, and
+                // the resolves and reopens that keep threads as they were.
                 DB.prepare(
                   `insert into change_guards (id, reason, ok)
-                   select ?, 'state', not exists (select 1 from nodes
-                     where owner_id = ? and origin = 'data' and kind = 'file'
-                       and deleted_at is null)`,
+                   select ?, 'state', not exists (select 1 from nodes n
+                     left join node_versions v on v.id = n.current_version_id
+                     where n.owner_id = ? and n.origin = 'data' and n.kind = 'file'
+                       and n.deleted_at is null
+                       and not (n.path glob '*?.comments/*'
+                         and json_valid(v.json_value)
+                         and (json_extract(v.json_value, '$.text') = ''
+                           or json_type(v.json_value, '$.resolves') = 'text'
+                           or json_type(v.json_value, '$.reopens') = 'text')))`,
                 ).bind(leftId, me.id),
                 DB.prepare('delete from team_members where user_id = ?').bind(
                   me.id,

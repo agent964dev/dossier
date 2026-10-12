@@ -24,6 +24,7 @@ export type {
   BaseGrammar,
   BaseLibraries,
 } from './base.ts'
+export * from './comments.ts'
 
 export type Json =
   | null

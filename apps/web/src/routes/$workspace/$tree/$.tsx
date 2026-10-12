@@ -17,6 +17,7 @@ import {
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { AppHeader } from '../../../components/app-header'
+import { MentionedBadge } from '../../../components/mentioned-badge'
 import { NoAccessScreen } from '../../../components/no-access'
 import { MenuButton, MenuLink, RowMenu } from '../../../components/row-menu'
 import { SectionLabel } from '../../../components/section-label'
@@ -315,9 +316,21 @@ function Listing({ view }: { view: ListingView }) {
                     </RowIcon>
                     <div className={answered ? PAGE_COLUMNS : COLUMNS}>
                       {/* A page opens in the shell: a whole new document. */}
-                      <a href={page.link} className={NAME_LINK}>
-                        {page.title}
-                      </a>
+                      {page.mentioned ? (
+                        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                          <a
+                            href={page.link}
+                            className={`${NAME_LINK} min-w-0`}
+                          >
+                            {page.title}
+                          </a>
+                          <MentionedBadge />
+                        </span>
+                      ) : (
+                        <a href={page.link} className={NAME_LINK}>
+                          {page.title}
+                        </a>
+                      )}
                       {answered ? (
                         <>
                           <span className={META}>

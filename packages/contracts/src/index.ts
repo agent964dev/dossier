@@ -1,6 +1,7 @@
 export * from './api.ts'
 export type * from './base.ts'
 export * from './codes.ts'
+export * from './comments.ts'
 export * from './errors.ts'
 export * from './events.ts'
 export * from './ids.ts'
