@@ -1,6 +1,7 @@
 // Page code's data calls: paths, the local value of each file, coalesced
 // writes with their optimistic values and rollback, and watchers.
 import {
+  pageOfCommentsFolder,
   DossierError,
   ERRORS,
   docFromWire,
@@ -108,6 +109,14 @@ interface Watcher {
 }
 
 const isFolder = (path: string): boolean => path === '' || path.endsWith('/')
+
+/**
+ * A folder whose read comes back assembled, one Doc per thread of a page's
+ * comments, rather than one per file: its value is taken as it is, and
+ * writes to the files in it are never merged into it.
+ */
+const isAssembled = (path: string): boolean =>
+  path !== '' && path.endsWith('/') && pageOfCommentsFolder(path) !== null
 
 const isDocWire = (value: unknown): value is DocWire =>
   isJsonObject(value) &&
@@ -303,6 +312,12 @@ export const createPageData = (deps: {
     wires: readonly DocWire[],
     sentAt = clock,
   ): { readonly path: string; readonly doc: Doc }[] => {
+    if (isAssembled(folder)) {
+      return wires.map((wire) => ({
+        path: wire.path,
+        doc: docFromWire(wire, page),
+      }))
+    }
     const out = new Map<string, Doc | null>()
     for (const wire of wires) {
       if (!fenced(wire.path, sentAt)) confirm(wire.path, wire)
@@ -328,6 +343,7 @@ export const createPageData = (deps: {
       }
       if (
         !isFolder(watcher.path) ||
+        isAssembled(watcher.path) ||
         !path.startsWith(watcher.path) ||
         watcher.files === undefined
       ) {

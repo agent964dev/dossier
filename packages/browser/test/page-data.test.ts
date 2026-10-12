@@ -422,6 +422,42 @@ describe('watch', () => {
     expect(folder.at(-1)!.map((doc) => doc.data)).toEqual([{ p: 1 }, { a: 1 }])
   })
 
+  test('takes a comments folder’s threads as they come, never merging an entry written into it', async () => {
+    const it = open()
+    const seen: Doc[][] = []
+    it.dossier.watch('results.comments/', (value) => seen.push(value as Doc[]))
+    await flush()
+    const root =
+      'questions/results.comments/sara@acme.com/2026-10-12T10-00-00.json'
+    const thread = (replies: number) => ({ root: { path: root }, replies })
+    await it.changed(1, [wire(root, thread(0))])
+    expect(seen.at(-1)!.map((doc) => doc.data)).toEqual([thread(0)])
+
+    const writing = it.dossier.write('results.comments/', { text: 'A reply' })
+    await flush()
+    const [write] = it.requests('write')
+    const reply =
+      'questions/results.comments/sara@acme.com/2026-10-12T10-01-00.json'
+    await it.answer(write!.id, wire(reply, { text: 'A reply' }))
+    await writing
+    // The watch still holds one Doc per thread, not the new entry.
+    expect(seen.at(-1)!.map((doc) => doc.data)).toEqual([thread(0)])
+    await it.changed(1, [wire(root, thread(1))])
+    expect(seen.at(-1)!.map((doc) => [doc.path, doc.data])).toEqual([
+      ['results.comments/sara@acme.com/2026-10-12T10-00-00.json', thread(1)],
+    ])
+
+    const withdrawing = it.dossier.withdraw(
+      'results.comments/sara@acme.com/2026-10-12T10-00-00.json',
+    )
+    await flush()
+    const [withdrawal] = it.requests('withdraw')
+    await it.answer(withdrawal!.id, null)
+    await withdrawing
+    // A deleted comment stays in its thread: the next value says so.
+    expect(seen.at(-1)).toHaveLength(1)
+  })
+
   test('a rollback keeps the patches still queued', async () => {
     const it = open()
     const file: unknown[] = []

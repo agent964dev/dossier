@@ -31,7 +31,11 @@ const bundles = [
 ] as const
 
 const LIBRARIES: readonly LibraryName[] = ['mermaid', 'shiki', 'katex']
-const COMPONENTS: readonly BaseComponentTag[] = ['dossier-diff', 'dossier-copy']
+const COMPONENTS: readonly BaseComponentTag[] = [
+  'dossier-diff',
+  'dossier-copy',
+  'dossier-comments',
+]
 
 const fail = (logs: readonly unknown[]): never => {
   for (const log of logs) console.error(log)
