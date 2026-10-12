@@ -198,3 +198,99 @@ describe('the export stream', () => {
     expect(cancelled).toBe(true)
   }, 10_000)
 })
+
+describe('an export, after its second review', () => {
+  it('gives each occurrence of a stylesheet its own imports, cycles cut where they close', async () => {
+    const tree = await pushForms(owner, ws, {
+      'page.html':
+        '<title>Both</title><link rel="stylesheet" href="a.css"><link rel="stylesheet" href="b.css">',
+      'a.css': '@import "b.css";.a{color:red}',
+      'b.css': '@import "a.css";.b{color:blue}',
+    })
+    const html = await (await exportOf(tree, 'page')).text()
+    const styles = [...html.matchAll(/<style>(.*?)<\/style>/gs)].map(
+      (m) => m[1]!,
+    )
+    expect(styles).toHaveLength(2)
+    // a.css, importing b.css, whose import of a.css closes the cycle.
+    expect(styles[0]).toContain('.a{color:red}')
+    expect(styles[0]).toContain('.b%7Bcolor%3Ablue%7D')
+    // b.css on its own, importing a.css whole.
+    expect(styles[1]).toContain('.b{color:blue}')
+    expect(styles[1]).toContain('.a%7Bcolor%3Ared%7D')
+  })
+})
+
+describe('the export stream, after its second review', () => {
+  const plan = {
+    pieces: [
+      { kind: 'text' as const, text: '<p>' },
+      {
+        kind: 'data-url' as const,
+        type: 'image/png',
+        sha256: 'b'.repeat(64),
+        size: 65_537,
+      },
+      { kind: 'text' as const, text: '</p>' },
+    ],
+    bytes: 0,
+    linked: [],
+  }
+
+  it('finishes a file whose last chunk is smaller than a base64 group', async () => {
+    const chunks = [new Uint8Array(65_536).fill(1), new Uint8Array([2])]
+    const blobs = {
+      get: async () => ({
+        body: new ReadableStream<Uint8Array>({
+          pull(controller) {
+            const next = chunks.shift()
+            if (next === undefined) controller.close()
+            else controller.enqueue(next)
+          },
+        }),
+      }),
+    } as unknown as R2Bucket
+    const text = await Promise.race([
+      new Response(exportStream(plan, blobs)).text(),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('stalled'), 3000),
+      ),
+    ])
+    const bytes = new Uint8Array(65_537).fill(1)
+    bytes[65_536] = 2
+    let binary = ''
+    for (const byte of bytes) binary += String.fromCharCode(byte)
+    expect(text).toBe(`<p>data:image/png;base64,${btoa(binary)}</p>`)
+  })
+
+  it('cancels a file read that arrives after the export was cancelled', async () => {
+    let cancelled = false
+    let answer: () => void = () => {}
+    const blobs = {
+      get: () =>
+        new Promise((resolve) => {
+          answer = () =>
+            resolve({
+              body: new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  controller.enqueue(new Uint8Array(3))
+                },
+                cancel() {
+                  cancelled = true
+                },
+              }),
+            })
+        }),
+    } as unknown as R2Bucket
+    const reader = exportStream(plan, blobs).getReader()
+    await reader.read()
+    const pending = reader.read()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    // The export is cancelled while R2 has not answered yet.
+    await reader.cancel()
+    answer()
+    await pending.catch(() => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(cancelled).toBe(true)
+  })
+})

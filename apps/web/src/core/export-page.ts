@@ -26,6 +26,7 @@ import {
   isRelativeUrl,
   planExport,
   rewriteImports,
+  type CssRef,
   type ExportAsset,
   type ExportPlan,
   type ExportRef,
@@ -187,8 +188,9 @@ export const exportFilename = (path: string, treeName: string): string => {
 
 /**
  * A stream of the plan's pieces: text, and files from R2 as base64. Each
- * read of the body reads at most one chunk of a file, so a slow reader
- * holds R2 back, and cancelling the body cancels the file's read.
+ * read of the body reads a file only until it has a whole base64 group to
+ * give (or the file ends), so a slow reader holds R2 back; cancelling the
+ * body cancels the file's read, one R2 had not answered yet included.
  */
 export const exportStream = (
   plan: ExportPlan,
@@ -201,26 +203,34 @@ export const exportStream = (
   // Bytes of the file not yet encoded: base64 goes in 3-byte groups, so each
   // chunk encodes on its own.
   let carry = new Uint8Array(0)
+  let cancelled = false
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (file !== null) {
-        const { done, value } = await file.read()
-        if (done) {
-          file = null
-          if (carry.length > 0)
-            controller.enqueue(encoder.encode(base64(carry)))
-          carry = new Uint8Array(0)
-          return
+        // Reads on until a whole base64 group can go out, or the file ends.
+        for (;;) {
+          const { done, value } = await file.read()
+          if (done) {
+            file = null
+            const rest = carry
+            carry = new Uint8Array(0)
+            if (rest.length > 0) {
+              controller.enqueue(encoder.encode(base64(rest)))
+              return
+            }
+            // Nothing left of it to write: on to the next piece.
+            break
+          }
+          const bytes = new Uint8Array(carry.length + value.length)
+          bytes.set(carry)
+          bytes.set(value, carry.length)
+          const whole = bytes.length - (bytes.length % 3)
+          carry = bytes.slice(whole)
+          if (whole > 0) {
+            controller.enqueue(encoder.encode(base64(bytes.subarray(0, whole))))
+            return
+          }
         }
-        const bytes = new Uint8Array(carry.length + value.length)
-        bytes.set(carry)
-        bytes.set(value, carry.length)
-        const whole = bytes.length - (bytes.length % 3)
-        carry = bytes.slice(whole)
-        if (whole > 0) {
-          controller.enqueue(encoder.encode(base64(bytes.subarray(0, whole))))
-        }
-        return
       }
       const piece = list[at++]
       if (piece === undefined) {
@@ -232,6 +242,11 @@ export const exportStream = (
         return
       }
       const object = await blobs.get(blobKey(piece.sha256))
+      // Cancelled while R2 answered: the body it gave is never read.
+      if (cancelled) {
+        await object?.body.cancel()
+        return
+      }
       if (object === null) {
         console.error('A blob is missing from R2', { sha256: piece.sha256 })
         controller.error(new Error('A file of the export is missing'))
@@ -241,6 +256,7 @@ export const exportStream = (
       controller.enqueue(encoder.encode(`data:${piece.type};base64,`))
     },
     async cancel(reason) {
+      cancelled = true
       await file?.cancel(reason)
       file = null
     },
@@ -516,60 +532,80 @@ export const makeExporter = (deps: ExporterDeps) => {
       // Stylesheets ----------------------------------------------------------
 
       /**
-       * Each stylesheet read once, by the tree path it was asked at. A sheet
-       * importing one still being read (a cycle) imports an empty sheet in
-       * its place, as a browser ignores the cycle; a sheet past the count
-       * stays its link.
+       * Each stylesheet's text and references, read once by the tree path it
+       * was asked at; null when it is too large or holds no bytes.
        */
-      const sheets = new Map<string, ExportSheet | null | 'reading'>()
+      const sheetFiles = new Map<
+        string,
+        { readonly text: string; readonly refs: readonly CssRef[] } | null
+      >()
+      /** What each URL in a stylesheet becomes, other than its imports. */
+      const sheetUrls = new Map<string, ExportTarget | null>()
+      /** How many stylesheets the export has written out so far. */
+      let expanded = 0
 
+      const sheetFile = (reached: Extract<Reached, { kind: 'tree' }>) =>
+        Effect.gen(function* () {
+          if (sheetFiles.has(reached.asked)) {
+            return sheetFiles.get(reached.asked) ?? null
+          }
+          const sha = reached.version.blobSha256
+          const text =
+            sha === null || (reached.version.size ?? 0) > SHEET_BYTES
+              ? null
+              : yield* textOf(sha)
+          const file = text === null ? null : { text, refs: cssRefs(text) }
+          sheetFiles.set(reached.asked, file)
+          return file
+        })
+
+      /**
+       * A stylesheet as it is written out where it is imported: its imports
+       * follow this occurrence's chain, so an import that closes a cycle on
+       * it imports an empty sheet in its place, as a browser ignores the
+       * cycle, and the depth counts from where it sits. A sheet past the
+       * count stays its link.
+       */
       const sheetOf = (
         reached: Extract<Reached, { kind: 'tree' }>,
         depth: number,
+        chain: ReadonlySet<string>,
       ): Effect.Effect<
         ExportSheet | 'cycle' | null,
         DossierError<'unavailable'>,
         CurrentCaller
       > =>
         Effect.gen(function* () {
-          const known = sheets.get(reached.asked)
-          if (known === 'reading') return 'cycle'
-          if (known !== undefined) return known
-          if (sheets.size >= MAX_SHEETS) return null
-          sheets.set(reached.asked, 'reading')
-          const sheet = yield* readSheet(reached, depth)
-          sheets.set(reached.asked, sheet)
-          return sheet
-        })
-
-      const readSheet = (
-        reached: Extract<Reached, { kind: 'tree' }>,
-        depth: number,
-      ): Effect.Effect<
-        ExportSheet | null,
-        DossierError<'unavailable'>,
-        CurrentCaller
-      > =>
-        Effect.gen(function* () {
-          const sha = reached.version.blobSha256
-          if (sha === null || (reached.version.size ?? 0) > SHEET_BYTES) {
-            return null
-          }
-          const text = yield* textOf(sha)
-          if (text === null) return null
+          if (chain.has(reached.asked)) return 'cycle'
+          if (expanded >= MAX_SHEETS) return null
+          const file = yield* sheetFile(reached)
+          if (file === null) return null
+          expanded += 1
+          const from = folderOf(reached.asked)
+          const inner = new Set([...chain, reached.asked])
           const refs: ExportSheet['refs'][number][] = []
-          for (const ref of cssRefs(text)) {
-            const target = yield* urlTarget(
-              ref.url,
-              folderOf(reached.asked),
-              ref.kind === 'import' ? 'stylesheet' : 'image',
-              depth + 1,
-            )
+          for (const ref of file.refs) {
+            let target: ExportTarget | null
+            if (ref.kind === 'import') {
+              target = yield* urlTarget(
+                ref.url,
+                from,
+                'stylesheet',
+                depth + 1,
+                inner,
+              )
+            } else {
+              const key = `${from}\n${ref.url}`
+              if (!sheetUrls.has(key)) {
+                sheetUrls.set(key, yield* urlTarget(ref.url, from, 'image'))
+              }
+              target = sheetUrls.get(key) ?? null
+            }
             if (target !== null) {
               refs.push({ range: ref.range, kind: ref.kind, target })
             }
           }
-          return { text, refs }
+          return { text: file.text, refs }
         })
 
       // Targets --------------------------------------------------------------
@@ -584,6 +620,7 @@ export const makeExporter = (deps: ExporterDeps) => {
         from: string,
         kind: ExportRef['kind'],
         depth = 0,
+        chain: ReadonlySet<string> = new Set(),
       ): Effect.Effect<
         ExportTarget | null,
         DossierError<'unavailable'>,
@@ -643,7 +680,7 @@ export const makeExporter = (deps: ExporterDeps) => {
             }
             case 'stylesheet': {
               if (depth > MAX_SHEET_DEPTH) return missing
-              const sheet = yield* sheetOf(reached, depth)
+              const sheet = yield* sheetOf(reached, depth, chain)
               if (sheet === 'cycle') {
                 return { kind: 'text', text: '', type: 'text/css' }
               }
