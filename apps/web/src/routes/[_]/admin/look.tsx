@@ -9,19 +9,16 @@ import {
   ImageUp,
   Lock,
   Search,
-  Upload,
 } from 'lucide-react'
-import {
-  useId,
-  useRef,
-  useState,
-  type ChangeEvent,
-  type FormEvent,
-  type ReactNode,
-} from 'react'
+import { useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 
 import { AppHeader } from '../../../components/app-header'
 import { Advanced, Palette } from '../../../components/look-colours'
+import {
+  Fonts,
+  PREVIEW_FAMILY,
+  type FontActions,
+} from '../../../components/look-fonts'
 import { HostName } from '../../../components/host-name'
 import { NoAccessScreen } from '../../../components/no-access'
 import { SectionLabel } from '../../../components/section-label'
@@ -37,8 +34,6 @@ import { Input, Label } from '../../../components/ui/input'
 import { cn } from '../../../lib/utils'
 import {
   contrastChecks,
-  familyOf,
-  FONT_ROLES,
   headerName,
   logoUrl,
   lookCss,
@@ -46,8 +41,6 @@ import {
   RADIUS_MAX,
   ratioText,
   sameLook,
-  type FontChoice,
-  type FontRole,
   type Look,
   type PresetName,
 } from '../../../lib/look'
@@ -116,15 +109,6 @@ function LookRoute() {
 
 /** The preview's container; its rules carry the unsaved Look. */
 const PREVIEW = '[data-look-preview]'
-/** Families of the unsaved Look, apart from the saved one's. */
-const PREVIEW_FAMILY = 'Dossier Preview'
-
-const ROLE_TITLES: Readonly<Record<FontRole, string>> = {
-  display: 'Display',
-  body: 'Body',
-  mono: 'Mono',
-  arabic: 'Arabic',
-}
 
 const DONE: Readonly<Record<Done, string>> = {
   saved: 'Saved. Every screen uses this Look from its next load.',
@@ -211,7 +195,7 @@ function LookScreen({ view }: { view: LookView }) {
           </p>
         </div>
 
-        <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_23rem]">
+        <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-8 lg:grid-cols-[minmax(0,1fr)_23rem]">
           <div className="flex min-w-0 flex-col gap-6">
             <Presets presets={view.presets} draft={draft} onChoose={edit} />
             <NameField
@@ -225,7 +209,7 @@ function LookScreen({ view }: { view: LookView }) {
             <Palette draft={draft} onChange={edit} />
             <Advanced draft={draft} onChange={edit} />
             <Contrast checks={checks} />
-            <Fonts draft={draft} onChange={edit} />
+            <Fonts draft={draft} onChange={edit} actions={FONT_ACTIONS} />
             <Radius
               value={draft.radius}
               onChange={(radius) => edit({ ...draft, radius })}
@@ -475,199 +459,16 @@ function Contrast({ checks }: { checks: ReturnType<typeof contrastChecks> }) {
   )
 }
 
-function Fonts({
-  draft,
-  onChange,
-}: {
-  draft: Look
-  onChange: (look: Look) => void
-}) {
-  return (
-    <section aria-labelledby="fonts-label" className="flex flex-col gap-3">
-      <SectionLabel id="fonts-label">Fonts</SectionLabel>
-      <ul className="divide-y divide-border/80 rounded-xl border border-border bg-card">
-        {FONT_ROLES.map((role) => (
-          <FontRoleRow
-            key={role}
-            role={role}
-            choice={draft.fonts[role]}
-            onChange={(choice) =>
-              onChange({ ...draft, fonts: { ...draft.fonts, [role]: choice } })
-            }
-          />
-        ))}
-      </ul>
-      <Note>
-        A Google font is copied to this deployment when you fetch it, so no
-        screen ever asks Google for anything.
-      </Note>
-    </section>
-  )
-}
-
-const SAMPLE: Readonly<Record<FontRole, string>> = {
-  display: 'Ag',
-  body: 'Ag',
-  mono: '{}',
-  arabic: 'أب',
-}
-
-/** A name for an uploaded file's family, from the file's own name. */
-const familyFromFile = (name: string) =>
-  name
-    .replace(/\.[^.]+$/, '')
-    .replace(/[^\p{L}\p{N} .\-_]+/gu, ' ')
-    .trim()
-    .slice(0, 64) || 'Uploaded font'
-
-const SOURCES: Readonly<Record<FontChoice['kind'], string>> = {
-  agent964: 'agent964’s',
-  system: 'this device’s own',
-  google: 'Google Fonts, copied here',
-  upload: 'uploaded',
-}
-
-function FontRoleRow({
-  role,
-  choice,
-  onChange,
-}: {
-  role: FontRole
-  choice: FontChoice
-  onChange: (choice: FontChoice) => void
-}) {
-  const input = useRef<HTMLInputElement>(null)
-  const [family, setFamily] = useState('')
-  const [busy, setBusy] = useState<'fetch' | 'upload' | null>(null)
-  const [refused, setRefused] = useState<string | null>(null)
-  const [changing, setChanging] = useState(false)
-  const title = ROLE_TITLES[role]
-  const actions = useId()
-
-  const fetchFamily = async (event: FormEvent) => {
-    event.preventDefault()
-    setBusy('fetch')
-    setRefused(null)
+/** The font rows' calls to the deployment, a refusal as its message. */
+const FONT_ACTIONS: FontActions = {
+  copyGoogleFont: async (family) => {
     const result = await fetchGoogleFont({ data: { family } })
-    if (isScreenFailure(result)) setRefused(result.error.message)
-    else {
-      onChange(result)
-      setFamily('')
-      setChanging(false)
-    }
-    setBusy(null)
-  }
-
-  const upload = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (file === undefined) return
-    setBusy('upload')
-    setRefused(null)
-    const form = new FormData()
-    form.set('file', file)
-    form.set('family', familyFromFile(file.name))
+    return isScreenFailure(result) ? result.error.message : result
+  },
+  uploadFont: async (form) => {
     const result = await uploadFont({ data: form })
-    if (isScreenFailure(result)) setRefused(result.error.message)
-    else {
-      onChange(result)
-      setChanging(false)
-    }
-    setBusy(null)
-  }
-
-  return (
-    <li className="flex flex-col gap-3 px-3.5 py-3">
-      <div className="flex items-center gap-3">
-        <span
-          aria-hidden
-          lang={role === 'arabic' ? 'ar' : undefined}
-          className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-800/70 text-lg text-neutral-50"
-          style={{ fontFamily: `"${PREVIEW_FAMILY} ${title}"` }}
-        >
-          {SAMPLE[role]}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[0.9375rem] text-neutral-50">
-            {title}
-          </span>
-          <span className="block truncate font-mono text-xs text-neutral-400">
-            {familyOf(role, choice)} · {SOURCES[choice.kind]}
-          </span>
-        </span>
-        <Button
-          variant="outline"
-          size="xs"
-          aria-expanded={changing}
-          aria-controls={actions}
-          aria-label={`Change the ${title} font`}
-          onClick={() => setChanging((open) => !open)}
-        >
-          {changing ? 'Close' : 'Change'}
-        </Button>
-      </div>
-      <div id={actions} hidden={!changing} className="flex flex-col gap-3">
-        <form onSubmit={fetchFamily} className="flex gap-2">
-          <Input
-            aria-label={`Google Fonts family for ${title}`}
-            placeholder="Google Fonts family, such as Inter"
-            value={family}
-            required
-            maxLength={64}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(event) => setFamily(event.target.value)}
-          />
-          <Button
-            type="submit"
-            variant="secondary"
-            size="lg"
-            disabled={busy !== null}
-            aria-label={`Fetch from Google Fonts for ${title}`}
-          >
-            {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
-          </Button>
-        </form>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy !== null}
-            aria-label={`Upload a font file for ${title}`}
-            onClick={() => input.current?.click()}
-          >
-            <Upload aria-hidden />
-            {busy === 'upload' ? 'Uploading…' : 'Upload a font file'}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={
-              busy !== null ||
-              (choice.kind === 'agent964' && choice.face === undefined)
-            }
-            aria-label={`Use agent964's font for ${title}`}
-            onClick={() => {
-              onChange({ kind: 'agent964' })
-              setChanging(false)
-            }}
-          >
-            Use agent964&apos;s
-          </Button>
-          <input
-            ref={input}
-            type="file"
-            accept=".woff2,.woff,.ttf,.otf,font/woff2,font/woff,font/ttf,font/otf"
-            className="sr-only"
-            tabIndex={-1}
-            aria-label={`Font file for ${title}`}
-            onChange={upload}
-          />
-        </div>
-      </div>
-      <Refusal message={refused} />
-    </li>
-  )
+    return isScreenFailure(result) ? result.error.message : result
+  },
 }
 
 function Radius({

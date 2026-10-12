@@ -6,6 +6,7 @@
     "build": "vite build",
     "db:generate": "drizzle-kit generate",
     "dev": "CLOUDFLARE_ENV=dev vite dev",
+    "fonts:catalogue": "bun scripts/google-fonts.ts",
     "dev:https": "CLOUDFLARE_ENV=dev vite build && bun scripts/local-config.ts && wrangler dev --config dist/server/wrangler.local.json --persist-to .wrangler/state --local-protocol https --port 8787 --https-key-path ../../.certs/localhost-key.pem --https-cert-path ../../.certs/localhost.pem",
     "deploy:dev": "CLOUDFLARE_ENV=dev vite build && bun scripts/copy-base.ts --bucket dossier-next-dev --env dev && wrangler d1 migrations apply dossier-next-dev --remote --env dev --config wrangler.jsonc && wrangler deploy --env dev",
     "test": "vitest run --config vitest.config.ts",
