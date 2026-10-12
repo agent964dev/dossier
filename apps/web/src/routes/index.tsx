@@ -17,7 +17,7 @@ import { Note } from '../components/settings-parts'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { WorkspaceMenu } from '../components/workspace-menu'
-import type { TreeSharing } from '../core/index'
+import { treeSharingLabel } from '../lib/sharing'
 import { signOut, startGoogleSignIn } from '../lib/auth-client'
 import {
   homeView,
@@ -79,22 +79,6 @@ function FrontPage({ deployment }: { deployment: string }) {
   )
 }
 
-/** How a tree is shared, as its row says it. */
-export function sharingLabel(sharing: TreeSharing): string {
-  switch (sharing.kind) {
-    case 'private':
-      return 'Private'
-    case 'workspace':
-      return 'Shared with the workspace'
-    case 'public':
-      return 'Public'
-    case 'people':
-      return sharing.count === 1
-        ? 'Shared with 1 person'
-        : `Shared with ${sharing.count} people`
-  }
-}
-
 function Trees({
   workspace,
   trees,
@@ -138,7 +122,7 @@ function Trees({
                     {tree.name}/
                   </span>
                   <span className="block text-xs text-neutral-400">
-                    {sharingLabel(tree.sharing)}
+                    {treeSharingLabel(tree.sharing)}
                   </span>
                   {tree.mentioned ? <MentionedBadge className="mt-1" /> : null}
                 </span>

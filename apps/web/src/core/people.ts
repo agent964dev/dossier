@@ -54,13 +54,10 @@ import {
   type TreeRow,
   type WorkspaceRow,
 } from './rows.ts'
+import type { TreeSharing } from '../lib/sharing.ts'
 import { TreeStore } from './tree-store.ts'
 
-export type TreeSharing =
-  | { readonly kind: 'private' }
-  | { readonly kind: 'workspace' }
-  | { readonly kind: 'people'; readonly count: number }
-  | { readonly kind: 'public' }
+export type { TreeSharing }
 
 export type WorkspaceRole = 'admin' | 'member'
 
@@ -950,26 +947,27 @@ export const PeopleLive: Layer.Layer<
               .where(eq(schema.shares.nodeId, tree.rootNodeId))
               .all(),
           )
-          const creator = yield* query(() =>
-            database
-              .select({ email: schema.user.email })
-              .from(schema.user)
-              .where(eq(schema.user.id, tree.createdBy))
-              .get(),
-          )
-          const people = shares.filter(
-            (s) =>
-              s.targetKind === 'email' &&
-              s.target !== creator?.email.toLowerCase(),
-          ).length
+          // Others than the person looking, as the tree's listing counts them.
+          const people = new Set(
+            shares
+              .filter(
+                (s) =>
+                  s.targetKind === 'email' &&
+                  s.target !== me.email.toLowerCase(),
+              )
+              .map((s) => s.target),
+          ).size
+          const teams = new Set(
+            shares.filter((s) => s.targetKind === 'team').map((s) => s.target),
+          ).size
           const sharing: TreeSharing = shares.some(
             (s) => s.targetKind === 'anyone',
           )
             ? { kind: 'public' }
             : shares.some((s) => s.targetKind === 'workspace')
               ? { kind: 'workspace' }
-              : people > 0
-                ? { kind: 'people', count: people }
+              : people + teams > 0
+                ? { kind: 'shared', people, teams }
                 : { kind: 'private' }
           result.push({ tree, sharing })
         }
