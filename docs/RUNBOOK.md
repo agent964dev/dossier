@@ -1,707 +1,951 @@
-# Dossier production runbook
+# Dossier runbook
 
-> This describes Dossier before Dossier next. It is rewritten for Dossier next before launch.
+How to run a Dossier deployment: what it is made of, how to set up a new one,
+how dossier.agent964.com is released, the launch of Dossier next, day-to-day
+operations, and the dev environment.
 
-Follow the steps in this runbook in order. Run shell commands from a clone of this repository. Never paste production secrets into chat, logs, screenshots, or a ticket. Replace `<date>`, `<version>`, `<document-id>`, and email placeholders before running commands.
+Run commands from a clone of this repository, in the directory each step
+names. Never paste a secret into chat, a log, a screenshot or an issue.
 
-## Automatic production releases
+## 1. What a deployment is made of
 
-`release-cli.yml` is the sole production coordinator. A push to `main` (normally
-a merged PR) calls `ci.yml` at the same commit and waits for **all** of its
-`checks`, `browser`, and `secrets` jobs. This preserves lint, formatting, both
-TypeScript checks, unit and browser tests, Gitleaks, both builds, and the CLI
-pack/install smoke test. PRs run those checks without a production environment,
-Cloudflare credentials, or OIDC publishing permission. There is no tag release
-trigger and no tag is needed.
+| Part               | Production (dossier.agent964.com)                     | Dev                                      |
+| ------------------ | ----------------------------------------------------- | ---------------------------------------- |
+| Worker             | `dossier`                                             | `dossier-next-dev`                       |
+| Main host          | `dossier.agent964.com` (custom domain)                | `dossier-next-dev.tech964.workers.dev`   |
+| Content hosts      | `<tree-id>.dossier-content.com`                       | `<tree-id>-dev.dossier-content.com`      |
+| Content route      | `*.dossier-content.com/*`, zone `dossier-content.com` | `*-dev.dossier-content.com/*`, same zone |
+| D1 (`DB`)          | `dossier-next-production`, location `eeur`            | `dossier-next-dev`, location `eeur`      |
+| R2 (`BLOBS`)       | `dossier-next-production`                             | `dossier-next-dev`                       |
+| Queue (`WEBHOOKS`) | `dossier-next-production`                             | `dossier-next-dev`                       |
 
-The coordinator checks out only `github.sha`, builds production with the full
-SHA in `DOSSIER_BUILD_VERSION`, checks the generated production bindings and
-existing secret **names**, applies pending D1 migrations, deploys Vite's generated
-Worker/assets, then verifies `/api/healthz`. Health must return HTTP 200,
-`ok: true`, `service: "dossier"`, that exact full SHA as `version`, and every
-capability listed in `scripts/release/production.json` at that revision (currently
-`state`). It tries at most 12 times, with a 10-second request timeout and 5 seconds
-between attempts. Wrangler automatic resource provisioning is explicitly disabled with
-`--no-x-provision`; missing D1 databases and R2 buckets must fail instead of
-being recreated. This flag disables Wrangler's resource-creation path, not
-Worker binding configuration. Rate-limit bindings are declared directly in
-`ratelimits`, using account-unique integer namespace IDs chosen in the config;
-they do not need a separate create command. See Cloudflare's
-[rate-limit binding setup](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/#get-started).
-A failed migration, deployment, or smoke check fails the run
-and blocks npm publication. Health proves build identity and advertised bindings;
-it is not an authenticated end-to-end saved-values or database-integrity test.
+Both are configured in `apps/web/wrangler.jsonc`: production at the top level,
+dev under `env.dev`. The dev route is more specific than production's, so
+Cloudflare sends `*-dev` hosts to the dev Worker.
 
-### Serialization and stale runs
+### The Worker and its hosts
 
-The entire production workflow, including its reusable CI and npm job, holds
-`dossier-production` concurrency with `cancel-in-progress: false` and `queue: max`.
-A subsequent merge cannot cancel a migration or deployment. GitHub supports up to
-100 pending runs; if that queue fills, rerun the canceled release after capacity
-is available. Waiting order is FIFO by entry into the concurrency queue, which
-can differ from commit order. Each normal queued merge therefore gets its own
-checks and deployment; if a newer revision has already reached production, the
-older run fails its stale-release guard before changing production.
+One Worker serves the whole deployment. The main host serves Dossier's screens,
+the shell, the API under `/_/api/` and the session cookie. Every tree's pages
+are served from its own content host on a separate content domain, so each tree
+has an origin of its own. A content host serves only page files, attachments
+and the base layer, and never sets or reads a cookie. The content domain needs
+one proxied wildcard DNS record, and the Worker route `*.<content domain>/*`
+sends its hosts to the Worker.
 
-Before either deployment or publication, the workflow reads **all** GitHub
-`production` deployment records and requires every attempted SHA to be an
-ancestor of the candidate. Failed attempts count: they might already have
-migrated D1 or activated code. The candidate must also still belong to `main`.
-GitHub creates the environment deployment record before starting the job, so the
-fence survives a failed smoke check or interrupted run. Same-SHA retries are
-allowed. API errors, unknown commits, and incomplete history fail closed. Keep
-these deployment records; deleting them removes this protection. The pagination
-limit is 10,000 records and deliberately requires maintenance if reached.
+### D1
 
-PR CI retains cancellation of obsolete checks. Reusable main CI has a unique
-run/attempt concurrency group and cannot cancel the production coordinator.
-A rerun of just the npm job repeats both the history guard and, before publishing,
-the production smoke check, even if the deploy job succeeded in an older attempt.
+D1 holds every record: people, sessions, agent keys, workspaces, trees, nodes,
+versions, shares, events, forms, data values, the search index, webhooks and
+their deliveries, settings and purge runs. Migrations are in `apps/web/drizzle/`
+(`0000` to `0025`; some numbers are skipped). The search index includes an FTS5
+virtual table (`search_pages`), which is why `wrangler d1 export` cannot export
+the database and backups rely on Time Travel (section 5).
+
+### R2
+
+| Prefix                                   | What                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------ |
+| `blobs/<sha256>/<generation>`            | The bytes of file versions (`blobs/<sha256>` for rows made before generations) |
+| `derived/markdown/<version>/<sha256>.md` | Markdown generated from a page for its agent version                           |
+| `base/<version>/…`                       | Copies of each deployed base layer, with a `.complete` marker                  |
+| `fonts/<sha256>`                         | Fonts of the Look                                                              |
+| `looks/<sha256>`                         | Logos of the Look                                                              |
+
+Only the purge deletes from `blobs/` and `derived/`. Nothing deletes `base/`,
+`fonts/` or `looks/`.
+
+### The Queue
+
+The `WEBHOOKS` Queue carries webhook work: one message per committed change,
+then one per delivery. The same Worker is its producer and its consumer
+(`max_batch_size` 10, `max_batch_timeout` 5, `max_retries` 10). D1 holds each
+delivery's state, and the consumer decides when a delivery has failed for good.
+A deployment without the Queue binding delivers no webhooks.
+
+### The tree hub
+
+`TREE_HUB` binds the `TreeHub` Durable Object class, one object per tree. It
+holds the WebSockets of shells and agents watching the tree and relays change
+hints. It keeps no records. The class is declared by the Durable Object
+migration `v1` (`new_sqlite_classes: ["TreeHub"]`).
+
+### Static Assets and the base-layer copies in R2
+
+The build's client files are Static Assets (`ASSETS`): the screens' code under
+`/_/app/` and the base layer under `/_/base/<version>/` (the shell, the page
+client, the base layout, the base components and the libraries). Static Assets
+keep only the latest build, but a page opened before a deploy may still load
+files of its own base-layer version. So every deploy first copies its base layer
+into R2 under `base/<version>/` with `apps/web/scripts/copy-base.ts`, and the
+Worker serves older versions from there. The copy skips a version R2 already
+holds, so a retried deploy copies nothing twice. A new version is about 400
+files and 77 MB and takes about a minute to copy.
+
+### Schedules
+
+| Cron           | Job                                                                        |
+| -------------- | -------------------------------------------------------------------------- |
+| `17 3 * * SUN` | The weekly purge, Sunday 03:17 UTC                                         |
+| `*/5 * * * *`  | The webhook sweep: deliveries a lost message or a Queue outage left behind |
+
+The Worker picks the job by the cron string, so keep both strings exactly.
+
+### Variables
+
+| Variable          | Example                        | Meaning                                                                |
+| ----------------- | ------------------------------ | ---------------------------------------------------------------------- |
+| `PUBLIC_ORIGIN`   | `https://dossier.agent964.com` | The main host's origin. Must be `https://`.                            |
+| `CONTENT_HOST`    | `{tree}.dossier-content.com`   | Each tree's host. Holds `{tree}` once, in its first label.             |
+| `DEPLOYMENT_NAME` | `dossier.agent964.com`         | The deployment's name on screens, in the health check and in webhooks. |
+
+`DOSSIER_BUILD_VERSION`, read at build time, is the version the health check
+reports. Without it the build uses the short git SHA of the checkout. The
+release sets the full SHA.
+
+### Secrets
+
+Every environment has five secrets. A missing one makes the Worker answer every
+request with the plain error page, or `unavailable` on `/_/api/`, and log "The
+deployment is misconfigured" with the missing name. The Google values are the
+exception: without them the sign-in page says that sign-in is not set up.
+
+| Secret                 | What it does                                                     | What rotating it does                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`   | Signs session cookies and sign-in notices.                       | Ends every browser session: everyone signs in again. Agent keys keep working.                                               |
+| `HANDLE_SECRET`        | Makes view handles and seals event cursors.                      | Each session gets a new view handle at its next view, and event cursors sealed earlier are refused. See below.              |
+| `SUPER_ADMINS`         | Comma-separated emails made super admins at their first sign-in. | Affects only people who sign in for the first time, or come back after deleting their account. Never removes a super admin. |
+| `GOOGLE_CLIENT_ID`     | The Google OAuth client.                                         | Sign-in uses the new client at once. Sessions stay.                                                                         |
+| `GOOGLE_CLIENT_SECRET` | The Google OAuth client's secret.                                | Sign-in uses the new secret at once. Delete the old one in Google after setting the new one.                                |
+
+To name or remove super admins after the first sign-in, use `/_/admin`.
+
+Rotating `HANDLE_SECRET`: a session's view handle for a tree is computed from
+the secret. At its next view of the tree, each session gets a new handle in
+place of the one the old secret made. A frame still holding the old handle
+answers 404, and the shell reloads the page with the new one. Event cursors
+sealed under the old secret are refused as `invalid`: a `dossier watch` running
+across the rotation stops, and is started again. Rotate `HANDLE_SECRET` only
+when it has leaked.
+
+## 2. Set up a new deployment (self-hosting)
+
+These steps set up a deployment of your own from an empty Cloudflare account.
+Fill in these values first and use them everywhere below:
+
+| Placeholder         | Meaning                                                                    | Example               |
+| ------------------- | -------------------------------------------------------------------------- | --------------------- |
+| `<main host>`       | The host people and the CLI use                                            | `dossier.example.com` |
+| `<content domain>`  | A separate domain whose subdomains serve the trees' pages                  | `example-content.com` |
+| `<worker>`          | The Worker's name                                                          | `dossier`             |
+| `<db>`              | The D1 database's name                                                     | `dossier`             |
+| `<location>`        | Where D1 keeps its primary: `weur`, `eeur`, `apac`, `oc`, `wnam` or `enam` | `weur`                |
+| `<bucket>`          | The R2 bucket's name                                                       | `dossier`             |
+| `<queue>`           | The Queue's name                                                           | `dossier`             |
+| `<you@example.com>` | Your Google account's email, the first super admin                         | `sara@example.com`    |
+
+### 2.1 Accounts, domains and tools
+
+1. A Cloudflare account on the Workers Paid plan.
+2. Two domains, both added to that Cloudflare account as zones: the domain of
+   `<main host>`, and `<content domain>`. Pages are served only from
+   `<content domain>`, so a deployment on `workers.dev` alone cannot serve
+   pages. The tree hosts are `<tree-id>.<content domain>`, one level under the
+   zone, because the zone's free certificate covers the apex and one level of
+   subdomains.
+3. A Google account that can create a Google Cloud project.
+4. On your machine: git, Bun 1.3.14, Node.js 22.12 or newer, `openssl` and
+   `xh`.
+5. The repository, with its dependencies, and Wrangler signed in:
+
+   ```sh
+   git clone https://github.com/agent964dev/dossier.git
+   cd dossier
+   bun install
+   cd apps/web
+   bunx wrangler login
+   ```
+
+Steps 2.4 to 2.9 run in `apps/web` with `CLOUDFLARE_ENV` unset, so Wrangler
+and the build use the top level of `wrangler.jsonc`:
+
+```sh
+unset CLOUDFLARE_ENV
+```
+
+### 2.2 The content domain's DNS record
+
+In the Cloudflare dashboard, open the DNS records of `<content domain>` and add
+one record:
+
+| Type   | Name | IPv6 address | Proxy status |
+| ------ | ---- | ------------ | ------------ |
+| `AAAA` | `*`  | `100::`      | Proxied      |
+
+`100::` is a placeholder address: the Worker route answers every request, so
+nothing reaches it. The zone's free Universal SSL certificate covers
+`*.<content domain>`.
+
+`<main host>` needs no record. The Worker's custom domain creates its DNS
+record and certificate at the first deploy, as long as no record for that host
+exists yet.
+
+### 2.3 The Google OAuth client
+
+In the Google Cloud console, in a project of your own:
+
+1. Google Auth Platform, Branding: give the app a name, a support email and the
+   authorized domain of `<main host>`. Set the app home page to
+   `https://<main host>/` and the privacy policy to
+   `https://<main host>/_/privacy`. Both answer once the deployment runs.
+2. Audience: user type External. Leave the app in Testing for now and add
+   `<you@example.com>` as a test user.
+3. Data access: the scopes `openid`, `email` and `profile`, nothing else.
+4. Clients: create an OAuth client of type Web application with the authorized
+   redirect URI `https://<main host>/_/auth/callback/google`.
+5. Save the client's ID and secret in a file only you can read, for example
+   `~/.config/dossier-deploy/google.env`, with mode 600:
+
+   ```sh
+   GOOGLE_CLIENT_ID=…
+   GOOGLE_CLIENT_SECRET=…
+   ```
+
+You publish the app in step 2.12, once `/_/privacy` answers.
+
+### 2.4 D1, R2 and the Queue
+
+From `apps/web`:
+
+```sh
+bunx wrangler d1 create <db> --location <location>
+bunx wrangler r2 bucket create <bucket>
+bunx wrangler queues create <queue>
+```
+
+`d1 create` prints the new database's `database_id`. Keep it for the next step.
+
+### 2.5 `wrangler.jsonc`
+
+Edit the top level of `apps/web/wrangler.jsonc` (not `env.dev`) so these keys
+hold your values. Keep every binding name, class name and cron string as they
+are: the code reads them.
+
+```jsonc
+  "name": "<worker>",
+  "routes": [
+    { "pattern": "<main host>", "custom_domain": true },
+    { "pattern": "*.<content domain>/*", "zone_name": "<content domain>" },
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://<main host>",
+    "DEPLOYMENT_NAME": "<main host>",
+    "CONTENT_HOST": "{tree}.<content domain>",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "<db>",
+      "database_id": "<database_id from wrangler d1 create>",
+      "migrations_dir": "drizzle",
+    },
+  ],
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "<bucket>" }],
+  "durable_objects": {
+    "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TreeHub"] }],
+  "queues": {
+    "producers": [{ "binding": "WEBHOOKS", "queue": "<queue>" }],
+    "consumers": [
+      {
+        "queue": "<queue>",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 10,
+      },
+    ],
+  },
+  "triggers": { "crons": ["17 3 * * SUN", "*/5 * * * *"] },
+```
+
+`DEPLOYMENT_NAME` is the name people see; the main host is the usual choice.
+Nothing below uses `env.dev`; leave it or delete it.
+
+### 2.6 Secrets
+
+From `apps/web`. Each value goes from a pipe straight to Cloudflare and is
+never printed. If the Worker does not exist yet, Wrangler offers to create it;
+answer yes.
+
+```sh
+openssl rand -base64 32 | bunx wrangler secret put BETTER_AUTH_SECRET --config wrangler.jsonc
+openssl rand -base64 32 | bunx wrangler secret put HANDLE_SECRET --config wrangler.jsonc
+printf '%s' '<you@example.com>' | bunx wrangler secret put SUPER_ADMINS --config wrangler.jsonc
+( . ~/.config/dossier-deploy/google.env
+  printf '%s' "$GOOGLE_CLIENT_ID" | bunx wrangler secret put GOOGLE_CLIENT_ID --config wrangler.jsonc
+  printf '%s' "$GOOGLE_CLIENT_SECRET" | bunx wrangler secret put GOOGLE_CLIENT_SECRET --config wrangler.jsonc )
+bunx wrangler secret list --config wrangler.jsonc
+```
+
+`SUPER_ADMINS` takes several emails separated by commas. The Google values are
+read in a subshell, so they never stay in your shell. `secret list` prints the
+five names, never the values.
+
+### 2.7 Migrations
+
+From `apps/web`:
+
+```sh
+bunx wrangler d1 migrations apply <db> --remote --config wrangler.jsonc
+```
+
+Wrangler lists the migrations from `0000` to `0025` and asks before applying
+them. Answer yes.
+
+### 2.8 Build, copy the base layer, deploy
+
+From `apps/web`, in this order:
+
+```sh
+bun run build
+bun scripts/copy-base.ts --bucket <bucket> --env production
+bunx wrangler deploy --config dist/server/wrangler.json
+```
+
+- `bun run build` builds the browser package, the screens and the Worker into
+  `dist/`. `dist/server/wrangler.json` is the deployable configuration.
+- `copy-base.ts` copies this build's base layer into R2 under
+  `base/<version>/`. `--env production` means the top level of
+  `wrangler.jsonc`. It prints `Copied base layer <version> into R2 (<n> files).`
+  or, when R2 already holds that version, `nothing to copy`.
+- `wrangler deploy` uploads the Worker and its assets, attaches the custom
+  domain and the content route, registers the Queue consumer and the crons, and
+  applies the Durable Object migration.
+
+### 2.9 The health check and the content host
+
+```sh
+xh https://<main host>/_/api/health
+```
+
+The answer is `200` with:
+
+```json
+{
+  "ok": true,
+  "service": "dossier",
+  "version": "<the build's git SHA>",
+  "protocol": 1,
+  "deployment": "<main host>",
+  "db": "ok"
+}
+```
+
+`version` is the commit the Worker was built from, `protocol` the API version
+the CLI must speak, and `db: "ok"` means D1 answered. A `503` with
+`"code":"unavailable"` means a variable or secret is missing; section 5 shows
+how to read the logs.
+
+Then ask a content host for a path only the main host serves:
+
+```sh
+xh -h https://releasecheck.<content domain>/_/api/health
+```
+
+`releasecheck` is a well-formed tree ID that no tree has. The answer must be a
+`404` that carries `content-security-policy: sandbox allow-scripts …`,
+`referrer-policy: strict-origin-when-cross-origin` and
+`x-content-type-options: nosniff`, and no `set-cookie`. That proves the DNS
+record, the certificate, the route and the Worker's host rule work together. A
+TLS error means the DNS record or the certificate is missing. A Cloudflare
+error page means the route is missing.
+
+### 2.10 First sign-in and the first-run screen
+
+Open `https://<main host>/` in a browser and sign in with Google as
+`<you@example.com>`. Because that email is in `SUPER_ADMINS`, you are a super
+admin, and Dossier sends you to `/_/admin`, which says "You are a super admin
+of <main host>, named in its configuration. Choose who may create
+workspaces." Choose one of:
+
+- Only super admins,
+- Listed people (emails and email domains you list),
+- Anyone who signs in with Google.
+
+Press Save. Until this is saved, the home keeps sending super admins to
+`/_/admin`. The rest of `/_/admin` (health, limits, retention, super admins,
+workspaces, the Look and the privacy text) appears after it.
+
+### 2.11 A first workspace
+
+Open `https://<main host>/_/settings` and press Create workspace. A name is 1 to
+63 lowercase letters, digits and hyphens, not starting with a hyphen, and not
+`api` or `cli`. You become the workspace's first admin.
+
+### 2.12 Publish the Google app
+
+Open `https://<main host>/_/privacy` and check that it shows the deployment's
+privacy text. In the Google Cloud console, under Audience, press Publish app.
+With only the basic scopes, Google publishes it without a review. Until then,
+only the test users can sign in.
+
+### 2.13 `dossier login`
+
+On any machine with Node.js 22.12 or newer:
+
+```sh
+npm i -g @agent964/dossier
+dossier login <main host>
+dossier whoami
+```
+
+`login` prints a link and a code and opens the link. Check that the code
+matches and press Allow. `whoami` prints
+`<you@example.com> on <main host> (key "cli on <machine>")`.
+
+### 2.14 A first push, opened in a browser
+
+From any folder outside the repository, with `<workspace>` the workspace from
+step 2.11:
+
+```sh
+mkdir -p dossier-first
+printf '%s\n' '<!doctype html>' '<html lang="en"><head><meta charset="utf-8"><title>Hello</title></head>' '<body><h1>Hello</h1><p>The first page on this deployment.</p></body></html>' > dossier-first/index.html
+dossier push dossier-first <workspace>/first -m "First page"
+dossier read <workspace>/first/
+```
+
+`push` prints `added    index.html` and the link with `(push 1)`. The first
+push to a tree name creates the tree. `read` prints the page's agent version,
+Markdown starting with `# Hello`.
+
+Open `https://<main host>/<workspace>/first/` in the browser. The shell frames
+the page from `https://<tree-id>.<content domain>/_/v/…`; the browser's
+developer tools show the frame's origin. For a richer first tree, push the
+repository's fixture from the repository root:
+`dossier push packages/cli/test/fixtures/acme <workspace>/acme`.
+
+### The same steps on dev
+
+For `dossier-next-dev`, every Wrangler command gets `--env dev` (or runs with
+`CLOUDFLARE_ENV=dev`), and the names are the dev ones from section 1. From
+`apps/web`:
+
+| Step | Command on dev                                                                                  |
+| ---- | ----------------------------------------------------------------------------------------------- |
+| 2.4  | `bunx wrangler d1 create dossier-next-dev --location eeur`, then the new id into `env.dev`      |
+| 2.6  | `bunx wrangler secret list --env dev` (the secrets already exist)                               |
+| 2.7  | `bunx wrangler d1 migrations apply dossier-next-dev --remote --env dev --config wrangler.jsonc` |
+| 2.8  | `bun run deploy:dev` (build, base-layer copy to `dossier-next-dev`, migrations, deploy)         |
+| 2.9  | `xh https://dossier-next-dev.tech964.workers.dev/_/api/health`                                  |
+| 2.9  | `xh -h https://releasecheck-dev.dossier-content.com/_/api/health`                               |
+| 2.10 | Sign in with a test user of the dev Google client, or use `scripts/dev-session.ts` (section 6)  |
+| 2.13 | `dossier login dossier-next-dev.tech964.workers.dev`                                            |
+
+The dev bucket and Queue are checked with `bunx wrangler r2 bucket info dossier-next-dev`
+and `bunx wrangler queues info dossier-next-dev`.
+
+## 3. dossier.agent964.com releases
+
+A merge into `main` releases production. `.github/workflows/release-cli.yml` is
+the only thing that deploys the production Worker or publishes the CLI. There
+are no tags and no manual deploys.
+
+### The workflow
+
+All runs share the concurrency group `dossier-production`, never cancel one
+another, and queue (`queue: max`). Each run has three jobs.
+
+1. `ci` runs `.github/workflows/ci.yml` at the merged commit: release tests,
+   the CLI version check, lint, format, typecheck, every package's tests, both
+   builds, a pack and install of the CLI, and the Gitleaks scan (`checks` and
+   `secrets`).
+2. `deploy`, in the GitHub environment `production`:
+   - `scripts/release/freshness.mjs`, the stale-run fence (below).
+   - Requires the environment variable `WORKERS_BUILDS_DISABLED=true`, the
+     variable `CLOUDFLARE_ACCOUNT_ID` and the secret `CLOUDFLARE_API_TOKEN`.
+   - Builds with `DOSSIER_BUILD_VERSION` set to the full commit SHA, then
+     `node scripts/release/verify.mjs config apps/web/dist/server/wrangler.json`.
+   - Lists the Worker's secret names and runs `verify.mjs secrets` on them.
+   - Runs `scripts/release/deploy.sh`.
+   - Runs `node scripts/release/verify.mjs smoke <sha>`.
+3. `publish`, only when `deploy` shipped: runs the fence again,
+   `scripts/release/registry.mjs` decides whether the CLI's version is
+   unpublished, builds the CLI, checks production once more with
+   `verify.mjs smoke`, and runs `npm publish --provenance` through npm's
+   trusted publishing (OIDC). No npm token exists.
+
+`deploy.sh` runs, from `apps/web` with `CLOUDFLARE_ENV` unset:
+
+```sh
+bunx --no-install wrangler d1 migrations apply dossier-next-production --remote --config wrangler.jsonc --no-x-provision
+bun scripts/copy-base.ts --bucket dossier-next-production --env production
+bunx --no-install wrangler deploy --config dist/server/wrangler.json --no-x-provision
+```
+
+Migrations run before the new code goes live, while the previous Worker still
+serves. `--no-x-provision` makes a missing database, bucket or Queue fail the
+release instead of being created.
+
+### The checks
+
+`scripts/release/verify.mjs` reads every expectation from
+`scripts/release/production.json`, so a change of resource edits that file and
+`wrangler.jsonc`, and nothing else:
+
+```json
+{
+  "healthUrl": "https://dossier.agent964.com/_/api/health",
+  "contentProbeUrl": "https://releasecheck.dossier-content.com/_/api/health",
+  "worker": "dossier",
+  "origin": "https://dossier.agent964.com",
+  "contentHost": "{tree}.dossier-content.com",
+  "contentRoute": {
+    "pattern": "*.dossier-content.com/*",
+    "zone_name": "dossier-content.com"
+  },
+  "deployment": "dossier.agent964.com",
+  "protocol": 1,
+  "secrets": [
+    "BETTER_AUTH_SECRET",
+    "HANDLE_SECRET",
+    "SUPER_ADMINS",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET"
+  ],
+  "d1": { "name": "dossier-next-production", "id": "<the database's id>" },
+  "r2": "dossier-next-production",
+  "queue": "dossier-next-production",
+  "hub": { "binding": "TREE_HUB", "class": "TreeHub" },
+  "crons": ["17 3 * * SUN", "*/5 * * * *"]
+}
+```
+
+- `config` refuses a built configuration unless it names the Worker, the
+  origin, `CONTENT_HOST`, the custom domain, the content route with its zone,
+  the D1 database by name and id, the bucket, the tree hub class, the Queue's
+  producer and consumer and both crons, has no rate limiter bindings, and no
+  secret name among its variables.
+- `secrets` requires every secret name in `production.json`.
+- `smoke` asks the health URL up to 12 times, 5 seconds apart, each with 10
+  seconds to answer. It requires `ok: true`, `service: "dossier"`, the exact
+  full SHA as `version`, the expected `protocol` and `deployment`, and
+  `db: "ok"`. Then it asks the content probe once, which must answer `404`
+  with `Referrer-Policy: strict-origin-when-cross-origin`, a
+  `Content-Security-Policy` holding `sandbox`, and no `Set-Cookie`.
+
+`bun run test:release` runs these checks' own tests.
+
+### The stale-run fence
+
+`freshness.mjs` reads every GitHub deployment record of the `production`
+environment and allows the run only if every SHA attempted so far is an
+ancestor of this one, and this one is still on `main`. Failed attempts count,
+because they may have applied migrations or activated code. A rerun of the same
+SHA is allowed. A run whose commit is older than one already attempted fails
+before it changes anything. Keep the deployment records: deleting them removes
+the fence. API errors and incomplete history fail closed.
 
 ### CLI versioning
 
-For a releasable CLI change, explicitly increase `packages/cli/package.json`
-using a stable `X.Y.Z` version, run `bun install` to update `bun.lock`, and commit
-both. CI builds and packs isolated archives of the base and proposed revisions,
-normalizes only the version number, and compares the actual npm payload. This
-covers bundled workspace dependencies and their resolved dependencies, generated
-CLI code, README, license, and packaged skills/assets. Unchanged payloads such as
-web-only or test-only edits do not require a CLI release. A Bun compiler version
-change also requires a bump because it changes the CLI build toolchain. A version decrease fails.
-When the version already increases, the normal build and package smoke gates
-still run. PR comparison uses the base and the tested synthetic merge SHA; main comparison uses the push's
-before/SHA, covering a push that contains several commits.
+`scripts/release/cli-version.mjs` (in CI) builds the npm package of the base
+and of the change, with the version number blanked, and compares them. If the
+package changed, `packages/cli/package.json` must carry a higher stable
+`X.Y.Z`, with `bun.lock` updated by `bun install`. A version never decreases.
+Changes that leave the package unchanged need no bump.
 
-After successful production verification, the npm job reads the public package
-metadata. An existing exact version is a successful no-op. An absent version
-must be greater than all published stable versions before it can be published.
-Only an HTTP 200, valid package document can establish absence; 404, 401/403,
-rate limiting, network errors, malformed responses, and registry failures fail
-the run. The existing package must already exist on npm. A failed publish may be
-retried; if npm accepted it before the job failed, the next attempt skips it.
-There is no automatic version increment and no token fallback.
+`scripts/release/registry.mjs` publishes only a version npm does not have and
+that is higher than every published version. It needs an HTTP 200 package
+document from the registry to decide; any other answer fails the run. An
+already published version is skipped, so a rerun is safe. Published versions
+never change: fix a published CLI with a new version.
 
-A previously bumped but still unpublished version can be published by a later
-main release after that later revision passes all gates. This supports recovery
-from a failed release. Published versions are immutable: fix a published CLI by
-merging another explicit version bump. This rollout explicitly bumps the CLI
-from the published `0.2.2` to `0.2.3`, including the saved-values CLI additions
-from PR #8. After the merge passes CI and production verification, the same
-release will publish `0.2.3` if it is still unpublished.
+### The Cloudflare token
 
-### First-time owner setup (before merging the CI/CD PR)
+The `production` environment holds `CLOUDFLARE_ACCOUNT_ID`
+(`0e58a177092eae6d95ff91afd4330c72`) as a variable and `CLOUDFLARE_API_TOKEN`
+as a secret. The token is limited to that account and needs:
 
-1. **Remove competing Cloudflare deployments.** In Workers & Pages → `dossier`
-   → Settings → Builds, inspect the repository and production/preview triggers.
-   Disconnect the production Worker from Workers Builds, including deploy hooks,
-   so this workflow is its only deployment writer. A separately named development
-   Worker can retain its own pipeline. Record this verification and set the
-   GitHub `production` environment variable `WORKERS_BUILDS_DISABLED` to `true`.
-   This is an explicit owner attestation, not an API-discovered fact. The workflow
-   refuses production work until it is set.
-2. **Create the GitHub environment `production`.** Set deployment branches/tags
-   to **Selected branches and tags**, add a **branch** rule for `main` only, and
-   allow no tags. Do not configure required reviewers or a wait timer: ordinary
-   successful merges must release without manual approval. Add environment
-   variable `CLOUDFLARE_ACCOUNT_ID=0e58a177092eae6d95ff91afd4330c72` (Agent964)
-   and environment secret `CLOUDFLARE_API_TOKEN`. Keep the credential at environment
-   scope, not repository scope. Use a dedicated token restricted to that account
-   and the `agent964.com` zone: Workers Scripts Edit, D1 Edit for migrations,
-   Workers R2 Storage Read for existing bucket bindings, and the zone's Workers
-   Routes Edit and Zone Read for the custom domain. Add only a permission that a
-   documented Wrangler operation actually requires; do not use a global API key
-   or grant unrelated account-wide privileges. These API permission classes can
-   authorize more than a single Worker; restrict resources as far as Cloudflare
-   supports and never use that authority to recreate infrastructure. Do not store Worker
-   application secret values in GitHub.
-3. **Complete existing Worker prerequisites.** Use `wrangler secret list
---config wrangler.jsonc` from `apps/web` to check names. Required:
-   `SESSION_SECRET`, `LINK_SECRET`, `SEED_ADMIN_EMAIL`, `BOOTSTRAP_API_KEY`.
-   Set only missing values using A5. Keep the existing `LINK_SECRET` stable:
-   rotating it invalidates anonymous edit links. The workflow never creates or
-   rotates secrets, databases, or buckets, and never calls `/api/setup`.
-   PR #8 merged as `04470e94061f2a134cbd5edb9d36a01579b10286` on 2026-09-16;
-   `0004_mature_colonel_america.sql` and `STATE_RATE_LIMITER` namespace `1003`
-   are already in main and will be applied by the first release. There is no
-   cherry-pick dependency remaining.
-4. **Authorize npm OIDC.** For `@agent964/dossier` on npmjs.com, configure a
-   GitHub Actions trusted publisher with organization/user **`agent964dev`**,
-   repository **`dossier`**, workflow filename **`release-cli.yml`**, and environment
-   **`production`** (exact case; filename only). Enable the allowed action for
-   **direct `npm publish`**; staged publishing alone is insufficient for automatic
-   releases. Replace the former publisher without an environment restriction so
-   historic tag workflows cannot retain publication authority. The publish job
-   runs directly in `release-cli.yml`; only CI is reusable, avoiding npm's caller
-   workflow identity ambiguity. It uses a GitHub-hosted Ubuntu runner, Node 24,
-   npm 11.19.1, job-scoped `id-token: write`, and explicit provenance. No
-   `NPM_TOKEN`, `NODE_AUTH_TOKEN`, npm-auth secret, or token-bearing `.npmrc` is
-   used. Choose npm's “Require two-factor authentication and disallow tokens”
-   setting. Verify the publisher in npm settings; saving it does not validate its
-   identity, and the first real publish is the final OIDC integration test.
-5. **Protect `main`.** Require PRs and the `checks`, `browser`, and `secrets`
-   PR checks, block force pushes/deletion, and restrict bypass access. Production
-   gating also happens inside the workflow, independently of branch protection.
+| Scope                                          | Permission              | Used by                                 |
+| ---------------------------------------------- | ----------------------- | --------------------------------------- |
+| Account                                        | D1 Edit                 | Migrations                              |
+| Account                                        | Workers R2 Storage Edit | The base-layer copy, the R2 binding     |
+| Account                                        | Queues Edit             | The Queue producer and consumer         |
+| Account                                        | Workers Scripts Edit    | Deploys and the secret name list        |
+| Zones `agent964.com` and `dossier-content.com` | Workers Routes Edit     | The custom domain and the content route |
+| Zones `agent964.com` and `dossier-content.com` | Zone Read               | Finding the zones                       |
 
-Setup status on 2026-09-16: the owner completed the external setup. Read-only
-inspection confirms the main-only `production` environment, no approval or wait
-timer, the expected Cloudflare credential name and variables, required CI checks,
-and protection against force pushes/deletion. The Worker lists all four required
-secret names, including `LINK_SECRET` and `SEED_ADMIN_EMAIL`; values were not read.
-The owner verified that Workers Builds is disconnected and npm trusted publishing
-is restricted to `release-cli.yml` / `production`, with direct publication allowed
-and bypass tokens disabled. Builds and npm settings are owner-verified: the
-available Builds API credential returned 403, and npm publisher settings were
-not accessible to the implementation session. Public health still reports
-existing build `dab662e` without capabilities. Only migration 0004 is pending.
-Registry metadata confirms `0.2.3` is unpublished. The first automated release
-and actual npm OIDC/provenance integration remain pending; these read-only checks
-did not deploy code, apply migrations, or publish a package.
+npm's trusted publisher for `@agent964/dossier` is the repository
+`agent964dev/dossier`, the workflow `release-cli.yml` and the environment
+`production`. `main` requires the `checks` and `secrets` checks.
 
-### Retries, migrations, and recovery
+### Retries and recovery
 
-Use **Re-run all jobs** on the main production run after fixing external setup or
-an infrastructure fault. The same immutable SHA is tested again, already-applied
-D1 migrations are skipped, and an already-published npm version is skipped. If a
-newer SHA has attempted deployment, the old run will be rejected; merge a forward fix or
-rerun the newer release. Never edit a historical migration that has been applied.
+- **A run failed on setup or on Cloudflare.** Fix the cause, then use Re-run
+  all jobs on that run. The same SHA is tested again; applied migrations are
+  skipped, a copied base layer is skipped, a published CLI is skipped.
+- **A newer merge already ran.** The older run's fence refuses it. Merge a
+  forward fix instead.
+- **A migration failed.** The run stops at once. Earlier migrations in the
+  batch may have committed: check with
+  `bunx wrangler d1 migrations list dossier-next-production --remote --config wrangler.jsonc`
+  from `apps/web`, fix forward with a new migration, and never edit an applied
+  one.
+- **Migrations applied but the deploy or the smoke check failed.** Keep the
+  schema and data. Read the run's output and `wrangler tail`, then rerun or
+  merge a fix. npm publication waits until production verifies.
+- **`wrangler deploy` reported a Cloudflare 504 after uploading.** The version
+  may be live without its Queue consumer or crons. From `apps/web`:
+  `bunx wrangler triggers deploy --config dist/server/wrangler.json` after
+  building that commit, or rerun the job.
 
-All routine schema changes must be compatible with both the currently deployed
-Worker and the new Worker: add nullable/defaulted columns or tables first, deploy
-code that can use both shapes, and backfill separately when needed. Destructive
-changes require a separately planned later cutover after old code and rollback
-candidates stop using the old schema. Migration 0004 follows the additive rollout
-and initializes existing documents with saved values disabled. Migrations run
-before Worker activation while the previous Worker still serves requests. A
-migration failure stops immediately; earlier migrations in that batch may have
-committed, so inspect the migration ledger before retrying.
+Never reset D1 or recreate a resource to recover. To put older code back, see
+rollbacks in section 5.
 
-If migrations succeed but deployment or smoke verification fails, preserve the
-schema and data. Investigate Wrangler output and Worker logs, then retry the same
-SHA or merge compatible corrected code. Do not reset D1, recreate infrastructure,
-or automatically reverse migrations. Prefer a forward code fix. An emergency
-code rollback is manual (C6) and safe only if that older code works with the
-current schema. npm publication remains blocked until production verifies.
+## 4. The launch of Dossier next (once)
 
-Official references checked for this implementation: [GitHub concurrency and
-queue semantics](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
-[GitHub deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments),
-[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/),
-[Cloudflare Vite environments](https://developers.cloudflare.com/workers/vite-plugin/reference/cloudflare-environments/),
-[Cloudflare GitHub Actions authentication](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/),
-[disconnecting Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/#disconnecting-builds),
-[disabling resource provisioning](https://developers.cloudflare.com/changelog/post/2025-10-24-automatic-resource-provisioning/),
-and [D1 migration tracking](https://developers.cloudflare.com/d1/reference/migrations/).
+Merging the Dossier next pull request into `main` replaces production in place:
+the Worker `dossier` and its custom domain stay, its bindings move to the new
+`dossier-next-production` resources, and the release publishes CLI 1.0.0.
+Today's data is not migrated. It was archived before production was wiped.
 
-### Upgrade an existing deployment for saved values
+### Before the merge
 
-Complete this sequence before the first code deploy that includes saved values.
-
-1. Confirm that `apps/web/wrangler.jsonc` declares `STATE_RATE_LIMITER` for production and development as described in step A4.
-2. Set a distinct `LINK_SECRET` in each environment. Step A5 covers production, and section D covers development. The `State` service belongs to `CoreServicesLive`, so requests that construct the core service layer fail when the secret is absent.
-3. Let the production release coordinator apply D1 migrations before activating the new Worker, as described in A6/A7. Do not apply production migrations directly from a working checkout. Confirm that the release logs show Wrangler applying `0004_mature_colonel_america.sql`. The migration adds `document_state`, `document_state_fields`, `document_state_grants`, and `document_edit_links`. It also adds the saved-values manifest to document versions and initializes every existing document with saved values disabled.
-4. Deploy the Worker and complete the health check in step A9. The response must include `"features":["state"]`.
-
-Never reuse a `LINK_SECRET` value between environments or print either value.
-The rate limiter binding is declarative, so Cloudflare provisions it during the
-Worker deploy.
-
-## A. Production cutover operator checklist
-
-This is the historical first-install checklist, not the routine deployment path.
-The production database and bucket already exist. Skip A2/A3 for this deployment;
-never rerun creation to repair a release. Preserve evidence without secret values.
-
-1. **Confirm Cloudflare access.**
+1. **Production secrets.** The agent set `BETTER_AUTH_SECRET`, `HANDLE_SECRET`
+   and `SUPER_ADMINS`, and the Google values from
+   `~/.config/dossier-next/google-production.env`. Check from `apps/web` with
+   `CLOUDFLARE_ENV` unset:
 
    ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler whoami
+   bunx wrangler secret list --config wrangler.jsonc > /tmp/dossier-secret-names.json
+   node ../../scripts/release/verify.mjs secrets /tmp/dossier-secret-names.json
    ```
 
-   Confirm that Wrangler prints the intended Cloudflare account and an authenticated user. Report the account name, account ID, and command exit status. Do not paste credentials.
+   It prints "Required production secret names are present". The old Worker
+   ignores the new names until the merge deploys the new code.
 
-2. **Create the production D1 database.**
+2. **Resources.** From `apps/web`:
 
    ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler d1 create dossier-production
+   bunx wrangler d1 info dossier-next-production
+   bunx wrangler r2 bucket info dossier-next-production
+   bunx wrangler queues info dossier-next-production
    ```
 
-   Wrangler must print `Successfully created DB 'dossier-production'` and a `database_id`. Replace the placeholder in `apps/web/wrangler.jsonc` with that UUID, then report the UUID and the resulting `d1_databases` block.
-
-3. **Create the production R2 bucket.**
+3. **The token.** The owner gives the `production` environment's
+   `CLOUDFLARE_API_TOKEN` every permission in section 3, in particular Queues
+   Edit, Workers R2 Storage Edit, and Workers Routes Edit on
+   `dossier-content.com`.
+4. **Branch protection.** `main` requires only the `checks` and `secrets`
+   checks. Check with:
 
    ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler r2 bucket create dossier-production
+   gh api repos/agent964dev/dossier/branches/main/protection --jq .required_status_checks.contexts
    ```
 
-   Confirm that Wrangler created `dossier-production`. Report the confirmation line.
+5. **The pull request.** Every check passes, including the CLI version step,
+   which compares 1.0.0 with main's 0.2.3.
 
-4. **Confirm both production rate limiters.**
+### The merge
 
-   Rate-limit bindings are declarative. Cloudflare provisions them when the Worker deploys.
+The owner merges the pull request. The release runs as in section 3: CI,
+migrations `0000` to `0025` into `dossier-next-production`, the base-layer
+copy, the deploy with the content route and the Queue consumer, the smoke
+checks, and the publication of 1.0.0.
+
+### After the merge
+
+1. **Health.**
 
    ```sh
-   cd /path/to/dossier/apps/web
-   rg -n -A 18 '"ratelimits"' wrangler.jsonc
+   xh https://dossier.agent964.com/_/api/health
+   xh -h https://releasecheck.dossier-content.com/_/api/health
    ```
 
-   The production block must contain `UPLOAD_RATE_LIMITER`, namespace `1001`, limit `30`, and period `60`. It must also contain `STATE_RATE_LIMITER`, namespace `1003`, limit `60`, and period `60`. Do not copy development namespaces `1002` or `1004` into production. Paste back the production block.
+   The first shows the merge's full SHA, `protocol: 1`,
+   `deployment: "dossier.agent964.com"` and `db: "ok"`. The second is a 404
+   with the sandbox header and no cookie.
 
-5. **Set only missing production secrets.**
-
-   Run `bunx wrangler secret list --config wrangler.jsonc` first. Run only the
-   individual commands below whose secret name is absent. Preserve existing
-   `SESSION_SECRET`, `LINK_SECRET`, and bootstrap credentials. Routine deployment
-   must never rotate `LINK_SECRET`.
+2. **A real Google sign-in.** Open `https://dossier.agent964.com/` and sign in
+   as `malhashemi@agent964.com`. The first-run screen appears at `/_/admin`.
+   Choose who may create workspaces.
+3. **CLI 0.2.3's upgrade error.** In an empty folder:
 
    ```sh
-   cd /path/to/dossier/apps/web
-   openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put SESSION_SECRET
-   openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET
-   bunx wrangler secret put SEED_ADMIN_EMAIL
-   openssl rand -base64 48 | tr -d '\n' > ../../.prod-bootstrap-key.local
-   chmod 600 ../../.prod-bootstrap-key.local
-   cat ../../.prod-bootstrap-key.local | bunx wrangler secret put BOOTSTRAP_API_KEY
-   stat -f '%OLp %N' ../../.prod-bootstrap-key.local
-   bunx wrangler secret list
+   cd "$(mktemp -d)"
+   HOME="$PWD" DOSSIER_API_URL=https://dossier.agent964.com DOSSIER_API_KEY=ds_test npx -y @agent964/dossier@0.2.3 whoami
    ```
 
-   When Wrangler prompts for `SEED_ADMIN_EMAIL`, enter the owner's verified
-   production email. Production must not declare a `SEED_ADMIN_EMAIL` plaintext var: it would
-   conflict with or replace the secret during deployment. On
-   Linux, replace the `stat` command with
-   `stat -c '%a %n' ../../.prod-bootstrap-key.local`. Confirm that the file mode
-   is `600` and the secret list names `SESSION_SECRET`, `LINK_SECRET`,
-   `SEED_ADMIN_EMAIL`, and `BOOTSTRAP_API_KEY` without revealing values. Report
-   the mode line and secret names only.
-
-6. **Verify production migrations through the release coordinator.**
-
-   Merge the tested change to `main` as described in A7. The automatic release
-   applies pending migrations under its freshness check and production lock,
-   before deploying the Worker. Do not run a separate migration apply command.
-   Confirm that the release logs mark each pending migration as applied or report
-   nothing to apply. For the first saved-values release, expect
-   `0004_mature_colonel_america.sql`. Record the migration names and statuses.
-
-   After the release completes, a read-only check can confirm that nothing is
-   pending at that tested revision:
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler d1 migrations list dossier-production --remote --config wrangler.jsonc
-   ```
-
-7. **Build and deploy production through GitHub Actions.**
-
-   Complete automatic-release setup above, then merge the compatible change to
-   `main`. Follow the `Production release` run. Its build clears `CLOUDFLARE_ENV`
-   to select the top-level Wrangler configuration (there is no `env.production`),
-   and deploys `apps/web/dist/server/wrangler.json`. `env.dev` and its databases
-   and buckets must never be used here. Record the run URL, full SHA, Cloudflare
-   version ID, and smoke-check result.
-
-8. **Run the protected setup endpoint.**
-
-   This is one-time manual bootstrap, not a routine release step. First disable
-   `release-cli.yml`, let any active release finish, and cancel queued releases.
-   Use a clean checkout of the exact SHA from the last successful production
-   release. Its migrations must already be applied, as verified in A6. The setup
-   script checks/applies that same migration set before calling `POST /api/setup`,
-   without exposing the key in curl arguments. This maintenance window prevents
-   racing another release; never run the script from an untested checkout.
-   Re-enable the workflow after bootstrap, before merging any further change.
-
-   ```sh
-   cd /path/to/dossier
-   apps/web/scripts/setup.sh \
-     --env production \
-     --key-file .prod-bootstrap-key.local
-   ```
-
-   The endpoint must return this JSON.
-
-   ```json
-   {
-     "ok": true,
-     "workspaceId": "workspace_agent964",
-     "workspaceSlug": "agent964",
-     "bootstrapAccountId": "acct_bootstrap",
-     "bootstrapApiKeyId": "key_bootstrap"
-   }
-   ```
-
-   A rerun must return the same summary without creating duplicates. Report the JSON summary, never the key.
-
-9. **Verify Worker health and saved-values availability.**
-
-   ```sh
-   curl --fail-with-body --silent --show-error \
-     https://dossier.agent964.com/api/healthz
-   printf '\n'
-   ```
-
-   The request must return HTTP 200. Its JSON must set `ok` to `true`, `service` to `dossier`, and `features` to `["state"]`. An empty `features` array means the deployed Worker cannot see `STATE_RATE_LIMITER`. Paste back the status and JSON.
-
-10. **Verify an authenticated tree page, then archive the probe.**
-
-    ```sh
-    cd /path/to/dossier
-    cat > /tmp/dossier-production-smoke.html <<'HTML'
-    <!doctype html><html><head><title>Production smoke check</title></head><body>Production smoke check</body></html>
-    HTML
-    HEADER_FILE=$(mktemp "${TMPDIR:-/tmp}/dossier-prod-header.XXXXXX")
-    chmod 600 "$HEADER_FILE"
-    trap 'rm -f "$HEADER_FILE" /tmp/dossier-production-smoke.html /tmp/dossier-tree.html' EXIT HUP INT TERM
-    printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < .prod-bootstrap-key.local)" > "$HEADER_FILE"
-    IDEMPOTENCY_KEY="production-cutover-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
-    PAYLOAD=$(jq -n --rawfile html /tmp/dossier-production-smoke.html \
-      --arg idempotencyKey "$IDEMPOTENCY_KEY" \
-      '{html:$html,filename:"production-smoke.html",kind:"smoke",visibility:"private",idempotencyKey:$idempotencyKey}')
-    RECEIPT=$(curl --fail-with-body --silent --show-error \
-      --request POST --header "@$HEADER_FILE" --json "$PAYLOAD" \
-      https://dossier.agent964.com/api/uploads)
-    DOCUMENT_ID=$(printf '%s' "$RECEIPT" | jq -r '.document.id')
-    printf 'Document ID: %s\n' "$DOCUMENT_ID"
-    curl --fail-with-body --silent --show-error \
-      --header "@$HEADER_FILE" --output /tmp/dossier-tree.html \
-      --write-out 'Tree HTTP %{http_code}\n' \
-      "https://dossier.agent964.com/d/$DOCUMENT_ID/tree"
-    grep -F 'Production smoke check' /tmp/dossier-tree.html
-    curl --fail-with-body --silent --show-error \
-      --request DELETE --header "@$HEADER_FILE" \
-      "https://dossier.agent964.com/api/documents/$DOCUMENT_ID?force=1"
-    printf '\n'
-    rm -f "$HEADER_FILE" /tmp/dossier-production-smoke.html /tmp/dossier-tree.html
-    ```
-
-    Confirm that the commands print a 12-character document ID, `Tree HTTP 200`, the probe title in the HTML, then archive JSON with `"ok":true`. Report those four items. Redact headers and tokens. The probe remains recoverable in trash by design.
-
-## B. Owner handoff
-
-Only the owner performs these steps, in this order. Every CLI command below pins the production origin and clears inherited Dossier environment credentials, so an existing development configuration cannot receive the production key or later commands.
-
-1. **Release the CLI package automatically.**
-
-   Explicitly bump the CLI version and lockfile in a PR as described above. After
-   merging to `main`, wait for `Production release` to pass production health
-   verification and publish through npm OIDC. Do not push a release tag. Confirm
-   `npm view @agent964/dossier version` reports the expected version and retain
-   the workflow URL.
-
-2. **Install that exact release.**
-
-   ```sh
-   npm install --global @agent964/dossier@<version>
-   dossier --version
-   ```
-
-   Confirm that `dossier --version` prints `<version>`. Report that line.
-
-3. **Complete the first production sign-in.**
-
-   Open <https://dossier.agent964.com>, choose **Sign in**, then **Continue with shoo**. Sign in as `<owner email>`. Shoo opens at `shoo.dev`. Its one-time consent screen identifies `https://dossier.agent964.com` and asks to share the verified email plus basic profile (name and picture). Approve it once.
-
-   Confirm that the browser returns to the Dossier dashboard and shows workspace `agent964` with role `admin`. Report the final URL, workspace, and role, not cookies or identity tokens.
-
-4. **Mint and store the owner's CLI key.**
-
-   Open <https://dossier.agent964.com/cli/auth>. Enter a machine-specific **Key name**, choose **Generate key**, and copy the `ds_…` token from the **Shown once** panel.
-
-   ```sh
-   pbpaste | env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com auth set
-   env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com whoami
-   ```
-
-   The command reads the key currently copied to the macOS clipboard without putting it in shell history. On Linux, use the clipboard tool available on that machine (for example, `xclip -selection clipboard -o | env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com auth set`). Confirm that `auth set` stores the key and `whoami` prints the owner's account, workspace `agent964`, and role `admin`. Report the `whoami` output. Redact the account ID and key ID before sharing outside the team. Never paste the token.
-
-5. **Allow outside email addresses when needed.**
-
-   Setup already allows the `agent964.com` domain. Add an individual entry for a person outside it.
-
-   ```sh
-   env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com workspace allow name@example.com --role member
-   env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com workspace
-   ```
-
-   Confirm that the allowlist includes `name@example.com` as `member`. Report that allowlist line. The person still needs to sign in once before appearing as a member.
-
-## C. Day-2 operations
-
-1. **Rotate the production bootstrap key.**
-
-   Use the manual maintenance window and tested checkout described in A8:
-   disable the coordinator, let the active release finish, cancel queued releases,
-   and re-enable it after maintenance. The setup script below must use only the
-   migrations already applied by that tested production release.
-
-   This rotates both the setup-endpoint secret and the hashed `acct_bootstrap` API credential. It explicitly re-enables `key_bootstrap`. `dossier setup` never auto-unrevokes it.
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   NEW_KEY_FILE=$(mktemp "${TMPDIR:-/tmp}/dossier-bootstrap-key.XXXXXX")
-   trap 'rm -f "$NEW_KEY_FILE"' EXIT HUP INT TERM
-   openssl rand -base64 48 | tr -d '\n' > "$NEW_KEY_FILE"
-   chmod 600 "$NEW_KEY_FILE"
-   NEW_HASH=$(openssl dgst -sha256 < "$NEW_KEY_FILE" | awk '{print $NF}')
-   cat "$NEW_KEY_FILE" | bunx wrangler secret put BOOTSTRAP_API_KEY
-   bunx wrangler d1 execute dossier-production --remote --command \
-     "UPDATE api_keys SET key_hash='$NEW_HASH', last_used_at=NULL, revoked_at=NULL WHERE id='key_bootstrap'"
-   cp "$NEW_KEY_FILE" ../../.prod-bootstrap-key.local
-   chmod 600 ../../.prod-bootstrap-key.local
-   scripts/setup.sh --env production --key-file ../../.prod-bootstrap-key.local
-   ```
-
-   Confirm that Wrangler updates the secret, D1 reports one changed row, and setup returns `"ok":true`. Report statuses and setup JSON only.
-
-2. **Rotate every anonymous edit link.**
-
-   Each environment holds its own `LINK_SECRET`. Rotating it immediately
-   invalidates every anonymous edit link in that environment. Signed-in access,
-   saved values, and link-generation rows do not change. Use this only for a
-   deployment-wide link reset.
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET
-   ```
-
-   Redeploy if Wrangler does not activate the secret change automatically, then
-   create a new link for each document that still needs anonymous editing. Old
-   edit links answer `410 link_revoked` after the rotation, and newly created
-   links work. Never print the secret value.
-
-3. **Recover from `503 state_unavailable`.**
-
-   Every protected API state read or write, every browser save, and every signed-in or edit-link browser state read returns `503 state_unavailable` when the Worker cannot use `STATE_RATE_LIMITER`. The Worker refuses the request rather than skipping the limit. Anonymous reads of a public document's values and direct link-management requests do not use this limiter. A missing binding also removes `state` from `/api/healthz`, so the CLI normally prints its deployment compatibility message before any state command. A binding whose `limit()` call throws can still appear in health, so inspect the Worker logs when health already lists the feature.
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   curl --fail-with-body --silent --show-error \
-     https://dossier.agent964.com/api/healthz
-   printf '\n'
-   rg -n -A 18 '"ratelimits"' wrangler.jsonc
-   bunx wrangler tail dossier --format pretty
-   ```
-
-   Stop the tail after capturing the failing request. If the production binding is absent, restore the `STATE_RATE_LIMITER` block with namespace `1003`, limit `60`, and period `60`. Build and redeploy the Worker.
-
-   Merge the binding fix to `main` and follow the automatic release. Do not run
-   an independent production deploy alongside the workflow.
-
-   If the binding exists and the limiter call still fails, resolve the Cloudflare binding error shown in the tail and redeploy. Do not remove the check or install the permissive local limiter in production. Verify that health lists `state`, then repeat the failed `dossier state get <document-id> --json` or save. Paste back the health JSON, deployed version ID, and successful command output with saved values redacted when needed.
-
-4. **Add an allowlist entry.**
-
-   ```sh
-   env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com workspace allow name@example.com --role member
-   env -u DOSSIER_API_KEY -u DOSSIER_API_URL dossier --api-url https://dossier.agent964.com workspace
-   ```
-
-   Confirm that the allowlist shows the normalized email and role `member`. For a whole domain, use `@example.com`. Report the added line.
-
-5. **Restore a document subtree from trash.**
-
-   ```sh
-   dossier trash
-   dossier restore <document-id> --batch <batch-id>
-   dossier tree <document-id>
-   ```
-
-   Copy the root document ID and batch ID from `dossier trash`. Confirm that `restore` prints `Restored` and `tree` prints a readable tree. Report the document ID, batch ID, and both commands' output.
-
-6. **Roll back a production deploy.**
-
-   Prefer a revert PR on current `main` so a new SHA passes all gates and deploys
-   through the normal coordinator. Preserve all applied migration files. The CLI
-   version must not decrease; any changed CLI payload needs another release bump.
-
-   For an emergency direct rollback, first disable `release-cli.yml` in Actions,
-   allow any active migration/deploy to finish, and cancel pending releases. Verify
-   the selected Worker is compatible with the current D1 schema. After the manual
-   operation below, prepare a forward recovery/revert PR, re-enable the workflow,
-   then merge that PR so its push triggers a new release. A commit merged while
-   the workflow is disabled has no release run to rerun. Never use an old workflow rerun as a rollback, or delete
-   deployment history to bypass its fence.
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler versions list
-   bunx wrangler rollback <known-good-version-id> \
-     --message "Rollback: <incident or reason>" --yes
-   curl --fail-with-body --silent --show-error \
-     https://dossier.agent964.com/api/healthz
-   printf '\n'
-   ```
-
-   Confirm that Wrangler activates the selected version and health returns `"ok":true`. Report the old and new version IDs, reason, and health JSON. A code rollback does not roll back D1 migrations or restore R2 data. Any database restore is a separate incident procedure requiring explicit assessment of data loss and compatibility; this pipeline never performs one.
-
-7. **Read production logs.**
-
-   ```sh
-   cd /path/to/dossier/apps/web
-   bunx wrangler tail dossier --format pretty
-   ```
-
-   Confirm that Wrangler streams live request and exception events from the production Worker. Reproduce one request, capture only relevant lines, then stop with `Ctrl-C`. Report the timestamp, request path, status, and exception text. Redact secrets, cookies, emails, and Bearer headers.
-
-## D. Development Worker saved-values configuration
-
-Step A5 sets the production `LINK_SECRET` and `SEED_ADMIN_EMAIL` before
-deployment. Set both development values separately when preparing the
-development Worker. Run these commands.
+   It prints ``dossier: This deployment runs Dossier next. Update with `npm i -g @agent964/dossier`.``
+   and exits 1. Then open `https://dossier.agent964.com/cli/auth` in a
+   browser, as `dossier auth login` of 0.2.3 would. The page shows the same
+   sentence.
+
+4. **npm.** `npm view @agent964/dossier version` prints `1.0.0`. Then
+   `npm i -g @agent964/dossier`, `dossier login` and `dossier whoami`.
+5. **Publish the Google app.** In the Google Cloud project that holds the
+   production client, under Branding, set the home page to
+   `https://dossier.agent964.com/` and the privacy policy to
+   `https://dossier.agent964.com/_/privacy`. Then under Audience, press Publish
+   app. Until then, only the test users can sign in.
+
+### Cleanup
+
+Once the archive of the old Dossier no longer needs them, remove the old
+resources. From `apps/web` with `CLOUDFLARE_ENV` unset:
 
 ```sh
-cd /path/to/dossier/apps/web
-openssl rand -base64 48 | tr -d '\n' | bunx wrangler secret put LINK_SECRET --env dev
-bunx wrangler secret put SEED_ADMIN_EMAIL --env dev
-rg -n -A 18 '"ratelimits"' wrangler.jsonc
+bunx wrangler secret delete SESSION_SECRET --config wrangler.jsonc
+bunx wrangler secret delete LINK_SECRET --config wrangler.jsonc
+bunx wrangler secret delete SEED_ADMIN_EMAIL --config wrangler.jsonc
+bunx wrangler secret delete BOOTSTRAP_API_KEY --config wrangler.jsonc
+bunx wrangler delete --name dossier-dev
+bunx wrangler d1 delete dossier-production
+bunx wrangler d1 delete dossier-development
+bunx wrangler r2 bucket delete dossier-production
+bunx wrangler r2 bucket delete dossier-development
 ```
 
-The development rate-limit block must contain `STATE_RATE_LIMITER`, namespace
-`1004`, limit `60`, and period `60`. The production namespace is `1003`. Before deploying development with `SEED_ADMIN_EMAIL` as a secret, remove its
-placeholder from `env.dev.vars`; a plaintext var can replace a remote secret.
-Production already omits this placeholder. Localhost tests and local
-development can use the permissive in-process limiter, but deployed environments
-must use the Cloudflare binding.
+The first four remove the old secrets from the Worker `dossier`. `delete
+--name dossier-dev` removes the old dev Worker. R2 deletes only an empty
+bucket: empty each one in the dashboard first. Each command asks before it
+deletes.
 
-## E. Remove archived documents from production
+## 5. Day-2 operations
 
-Archived documents become eligible for permanent removal 30 days after
-archiving. The `PURGE_RETENTION_DAYS` var in `apps/web/wrangler.jsonc` sets
-that window. Both environments run the purge once a week (Sunday
-03:17 UTC) from the `triggers` block in that file, and an operator can run it at
-any time with `dossier admin purge`. Steps 1 and 2 verify the active release
-before each purge, step 3 is read-only, step 5 is a manual removal, and step 6 confirms that the
-deployment runs the weekly schedule.
+Commands in this section run from `apps/web` with `CLOUDFLARE_ENV` unset, and
+use production's names. For dev, add `--env dev` and use the dev names.
 
-1. **Confirm the deployed Worker and the operator CLI support the purge.**
+### Health
 
-   The Worker reports its build's git commit as `version` in its health
-   response. In Cloudflare, identify the active `dossier` Worker version and
-   match its version ID to the deployment output of a **Production release**
-   run. That run's production smoke check must have passed. Use its run ID below;
-   `origin/main` may already contain newer commits waiting in the release queue.
-   Wait for any active deployment to finish. If a failed deployment or manual
-   rollback changed the active version, resolve and verify that release before
-   proceeding with a purge.
+- `xh https://dossier.agent964.com/_/api/health` answers 200 while the Worker
+  and D1 work.
+- `/_/admin` shows a health line for super admins: Database, File storage,
+  Base layer and Purge, each with what it found.
+
+### Logs
+
+```sh
+bunx wrangler tail --config wrangler.jsonc
+bunx wrangler tail --config wrangler.jsonc --format json --search "webhook"
+```
+
+Workers Logs are also on in the dashboard (`observability`). Dossier logs one
+JSON line per event with a `message`:
+
+| `message`                         | Logged when                                                                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tree event`                      | Every change to a tree: tree, sequence, type, path, actor, key, push                                                                                                  |
+| `share`                           | A share given or taken away                                                                                                                                           |
+| `purge`                           | A purge run starts and ends, with its counts                                                                                                                          |
+| `webhook delivery`                | Each delivery attempt and its result                                                                                                                                  |
+| `webhook sweep`                   | Each sweep run                                                                                                                                                        |
+| `webhook skipped`                 | A delivery dropped on its recheck: the webhook or event is gone, the tree moved, the workspace is not live, the event type is no longer chosen, or the URL is refused |
+| `The deployment is misconfigured` | A variable or secret is missing or wrong                                                                                                                              |
+| `Request failed`                  | An unexpected failure, with its request ID                                                                                                                            |
+
+The request ID is Cloudflare's `cf-ray`, also sent back as `x-request-id`.
+
+### The weekly purge and Purge now
+
+The purge runs every Sunday at 03:17 UTC. It removes what was deleted before
+the retention period, and then the bytes nothing references any more. A run
+stops at its budget (800 statements or 25 seconds) and the next run goes on;
+the health line says when the last run finished and what it removed.
+
+A super admin can run it at once: `/_/admin`, Retention period, Purge now.
+Purge now and the weekly run never overlap: one holds a lease for ten minutes.
+
+### Retention
+
+`/_/admin`, Retention period, sets how many days deleted files, folders, trees,
+workspaces and data stay restorable. It starts at 30. Shortening it makes the
+next purge remove more. Webhook delivery rows older than the retention period
+are deleted by the sweep.
+
+Limits (file and push sizes, push and send rates, upload and data file sizes,
+workspace storage, webhooks per workspace) are in the same screen.
+
+### Failing webhooks
+
+A workspace's webhooks are at `/_/w/<workspace>/settings/webhooks`, for its
+admins. After three failed attempts in a row, a webhook shows "Failing since
+<time> · <last error>" (an HTTP status, a timeout or a network error), and its
+first success clears it. Each delivery is tried up to nine times, after 30
+seconds, 2 minutes, 10 minutes, 30 minutes, then 1, 3, 6 and 12 hours, about
+22 hours in all, and then it has failed for good. A receiver must answer within
+10 seconds with a 2xx.
+
+To look into one, `wrangler tail` with `--search "webhook delivery"` shows
+each attempt. Editing the URL resets the webhook's health. Roll secret gives a
+new secret at once; receivers that check the old one refuse every delivery
+until they have the new one.
+
+The sweep runs every five minutes and covers deliveries a lost Queue message
+left behind. If the Queue's consumer is missing (after a deploy that hit a
+Cloudflare 504), `bunx wrangler triggers deploy --config dist/server/wrangler.json`
+after a build of the deployed commit attaches it again.
+
+### Backups and restores with D1 Time Travel
+
+D1 keeps every change for 30 days on Workers Paid, and Time Travel restores the
+database to any minute in that window. `wrangler d1 export` does not work for
+this database, because the search index is an FTS5 virtual table.
+
+```sh
+bunx wrangler d1 time-travel info dossier-next-production --config wrangler.jsonc
+bunx wrangler d1 time-travel info dossier-next-production --timestamp=2026-10-12T09:00:00Z --config wrangler.jsonc
+bunx wrangler d1 time-travel restore dossier-next-production --timestamp=2026-10-12T09:00:00Z --config wrangler.jsonc
+```
+
+The restore prints a bookmark of the state before it; restoring to that
+bookmark (`--bookmark=<bookmark>`) undoes it. Before restoring:
+
+- R2 is not restored. A file's bytes stay in R2 until a purge removes them, so
+  restore to a point after the last purge run when you can. Rows that a
+  restore brings back for bytes a purge already removed cannot be opened.
+- Composed pages are cached for up to a day under the tree's sequence. After a
+  restore, a new push reuses sequence numbers, so a page may show an older
+  composition for up to a day.
+
+### Migrations
+
+A migration must work with both the running Worker and the new one, because
+the release applies it before the new code goes live. Add tables and nullable
+or defaulted columns, deploy code that uses them, and remove old shapes only in
+a later release once no deployed code reads them. Never edit a migration that
+has been applied anywhere.
+
+Generate one from the schema with `bun run --cwd apps/web db:generate`. Write
+triggers and FTS changes by hand with `bunx drizzle-kit generate --custom` from
+`apps/web`. drizzle-kit names its file after the journal's entry count, which
+is lower than the last number because numbers were skipped: rename the new file
+to the next free number and restore any snapshot it overwrote from git.
+
+### Rolling back code
+
+```sh
+bunx wrangler deployments list --config wrangler.jsonc
+bunx wrangler rollback <version-id> --config wrangler.jsonc --message "<why>"
+```
+
+A rollback changes only the code. D1 stays as it is, so roll back only to code
+that works with the current schema; after a migration that older code cannot
+read, fix forward instead. Older base layers are still in R2, so pages keep
+loading. The health check then shows the older SHA, and the next merge deploys
+forward again. Prefer a forward fix.
+
+### The Look and the privacy text
+
+Both are super admin settings and need no deploy.
+
+- `/_/admin/look` sets the name in the header, the logo, the palette, fonts and
+  radius of Dossier's own screens. Save refuses a Look whose text fails the
+  contrast checks. Reset returns to agent964's Look. Pages never receive the
+  Look.
+- `/_/admin`, Privacy page, replaces the generated text of `/_/privacy` (up to
+  20,000 characters). Reset, or saving it empty, returns to the generated text,
+  which names the deployment and what Dossier stores. Google's consent screen
+  links to this page, so keep it accurate.
+
+## 6. The dev environment
+
+### dossier-next-dev
+
+`dossier-next-dev` runs at `https://dossier-next-dev.tech964.workers.dev`, and
+its trees at `https://<tree-id>-dev.dossier-content.com`. Its D1 database, R2
+bucket and Queue are all `dossier-next-dev`. Its Google client is in Testing,
+so only its test users can sign in with Google. Its secrets are the same five
+names, with values of its own.
+
+Deploy the current checkout from the repository root:
+
+```sh
+bun run deploy:dev
+```
+
+That runs `apps/web`'s `deploy:dev`: `CLOUDFLARE_ENV=dev vite build`, the
+base-layer copy (`bun scripts/copy-base.ts --bucket dossier-next-dev --env dev`),
+`wrangler d1 migrations apply dossier-next-dev --remote --env dev`, and
+`wrangler deploy --env dev`. The base layer is copied before the deploy, so open
+pages keep their version.
+
+### A local Worker
+
+The local Worker serves the main host at `https://localhost:8787` and each tree
+at `https://<tree-id>.content.localhost:8787`, which every browser resolves to
+this machine.
+
+1. Trust mkcert's certificate authority once, then make the certificate at the
+   repository root:
 
    ```sh
-   cd /path/to/dossier
-   RELEASE_RUN_ID='replace-with-the-matching-run-id'
-   PURGE_RELEASE_SHA=$(gh run view "$RELEASE_RUN_ID" --repo agent964dev/dossier --json headSha --jq .headSha)
-   printf '%s\n' "$PURGE_RELEASE_SHA"
-   curl --fail-with-body --silent https://dossier.agent964.com/api/healthz
-   printf '\n'
-   dossier --version
-   dossier admin purge --help
+   brew install mkcert nss
+   mkcert -install
+   mkcert -key-file .certs/localhost-key.pem -cert-file .certs/localhost.pem localhost '*.content.localhost'
    ```
 
-   Confirm that the health `version` matches the full release commit that
-   `gh run view` returns.
-   That commit must be at or after the 0.2.0 merge (`2af0932`). Confirm that
-   `dossier --version` prints 0.2.0 or newer and the help synopsis lists
-   `--execute` and `--retention-days`. Report the release URL, Worker version ID,
-   expected and observed commits, CLI version, and help synopsis.
-
-   Prepare a separate worktree at that SHA for the migration check. Stop if any
-   command fails; do not reuse or modify an existing checkout. If this worktree
-   path already exists, choose a new unused path. This keeps local
-   Wrangler configuration and migration files aligned with the verified release.
+2. Copy `apps/web/.dev.vars.example` to `apps/web/.dev.vars` and fill in the
+   two secrets (`openssl rand -base64 32`), your email in `SUPER_ADMINS`, and,
+   to sign in with Google locally, a client whose redirect URI is
+   `https://localhost:8787/_/auth/callback/google`. `.dev.vars` sets
+   `PUBLIC_ORIGIN`, `CONTENT_HOST` and `DEPLOYMENT_NAME` over the dev values.
+3. Apply the migrations to local D1, from `apps/web`:
 
    ```sh
-   cd /path/to/dossier
-   git fetch origin "$PURGE_RELEASE_SHA"
-   PURGE_RELEASE_WORKTREE="$(pwd)/../dossier-purge-$PURGE_RELEASE_SHA"
-   git worktree add --detach "$PURGE_RELEASE_WORKTREE" "$PURGE_RELEASE_SHA"
-   cd "$PURGE_RELEASE_WORKTREE"
-   bun install --frozen-lockfile
+   bunx wrangler d1 migrations apply dossier-next-dev --local --env dev --config wrangler.jsonc
    ```
 
-   The `dossier` commands use the installed operator CLI whose version and help
-   were checked above; they do not load code from the current source directory.
-   Steps 3 and 5 read the existing bootstrap-key file in the original checkout.
-   Do not copy that secret into this worktree. Keep these shell variables for
-   the following migration check.
-
-2. **Confirm migration 0003 on the production database.**
-
-   Production migrations belong to the automatic release coordinator. Check the
-   successful release log for `0003_skinny_pet_avengers.sql` or the message that
-   no migrations remain. From that exact tested revision, list pending migrations
-   without changing production:
+4. Run the Worker from the repository root:
 
    ```sh
-   cd "$PURGE_RELEASE_WORKTREE/apps/web"
-   env -u CLOUDFLARE_ENV bunx --no-install wrangler d1 migrations list dossier-production --remote --config wrangler.jsonc
+   bun run --cwd apps/web dev:https
    ```
 
-   If migration 0003 is still pending, merge the compatible revision to `main`
-   and let the coordinator apply it before deploying the code. Do not apply it
-   through an independent terminal command. Record the release URL and migration
-   statuses before running a purge.
+`dev:https` builds with `CLOUDFLARE_ENV=dev`, writes
+`dist/server/wrangler.local.json` without routes
+(`apps/web/scripts/local-config.ts`; Wrangler would otherwise rewrite every
+local request to the first route's host), and runs `wrangler dev
+--local-protocol https`. Local state is kept in `apps/web/.wrangler/state`. The
+Queue runs locally; crons do not fire. The build copies `.dev.vars` into
+`dist/server/`, so rebuild after changing it. Restart `dev:https` after
+rebuilding `dist/` while it runs.
 
-3. **Run a dry run.**
+`bun run --cwd apps/web dev` (Vite's dev server) does not serve the base layer,
+so pages do not open there. Use `dev:https`.
 
-   ```sh
-   cd /path/to/dossier
-   BOOTSTRAP_API_KEY=$(tr -d '\r\n' < .prod-bootstrap-key.local) \
-     env -u DOSSIER_API_KEY -u DOSSIER_API_URL \
-     dossier admin purge --api-url https://dossier.agent964.com
-   ```
+The CLI talks to the local Worker once Node trusts mkcert's authority:
 
-   The command is a dry run unless you pass `--execute`. The server writes
-   nothing during a dry run. Add `--retention-days <n>` to preview a different
-   window, and `--json` for the raw report. When batches exist, report the cutoff
-   line, the table with one row per eligible batch, and the totals line. When
-   none exist, the command prints only
-   `No batch is past the retention window (cutoff <timestamp>).`. Report that
-   single line. The empty report has no table or totals line.
+```sh
+export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
+dossier login https://localhost:8787
+```
 
-4. **Review the report.**
+### People for checks: `scripts/dev-session.ts`
 
-   Read every root title in the report. Nobody can restore a purged batch. The
-   purge removes the R2 objects and the document and version rows, leaving only
-   the deletion batch row as an audit record. To keep a batch, restore it from
-   the trash page first, then repeat step 3.
+Checks that need a signed-in person use `apps/web/scripts/dev-session.ts`. From
+the repository root:
 
-5. **Execute.**
+```sh
+bun apps/web/scripts/dev-session.ts --email someone@example.com --name "Someone" --super-admin
+bun apps/web/scripts/dev-session.ts --email someone@example.com --remote
+```
 
-   ```sh
-   cd /path/to/dossier
-   BOOTSTRAP_API_KEY=$(tr -d '\r\n' < .prod-bootstrap-key.local) \
-     env -u DOSSIER_API_KEY -u DOSSIER_API_URL \
-     dossier admin purge --execute --api-url https://dossier.agent964.com
-   ```
+It writes, with `wrangler d1 execute`, a person, a stand-in Google account, a
+browser session and an agent key, and prints the session cookie
+(`__Secure-dossier.session_token=…`) and the `dsk_` key. `--super-admin` also
+makes the person a super admin.
 
-   When the command removes batches, confirm that it lists the reviewed
-   batches under `Purged:`. Report that line, the table, and the totals line.
-   If it finds no eligible batches, report its single no-batches line instead.
-   Repeat step 3 and confirm that it prints only
-   `No batch is past the retention window (cutoff <timestamp>).`. Report that
-   line, not a totals line. Repeat steps 3 to 5 whenever you want to empty the
-   trash. A monthly check is enough.
+- Without `--remote` it writes local D1 (`apps/web/.wrangler/state`) and signs
+  the cookie with `BETTER_AUTH_SECRET` from `apps/web/.dev.vars`.
+- With `--remote` it writes the `dossier-next-dev` database and signs with
+  `BETTER_AUTH_SECRET` from `.dev-next-secrets.local` at the repository root
+  (gitignored, one line `BETTER_AUTH_SECRET=…`).
 
-6. **Confirm that the deployment runs the weekly cron.**
-
-   The top level of `apps/web/wrangler.jsonc` carries
-   `"triggers": { "crons": ["17 3 * * SUN"] }` beside `"routes"`. The `env.dev`
-   block has the same schedule. Deploying production registers it.
-
-   Merge the trigger change to `main` and inspect the automatic release output.
-
-   Confirm that Wrangler reports the schedule `17 3 * * SUN` for the deployed
-   version. Report the deployed version ID and the schedule line.
-
-   To pause the schedule, set the top-level trigger to an explicit empty list
-   and deploy. Leaving `triggers` out of the file does not clear a schedule
-   that the deployment already runs.
-
-   ```jsonc
-   "triggers": { "crons": [] },
-   ```
-
-   Restore the cron expression and deploy to resume. The admin command keeps
-   working either way.
+It refuses every other target: the database name is fixed to
+`dossier-next-dev`, and it never touches production. It is not part of the
+Worker's build and adds no route. Set the cookie in a browser for the main host
+(secure, HTTP only, SameSite Lax), or use the key with
+`DOSSIER_DEPLOYMENT` and `DOSSIER_KEY`. Revoke keys in `/_/settings` when the
+check is done.

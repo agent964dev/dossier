@@ -1,413 +1,570 @@
 # Dossier CLI
 
-> This describes Dossier before Dossier next. It is rewritten for Dossier next before launch.
+`@agent964/dossier` is the command line for Dossier. It signs a person in to a
+deployment, keeps one agent key per deployment, and pushes, pulls, reads,
+watches, moves, removes, restores, compares, shares, searches and exports the
+nodes of trees. People and coding agents use the same verbs.
 
-`@agent964/dossier` publishes, reads, compares, and manages documents on a Dossier deployment. The `dossier` executable is ESM and supports Node.js 22.12 or newer and Bun.
+`dossier --agent-info` prints the guide agents read: every verb with its usage
+and flags, the exit codes, and the conventions for writing pages. This file is
+the reference for people.
 
 ## Install
 
+The CLI needs Node.js 22.12 or newer.
+
 ```sh
-npm install --global @agent964/dossier
+npm i -g @agent964/dossier
+dossier --version
 dossier --help
 ```
 
-## Global flags
+Bun, pnpm and Yarn global installs work too. `dossier update` keeps whichever
+one installed it up to date.
 
-The Dossier origin and output flags work before or after a subcommand, including nested subcommands.
+## Deployments, keys and environment
 
-| Flag                    | Meaning                                                                                       |
-| ----------------------- | --------------------------------------------------------------------------------------------- |
-| `--api-url <url>`       | Use this Dossier origin. The CLI requires HTTPS except for loopback development URLs.         |
-| `--json`                | Print exactly one JSON value on stdout. Errors still print as `dossier: <message>` on stderr. |
-| `-q`, `--quiet`         | Suppress normal output. `upload` and `assets push` print only the resulting URL.              |
-| `-h`, `--help`          | Show help for the selected command.                                                           |
-| `--version`             | Show the version from the installed package.json.                                             |
-| `--completions <shell>` | Generate a shell completion script for sh, bash, fish, or zsh.                                |
-| `--log-level <level>`   | Set Effect CLI logging verbosity to all, trace, debug, info, warning, error, fatal, or none.  |
-| `--wizard`              | Start Effect CLI's interactive command wizard.                                                |
+A deployment is one running Dossier at its own address, such as
+`dossier.agent964.com`. The CLI talks to one deployment per command and sends
+an agent key only to the deployment it belongs to.
 
-These examples place global flags before and after subcommands.
+The deployment a command uses is, in order:
 
-```sh
-dossier --json whoami
-dossier whoami --json
-dossier assets --api-url https://dossier.example list
+1. the deployment of a link given on the command line,
+2. `DOSSIER_DEPLOYMENT`,
+3. the deployment of the latest `dossier login`,
+4. `dossier.agent964.com`.
+
+A deployment is named by its host (`dossier.example.com`), its `https://`
+origin, or any link into it. Every deployment is reached over HTTPS. Only a
+loopback deployment (`localhost`, `*.localhost`, `127.x.x.x`, `[::1]`) may use
+`http://`, and it keeps its port.
+
+### The config file
+
+`dossier login` saves the key in `$XDG_CONFIG_HOME/dossier/config.json`, or
+`~/.config/dossier/config.json` when `XDG_CONFIG_HOME` is not set. The folder
+is mode 0700 and the file 0600. Each change is written to a temporary file,
+synced and renamed into place, under a lock file beside it, so two dossier
+processes never interleave their writes.
+
+```json
+{
+  "version": 1,
+  "default": "dossier.agent964.com",
+  "deployments": {
+    "dossier.agent964.com": {
+      "key": "dsk_…",
+      "keyName": "cli on m4",
+      "person": "sara@acme.com",
+      "savedAt": "2026-10-12T09:14:03.000Z"
+    }
+  }
+}
 ```
 
-### Configuration precedence
+`default` is the deployment of the latest login. A file the CLI cannot read
+fails every command with a message that names it; repair it, or remove it and
+log in again.
 
-The CLI selects the API origin in this order.
+`heads.json` sits beside `config.json`. It records, per deployment, tree, path
+and local folder, the push each folder last pulled or pushed. `dossier push`
+uses it to notice that someone else pushed in between.
 
-1. Use `--api-url` when present.
-2. Otherwise, use `DOSSIER_API_URL` when present.
-3. Otherwise, read `apiUrl` from `$DOSSIER_HOME/config.json`.
-4. Otherwise, use `https://dossier.agent964.com`.
+### Environment variables
 
-The CLI selects the API key in this order.
+| Variable                      | Effect                                                                                                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DOSSIER_DEPLOYMENT`          | The deployment to use when the command line names none.                                                                                              |
+| `DOSSIER_KEY`                 | An agent key for `DOSSIER_DEPLOYMENT`. Used instead of the saved key for that deployment only. Set without `DOSSIER_DEPLOYMENT`, every verb exits 2. |
+| `DOSSIER_JSON`                | `1`, `true` or `yes` makes every verb print JSON, as `--json` does.                                                                                  |
+| `DOSSIER_UPDATE_REGISTRY_URL` | The npm registry `dossier update` reads. Defaults to `https://registry.npmjs.org`.                                                                   |
+| `XDG_CONFIG_HOME`             | Where the config file lives.                                                                                                                         |
 
-1. Use `DOSSIER_API_KEY` when present.
-2. Otherwise, read the key for the API origin from `$DOSSIER_HOME/credentials.json`.
-
-`DOSSIER_HOME` defaults to `~/.dossier`. The CLI creates the directory with mode `0700` and writes credentials, config, document mappings, temporary files, and lock files atomically with private permissions. The CLI never sends credentials across origins or redirects.
-
-## Document references
-
-Every `<id>` argument accepts these forms.
-
-- Use a 12-character lowercase Dossier ID, such as `7k2m9x1qz3ab`.
-- Pin a version with an ID such as `7k2m9x1qz3ab@4`.
-- Use a canonical document URL on the configured origin, such as `https://dossier.agent964.com/d/7k2m9x1qz3ab`.
-- Pin a version with a canonical URL such as `https://dossier.agent964.com/d/7k2m9x1qz3ab/v/4`.
-
-A URL from another origin is a usage error. `fetch` uses a pinned version. `diff` treats a pinned version as `--to`. Commands that act on the document itself accept pinned references and use their document ID.
-
-## Authentication
-
-### `dossier auth login`
-
-`auth login` opens `<configured-origin>/cli/auth` in the default browser, prompts for a pasted key, verifies it, and stores it for that origin. It requires an interactive terminal and does not support `--json` or `--quiet`.
+To act with a key made in a deployment's settings, for example in CI:
 
 ```sh
-dossier auth login
-dossier --api-url https://dossier.example auth login
+export DOSSIER_DEPLOYMENT=dossier.example.com
+export DOSSIER_KEY=dsk_…
+dossier whoami
 ```
 
-### `dossier auth set [key]`
+### Agent keys
 
-`auth set` stores a key without opening a browser. When you omit `[key]`, the command reads the key from stdin. Scripts should pipe the key this way because it keeps the key out of shell history.
+An agent key starts with `dsk_`. It acts as its person and can be limited to
+one tree or node, and to read only. `dossier login` makes a key with no limit,
+named after the machine (`cli on m4`). Keys made in settings can carry limits.
+A command outside a key's reach answers as if the node did not exist (exit 3),
+and a write with a read-only key exits 3 with "You can open this but not change
+it."
+
+### Protocol and timeouts
+
+Every request carries `Dossier-Protocol: 1`. A deployment that speaks another
+protocol answers `protocol_mismatch`, and the CLI exits 1 with "Update the CLI
+with dossier update." Each request has 30 seconds. The CLI never follows a
+redirect from the API; it reports it and names the host to use.
+
+## Links and paths
+
+Every node has a link:
+
+```text
+https://<deployment>/<workspace>/<tree>/<path>
+```
+
+- `plan.html` opens at `…/plan`.
+- `questions/index.html` opens at `…/questions/`.
+- A folder without `index.html` opens at `…/<folder>/` as its listing.
+- Any other file keeps its exact path: `…/clip.mp4`.
+
+Workspace and tree names are 1 to 63 lowercase letters, digits and hyphens, not
+starting with a hyphen. `api` and `cli` are not workspace names.
+
+Verbs take a target in one of two forms:
+
+- `workspace/tree/path` on the current deployment, such as
+  `agent964/acme/plans/q3.html`. `workspace/tree` and `workspace/tree/` name
+  the tree's root.
+- A link, such as `https://dossier.agent964.com/agent964/acme/plans/q3`. A
+  link names its own deployment, so the CLI uses that deployment and its key.
+
+A trailing slash names a folder. `agent964/acme/open/` is the folder `open`;
+`agent964/acme/open` is the page `open.html` when one exists, else the folder.
+Paths are inside the tree: nothing reaches above its root.
+
+## Verbs
+
+The verbs below are listed in the order `dossier --help` lists them. Every verb
+takes `--json`.
+
+### `dossier login`
 
 ```sh
-printf '%s\n' "$DOSSIER_KEY" | dossier auth set
-dossier --api-url https://dossier.example auth set ds_example
+dossier login [--json] [<deployment>]
 ```
 
-When you supply `--api-url`, the CLI also saves that origin in `config.json`.
+Signs in through the browser and saves an agent key for the deployment.
+`<deployment>` is a host or a link into the deployment; without it, the
+deployment comes from the rules above.
 
-### `dossier auth logout`
+The CLI prints a link and a code such as `WDJB-MJHT`, and opens the link in the
+browser when the link is on that deployment. Sign in with Google there, check
+that the code matches, and press Allow. The CLI then saves the new key, and the
+deployment becomes the default for later commands. A code that expires before
+it is approved is replaced once with a new one.
 
-`auth logout` removes the stored key for the configured origin.
+```text
+Signed in to dossier.agent964.com as sara@acme.com. The key "cli on m4" is saved.
+```
+
+`--json` prints `{ "deployment", "person", "key": { "name" } }`.
+
+### `dossier logout`
+
+```sh
+dossier logout [--json]
+```
+
+Revokes the agent key this CLI uses on the current deployment and removes it
+from the config file. A saved key the deployment already revoked is still
+removed. A key from `DOSSIER_KEY` is revoked on the deployment; there is
+nothing to remove locally.
+
+`--json` prints `{ "deployment", "key": { "name" }, "revoked", "removedFromConfig" }`.
 
 ### `dossier whoami`
 
-`whoami` prints the current account, workspace, role, and API-key identity.
-
-## Documents
-
-### `dossier upload <file>`
-
-`upload` validates and uploads one complete HTML document.
-
-```text
-dossier upload <file>
-  [--parent <id|root>]
-  [--kind <kind>]
-  [--visibility public|team|private|inherit]
-  [--share <email,email>]
-  [--description <text>]
-  [--new | --doc <id>]
-  [--stateful]
-  [--accept-state-changes]
+```sh
+dossier whoami [--json]
 ```
 
-The CLI records successful uploads by configured origin, account, and absolute file path. Uploading the same path again updates that document. Omitted metadata flags leave existing values unchanged.
-
-- `--new` creates a distinct document and replaces the local path mapping.
-- `--doc <id>` explicitly updates a document.
-- `--parent root` creates at the root. Another reference creates beneath that document.
-- Re-upload cannot move a document. To choose a different parent, use `dossier move`.
-- `--visibility inherit` stores no explicit boundary.
-- `--share` is a comma-separated initial share list.
-- `--description` sets the document description.
-- `--stateful` enables one shared set of saved values for controls marked with `data-state`. Dossier keeps saved values enabled on later uploads without the flag.
-- `--accept-state-changes` confirms a change that would retype or orphan a saved field. Dossier resets retyped values to their new defaults and keeps values for removed fields.
-
-Human output includes Created/Updated, URL, Raw, Hub, ID, Version, Parent, and Visibility. A saved-values document also prints `State: enabled, one shared set of saved values` and `Last saved: <time|never>`. An accepted retype prints a `Reset saved values:` line followed by one indented `- <name>` line per reset field. `--json` returns the document DTO plus `versionNumber`, `created`, `warnings`, and `resetStateFields`. The document DTO includes `stateful`, `stateRevision`, and `stateUpdatedAt`. Quiet output remains the document URL alone.
-
-A normal re-upload keeps saved values, grants, and the active edit link. `--new` starts a separate document with authored defaults and no copied grant or link. A field keeps its saved value when its `data-state` name and type stay the same. A removed field keeps its saved value. Adding that name back with the same type restores the value.
-
-Before a `--stateful` upload, the CLI reads `/api/healthz` and requires `features` to contain `state`. It performs the same check for a locally mapped saved-values document, every `dossier state` operation, and `dossier share --edit-state`. A target without the feature fails before the CLI sends a saved-values request and prints this line.
+Shows the person, the deployment and the agent key this CLI acts with:
 
 ```text
-dossier: This Dossier deployment does not support saved values. Update the deployment.
+sara@acme.com on dossier.agent964.com (key "cli on m4")
 ```
 
-### `dossier fetch <id-or-url>`
+`--json` prints `{ "person", "deployment", "key" }`, where `key` holds the
+key's `id`, `name`, `scope` (the node it is limited to, as
+`workspace/tree/path`, or null) and `readOnly`. Without a key, `whoami` exits 4
+and names the `dossier login` command to run.
 
-```text
-dossier fetch <id-or-url> [--version <n>] [-o, --output <file>]
-```
-
-`fetch` writes the exact stored bytes to stdout or to a file. A version in the reference must agree with `--version`. With `--json` and no output file, the CLI returns content as `contentBase64`.
+### `dossier update`
 
 ```sh
-dossier fetch 7k2m9x1qz3ab@4 -o /tmp/document.html
-dossier fetch https://dossier.agent964.com/d/7k2m9x1qz3ab --version 2
+dossier update [--check] [--json]
 ```
 
-### `dossier diff <id>`
+Reads the latest version of `@agent964/dossier` from npm and installs it with
+the package manager that installed the CLI: `npm install -g`, `bun add -g`,
+`pnpm add -g` or `yarn global add`, always of the exact version it read.
+`--check` only reports.
 
-```text
-dossier diff <id> [--from <n>] [--to <n>] [--text]
-```
+- A CLI run through `npx` or `bunx` names the command to run instead.
+- A CLI run from a checkout of the repository says to update the checkout.
+- On Windows, `update` names the `npm install -g` command to run with elevated
+  rights.
 
-`diff` requests `GET /api/documents/:id/diff` and prints a standard unified diff. The default comparison is the previous version against the latest. `--text` compares visible normalized text rather than HTML source. A pinned reference supplies `--to`. An explicit `--to` that disagrees with the pin is a usage error.
+`update` talks only to npm, never to a deployment, so it works against any
+deployment, including one that runs an older protocol.
 
-File headers are `--- a/<id>@<from>` and `+++ b/<id>@<to>`. The CLI colors additions and deletions only when stdout is a TTY and `NO_COLOR` is unset. A successful comparison exits `0` even when changes exist. `--json` prints the server's complete diff response. If the server returns `413 diff_too_large`, fetch the two versions and compare them locally.
+`--json` prints `{ "ok", "currentVersion", "latestVersion", "installMethod", "updateAvailable", "checked", "updated" }`.
 
-### `dossier list`
-
-```text
-dossier list [--all] [--tree] [--parent <id|root>] [--trash]
-```
-
-`list` lists the current account's documents. `--all` includes every readable document. `--tree` prints a nested readable forest. `--parent` focuses the list on one parent. `--trash` lists archived documents and rejects the other list filters. `dossier trash` is the batch-oriented human view.
-
-### `dossier tree <id>`
-
-`tree` prints the readable breadcrumb, siblings, and children for one document. It omits unreadable structure.
-
-### `dossier move <id> --parent <id|root>`
-
-`move` moves a document and its subtree without changing authorship.
-
-### `dossier visibility <id> <level>`
-
-`<level>` is `public`, `team`, `private`, or `inherit`.
-
-### `dossier share <id>`
-
-```text
-dossier share <id>
-  [--add <email,email>]
-  [--remove <email,email>]
-  [--edit-state]
-```
-
-Without `--add` or `--remove`, the command reads the current view shares and saved-values grants. `--add` grants view access. `--add --edit-state` grants view and save access to the named verified email on this document. `--remove --edit-state` removes save access but keeps view access. On a deployment with saved values, `--remove` removes both the view share and any saved-values grant for that email.
-
-`share`, `share --add`, and `share --remove` keep working on a deployment that predates saved values. Such a deployment omits `grants` from the response, and the CLI treats the missing field as an empty list and prints view-only permissions. On that deployment a plain `--remove` sends only the view-share removal, because its API rejects the grant fields. A current deployment that has saved values switched off still receives the grant removal.
-
-A saved-values grant does not grant permission to publish, replace HTML, change sharing, or reach another document. The CLI uses the server's atomic delta endpoint and never performs a GET-then-PUT replacement.
-
-Human output prints Configured, Effective, Permissions, and Access source. Each permission line says `view` or `view and save`. `--json` returns `configured`, `effective`, `accessSource`, and `grants`, where each grant contains `email` and `canSave`. Quiet mode prints nothing.
-
-## Saved values
-
-Dossier stores one shared set of values for each saved-values document. A collaborator changes values in the first-party wrapper and chooses Save. Other visitors see the latest saved values after they reload the document. Dossier does not create a submission per visitor, save arbitrary page changes automatically, or provide live co-editing.
-
-The CLI uses its normal Bearer API key for every command in this section. Anonymous edit links work only in the browser.
-
-### `dossier state get <id>`
+### `dossier push`
 
 ```sh
-dossier state get <id>
-dossier state get <id> --json
-dossier state get <id> --quiet
+dossier push [-m, --message <text>] [--dry-run] [--force] [--share <target>:<role>]... [--json] <dir> <target>
 ```
 
-Anyone who can read the document can read its saved values. Human output prints the value object, the shared revision, and the last saved time.
+Publishes a local folder to a node of a tree, all at once. After the push, the
+target path holds exactly the folder's files: files the folder no longer has
+are removed there. Either the whole push lands or none of it.
+
+| Flag                      | Effect                                                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-m`, `--message <text>`  | A note on what the push changes, at most 500 characters.                                                                                                |
+| `--dry-run`               | Checks the folder and prints what would change. Publishes nothing.                                                                                      |
+| `--force`                 | Pushes even if someone pushed to the path since this folder last pulled or pushed.                                                                      |
+| `--share <target>:<role>` | Shares the pushed node as the push commits. Repeat for more: `--share sara@acme.com:respond --share anyone:read`. Targets and roles as `dossier share`. |
+
+What is pushed:
+
+- Every file under `<dir>`, except `.git`, `node_modules` and `.DS_Store` at
+  any depth, the `.dossierignore` file, and what `.dossierignore` lists in
+  gitignore syntax.
+- Files under a data folder at the target are never pushed over. They print as
+  `ignored`; a push leaves people's data alone.
+
+Before anything is uploaded, the CLI checks the folder with the same rules the
+deployment uses: page and path rules, forms, layouts and components. A rule a
+push breaks exits 6 with the file, line and fix. Things worth knowing that do
+not stop a push, such as a component tag with no `_components/<tag>.js` above
+it, print as warnings.
+
+A member's first push to a tree name the workspace does not have creates the
+tree. A push into an existing path exits 5 if someone pushed there since this
+folder last pulled or pushed; pull first, or push again with `--force`.
 
 ```text
-Values:
+added    plans/q3.html
+changed  plan.html
+deleted  old.html
+warning  plan.html uses <acme-card>, but no _components/acme-card.js is above it.
+https://dossier.agent964.com/agent964/acme/  (push 12)
+```
+
+A push with nothing to change prints `No changes.` and the link, and gives no
+shares. `--json` prints `{ "push", "link", "added", "changed", "deleted", "ignored", "warnings", "dryRun" }`;
+`push` is null for a dry run.
+
+### `dossier pull`
+
+```sh
+dossier pull [--json] <target> <dir>
+```
+
+Copies a node of a tree into a local folder: every file you can read at or
+below it, `_` files included. Data files people wrote through forms are written
+read-only (mode 0444). The CLI records the push it pulled, so a later
+`dossier push` from that folder knows its base.
+
+Pull refuses to write through a symbolic link on the way to any file, and
+writes each file to a temporary file before renaming it into place.
+
+```text
+pulled   plan.html
+pulled   questions/index.html
+Pulled 2 files into ./acme at push 12.
+```
+
+### `dossier rm`
+
+```sh
+dossier rm [--json] <path>
+```
+
+Deletes a file, a folder or a whole tree. Give the tree's root as
+`workspace/tree/` to delete the tree. Write holders only.
+
+Nothing is lost at once. The deleted node stays in history and can be restored
+within the retention period (30 days unless the deployment sets another).
+`rm` prints the command that restores it:
+
+```text
+Deleted agent964/acme/plan.html. Restore it with `dossier restore agent964/acme/plan.html --to 2026-10-12T09:14:02.999Z` within 30 days.
+```
+
+Deleting a comment file blanks the comment. Exits 3 on a node you cannot
+delete, 5 when it changed while deleting.
+
+### `dossier mv`
+
+```sh
+dossier mv [--json] <from> <to>
+```
+
+Moves or renames a file or a folder within its tree, or moves a whole tree to
+another workspace or name:
+
+```sh
+dossier mv agent964/acme/plan.html agent964/acme/plans/plan.html
+dossier mv agent964/acme studio/acme
+```
+
+A move changes paths, never identities. Shares, comments, data and history go
+with the node, and its old link keeps working. Relative links in pages that
+point into or out of it are rewritten, and the output says how many files
+changed. A page's `<page>.comments/` folder moves with it.
+
+Moving a tree to another workspace ends its team shares, because teams belong
+to their workspace. `mv` names each one. Exits 3 on a node you cannot move, 5
+when its new path is taken, 6 on a move a rule refuses.
+
+### `dossier share`
+
+```sh
+dossier share [--remove] [--json] <path> [<target>] [<role>]
+```
+
+Lists a node's shares, gives a target a role on it, or takes a share away.
+
+```sh
+dossier share agent964/acme/questions/                         # list
+dossier share agent964/acme/questions/ sara@acme.com respond
+dossier share agent964/acme/questions/ team:Design read
+dossier share agent964/acme/ workspace write
+dossier share agent964/acme/brief.html anyone read
+dossier share agent964/acme/questions/ sara@acme.com --remove
+```
+
+Targets: an email, `team:<name>`, `workspace`, or `anyone`. Roles: `read`
+(open it), `respond` (open it and answer its forms), `write` (push, share, and
+see every answer). Roles add up across shares, and a share on a folder covers
+everything inside it.
+
+`anyone` makes the node public: anyone with the link opens it without signing
+in, along with the files its pages need. Answering a form still asks them to
+sign in with Google. Exits 3 on a node you cannot share, 6 on a target or role
+that is not one.
+
+### `dossier ls`
+
+```sh
+dossier ls [--json] <target>
+```
+
+Lists what a folder holds: pages, folders, attachments, `_` files as the kit,
+and data. Each row gives the name (a folder ends in `/`), its kind, its size and
+the push that last changed it. An empty folder prints `Nothing here yet.`
+
+### `dossier read`
+
+```sh
+dossier read [--json] <target>
+```
+
+Prints what the link gives an agent, byte for byte:
+
+- A page: its agent version. That is its companion if it has one (the file its
+  `<link rel="alternate">` names, or the same-name `.md`), else Markdown made
+  from the page, ending with a line that says where its data and comments are.
+- A folder (`…/questions/`): what it holds and, for write holders, the kit at
+  that point: each layout, theme and component, closest first.
+- A data folder (`…/answers/`): each file with who wrote it, when, and the push
+  they saw.
+- A comments folder (`…/plan.comments/`): the threads.
+
+An empty folder prints `Nothing here yet.` `--json` holds the text and, for a
+page, the pointer to its data and comments as a field.
+
+### `dossier export`
+
+```sh
+dossier export [-o, --output <file>] [--json] <link>
+```
+
+Saves a page as one HTML file that opens offline: its layouts, theme,
+components, images, fonts and the base libraries it uses are inlined, with a
+snapshot of the data you can read (the page's form targets, its comments, and
+data files under the page's folder).
+
+The file is `./<name>.html` by default: a page's name, an `index.html`'s folder
+name, or the tree's name for the root. `-o` names the file, or a folder to
+write it into under that name. The CLI writes a temporary
+`.dossier-export-<uuid>.tmp` beside it and renames it when complete.
+
+Forms and page code work in the file, but what they save stays in that browser.
+A file past 50 MiB keeps its largest media as links to the deployment until it
+fits; the CLI lists them under `Linked, not included:`. `--json` prints
+`{ "file", "bytes", "linked" }`.
+
+### `dossier search`
+
+```sh
+dossier search [--offset <n>] [--json] <words>...
+dossier search in [--offset <n>] [--json] <words>...
+```
+
+Finds what you can open on the current deployment, across every workspace and
+tree.
+
+- `dossier search <words>` looks in titles and paths, and finds pages,
+  folders and files.
+- `dossier search in <words>` looks in the contents of pages and in their
+  companions (for anyone who can read the companion), and finds pages. Each
+  result shows the words around the match on the next line.
+
+People's answers and other data are never searched. Accents and Arabic marks
+are ignored. A search is at most 200 characters.
+
+```text
+Warehouse layout  https://dossier.agent964.com/agent964/acme/mockups/warehouse
+  … moves pallets from the depot to the …
+More results: dossier search in depot --offset 20
+```
+
+Results come 20 a page. `--offset` starts at a later result, as the last line
+gives it, from 0 to 180. When nothing matches, `search` prints
+`No pages match "<words>".` and exits 0.
+
+`--json` prints `{ "query", "mode", "results", "next" }`. `mode` is `titles`
+or `content`. Each result is `{ "kind", "title", "workspace", "tree", "path", "link", "snippet" }`,
+where `kind` is `page`, `folder` or `attachment`, and `snippet` (content mode
+only) is a list of `{ "text", "match" }` parts. `next` is the offset of the
+next page, or null on the last.
+
+### `dossier watch`
+
+```sh
+dossier watch [--next] [--json] <target>
+```
+
+Prints each change to a tree, folder or file as it happens, one line each:
+when, the event, its path and who. Events are `push`, `delete`, `restore`,
+`move`, `submission`, `entry`, `withdrawal`, `data_write`, `comment`,
+`mention` and `share`. A folder path ends in `/`.
+
+`watch` runs until Ctrl-C. `--next` prints the first event and exits 0, so an
+agent can wait for the next submission and then `dossier read` the folder.
+`--json` prints one JSON object per line: the event (`cursor`, `type`, `path`,
+`at`, `by`, `push`) and its `link`.
+
+You see only events on nodes you can read. `watch` keeps a live connection and
+reads the events after the last one it printed at each hint. When the
+connection drops, it polls every 10 seconds and opens the connection again
+after 1, 2, 4 and up to 60 seconds, so no event is skipped.
+
+### `dossier log`
+
+```sh
+dossier log [--cursor <text>] [--json] <path>
+```
+
+Lists a folder's or a file's history, newest first: pushes, deletions,
+restores, moves and withdrawals, 50 lines a page, times in UTC. The last line
+names the `--cursor` for the next, older page. Write holders only; anyone else
+gets exit 3.
+
+### `dossier diff`
+
+```sh
+dossier diff [--json] <path> [<from>] [<to>]
+```
+
+Prints a unified diff, byte for byte.
+
+```sh
+dossier diff agent964/acme/plan.html          # its last change
+dossier diff agent964/acme/plan.html 11       # push 11 against now
+dossier diff agent964/acme/plan.html 11 12    # push 11 against push 12
+dossier diff agent964/acme/questions/         # the folder's latest push
+```
+
+A binary file, or one too large to show, gets a sentence instead. Exits 3 on a
+node whose history you cannot read, 6 on a push number that is not one.
+
+### `dossier restore`
+
+```sh
+dossier restore --to <push|time> [--json] <path>
+```
+
+Brings a file or a folder, deleted or not, back to how it was just after a
+push, or at a time, and prints the files that changed. `--to` takes a push
+number from `dossier log` or an ISO 8601 time such as `2026-10-11T09:30:00Z`.
+
+```sh
+dossier restore agent964/acme/plan.html --to 12
+dossier restore agent964/acme/questions/ --to 2026-10-11T09:30:00Z
+```
+
+A restored folder matches that point: files made since are deleted, and data
+written since stays. Exits 3 on a node you cannot restore or past the
+retention period, 5 when a newer node holds its path (move it first), 6 on a
+point it did not exist at.
+
+## `--json`
+
+Every verb takes `--json`, before or after the verb, and then prints one JSON
+value on stdout. `DOSSIER_JSON=1` does the same for every command. Progress a
+person would read goes to stderr under `--json`, so stdout stays one value.
+`dossier watch --json` is the one exception: it prints one value per line, one
+per event.
+
+## Exit codes and the error JSON
+
+| Code | Meaning                      |
+| ---- | ---------------------------- |
+| 0    | success                      |
+| 1    | failure                      |
+| 2    | usage                        |
+| 3    | not found or no access       |
+| 4    | not signed in or key refused |
+| 5    | conflict                     |
+| 6    | refused by a rule or a limit |
+
+Not found and no access are the same answer, exit 3, so a path you cannot read
+looks like one that does not exist.
+
+Some of the deployment's error codes and their exits:
+
+| Error code                                                                                         | Exit |
+| -------------------------------------------------------------------------------------------------- | ---- |
+| `not_found`, `forbidden`                                                                           | 3    |
+| `sign_in_required`, `device_expired`, `access_denied`                                              | 4    |
+| `conflict`, `stale_head`, `form_changed`, `blob_reclaiming`                                        | 5    |
+| `invalid`, `policy_rejected`, `too_large`, `closed`, `rate_limited`, `not_mergeable`, `last_admin` | 6    |
+| `unavailable`, `protocol_mismatch`                                                                 | 1    |
+
+In text, a failure prints `dossier: <message>` on stderr, then the fix on the
+next line when there is one. Under `--json` it prints one value on stdout:
+
+```json
 {
-  "objective": "Launch the new website",
-  "approved": true
+  "error": {
+    "code": 3,
+    "message": "Nothing is here, or you cannot open it.",
+    "fix": "Check the path, or ask someone who can open it to share it with you.",
+    "path": "plan.html"
+  }
 }
-Revision: 7
-Last saved: 2026-09-14T07:42:00Z
 ```
 
-Before the first save, revision is `0`, the last saved time is `never`, and authored defaults fill the value object. False, zero, null, and empty values remain present. Saved values for fields removed from the current HTML also remain present.
+`code` is the exit code. `fix` says what to do, and `path` names the file or
+field the failure is about. Both may be null.
 
-`--json` prints one `StateResponse` value with `documentId`, `version`, `revision`, `updatedAt`, `data`, and `fields`. Each entry in `fields` contains `value`, `revision`, and `type`. Quiet mode prints nothing.
-
-### `dossier state set <id>`
-
-```text
-dossier state set <id> --data <values.json> [--revision <n>]
-```
-
-The JSON file must contain one object that maps saved-value names to values. The command changes only the names present in that object. The caller must manage the document or hold a signed-in saved-values grant.
-
-With `--revision`, the CLI sends that number as the baseline for every supplied field. Pass the revision from the earlier `state get` that informed the changes. Without `--revision`, the CLI reads the current state first and uses each field revision from that read. This read-first mode detects saves that race with the command itself. It does not protect work prepared from an earlier read. The CLI has no force-write mode.
-
-Human output prints the new revision and last saved time. `--json` prints the complete saved `StateResponse`. Quiet mode prints the new revision as one line.
-
-### `dossier state link`
-
-A document manager can issue one active anonymous edit link for a saved-values document. Anyone who holds the complete link can read and save the document's values and can forward the link. The link does not grant permission to publish, change sharing, or use the CLI. Revocation stops link access without changing signed-in grants.
-
-#### `dossier state link create <id>`
+## `--agent-info`
 
 ```sh
-dossier state link create <id>
+dossier --agent-info
+dossier --agent-info --json
 ```
 
-Create returns the active link when one already exists. Otherwise, it creates a link. Human output prints the warning and then the URL.
-
-```text
-Anyone with this link can read and change the saved values and can forward it.
-https://dossier.example/d/abcdefghijkl/edit#<token>
-```
-
-`--json` returns `documentId`, `active: true`, and `editUrl`. Quiet mode prints only the URL.
-
-#### `dossier state link get <id>`
-
-```sh
-dossier state link get <id>
-```
-
-Human output prints the active URL or `No active edit link`. `--json` returns `documentId`, `active`, and `editUrl`. An absent link has `active: false` and `editUrl: null`. Quiet mode prints the URL when a link exists and prints nothing when none exists.
-
-#### `dossier state link revoke <id>`
-
-```sh
-dossier state link revoke <id>
-```
-
-Human output prints `Edit link revoked` or `No edit link to revoke`. `--json` returns `documentId` and `revoked`. Quiet mode prints nothing. A later create operation issues a link with a new generation.
-
-### Archive and serving commands
-
-```sh
-dossier delete <id> [--force]
-dossier trash
-dossier restore <id> [--batch <batch-id>]
-dossier disable <id>
-dossier enable <id>
-```
-
-`delete` never prompts. A subtree requires `--force`. Without it, the error reports descendant and author impact. `trash` groups archived documents by deletion batch. `restore` discovers the document's batch when you omit `--batch`. `disable` and `enable` affect serving for one node.
-
-## Maintenance
-
-### `dossier update [--check]`
-
-`update` checks the npm registry and updates a globally installed CLI with the package
-manager that installed it. Supported global installs are npm, Bun, pnpm, and
-Yarn classic. The command never downgrades a locally newer version.
-
-```sh
-dossier update --check
-dossier update
-dossier update --json
-dossier update -q
-```
-
-`--check` reports availability without installing and exits `0` whether or not
-an update exists. `--json` emits one result object on stdout and routes
-installer output to stderr. Quiet mode prints nothing unless an update runs or
-an error occurs. The command refuses automatic updates for npx, bunx, source checkouts,
-unknown installations, and Windows. The error gives a manual command where
-applicable.
-Permission errors show the exact command to rerun with elevated rights and never
-invoke `sudo` automatically.
-
-`DOSSIER_UPDATE_REGISTRY_URL` overrides the npm registry origin. It exists only
-for automated testing. Normal usage leaves it unset.
-
-## Shared assets
-
-### `dossier assets push <file> [--slug <slug>]`
-
-`assets push` uploads `.css` or `.woff2`. The CLI checks CSS locally before authentication. The server policy remains authoritative. A slug must be at most 64 lowercase letters, digits, or hyphens and defaults to the filename stem. Human output includes both the latest and pinned version URLs.
-
-### `dossier assets list`
-
-`assets list` lists active assets and their latest and pinned URLs.
-
-### `dossier assets delete <slug>`
-
-`assets delete` stops serving the latest URL. Pinned asset versions continue to serve.
-
-## Workspace administration
-
-Workspace commands require an admin key.
-
-```sh
-dossier workspace
-dossier workspace members
-dossier workspace allow <email|@domain> [--role admin|member]
-dossier workspace disallow <email|@domain>
-dossier workspace promote <email>
-dossier workspace remove <email>
-```
-
-`workspace` prints members and the sign-in allowlist. `workspace members` prints only members. `allow` defaults to role `member`. Removing an allowlist entry prevents future sign-ins but does not remove an existing membership. `promote` and `remove` resolve the current member by verified email before calling the account-ID API.
-
-## Deployment setup
-
-`dossier setup` is for deployment operators, not routine client configuration. It calls the deployed Worker's protected `POST /api/setup` endpoint. Supply the bootstrap secret through `BOOTSTRAP_API_KEY`, `DOSSIER_API_KEY`, credentials for the configured origin, or stdin. The command does not create resources, apply migrations, or deploy the Worker.
-
-The Worker reads its configured `SEED_WORKSPACE` and `SEED_ADMIN_EMAIL`, then idempotently creates the initial workspace, allowlist, bootstrap account, and bootstrap key record. Apply remote D1 migrations before calling it. The repository's `apps/web/scripts/setup.sh` wrapper performs both steps without exposing the key in process arguments.
-
-```sh
-cat .prod-bootstrap-key.local | \
-  dossier --api-url https://dossier.agent964.com setup --json
-```
-
-## Deployment administration
-
-`dossier admin purge` is for deployment operators, not routine use. It calls the deployed Worker's protected `POST /api/admin/purge`, which reports the archived deletion batches past the retention window. Supply the bootstrap secret through `BOOTSTRAP_API_KEY`, `DOSSIER_API_KEY`, credentials for the configured origin, or stdin, just as with `dossier setup`.
-
-```sh
-dossier admin purge
-dossier admin purge --retention-days 45
-dossier admin purge --execute
-dossier admin purge --json
-```
-
-Without `--execute` the command is a dry run and the server writes nothing. `--retention-days` overrides the server's window for one run. When batches exist, human output shows one row per batch followed by totals. When none exist, it prints only `No batch is past the retention window (cutoff <timestamp>).`. `--json` prints the server's report as one JSON value.
-
-```text
-Dry run: archived batches older than 2026-08-15T03:17:00.000Z
-  BATCH           ROOT         DOCS  VERSIONS    SIZE
-  b_9f3c1a2b4d5e  Q3 planning     4        11  2.1 MB
-Totals: 1 batch, 4 documents, 11 versions, 2.1 MB
-Nothing was removed. Re-run with --execute to remove them permanently.
-```
-
-Archived documents become eligible for permanent removal after the deployment's retention window (30 days by default, `PURGE_RETENTION_DAYS`). `--retention-days` previews or applies a different window for one run. The deployment runs the same purge once a week from a cron trigger (`docs/RUNBOOK.md` section E), so eligible batches disappear without an operator command. To remove them sooner, run this command, read the report, and run it again with `--execute`. A removal deletes the R2 objects first, then the document and version rows, and keeps the deletion batch row as an audit record. Nobody can restore a purged batch.
-
-## Diagnostics
-
-`dossier health` is a hidden compatibility command that calls `/api/healthz`. It is useful for deployment smoke checks.
-
-## Exit codes and error output
-
-| Code | Meaning                                                                      |
-| ---: | ---------------------------------------------------------------------------- |
-|  `0` | Success. A diff with changes is still success.                               |
-|  `1` | Operational failure, policy rejection, server error, conflict, or not found. |
-|  `2` | Invalid command usage, option, reference, or configured URL.                 |
-|  `4` | Authentication is missing or rejected.                                       |
-
-### Saved-values errors
-
-The API returns errors as `{"ok":false,"code":"<code>","message":"<message>","details":<value>}`. Contracts for simple codes allow the message and details to be absent. Contracts for errors with structured details require both. The live Worker messages below show the current text.
-
-`state_not_enabled` and every other saved-values error in this table use CLI exit code 1. With `--json`, the CLI writes the decoded API envelope plus `"exitCode":1` to stdout. It also writes the human error to stderr.
-
-| Code                    | HTTP | Worker message or required details                                                                                                                                                                                      | CLI rendering                                                                                                        | Exit |
-| ----------------------- | ---: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---: |
-| `state_not_enabled`     |  409 | `Saved values are not enabled for this document.`                                                                                                                                                                       | `state get` prints `Saved values are not enabled for this document`. Other commands print the Worker message.        |  `1` |
-| `state_conflict`        |  409 | The required `details.fields` array contains `{name, revision, value}` for every conflicting field.                                                                                                                     | The CLI prints `<name>: <JSON value> (revision <n>)`, then tells the caller to read the latest values and try again. |  `1` |
-| `state_schema_change`   |  409 | The required details contain `retyped: [{name, from, to}]` and `orphaned: [name]`.                                                                                                                                      | The CLI lists both groups and tells the author to re-run with `--accept-state-changes`.                              |  `1` |
-| `state_version_changed` |  409 | The required details contain `currentVersion`. The message states that the document version changed before the save completed or after the page loaded.                                                                 | The CLI prints the Worker message.                                                                                   |  `1` |
-| `state_type_mismatch`   |  422 | The required `details.fields` array names rejected entries. The Worker rejects unknown or duplicate names, invalid baselines or types, non-JSON values, values larger than 64 KiB, and batches larger than 200 changes. | `Values do not match the current types for: <names>`                                                                 |  `1` |
-| `state_edit_required`   |  403 | `State edit access is required.`                                                                                                                                                                                        | The CLI prints the Worker message.                                                                                   |  `1` |
-| `state_too_large`       |  413 | The required details contain `bytes` and `limit` when the document total would exceed 256 KiB.                                                                                                                          | `Saved values use <bytes> bytes; the limit is <limit> bytes.`                                                        |  `1` |
-| `state_unavailable`     |  503 | `Saved values are temporarily unavailable.` The Worker uses this code when it cannot use the state rate limiter.                                                                                                        | The CLI prints the Worker message. A failed health check instead prints the deployment compatibility message.        |  `1` |
-| `link_revoked`          |  410 | `This edit link is no longer active.`                                                                                                                                                                                   | The browser edit-link routes return this error. A CLI API failure prints the Worker message.                         |  `1` |
-| `rate_limited`          |  429 | `State rate limit exceeded.` The response includes `Retry-After: 60`.                                                                                                                                                   | The CLI prints the Worker message.                                                                                   |  `1` |
-
-The general API errors still apply. Missing or rejected authentication uses exit code 4. Invalid local command usage uses exit code 2. Unreadable documents and insufficient management permission use the existing `not_found`, `editor_required`, or `publisher_required` responses and exit code 1.
-
-The CLI writes errors to stderr in this form.
-
-```text
-dossier: <message>
-```
-
-With `--json`, stdout still contains exactly one JSON value. Scripts should treat the exit code as the primary success signal.
+Prints the guide for agents as Markdown: what a deployment, workspace and tree
+are, every verb with its usage and flags, the exit codes, and the conventions
+for writing pages (kits, layouts, themes, components, the base layer,
+embedding, forms, the page client, live data, agent versions, reading,
+sharing, export and history). The verbs and flags come from the same
+declarations as `--help`, so the guide always matches the installed CLI.
+`--json` gives the same guide as JSON.
