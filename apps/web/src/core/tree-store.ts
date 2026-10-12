@@ -1694,7 +1694,9 @@ export const TreeStoreLive: Layer.Layer<
         // a `_` folder is a folder, as `ls` lists it.
         const split = ref.folder ? null : underscoreSplit(ref.path)
         let found: TreeRow | null
-        // A tree known by ID is read together with what the path names in it.
+        // A tree known by ID is read together with what the path names in it
+        // at a pinned sequence. Unpinned, the tree is read first, so a push
+        // between the two reads can't pair an older page with a newer tree.
         let prefetched: Effect.Effect.Success<
           ReturnType<typeof pathReads>
         > | null = null
@@ -1703,7 +1705,7 @@ export const TreeStoreLive: Layer.Layer<
           const [byId, reads, candidates] = yield* Effect.all(
             [
               treeById(ref.treeId),
-              split === null
+              split === null && at !== undefined
                 ? pathReads(ref.treeId, ref, at)
                 : Effect.succeed(null),
               split !== null && at !== undefined
