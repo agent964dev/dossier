@@ -536,7 +536,6 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           grants: [] as Grant[],
           owns: false,
           facts: null as TreeFacts | null,
-          inScope: false,
         }
         const caller = yield* CurrentCaller
         if (caller.via.kind === 'system') return none
@@ -611,23 +610,22 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           node.origin === 'data' &&
           node.deletedAt === null &&
           node.ownerId === caller.person.id
-        return { grants, owns, facts, inScope: true }
+        return { grants, owns, facts }
       })
 
     /** The caller's roles on a node, counting only grants made by `asOf`. */
     const roleAt = (node: NodeRow, asOf: number | null) =>
       Effect.gen(function* () {
-        const { grants, owns, facts, inScope } = yield* grantsOn(node, asOf)
+        const { grants, owns, facts } = yield* grantsOn(node, asOf)
         const roles = roleSetOf(grants, owns)
         // What is carried follows the pages as they are now: never what was
         // readable at an earlier grant order, where a dependency a later
         // push added would reach back to versions nobody issued.
         const reads =
           readsBy(roles, node.origin) ||
-          (asOf === null &&
-            inScope &&
-            facts !== null &&
-            (yield* carries(node, null)))
+          // Its arms hold their own key scope, the `_` reach outside it
+          // included, as reach from grants does.
+          (asOf === null && facts !== null && (yield* carries(node, null)))
         return { ...roles, reads } satisfies RoleSet
       })
 
@@ -640,7 +638,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (isMissing(node)) return yield* denied(caller, node.path)
-        const { grants, owns, facts, inScope } = yield* grantsOn(node)
+        const { grants, owns, facts } = yield* grantsOn(node)
         if (facts !== null && facts.state !== 'live') {
           // People withdraw what they wrote wherever it sits, so deleting
           // an account leaves nothing of theirs in a closed workspace.
@@ -688,10 +686,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         // What is carried is read only, as reach is: any other action on a
         // node read only that way is refused as missing.
         const carried =
-          !direct &&
-          action === 'read' &&
-          inScope &&
-          (yield* carries(node, null))
+          !direct && action === 'read' && (yield* carries(node, null))
         const reads = direct || carried
         // Answering into a shared file needs respond, not read: the form
         // that targets it already says it is there.

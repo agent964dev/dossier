@@ -1829,6 +1829,23 @@ describe('the list check', () => {
         numRuns: 80,
         // Two shares on one node for one target: only the first is planted.
         examples: [
+          // A key scoped to a file a shared page renders with reads the `_`
+          // files above it, as reach from a grant does.
+          [
+            {
+              shares: [
+                {
+                  at: PATHS.indexOf('a/b/c.html'),
+                  kind: 'email',
+                  role: 'read',
+                },
+              ],
+              caller: 'scoped',
+              scopeAt: PATHS.indexOf('a/d.txt'),
+              deleted: null,
+              suspended: false,
+            },
+          ],
           // A public page that frames e.html: e.html and its comments are
           // read through what the public page carries.
           [
