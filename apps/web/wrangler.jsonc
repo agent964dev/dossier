@@ -85,7 +85,7 @@
         {
           "binding": "DB",
           "database_name": "dossier-next-dev",
-          "database_id": "70b42e29-2b9a-434d-b2a5-920137c7fea9",
+          "database_id": "1c6c9e18-3069-4b54-b5ca-e3b681389c8e",
           "migrations_dir": "drizzle",
         },
       ],
