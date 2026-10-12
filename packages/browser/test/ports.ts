@@ -52,7 +52,7 @@ export const fakeChannel = (): { port1: FakePort; port2: FakePort } => {
 
 /** Lets pending promise callbacks and port deliveries run. */
 export const flush = async (): Promise<void> => {
-  for (let i = 0; i < 20; i++) await Promise.resolve()
+  for (let i = 0; i < 100; i++) await Promise.resolve()
 }
 
 /**

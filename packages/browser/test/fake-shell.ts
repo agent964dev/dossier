@@ -1,5 +1,5 @@
 // A fake shell around a happy-dom page, for the page client's tests.
-import type { Me, PageBootstrap } from '@dossier/contracts/bridge'
+import type { DraftValues, Me, PageBootstrap } from '@dossier/contracts/bridge'
 import type { Window as DomWindow } from 'happy-dom'
 import { domWindow, fakeChannel, type FakePort } from './ports.ts'
 
@@ -19,6 +19,7 @@ export const BOOTSTRAP: PageBootstrap = {
   base: 'b1',
   kit: {},
   used: [],
+  forms: [],
 }
 
 export const SARA: Me = { email: 'sara@acme.com', name: 'Sara', role: 'write' }
@@ -38,7 +39,15 @@ export interface FakeShell {
   }
   readonly hellos: Hello[]
   /** Answers the last hello with a welcome. */
-  readonly welcome: (me: Me | null) => void
+  readonly welcome: (
+    me: Me | null,
+    extra?: {
+      readonly drafts?: Readonly<Record<string, DraftValues>>
+      readonly resume?: readonly string[]
+    },
+  ) => void
+  /** Sends the page anything over the last hello's port. */
+  readonly tell: (message: unknown) => void
   /** What the page sent to the shell over the last hello's port. */
   readonly received: () => unknown[]
 }
@@ -59,12 +68,23 @@ export const fakeShell = (): FakeShell => {
     if (port === undefined) throw new Error('no hello yet')
     return port
   }
+  const post = (message: unknown): void => {
+    // A MessagePort's postMessage takes no target origin.
+    // oxlint-disable-next-line unicorn/require-post-message-target-origin
+    lastPort().postMessage(message)
+  }
   return {
     window,
     hellos,
-    // A MessagePort's postMessage takes no target origin.
-    // oxlint-disable-next-line unicorn/require-post-message-target-origin
-    welcome: (me) => lastPort().postMessage({ type: 'welcome', v: 1, me }),
+    welcome: (me, extra = {}) =>
+      post({
+        type: 'welcome',
+        v: 1,
+        me,
+        drafts: extra.drafts ?? {},
+        resume: extra.resume ?? [],
+      }),
+    tell: post,
     received: () => lastPort().inbox,
   }
 }
@@ -85,6 +105,7 @@ export const openPage = (options: {
   readonly url?: string
   readonly body?: string
   readonly title?: string
+  readonly bootstrap?: PageBootstrap
 }): Page => {
   const shell = fakeShell()
   const win = domWindow(options.url ?? PAGE_URL)
@@ -93,7 +114,7 @@ export const openPage = (options: {
   const bootstrap = doc.createElement('script')
   bootstrap.setAttribute('type', 'application/json')
   bootstrap.id = 'dossier-bootstrap'
-  bootstrap.textContent = JSON.stringify(BOOTSTRAP)
+  bootstrap.textContent = JSON.stringify(options.bootstrap ?? BOOTSTRAP)
   doc.head.prepend(bootstrap)
   doc.body.innerHTML = options.body ?? ''
 

@@ -1,6 +1,11 @@
 // The client.js entry, a classic script that runs before any author script.
 import type { Hello, PageBootstrap } from '@dossier/contracts/bridge'
-import { createPageClient } from './create-page-client.ts'
+import {
+  createPageClient,
+  type Dossier,
+  type SubmitSource,
+} from './create-page-client.ts'
+import { formInfoOf, type FormsController } from './forms.ts'
 import {
   libraryUrl,
   startLibraries,
@@ -49,8 +54,140 @@ export const installLibraries = (
   return loader
 }
 
+type Send = FormsController['submitted']
+
+/**
+ * Takes over the sending of managed forms before any author script runs.
+ *
+ * One capture listener on the window, the first to see a submit event,
+ * cancels the browser's own submission at once with the native
+ * `preventDefault`, so nothing page code does later can let it through. The
+ * event then shows page code only page code's own cancellation: its
+ * `preventDefault`, `returnValue` and `defaultPrevented` are shadowed on the
+ * instance, and while it dispatches `Event.prototype.preventDefault` called on
+ * it counts too. Once dispatch has finished, in a later task so that every
+ * listener counts, the form is sent unless page code cancelled.
+ * `HTMLFormElement.prototype.submit()` on a managed form sends it the same
+ * way; other forms keep the browser's behaviour.
+ */
+export const interceptSubmits = (
+  window: Window,
+  managed: (form: HTMLFormElement) => boolean,
+): SubmitSource => {
+  const win = window as Window & typeof globalThis
+  const proto = win.Event.prototype
+  const preventDescriptor = Object.getOwnPropertyDescriptor(
+    proto,
+    'preventDefault',
+  )
+  // oxlint-disable-next-line typescript/unbound-method
+  const nativePrevent = proto.preventDefault
+  const formProto = win.HTMLFormElement.prototype
+  // oxlint-disable-next-line typescript/unbound-method
+  const nativeSubmit = formProto.submit
+  // Page code that replaces setTimeout later cannot hold the decision back.
+  const later = win.setTimeout.bind(win)
+
+  let handler: Send | null = null
+  const waiting: Parameters<Send>[] = []
+  const deliver = (...args: Parameters<Send>): void => {
+    if (handler === null) waiting.push(args)
+    else handler(...args)
+  }
+
+  /** Submit events still dispatching, with how each records a cancellation. */
+  const dispatching = new Map<Event, () => void>()
+  const wrapped = function preventDefault(this: Event): void {
+    const cancel = dispatching.get(this)
+    if (cancel === undefined) nativePrevent.call(this)
+    else cancel()
+  }
+  const wrap = (): void => {
+    Object.defineProperty(proto, 'preventDefault', {
+      value: wrapped,
+      writable: true,
+      configurable: true,
+      enumerable: preventDescriptor?.enumerable ?? true,
+    })
+  }
+  const unwrap = (): void => {
+    if (preventDescriptor === undefined) {
+      delete (proto as Partial<Event>).preventDefault
+    } else {
+      Object.defineProperty(proto, 'preventDefault', preventDescriptor)
+    }
+  }
+
+  const isForm = (target: EventTarget | null): target is HTMLFormElement =>
+    target !== null &&
+    (target as Partial<Element>).localName === 'form' &&
+    typeof (target as Partial<HTMLFormElement>).checkValidity === 'function'
+
+  win.addEventListener(
+    'submit',
+    (event) => {
+      const form = event.target
+      if (!isForm(form) || !managed(form)) return
+      nativePrevent.call(event)
+      let authored = false
+      const cancel = (): void => {
+        if (event.cancelable) authored = true
+      }
+      Object.defineProperties(event, {
+        preventDefault: {
+          value: function preventDefault(): void {
+            cancel()
+          },
+          configurable: true,
+          writable: true,
+        },
+        defaultPrevented: { get: () => authored, configurable: true },
+        returnValue: {
+          get: () => !authored,
+          set: (value: unknown) => {
+            if (value === false) cancel()
+          },
+          configurable: true,
+        },
+      })
+      if (dispatching.size === 0) wrap()
+      dispatching.set(event, cancel)
+      const submitter = (event as SubmitEvent).submitter ?? null
+      later(() => {
+        dispatching.delete(event)
+        if (dispatching.size === 0) unwrap()
+        if (!authored) deliver(form, submitter, 'event')
+      }, 0)
+    },
+    true,
+  )
+
+  Object.defineProperty(formProto, 'submit', {
+    value: function submit(this: HTMLFormElement): void {
+      if (managed(this)) deliver(this, null, 'method')
+      else nativeSubmit.call(this)
+    },
+    writable: true,
+    configurable: true,
+  })
+
+  return {
+    connect: (next) => {
+      handler = next
+      for (const args of waiting.splice(0)) next(...args)
+    },
+  }
+}
+
+/** What install leaves behind, for tests. */
+export interface Installed {
+  readonly dossier: Dossier
+  /** The forms controller, once it has started. */
+  readonly forms: () => FormsController | null
+}
+
 /** Installs the page client and `window.dossier` in a composed page. */
-export const install = (window: Window): void => {
+export const install = (window: Window): Installed => {
   const doc = window.document
   const bootstrap = JSON.parse(
     doc.getElementById('dossier-bootstrap')?.textContent ?? 'null',
@@ -59,9 +196,22 @@ export const install = (window: Window): void => {
   // Before first paint, so page styles can tell a framed page apart.
   if (embedded) doc.documentElement.setAttribute('data-dossier-embedded', '')
 
+  const submits = interceptSubmits(
+    window,
+    (form) => formInfoOf(bootstrap, form) !== null,
+  )
   const { MessageChannel } = window as Window & typeof globalThis
   const { port1, port2 } = new MessageChannel()
-  const dossier = createPageClient({ bootstrap, port: port1, window })
+  let forms: FormsController | null = null
+  const dossier = createPageClient({
+    bootstrap,
+    port: port1,
+    window,
+    submits,
+    onForms: (controller) => {
+      forms = controller
+    },
+  })
   installLibraries(window, bootstrap)
 
   const handle = framePath(window.location.pathname)?.handle
@@ -82,6 +232,7 @@ export const install = (window: Window): void => {
     writable: false,
     configurable: false,
   })
+  return { dossier, forms: () => forms }
 }
 
 if (

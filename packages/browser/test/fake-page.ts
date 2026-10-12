@@ -7,6 +7,7 @@ import {
   type ShellApi,
   type ViewGrant,
 } from '../src/shell/create-shell.ts'
+import { memoryStore, type MemoryStore } from './memory-store.ts'
 import { domWindow, fakeChannel, type FakePort } from './ports.ts'
 
 export const BOOT: ShellBoot = {
@@ -26,11 +27,13 @@ export const grant = (
   handle: string,
   seq: number,
   role: ViewGrant['role'] = 'write',
+  path = 'questions/index.html',
 ): ViewGrant => ({
   handle,
   seq,
   role,
   expiresAt: '2026-10-12T03:00:00.000Z',
+  path,
 })
 
 /** A page window as the shell sees it: only its place among the frames. */
@@ -43,9 +46,11 @@ export const openShell = (
     readonly boot?: ShellBoot
     readonly url?: string
     readonly grants?: readonly (ViewGrant | Error)[]
+    readonly store?: MemoryStore
   } = {},
 ) => {
   const boot = options.boot ?? BOOT
+  const store = options.store ?? memoryStore()
   const win: DomWindow = domWindow(
     options.url ?? 'https://main.test/agent964/acme/questions/#intro',
   )
@@ -63,6 +68,19 @@ export const openShell = (
     if (next instanceof Error) throw next
     return next
   })
+  const read = vi.fn<ShellApi['read']>(async () => null)
+  const send = vi.fn<ShellApi['send']>(async () => ({
+    doc: null,
+    replayed: false,
+  }))
+  const upload = vi.fn<ShellApi['upload']>(async (i) => ({
+    path: `${i.target}${boot.me?.email ?? 'visitor'}/files/${i.name}`,
+    file: `files/${i.name}`,
+    name: i.name,
+    size: i.size,
+    type: i.type,
+  }))
+  const withdraw = vi.fn<ShellApi['withdraw']>(async () => {})
   const reload = vi.spyOn(win.location, 'reload').mockImplementation(() => {})
   const assign = vi.spyOn(win.location, 'assign').mockImplementation(() => {})
   const pushState = vi.spyOn(win.history, 'pushState')
@@ -72,7 +90,8 @@ export const openShell = (
     window: win as unknown as Window,
     frame: placeholder,
     boot,
-    api: { view },
+    api: { view, read, send, upload, withdraw },
+    store,
   })
 
   /** The iframe element in the shell now. */
@@ -99,6 +118,7 @@ export const openShell = (
     readonly nested?: boolean
     readonly origin?: string
     readonly ports?: FakePort[]
+    readonly path?: string
   }) => {
     const { port1, port2 } = fakeChannel()
     const ports = input.ports ?? [port2]
@@ -107,7 +127,7 @@ export const openShell = (
         dossier: 'hello',
         v: 1,
         handle: input.handle ?? 'h1',
-        path: '/questions/index.html',
+        path: input.path ?? '/questions/index.html',
         nested: input.nested ?? false,
       },
       origin: input.origin ?? boot.contentOrigin,
@@ -121,7 +141,12 @@ export const openShell = (
   return {
     win,
     shell,
+    store,
     view,
+    read,
+    send,
+    upload,
+    withdraw,
     reload,
     assign,
     pushState,

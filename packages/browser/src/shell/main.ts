@@ -3,6 +3,7 @@
 import type { ShellBoot } from '@dossier/contracts/bridge'
 import { shellApi } from './api.ts'
 import { createShell } from './create-shell.ts'
+import { browserStore } from './store.ts'
 
 const boot = JSON.parse(
   document.getElementById('dossier-shell')?.textContent ?? 'null',
@@ -14,4 +15,5 @@ void createShell({
   frame,
   boot,
   api: shellApi(window.fetch.bind(window), boot.deployment.origin),
+  store: browserStore(window.indexedDB),
 }).start()

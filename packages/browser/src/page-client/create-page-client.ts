@@ -3,11 +3,42 @@ import {
   WINDOW_NAME_PREFIX,
   isShellToPage,
   readTopBoot,
+  type Doc,
+  type DraftValues,
   type Me,
   type PageBootstrap,
 } from '@dossier/contracts/bridge'
+import { startForms, type FormsController } from './forms.ts'
 import { startKit } from './kit.ts'
 import { trackLocation } from './location.ts'
+import { createRequests } from './requests.ts'
+
+export type { Doc } from '@dossier/contracts/bridge'
+
+/** Where a managed form stands; 'closed' is final for the page load. */
+export type FormState =
+  | 'idle'
+  | 'draft'
+  | 'sending'
+  | 'sent'
+  | 'failed'
+  | 'closed'
+
+/** The detail of the `dossier:state` event a managed form fires. */
+export interface DossierStateDetail {
+  readonly state: FormState
+  readonly error: DossierError | null
+  readonly doc: Doc | null
+}
+
+/**
+ * Where the sends of managed forms come from: the submit events page code let
+ * through, and submit() calls. Sends that come before the forms controller
+ * starts wait for it.
+ */
+export interface SubmitSource {
+  readonly connect: (handler: FormsController['submitted']) => void
+}
 
 export interface Dossier {
   /** Null for a visitor, and for a nested page until ready. */
@@ -35,6 +66,9 @@ export const createPageClient = (deps: {
   readonly bootstrap: PageBootstrap
   readonly port: HostPort
   readonly window: Window
+  readonly submits?: SubmitSource
+  /** Called once the forms controller starts. */
+  readonly onForms?: (forms: FormsController) => void
 }): Dossier => {
   const { bootstrap, port, window: win } = deps
   // Components start loading before any author script runs.
@@ -73,13 +107,51 @@ export const createPageClient = (deps: {
   // Page code that never awaits `ready` should not see an unhandled rejection.
   ready.catch(() => {})
 
+  const requests = createRequests(port)
+  let formsAsked = false
+  /** Starts the forms controller once identity is known and the document is parsed. */
+  const beginForms = (
+    drafts: Readonly<Record<string, DraftValues>>,
+    resume: readonly string[],
+  ): void => {
+    // A page opened on its own has no shell to send through.
+    if (formsAsked || alone) return
+    formsAsked = true
+    const begin = (): void => {
+      const controller = startForms({
+        window: win,
+        bootstrap,
+        me: () => me,
+        drafts,
+        resume,
+        requests,
+      })
+      requests.onResumed(controller.resumed)
+      deps.submits?.connect(controller.submitted)
+      deps.onForms?.(controller)
+    }
+    const doc = win.document
+    if (doc.readyState === 'loading') {
+      doc.addEventListener('DOMContentLoaded', begin, { once: true })
+    } else {
+      begin()
+    }
+  }
+
   port.addEventListener('message', (event) => {
-    if (!isShellToPage(event.data)) return
-    me = event.data.me
+    const data: unknown = event.data
+    if (!isShellToPage(data)) return
+    if (data.type !== 'welcome') {
+      requests.receive(data)
+      return
+    }
+    me = data.me
     win.clearTimeout(timer)
     welcomed()
+    beginForms(data.drafts, data.resume)
   })
   port.start()
+  if (boot !== null) beginForms(boot.drafts, boot.resume)
 
   if (!embedded && !alone) trackLocation({ window: win, bootstrap, port })
 

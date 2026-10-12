@@ -1,11 +1,24 @@
 // MessagePort.postMessage takes no target origin.
 // oxlint-disable unicorn/require-post-message-target-origin
-import { DossierError } from '@dossier/contracts/bridge'
+import {
+  DossierError,
+  formKey,
+  type DocWire,
+  type FormRef,
+  type PendingSend,
+  type SendRequest,
+} from '@dossier/contracts/bridge'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { shellApi } from '../src/shell/api.ts'
-import { RETRY_DELAY, type ViewGrant } from '../src/shell/create-shell.ts'
+import {
+  REPLAY_INTERVAL,
+  RETRY_DELAY,
+  type ViewGrant,
+} from '../src/shell/create-shell.ts'
 import { within } from '../src/shell/frames.ts'
 import { BOOT, grant, openShell } from './fake-page.ts'
+import { memoryStore } from './memory-store.ts'
 import { FakePort, flush } from './ports.ts'
 
 const HOUR = 60 * 60 * 1000
@@ -156,6 +169,8 @@ describe('createShell', () => {
     expect(bootOf(frame)).toEqual({
       v: 1,
       me: { email: 'sara@acme.com', name: 'Sara', role: 'write' },
+      drafts: {},
+      resume: [],
     })
     it.shell.dispose()
   })
@@ -163,7 +178,12 @@ describe('createShell', () => {
   test('gives a visitor null identity in the boot data', async () => {
     const it = openShell({ boot: { ...BOOT, me: null } })
     await it.shell.start()
-    expect(bootOf(it.frame())).toEqual({ v: 1, me: null })
+    expect(bootOf(it.frame())).toEqual({
+      v: 1,
+      me: null,
+      drafts: {},
+      resume: [],
+    })
     it.shell.dispose()
   })
 
@@ -178,6 +198,8 @@ describe('createShell', () => {
         type: 'welcome',
         v: 1,
         me: { email: 'sara@acme.com', name: 'Sara', role: 'write' },
+        drafts: {},
+        resume: [],
       },
     ])
     it.shell.dispose()
@@ -311,6 +333,8 @@ describe('createShell', () => {
     expect(bootOf(next)).toEqual({
       v: 1,
       me: { email: 'sara@acme.com', name: 'Sara', role: 'read' },
+      drafts: {},
+      resume: [],
     })
     // The previous page's port is closed with it.
     expect(shell.closed).toBe(true)
@@ -325,6 +349,8 @@ describe('createShell', () => {
         type: 'welcome',
         v: 1,
         me: { email: 'sara@acme.com', name: 'Sara', role: 'read' },
+        drafts: {},
+        resume: [],
       },
     ])
     it.shell.dispose()
@@ -465,11 +491,12 @@ describe('createShell', () => {
     // The page in the frame keeps its handle; new pages get the renewed one.
     const source = it.page()
     const old = it.hello({ source, handle: 'h1' })
-    const renewed = it.hello({ source, handle: 'h2' })
-    const other = it.hello({ source, handle: 'h3' })
-    await vi.advanceTimersByTimeAsync(0)
+    await flush()
     expect(old.page.inbox).toHaveLength(1)
+    const renewed = it.hello({ source, handle: 'h2' })
+    await flush()
     expect(renewed.page.inbox).toHaveLength(1)
+    const other = it.hello({ source, handle: 'h3' })
     expect(other.shell.closed).toBe(true)
     it.shell.dispose()
   })
@@ -527,5 +554,635 @@ describe('createShell', () => {
     await vi.advanceTimersByTimeAsync(HOUR * 2)
     expect(late.page.inbox).toEqual([])
     expect(it.view).toHaveBeenCalledTimes(1)
+  })
+})
+
+const FORM_A = { host: 'n1', target: 'questions/answers/', id: null }
+const FORM_B = { host: 'n1', target: 'questions/board.json', id: 'board' }
+const KEY_A = formKey(FORM_A)
+const KEY_B = formKey(FORM_B)
+const PAGE = 'questions/index.html'
+
+const pendingSend = (
+  opId: string,
+  by: string | null,
+  form: FormRef = FORM_A,
+  savedAt = '2026-10-12T10:00:00.000Z',
+): PendingSend => ({
+  form,
+  seq: 7,
+  entries: [['name', 'Sara']],
+  submitter: null,
+  opId,
+  page: PAGE,
+  by,
+  savedAt,
+})
+
+const offlineError = () =>
+  new DossierError({
+    code: 'offline',
+    message: 'Not sent. Your answers are kept on this device. Try again.',
+    fix: null,
+    path: null,
+  })
+
+const request = (id: number, send: Partial<SendRequest> = {}) => ({
+  type: 'request',
+  id,
+  op: 'send',
+  send: {
+    form: FORM_A,
+    seq: 7,
+    entries: [['name', 'Sara']],
+    submitter: null,
+    opId: `op-${id}`,
+    ...send,
+  },
+})
+
+describe('shell drafts and sends', () => {
+  test('keeps drafts per viewer, tree, page and form', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const top = it.page()
+    const { page } = it.hello({ source: top })
+    page.postMessage({ type: 'draft', form: KEY_A, values: { name: 'Sa' } })
+    page.postMessage({ type: 'draft', form: KEY_B, values: { title: 'Plan' } })
+    const nested = it.hello({
+      source: { parent: top },
+      nested: true,
+      path: '/questions/other.html',
+    })
+    nested.page.postMessage({
+      type: 'draft',
+      form: KEY_A,
+      values: { name: 'Other' },
+    })
+    await flush()
+    expect(it.store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'Sa' },
+      [KEY_B]: { title: 'Plan' },
+    })
+    expect(
+      it.store.drafts.get('sara@acme.com|t1|questions/other.html'),
+    ).toEqual({ [KEY_A]: { name: 'Other' } })
+
+    page.postMessage({ type: 'draft', form: KEY_B, values: null })
+    await flush()
+    expect(it.store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'Sa' },
+    })
+
+    // The next page load and a nested page's welcome carry their own page's.
+    page.postMessage({ type: 'open', path: 'questions/', hash: '' })
+    await flush()
+    expect(bootOf(it.frame())).toMatchObject({
+      drafts: { [KEY_A]: { name: 'Sa' } },
+    })
+    const again = it.hello({ source: it.page() })
+    const inner = it.hello({
+      source: { parent: it.page() },
+      nested: true,
+      path: '/questions/other.html',
+    })
+    await flush()
+    expect(again.page.inbox[0]).toMatchObject({
+      drafts: { [KEY_A]: { name: 'Sa' } },
+    })
+    expect(inner.page.inbox[0]).toMatchObject({
+      drafts: { [KEY_A]: { name: 'Other' } },
+    })
+    it.shell.dispose()
+  })
+
+  test('a visitor keeps drafts as the empty viewer', async () => {
+    const it = openShell({ boot: { ...BOOT, me: null } })
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    page.postMessage({ type: 'draft', form: KEY_A, values: { name: 'V' } })
+    await flush()
+    expect(it.store.drafts.get(`|t1|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'V' },
+    })
+    it.shell.dispose()
+  })
+
+  test('hands a visitor’s drafts in this tree to the person who signs in', async () => {
+    const store = memoryStore()
+    await store.saveDraft('', 't1', PAGE, KEY_A, { name: 'Before sign-in' })
+    await store.saveDraft('', 't2', PAGE, KEY_A, { name: 'Other tree' })
+    const adopt = vi.spyOn(store, 'adoptDrafts')
+    const it = openShell({ store })
+    await it.shell.start()
+    expect(bootOf(it.frame())).toMatchObject({
+      drafts: { [KEY_A]: { name: 'Before sign-in' } },
+    })
+    expect(store.drafts.get(`|t1|${PAGE}`)).toBeUndefined()
+    expect(store.drafts.get(`|t2|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'Other tree' },
+    })
+    // Once per shell, not on every load.
+    const { page } = it.hello({ source: it.page() })
+    page.postMessage({ type: 'open', path: 'plan', hash: '' })
+    await flush()
+    expect(adopt).toHaveBeenCalledTimes(1)
+    it.shell.dispose()
+  })
+
+  test('replays kept sends only for the same email or a visitor', async () => {
+    const store = memoryStore()
+    await store.savePending('t1', PAGE, pendingSend('op-visitor', null))
+    await store.savePending(
+      't1',
+      PAGE,
+      pendingSend('op-sara', 'sara@acme.com', FORM_B),
+    )
+    await store.savePending('t1', PAGE, pendingSend('op-omar', 'omar@acme.com'))
+    await store.saveDraft('omar@acme.com', 't1', PAGE, KEY_A, { name: 'Omar' })
+    const it = openShell({ store })
+    await it.shell.start()
+    expect(bootOf(it.frame())).toMatchObject({ resume: [KEY_A, KEY_B] })
+    // Another person's send is dropped; their draft stays theirs.
+    expect([...store.pending.get(`t1|${PAGE}`)!.keys()]).toEqual([
+      'op-visitor',
+      'op-sara',
+    ])
+    expect(store.drafts.get(`omar@acme.com|t1|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'Omar' },
+    })
+    expect(it.send).not.toHaveBeenCalled()
+
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    expect(it.send.mock.calls.map(([payload]) => payload.opId)).toEqual([
+      'op-visitor',
+      'op-sara',
+    ])
+    expect(it.send.mock.calls[0]![0]).toEqual({
+      tree: 't1',
+      page: PAGE,
+      seq: 7,
+      form: FORM_A,
+      entries: [['name', 'Sara']],
+      submitter: null,
+      entry: null,
+      opId: 'op-visitor',
+    })
+    expect(page.inbox[0]).toMatchObject({
+      type: 'welcome',
+      resume: [KEY_A, KEY_B],
+    })
+    expect(page.inbox.slice(1)).toEqual([
+      {
+        type: 'resumed',
+        form: KEY_A,
+        ok: true,
+        value: { doc: null, replayed: false },
+      },
+      {
+        type: 'resumed',
+        form: KEY_B,
+        ok: true,
+        value: { doc: null, replayed: false },
+      },
+    ])
+    expect(store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
+    it.shell.dispose()
+  })
+
+  test('replays an offline send on online with the same op ID', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    page.postMessage({ type: 'draft', form: KEY_A, values: { name: 'Sara' } })
+    it.send.mockRejectedValueOnce(offlineError())
+    page.postMessage(request(1))
+    await flush()
+    expect(page.inbox.at(-1)).toEqual({
+      type: 'result',
+      id: 1,
+      ok: false,
+      error: {
+        code: 'offline',
+        message: 'Not sent. Your answers are kept on this device. Try again.',
+        fix: null,
+        path: null,
+      },
+    })
+    expect(it.store.pending.get(`t1|${PAGE}`)!.get('op-1')).toMatchObject({
+      opId: 'op-1',
+      page: PAGE,
+      by: 'sara@acme.com',
+    })
+
+    it.win.dispatchEvent(new it.win.Event('online'))
+    await flush()
+    expect(it.send).toHaveBeenCalledTimes(2)
+    expect(it.send.mock.calls[1]![0].opId).toBe('op-1')
+    expect(page.inbox.at(-1)).toEqual({
+      type: 'resumed',
+      form: KEY_A,
+      ok: true,
+      value: { doc: null, replayed: false },
+    })
+    expect(it.store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
+    expect(it.store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({})
+    it.shell.dispose()
+  })
+
+  test('tries kept sends every 30 seconds while the tab is open', async () => {
+    vi.useFakeTimers()
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    it.send.mockRejectedValueOnce(offlineError())
+    it.send.mockRejectedValueOnce(offlineError())
+    page.postMessage(request(1))
+    await flush()
+    await vi.advanceTimersByTimeAsync(REPLAY_INTERVAL)
+    await flush()
+    expect(it.send).toHaveBeenCalledTimes(2)
+    expect(page.inbox.at(-1)).toMatchObject({ type: 'resumed', ok: false })
+    await vi.advanceTimersByTimeAsync(REPLAY_INTERVAL)
+    await flush()
+    expect(it.send).toHaveBeenCalledTimes(3)
+    expect(it.send.mock.calls.map(([payload]) => payload.opId)).toEqual([
+      'op-1',
+      'op-1',
+      'op-1',
+    ])
+    expect(page.inbox.at(-1)).toMatchObject({ type: 'resumed', ok: true })
+    it.shell.dispose()
+  })
+
+  test('keeps a send without trying when the browser is offline', async () => {
+    const it = openShell()
+    await it.shell.start()
+    vi.spyOn(it.win.navigator, 'onLine', 'get').mockReturnValue(false)
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    page.postMessage(request(1))
+    await flush()
+    expect(it.send).not.toHaveBeenCalled()
+    expect(page.inbox.at(-1)).toMatchObject({
+      type: 'result',
+      id: 1,
+      ok: false,
+      error: { code: 'offline' },
+    })
+    expect(it.store.pending.get(`t1|${PAGE}`)!.has('op-1')).toBe(true)
+    it.shell.dispose()
+  })
+
+  test('a send that needs sign-in is kept and the shell goes to sign-in', async () => {
+    const it = openShell({ boot: { ...BOOT, me: null } })
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    it.send.mockRejectedValueOnce(
+      new DossierError({
+        code: 'sign_in_required',
+        message: 'Sign in.',
+        fix: null,
+        path: null,
+      }),
+    )
+    page.postMessage(request(1))
+    await flush()
+    expect(it.store.pending.get(`t1|${PAGE}`)!.get('op-1')).toMatchObject({
+      by: null,
+      page: PAGE,
+    })
+    expect(it.assign).toHaveBeenCalledWith(
+      `/_/sign-in?next=${encodeURIComponent('https://main.test/agent964/acme/questions/')}`,
+    )
+    // The page is not answered: its form stays sending.
+    expect(
+      page.inbox.filter((m) => (m as { type: string }).type === 'result'),
+    ).toEqual([])
+    it.shell.dispose()
+  })
+
+  test('uploads each file first and sends the stored upload in its place', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    const file = new File(['%PDF-1'], 'cv.pdf', { type: 'application/pdf' })
+    const blank = new File(['x'], 'notes', { type: '' })
+    page.postMessage(
+      request(1, {
+        entries: [
+          ['name', 'Sara'],
+          ['cv', file],
+          ['extra', blank],
+        ],
+      }),
+    )
+    await flush()
+    await vi.waitFor(() => expect(it.send).toHaveBeenCalled())
+    const sha = createHash('sha256').update('%PDF-1').digest('hex')
+    expect(it.upload).toHaveBeenCalledTimes(2)
+    const [first] = it.upload.mock.calls[0]!
+    expect({ ...first, body: undefined }).toEqual({
+      tree: 't1',
+      page: PAGE,
+      seq: 7,
+      host: 'n1',
+      target: 'questions/answers/',
+      id: null,
+      field: 'cv',
+      name: 'cv.pdf',
+      type: 'application/pdf',
+      size: 6,
+      sha256: sha,
+      opId: 'op-1:cv',
+      body: undefined,
+    })
+    expect(it.upload.mock.calls[1]![0]).toMatchObject({
+      type: 'application/octet-stream',
+      opId: 'op-1:extra',
+    })
+    expect(it.send.mock.calls[0]![0].entries).toEqual([
+      ['name', 'Sara'],
+      [
+        'cv',
+        {
+          file: 'files/cv.pdf',
+          name: 'cv.pdf',
+          size: 6,
+          type: 'application/pdf',
+        },
+      ],
+      [
+        'extra',
+        {
+          file: 'files/notes',
+          name: 'notes',
+          size: 1,
+          type: 'application/octet-stream',
+        },
+      ],
+    ])
+    await vi.waitFor(() =>
+      expect(page.inbox.at(-1)).toMatchObject({
+        type: 'result',
+        id: 1,
+        ok: true,
+      }),
+    )
+    it.shell.dispose()
+  })
+
+  test('reads resolve against the page, with ~ for the viewer', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    const doc = {
+      path: 'questions/answers/sara@acme.com.json',
+      data: { name: 'Sara' },
+      by: 'sara@acme.com',
+      at: '2026-10-12T10:00:00.000Z',
+      push: 2,
+    } as DocWire
+    it.read.mockResolvedValueOnce(doc)
+    page.postMessage({
+      type: 'request',
+      id: 1,
+      op: 'read',
+      path: 'answers/~.json',
+    })
+    page.postMessage({
+      type: 'request',
+      id: 2,
+      op: 'read',
+      path: '../../x.json',
+    })
+    await flush()
+    expect(it.read).toHaveBeenCalledWith({
+      tree: 't1',
+      path: 'questions/answers/sara@acme.com.json',
+    })
+    expect(it.read).toHaveBeenCalledTimes(1)
+    const results = page.inbox.filter(
+      (m) => (m as { type: string }).type === 'result',
+    )
+    expect(results).toEqual([
+      {
+        type: 'result',
+        id: 2,
+        ok: false,
+        error: expect.objectContaining({ code: 'not_found' }),
+      },
+      { type: 'result', id: 1, ok: true, value: doc },
+    ])
+    it.shell.dispose()
+  })
+
+  test('withdraws the resolved path with the page’s op ID', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    page.postMessage({
+      type: 'request',
+      id: 4,
+      op: 'withdraw',
+      path: '/questions/answers/sara@acme.com.json',
+      opId: 'w-1',
+    })
+    await flush()
+    expect(it.withdraw).toHaveBeenCalledWith({
+      tree: 't1',
+      path: 'questions/answers/sara@acme.com.json',
+      opId: 'w-1',
+    })
+    expect(page.inbox.at(-1)).toEqual({
+      type: 'result',
+      id: 4,
+      ok: true,
+      value: null,
+    })
+    it.shell.dispose()
+  })
+
+  test('answers no request over a port it refused', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page, shell } = it.hello({ source: it.page(), handle: 'nope' })
+    expect(shell.closed).toBe(true)
+    page.postMessage({ type: 'request', id: 1, op: 'read', path: 'x.json' })
+    page.postMessage(request(2))
+    await flush()
+    expect(it.read).not.toHaveBeenCalled()
+    expect(it.send).not.toHaveBeenCalled()
+    it.shell.dispose()
+  })
+})
+
+describe('shellApi data calls', () => {
+  const ok = (status: number, body?: unknown) =>
+    fakeFetch(
+      async () =>
+        new Response(body === undefined ? null : JSON.stringify(body), {
+          status,
+        }),
+    )
+  const doc = {
+    path: 'a.json',
+    data: { x: 1 },
+    by: 'sara@acme.com',
+    at: '2026-10-12T10:00:00.000Z',
+    push: 1,
+  }
+
+  test('read gets a file, null, or a folder’s files', async () => {
+    const fetch = ok(200, { file: doc })
+    const api = shellApi(fetch, 'https://main.test')
+    await expect(api.read({ tree: 't1', path: 'a.json' })).resolves.toEqual(doc)
+    const [url, init] = fetch.spy.mock.calls[0]!
+    expect(url).toBe('https://main.test/_/api/data/read?tree=t1&path=a.json')
+    expect(init?.credentials).toBe('same-origin')
+    await expect(
+      shellApi(ok(200, { file: null }), 'https://main.test').read({
+        tree: 't1',
+        path: 'b.json',
+      }),
+    ).resolves.toBeNull()
+    await expect(
+      shellApi(ok(200, { files: [doc] }), 'https://main.test').read({
+        tree: 't1',
+        path: 'answers/',
+      }),
+    ).resolves.toEqual([doc])
+  })
+
+  test('send, upload and withdraw carry the CSRF header', async () => {
+    const send = ok(200, { doc, replayed: true })
+    const payload = {
+      tree: 't1',
+      page: PAGE,
+      seq: 7,
+      form: FORM_A,
+      entries: [['name', 'Sara']] as const,
+      submitter: null,
+      entry: null,
+      opId: 'op-1',
+    }
+    await expect(
+      shellApi(send, 'https://main.test').send(payload),
+    ).resolves.toEqual({ doc, replayed: true })
+    const [sendUrl, sendInit] = send.spy.mock.calls[0]!
+    expect(sendUrl).toBe('https://main.test/_/api/data/send')
+    expect(sendInit).toMatchObject({
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'Dossier-CSRF': '1' },
+    })
+    expect(JSON.parse(String(sendInit?.body))).toEqual(payload)
+
+    const stored = {
+      path: 'questions/answers/sara@acme.com/files/cv.pdf',
+      file: 'files/cv.pdf',
+      name: 'cv.pdf',
+      size: 3,
+      type: 'application/pdf',
+    }
+    const upload = ok(201, stored)
+    const body = new Blob(['pdf'])
+    await expect(
+      shellApi(upload, 'https://main.test').upload({
+        tree: 't1',
+        page: PAGE,
+        seq: 7,
+        host: 'n1',
+        target: 'questions/answers/',
+        id: null,
+        field: 'cv',
+        name: 'cv.pdf',
+        type: 'application/pdf',
+        size: 3,
+        sha256: 'ab',
+        opId: 'op-1:cv',
+        body,
+      }),
+    ).resolves.toEqual(stored)
+    const [uploadUrl, uploadInit] = upload.spy.mock.calls[0]!
+    const query = new URL(String(uploadUrl)).searchParams
+    expect(new URL(String(uploadUrl)).pathname).toBe('/_/api/data/upload')
+    expect(Object.fromEntries(query)).toEqual({
+      tree: 't1',
+      page: PAGE,
+      seq: '7',
+      host: 'n1',
+      target: 'questions/answers/',
+      field: 'cv',
+      name: 'cv.pdf',
+      type: 'application/pdf',
+      size: '3',
+      sha256: 'ab',
+      opId: 'op-1:cv',
+    })
+    expect(uploadInit).toMatchObject({
+      method: 'PUT',
+      body,
+      headers: { 'Dossier-CSRF': '1' },
+    })
+
+    const withdraw = ok(204)
+    await expect(
+      shellApi(withdraw, 'https://main.test').withdraw({
+        tree: 't1',
+        path: 'a.json',
+        opId: 'w-1',
+      }),
+    ).resolves.toBeUndefined()
+    expect(withdraw.spy.mock.calls[0]![1]).toMatchObject({
+      method: 'POST',
+      headers: { 'Dossier-CSRF': '1' },
+    })
+  })
+
+  test('no answer is offline; a bad answer is unavailable; an error body is its own', async () => {
+    const down = fakeFetch(async () => {
+      throw new TypeError('Failed to fetch')
+    })
+    const offline = await shellApi(down, 'https://main.test')
+      .read({ tree: 't1', path: 'a.json' })
+      .catch((e) => e)
+    expect(offline).toBeInstanceOf(DossierError)
+    expect(offline).toMatchObject({
+      code: 'offline',
+      message: 'Not sent. Your answers are kept on this device. Try again.',
+    })
+    for (const fetch of [ok(502), ok(200, { nope: true })]) {
+      const error = await shellApi(fetch, 'https://main.test')
+        .withdraw({ tree: 't1', path: 'a.json', opId: 'w' })
+        .then(() =>
+          shellApi(fetch, 'https://main.test').read({ tree: 't1', path: 'a' }),
+        )
+        .catch((e) => e)
+      expect(error).toMatchObject({ code: 'unavailable' })
+    }
+    const closed = await shellApi(
+      ok(409, {
+        error: { code: 'closed', message: 'Closed.', fix: null, path: null },
+      }),
+      'https://main.test',
+    )
+      .send({
+        tree: 't1',
+        page: PAGE,
+        seq: 7,
+        form: FORM_A,
+        entries: [],
+        submitter: null,
+        entry: null,
+        opId: 'x',
+      })
+      .catch((e) => e)
+    expect(closed).toMatchObject({ code: 'closed', message: 'Closed.' })
   })
 })
