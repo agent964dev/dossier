@@ -132,7 +132,9 @@ function RowIcon({ children }: { children: ReactNode }) {
 function Meta({ first, second }: { first: ReactNode; second: string | null }) {
   return (
     <span className={META}>
-      <span className="md:truncate">{first}</span>
+      <span className="md:truncate">
+        <bdi>{first}</bdi>
+      </span>
       {second === null ? null : (
         <>
           <span aria-hidden className="md:hidden">
@@ -340,19 +342,21 @@ function Listing({ view }: { view: ListingView }) {
                             href={page.link}
                             className={`${NAME_LINK} min-w-0`}
                           >
-                            {page.title}
+                            <bdi>{page.title}</bdi>
                           </a>
                           <MentionedBadge />
                         </span>
                       ) : (
                         <a href={page.link} className={NAME_LINK}>
-                          {page.title}
+                          <bdi>{page.title}</bdi>
                         </a>
                       )}
                       {answered ? (
                         <>
                           <span className={META}>
-                            <span className="md:truncate">{page.path}</span>
+                            <span className="md:truncate">
+                              <bdi>{page.path}</bdi>
+                            </span>
                             {page.push === null ? null : (
                               <span aria-hidden className="md:hidden">
                                 {' · '}

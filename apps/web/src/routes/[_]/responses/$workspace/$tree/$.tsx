@@ -141,7 +141,10 @@ function Responses({ view, at }: { view: ResponsesView; at: PageAt }) {
           <div className="flex flex-wrap items-center justify-between gap-3 md:flex-col md:items-start">
             <h1 className="font-clash text-[2rem] leading-tight font-semibold tracking-[-0.03em] break-words text-neutral-50 md:text-[2.5rem]">
               Responses
-              <span className="max-md:sr-only"> to {view.page.title}</span>
+              <span className="max-md:sr-only">
+                {' to '}
+                <bdi>{view.page.title}</bdi>
+              </span>
             </h1>
             <div className="flex items-center gap-2">
               <Button
@@ -161,7 +164,9 @@ function Responses({ view, at }: { view: ResponsesView; at: PageAt }) {
           {title === undefined ? null : (
             <p className="flex items-center gap-2 text-[0.9375rem] text-neutral-300 md:hidden">
               <FileText aria-hidden className="size-4 text-neutral-500" />
-              {title.heading}
+              <span>
+                <bdi>{title.title}</bdi> · {title.people}
+              </span>
             </p>
           )}
         </div>
@@ -207,7 +212,7 @@ function FormSection({
               : 'font-clash text-[1.25rem] font-semibold tracking-[-0.02em] text-neutral-50'
           }
         >
-          {form.heading}
+          <bdi>{form.title}</bdi> · {form.people}
         </h2>
         <p className="hidden items-center gap-2 text-[0.9375rem] text-neutral-300 md:flex">
           <FileText aria-hidden className="size-4 text-neutral-500" />

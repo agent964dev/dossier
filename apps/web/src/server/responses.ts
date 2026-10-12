@@ -26,8 +26,10 @@ export interface ResponsesView {
   readonly forms: readonly {
     /** The form's identity: its page or layout, target and id. */
     readonly key: string
-    /** 'Delivery questions · 3 people'. */
-    readonly heading: string
+    /** 'Delivery questions', shown before how many answered. */
+    readonly title: string
+    /** '3 people'. */
+    readonly people: string
     /** 'answers/', as the form names it from the page's folder. */
     readonly target: string
     /** 'The form writes answers/.' */
@@ -297,7 +299,8 @@ export const responsesView = createServerFn({ method: 'GET' })
             )
           }
           return {
-            heading: `${title} · ${people}`,
+            title,
+            people,
             target,
             summary: `${plural(f.people, 'person', 'people')} answered. The form writes ${target}.`,
             key: `${f.form.host}|${f.form.target}|${f.form.id ?? ''}`,
