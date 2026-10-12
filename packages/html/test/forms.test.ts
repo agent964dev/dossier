@@ -709,16 +709,28 @@ describe('disabled controls and date steps', () => {
     ).toMatchObject({ ok: false })
     // Months and weeks in their own units, datetimes in seconds.
     expect(
-      stepped('<input type="month" name="d" step="3" min="2026-01">', '2026-07'),
+      stepped(
+        '<input type="month" name="d" step="3" min="2026-01">',
+        '2026-07',
+      ),
     ).toMatchObject({ ok: true })
     expect(
-      stepped('<input type="month" name="d" step="3" min="2026-01">', '2026-08'),
+      stepped(
+        '<input type="month" name="d" step="3" min="2026-01">',
+        '2026-08',
+      ),
     ).toMatchObject({ ok: false })
     expect(
-      stepped('<input type="week" name="d" step="2" min="2026-W01">', '2026-W05'),
+      stepped(
+        '<input type="week" name="d" step="2" min="2026-W01">',
+        '2026-W05',
+      ),
     ).toMatchObject({ ok: true })
     expect(
-      stepped('<input type="week" name="d" step="2" min="2026-W01">', '2026-W04'),
+      stepped(
+        '<input type="week" name="d" step="2" min="2026-W01">',
+        '2026-W04',
+      ),
     ).toMatchObject({ ok: false })
     expect(
       stepped('<input type="datetime-local" name="d">', '2026-10-12T09:15'),

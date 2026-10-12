@@ -163,6 +163,24 @@ const isUploadRef = (value: unknown): value is UploadRef =>
   typeof value.size === 'number' &&
   typeof value.type === 'string'
 
+/** The same answers: text alike, the very same files, stored uploads alike. */
+const sameEntries = (
+  a: SendRequest['entries'],
+  b: SendRequest['entries'],
+): boolean =>
+  a.length === b.length &&
+  a.every(([name, value], index) => {
+    const [otherName, other] = b[index]!
+    if (name !== otherName) return false
+    if (typeof value === 'string' || typeof other === 'string') {
+      return value === other
+    }
+    if (isUploadRef(value) && isUploadRef(other)) {
+      return JSON.stringify(value) === JSON.stringify(other)
+    }
+    return value === other
+  })
+
 const isDocWire = (value: unknown): value is DocWire =>
   isRecord(value) &&
   typeof value.path === 'string' &&
@@ -270,12 +288,20 @@ interface Managed {
   edits: number
   /** The fields the person changed on this page, which a late prefill leaves. */
   readonly typed: Set<string>
-  /** The stored upload of each file field, kept when its input stays empty. */
-  readonly uploads: Map<string, UploadRef>
-  /** The send's op ID, kept until it succeeds or the answers change. */
-  opId: string | null
-  /** The last send that did not succeed, for Try again. */
-  last: { readonly request: SendRequest; readonly autosave: boolean } | null
+  /** The stored uploads of each file field, kept when its input stays empty. */
+  readonly uploads: Map<string, readonly UploadRef[]>
+  /**
+   * The last attempt, with its own op ID and how many edits it holds: Try
+   * again and an unchanged resend repeat it exactly; anything changed since
+   * is a new attempt with a new op ID.
+   */
+  last: {
+    readonly request: SendRequest
+    readonly autosave: boolean
+    readonly edits: number
+  } | null
+  /** A send of this page load succeeded: older stored values never replace it. */
+  settled: boolean
   inflight: boolean
   queued: {
     readonly autosave: boolean
@@ -383,7 +409,8 @@ export const startForms = (deps: {
         if (control.localName === 'input') {
           const input = control as HTMLInputElement
           if (input.type === 'file') {
-            if (isUploadRef(value)) m.uploads.set(name, value)
+            const refs = refsOf(value)
+            if (refs.length > 0) keepUploads(m, name, refs)
             continue
           }
           if (input.type === 'checkbox') {
@@ -448,11 +475,11 @@ export const startForms = (deps: {
       }
       const file = value as File
       if (file.name === '' && file.size === 0) {
-        // No file chosen: the stored upload stays, if there is one.
-        const upload = m.uploads.get(name)
-        if (upload !== undefined && !kept.has(name)) {
+        // No file chosen: the stored uploads stay, if there are any.
+        const uploads = m.uploads.get(name) ?? []
+        if (!kept.has(name)) {
           kept.add(name)
-          out.push([name, upload])
+          for (const upload of uploads) out.push([name, upload])
         }
         continue
       }
@@ -485,16 +512,26 @@ export const startForms = (deps: {
       m.queued = { autosave: options.autosave, submitter: options.submitter }
       return
     }
-    m.opId ??= newOpId()
-    const request: SendRequest = options.again ?? {
-      form: { host: m.info.host, target: m.info.target, id: m.info.id },
-      seq: bootstrap.seq,
-      entries: entriesOf(m),
-      submitter: submitterOf(m, options.submitter),
-      opId: m.opId,
-    }
-    const edits = m.edits
-    m.last = { request, autosave: options.autosave }
+    const submitter = submitterOf(m, options.submitter)
+    const entries = entriesOf(m)
+    // An attempt with the same answers as the last one that failed is that
+    // attempt again, under its op ID; anything else is a new one.
+    const unchanged =
+      options.again === undefined &&
+      m.last !== null &&
+      sameEntries(m.last.request.entries, entries) &&
+      JSON.stringify(m.last.request.submitter) === JSON.stringify(submitter)
+    const request: SendRequest = options.again ??
+      (unchanged ? m.last!.request : null) ?? {
+        form: { host: m.info.host, target: m.info.target, id: m.info.id },
+        seq: bootstrap.seq,
+        entries,
+        submitter,
+        opId: newOpId(),
+      }
+    const edits =
+      options.again !== undefined || unchanged ? m.last!.edits : m.edits
+    m.last = { request, autosave: options.autosave, edits }
     m.inflight = true
     report(m, options.autosave ? TEXT.saving : TEXT.sending)
     setState(m, 'sending')
@@ -518,15 +555,61 @@ export const startForms = (deps: {
     if (queued !== null) send(m, queued)
   }
 
+  /** A file field's stored uploads: one, several, or none. */
+  const refsOf = (value: unknown): readonly UploadRef[] =>
+    Array.isArray(value)
+      ? value.filter(isUploadRef)
+      : isUploadRef(value)
+        ? [value]
+        : []
+
+  const fileInputs = (m: Managed, name: string): HTMLInputElement[] =>
+    controlsOf(m.form).filter(
+      (control): control is HTMLInputElement =>
+        control.localName === 'input' &&
+        (control as HTMLInputElement).type === 'file' &&
+        control.name === name,
+    )
+
+  /**
+   * Keeps a file field's stored uploads for later sends. While it has some,
+   * a required file input is not left empty: the browser would refuse a
+   * form that already holds its file.
+   */
+  const keepUploads = (
+    m: Managed,
+    name: string,
+    refs: readonly UploadRef[],
+  ): void => {
+    if (refs.length === 0) m.uploads.delete(name)
+    else m.uploads.set(name, refs)
+    for (const input of fileInputs(m, name)) {
+      if (refs.length > 0 && input.hasAttribute('required')) {
+        input.removeAttribute('required')
+        input.setAttribute('data-dossier-required', '')
+      } else if (
+        refs.length === 0 &&
+        input.hasAttribute('data-dossier-required')
+      ) {
+        input.removeAttribute('data-dossier-required')
+        input.setAttribute('required', '')
+      }
+    }
+  }
+
+  const forgetUploads = (m: Managed): void => {
+    for (const name of m.uploads.keys()) keepUploads(m, name, [])
+  }
+
   const rememberUploads = (m: Managed, data: unknown): void => {
     if (!isRecord(data)) return
     for (const control of controlsOf(m.form)) {
       const input = control as HTMLInputElement
       if (input.localName !== 'input' || input.type !== 'file') continue
-      const upload = data[input.name]
-      if (!isUploadRef(upload)) continue
-      // The file is stored: later sends keep it without uploading again.
-      m.uploads.set(input.name, upload)
+      const refs = refsOf(data[input.name])
+      if (refs.length === 0) continue
+      // The files are stored: later sends keep them without uploading again.
+      keepUploads(m, input.name, refs)
       input.value = ''
     }
   }
@@ -535,17 +618,22 @@ export const startForms = (deps: {
     m: Managed,
     value: unknown,
     autosave: boolean,
-    edits: number | null,
+    edits: number,
   ): void => {
-    m.opId = null
     m.last = null
+    m.settled = true
     const wire = isRecord(value) && isDocWire(value.doc) ? value.doc : null
     const stored = wire === null ? null : docFromWire(wire, bootstrap.path)
-    const changedSince = edits !== null && edits !== m.edits
+    // Edits made since this send began stay, with their draft.
+    const changedSince = edits !== m.edits
     if (m.info.kind === 'entries') {
-      m.form.reset()
-      m.uploads.clear()
+      if (!changedSince) {
+        m.form.reset()
+        forgetUploads(m)
+      }
     } else if (wire !== null) {
+      // The form shows what was stored, unless the person changed it since.
+      if (!changedSince && isRecord(wire.data)) fill(m, wire.data, false)
       rememberUploads(m, wire.data)
     }
     if (!changedSince) {
@@ -617,9 +705,12 @@ export const startForms = (deps: {
 
   const tryAgain = (m: Managed): void => {
     const last = m.last
-    if (last === null) send(m, { autosave: false, submitter: null })
-    else
+    // Changed answers are a new attempt; unchanged ones the same again.
+    if (last === null || last.edits !== m.edits) {
+      send(m, { autosave: last?.autosave ?? false, submitter: null })
+    } else {
       send(m, { autosave: last.autosave, submitter: null, again: last.request })
+    }
   }
 
   const close = (m: Managed, text: string): void => {
@@ -658,16 +749,16 @@ export const startForms = (deps: {
           win.clearTimeout(m.draftTimer)
           win.clearTimeout(m.saveTimer)
           m.queued = null
-          m.opId = null
           m.last = null
-          m.uploads.clear()
+          forgetUploads(m)
           clearFields(m.form)
           requests.draft(m.key, null)
           if (m.closed) {
             setStatus(m, m.closedText)
             return
           }
-          report(m, TEXT.withdrawn)
+          // A viewer who may only read still withdraws their own answer.
+          setStatus(m, TEXT.withdrawn)
           setState(m, 'idle')
         },
         (error: unknown) => {
@@ -720,11 +811,6 @@ export const startForms = (deps: {
       m.invalid.setCustomValidity('')
       m.invalid = null
     }
-    // Changed answers are a new send, with a new op ID.
-    if (m.state === 'failed') {
-      m.opId = null
-      m.last = null
-    }
     if (m.state !== 'sending') setState(m, 'draft')
     win.clearTimeout(m.draftTimer)
     m.draftTimer = win.setTimeout(() => {
@@ -757,6 +843,8 @@ export const startForms = (deps: {
       return
     }
     if (!isDocWire(value)) return
+    // A send of this page load already shows what is stored now.
+    if (m.settled) return
     const stored = docFromWire(value, bootstrap.path)
     // What the person already typed stays; the rest is what they sent.
     if (isRecord(value.data)) fill(m, value.data, false, m.typed)
@@ -768,6 +856,7 @@ export const startForms = (deps: {
   const restoreDraft = (m: Managed): void => {
     const draft = deps.drafts[m.key]
     if (draft === undefined || m.closed || m.readOnly || m.touched) return
+    if (m.settled) return
     fill(m, draft, true)
     if (m.state !== 'sending') setState(m, 'draft')
   }
@@ -799,8 +888,8 @@ export const startForms = (deps: {
       edits: 0,
       typed: new Set(),
       uploads: new Map(),
-      opId: null,
       last: null,
+      settled: false,
       inflight: false,
       queued: null,
       invalid: null,
@@ -821,15 +910,15 @@ export const startForms = (deps: {
     return m
   }
 
-  for (const form of doc.querySelectorAll<HTMLFormElement>(
-    'form[data-dossier-form]',
-  )) {
+  /** Takes a managed form in: its state, closing, prefill and draft. */
+  const manage = (form: HTMLFormElement): void => {
     const info = formInfoOf(bootstrap, form)
-    if (info === null || recordOf(form) !== undefined) continue
+    if (info === null || recordOf(form) !== undefined) return
     const m = setUp(form, info)
     if (deps.me()?.role === 'read') {
       m.readOnly = true
-      lock(form, false)
+      // Owners may always withdraw their own answer, whatever their role.
+      lock(form, true)
       setStatus(m, TEXT.readOnly)
     }
     const now = Date.now()
@@ -844,6 +933,35 @@ export const startForms = (deps: {
     }
     void prefill(m).then(() => restoreDraft(m))
   }
+
+  const manageWithin = (node: Node): void => {
+    if (node.nodeType !== 1) return
+    const element = node as Element
+    if (
+      element.localName === 'form' &&
+      element.hasAttribute('data-dossier-form')
+    ) {
+      manage(element as HTMLFormElement)
+    }
+    for (const form of element.querySelectorAll<HTMLFormElement>(
+      'form[data-dossier-form]',
+    )) {
+      manage(form)
+    }
+  }
+
+  for (const form of doc.querySelectorAll<HTMLFormElement>(
+    'form[data-dossier-form]',
+  )) {
+    manage(form)
+  }
+  // Page code may add a managed form later, cloned from a template.
+  const added = new win.MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) manageWithin(node)
+    }
+  })
+  added.observe(doc, { childList: true, subtree: true })
 
   win.addEventListener('input', onInput, true)
   win.addEventListener('change', onInput, true)
@@ -867,7 +985,9 @@ export const startForms = (deps: {
       for (const m of managed) {
         if (m.key !== notice.form) continue
         if (notice.ok) {
-          succeeded(m, notice.value, false, null)
+          // A kept send holds the answers as they were when it was made: on
+          // this page, the last attempt's; from before, none of this page's.
+          succeeded(m, notice.value, false, m.last?.edits ?? 0)
           continue
         }
         const error = new DossierError(notice.error)
@@ -882,6 +1002,7 @@ export const startForms = (deps: {
     },
     stateOf: (form) => recordOf(form)?.state ?? null,
     stop: () => {
+      added.disconnect()
       win.removeEventListener('input', onInput, true)
       win.removeEventListener('change', onInput, true)
       for (const m of managed) {

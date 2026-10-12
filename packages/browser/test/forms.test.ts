@@ -857,3 +857,154 @@ describe('entries, roles and resumed sends', () => {
     expect(it.form().getAttribute('data-state')).toBe('sent')
   })
 })
+
+describe('review fixes', () => {
+  const ok = (data: unknown = { name: 'Sara' }) => ({
+    doc: wire(data, '2026-10-12T14:30:00'),
+    replayed: false,
+  })
+
+  test('a resumed send leaves the draft and the edits made since the page opened', async () => {
+    const key = formKey(PERSON)
+    const it = open({
+      body: PERSON_FORM,
+      drafts: { [key]: { name: 'Kept' } },
+      resume: [key],
+    })
+    await flush()
+    await it.answer(it.requests('read')[0]!.id, null)
+    type(it, '[name=name]', 'Newer')
+    await vi.advanceTimersByTimeAsync(DRAFT_DELAY)
+    it.page.shell.tell({ type: 'resumed', form: key, ok: true, value: ok() })
+    await flush()
+    expect(it.drafts().at(-1)).toMatchObject({ values: { name: 'Newer' } })
+    expect(it.field('[name=name]').value).toBe('Newer')
+    expect(it.form().getAttribute('data-state')).toBe('draft')
+  })
+
+  test('a prefill that comes after a resumed send keeps what was sent', async () => {
+    const key = formKey(PERSON)
+    const it = open({
+      body: PERSON_FORM,
+      drafts: { [key]: { name: 'From the draft' } },
+      resume: [key],
+    })
+    await flush()
+    it.page.shell.tell({
+      type: 'resumed',
+      form: key,
+      ok: true,
+      value: ok({ name: 'As sent' }),
+    })
+    await flush()
+    await it.answer(
+      it.requests('read')[0]!.id,
+      wire({ name: 'Older' }, '2026-10-12T09:00:00'),
+    )
+    await flush()
+    expect(it.field('[name=name]').value).toBe('As sent')
+    expect(it.form().getAttribute('data-state')).toBe('sent')
+  })
+
+  test('each attempt keeps its own op ID: edits during a send go under a new one', async () => {
+    const BOARD = '<form data-dossier-form="2"><input name="title"></form>'
+    const it = open({ body: BOARD, forms: [SHARED] })
+    await flush()
+    await it.answer(it.requests('read')[0]!.id, null)
+    type(it, '[name=title]', 'A')
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DELAY)
+    await flush()
+    const [first] = it.requests('send')
+    type(it, '[name=title]', 'AB')
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DELAY)
+    await it.fail(first!.id, 'offline')
+    await flush()
+    const sends = sendsOf(it)
+    expect(sends).toHaveLength(2)
+    expect(sends[1]!.entries).toEqual([['title', 'AB']])
+    expect(sends[1]!.opId).not.toBe(sends[0]!.opId)
+  })
+
+  test('Try again sends the failed attempt as it was, under its op ID', async () => {
+    const it = await openEmpty()
+    type(it, '[name=name]', 'Sara')
+    await submit(it)
+    const [first] = it.requests('send')
+    await it.fail(first!.id, 'offline')
+    ;(it.doc.querySelector('[data-dossier-retry]') as HTMLButtonElement).click()
+    await flush()
+    const sends = sendsOf(it)
+    expect(sends[1]).toEqual(sends[0])
+  })
+
+  test('an entries form keeps what the person typed while its send was in flight', async () => {
+    const BODY =
+      '<form data-dossier-form="3"><input name="idea"><button>Add</button></form>'
+    const it = open({ body: BODY, forms: [ENTRIES] })
+    await flush()
+    type(it, '[name=idea]', 'First')
+    await submit(it, 3)
+    type(it, '[name=idea]', 'Second, typed meanwhile')
+    await it.answer(it.requests('send')[0]!.id, ok({ idea: 'First' }))
+    expect(it.field('[name=idea]').value).toBe('Second, typed meanwhile')
+  })
+
+  test('a kept upload satisfies a required file field and goes with the next send', async () => {
+    const BODY = `<form data-dossier-form="1"><input name="name">
+      <input type="file" name="cv" required><button>Send</button></form>`
+    const it = open({ body: BODY })
+    await flush()
+    const cv = { file: 'files/cv.pdf', name: 'cv.pdf', size: 4, type: 'x' }
+    await it.answer(it.requests('read')[0]!.id, wire({ name: 'Sara', cv }))
+    expect(it.form().checkValidity()).toBe(true)
+    await submit(it)
+    expect(sendsOf(it)[0]!.entries).toContainEqual(['cv', cv])
+  })
+
+  test('several kept uploads of one field all go with the next send', async () => {
+    const BODY = `<form data-dossier-form="1"><input name="name">
+      <input type="file" name="cv" multiple><button>Send</button></form>`
+    const it = open({ body: BODY })
+    await flush()
+    const a = { file: 'files/a.pdf', name: 'a.pdf', size: 1, type: 'x' }
+    const b = { file: 'files/b.pdf', name: 'b.pdf', size: 1, type: 'x' }
+    await it.answer(
+      it.requests('read')[0]!.id,
+      wire({ name: 'Sara', cv: [a, b] }),
+    )
+    await submit(it)
+    const files = sendsOf(it)[0]!.entries.filter(([name]) => name === 'cv')
+    expect(files).toEqual([
+      ['cv', a],
+      ['cv', b],
+    ])
+  })
+
+  test('a viewer who may only read can still withdraw their own answer', async () => {
+    const it = open({ body: PERSON_FORM, me: { ...SARA, role: 'read' } })
+    await flush()
+    const withdraw = it.doc.querySelector(
+      '[data-dossier-withdraw]',
+    ) as HTMLButtonElement
+    expect(withdraw.disabled).toBe(false)
+    expect(it.field('[name=name]').readOnly).toBe(true)
+  })
+
+  test('a managed form cloned from a template is set up like the others', async () => {
+    const it = open({
+      body: `<template id="t">${PERSON_FORM}</template><div id="here"></div>`,
+    })
+    await flush()
+    expect(it.requests('read')).toHaveLength(0)
+    const template = it.doc.getElementById('t') as HTMLTemplateElement
+    it.doc
+      .getElementById('here')!
+      .append(template.content.cloneNode(true) as DocumentFragment)
+    await flush()
+    expect(it.form().getAttribute('data-state')).toBe('idle')
+    expect(
+      it.form().querySelector('output[data-dossier-status]'),
+    ).not.toBeNull()
+    expect(it.requests('read')).toHaveLength(1)
+  })
+})
