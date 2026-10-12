@@ -222,6 +222,11 @@ export interface RestorePlan {
   readonly folders: readonly NodeRow[]
   /** Authored folders the change leaves with no live file below, deleted. */
   readonly empty: readonly NodeRow[]
+  /**
+   * The live comments of the pages it removes (their comments folders and
+   * everything in them), deleted with them before anything comes back.
+   */
+  readonly retire: readonly NodeRow[]
   /** A deleted tree, live again with its root. */
   readonly tree: boolean
   /**
@@ -708,6 +713,23 @@ const unavailable = (error: unknown) => {
 const under = (column: string, prefix: string): string =>
   `(${prefix} = '' or ${column} = ${prefix} or substr(${column}, 1, length(${prefix}) + 1) = ${prefix} || '/')`
 
+/**
+ * The page's comments folder, for a page path in SQL:
+ * 'a/plan.html' → 'a/plan.comments'.
+ */
+const commentsFolderSql = (page: string): string =>
+  `(substr(${page}, 1, length(${page}) - 5) || '.comments')`
+
+/** An authored page file, whose comments folder goes with it. */
+const isPageNode = (node: {
+  readonly kind: string
+  readonly origin: string
+  readonly path: string
+}): boolean =>
+  node.kind === 'file' &&
+  node.origin === 'authored' &&
+  node.path.endsWith('.html')
+
 const isKitPath = (path: string): boolean =>
   path.split('/').some((segment) => segment.startsWith('_'))
 
@@ -977,6 +999,16 @@ const byListingOrder = (a: Entry, b: Entry) =>
   (a.node.kind === 'folder' ? 0 : 1) - (b.node.kind === 'folder' ? 0 : 1) ||
   (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
 
+/**
+ * The node at `column` lies in the comments folder of a page the push ?2
+ * deleted.
+ */
+const inCommentsOfDeleted = (column: string): string =>
+  `exists (select 1 from node_versions pv join nodes p on p.id = pv.node_id
+    where pv.push_id = ?2 and pv.state = 'deleted' and p.origin = 'authored'
+      and substr(p.path, -5) = '.html'
+      and ${under(column, commentsFolderSql('p.path'))})`
+
 /** The statements that make a pushed folder match its staged manifest. */
 const stagedWrites = (i: {
   readonly treeId: TreeId
@@ -1028,6 +1060,26 @@ const stagedWrites = (i: {
                  and v.push_id = ?2 and v.state = 'deleted')
             where tree_id = ?1 and id in
               (select node_id from node_versions where push_id = ?2 and state = 'deleted')`,
+      binds,
+    },
+    // The comments of the pages it deleted go with them: a later page at
+    // the same path starts with none.
+    {
+      sql: `insert into node_versions (${versionColumns})
+            select lower(hex(randomblob(16))), n.id, ?1, ${revision}, null, 'deleted',
+              null, null, null, null, ?4, ?5, null, null, null, ?3
+            from nodes n
+            where n.tree_id = ?1 and n.deleted_at is null and n.kind = 'file'
+              and n.origin = 'data' and ${inCommentsOfDeleted('n.path')}`,
+      binds,
+    },
+    {
+      sql: `update nodes set deleted_at = ?3, current_version_id =
+              case when kind = 'file' then (select v.id from node_versions v
+                where v.node_id = nodes.id order by v.revision desc limit 1)
+              else current_version_id end
+            where tree_id = ?1 and deleted_at is null and origin = 'data'
+              and ${inCommentsOfDeleted('nodes.path')}`,
       binds,
     },
     // Authored folders left with no live file below them.
@@ -2151,8 +2203,22 @@ export const TreeStoreLive: Layer.Layer<
           })
           if (node.origin === 'authored') authoredTouched = true
           // ?1 tree · ?2 node · ?3 its path · ?4 now · ?5 author · ?6 key
-          const below = `(n.id = ?2 or ${under('n.path', '?3')})`
-          const binds = [t, node.id, node.path, now, person.id, keyId]
+          // ?7 a page's comments folder, which goes with it
+          const page = isPageNode(node)
+          const comments = (column: string) =>
+            page ? ` or ${under(column, '?7')}` : ''
+          const below = `(n.id = ?2 or ${under('n.path', '?3')}${comments('n.path')})`
+          const binds = [
+            t,
+            node.id,
+            node.path,
+            now,
+            person.id,
+            keyId,
+            ...(page
+              ? [`${node.path.slice(0, -'.html'.length)}.comments`]
+              : []),
+          ]
           writes.push(
             {
               sql: `insert into node_versions (${VERSION_COLUMNS})
@@ -2172,8 +2238,10 @@ export const TreeStoreLive: Layer.Layer<
                         where v.node_id = nodes.id order by v.revision desc limit 1)
                       else current_version_id end
                     where tree_id = ?1 and deleted_at is null
-                      and (id = ?2 or ${under('path', '?3')})`,
-              binds: binds.slice(0, 4),
+                      and (id = ?2 or ${under('path', '?3')}${comments('path')})`,
+              binds: page
+                ? [...binds.slice(0, 4), null, null, binds[6]]
+                : binds.slice(0, 4),
             },
           )
           // The tree root takes the tree with it.
@@ -2741,6 +2809,7 @@ export const TreeStoreLive: Layer.Layer<
             )
             const folders = JSON.stringify(made.folders.map((f) => f.id))
             const empty = JSON.stringify(made.empty.map((f) => f.id))
+            const retire = JSON.stringify(made.retire.map((f) => f.id))
             // Everything is as it was read, and every version copied is
             // still there: a purge that got there first fails the change.
             stateGuards.push(
@@ -2767,6 +2836,18 @@ export const TreeStoreLive: Layer.Layer<
                         left join nodes n on n.id = j.value
                         where n.id is null or n.deleted_at is null or n.tree_id <> ?)`,
                 binds: [folders, t],
+              },
+              {
+                // The comments it retires are live, and nothing new was
+                // written in their folders meanwhile.
+                sql: `not exists (select 1 from json_each(?) j
+                        left join nodes n on n.id = j.value
+                        where n.id is null or n.deleted_at is not null or n.tree_id <> ?)
+                      and not exists (select 1 from json_each(?) j
+                        join nodes f on f.id = j.value and f.kind = 'folder'
+                        join nodes c on c.parent_id = f.id and c.deleted_at is null
+                        where c.id not in (select value from json_each(?)))`,
+                binds: [retire, t, retire, retire],
               },
             )
             // Their bytes are still there and nobody is reclaiming them.
@@ -2806,6 +2887,24 @@ export const TreeStoreLive: Layer.Layer<
                       where tree_id = ?1 and id in
                         (select json_extract(j.value, '$.node') from json_each(?2) j)`,
                 binds: [t, remove, now],
+              },
+              {
+                sql: `insert into node_versions (${VERSION_COLUMNS})
+                      select lower(hex(randomblob(16))), n.id, ?1,
+                        (select coalesce(max(r.revision), 0) + 1 from node_versions r
+                           where r.node_id = n.id),
+                        null, 'deleted', null, null, null, null, ?3, ?4, null, null, null, ?5
+                      from json_each(?2) j join nodes n on n.id = j.value
+                      where n.kind = 'file'`,
+                binds: [t, retire, person.id, keyId, now],
+              },
+              {
+                sql: `update nodes set deleted_at = ?3, current_version_id =
+                        case when kind = 'file' then (select v.id from node_versions v
+                          where v.node_id = nodes.id order by v.revision desc limit 1)
+                        else current_version_id end
+                      where tree_id = ?1 and id in (select value from json_each(?2))`,
+                binds: [t, retire, now],
               },
             )
             writes.push(

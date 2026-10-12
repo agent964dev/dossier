@@ -217,8 +217,15 @@ describe('what a purge removes', () => {
     }
     expect(await count('mentions', 'page_node_id = ?', ids.gone)).toBe(0)
     expect(await count('mentions', 'page_node_id = ?', ids.later)).toBe(1)
-    // The comment itself is someone's data and stays.
-    expect(await nodeAt(treeId, 'gone.comments')).toBeDefined()
+    // The comment went with its page when the push dropped it (a later
+    // gone.html starts with none), and leaves with it.
+    expect(
+      await count(
+        'nodes',
+        "tree_id = ? and path like 'gone.comments%'",
+        treeId,
+      ),
+    ).toBe(0)
     // A deleted file within the retention period keeps its history.
     expect(await versionsOf(ids.later)).toBe(2)
     // A live file keeps every version.

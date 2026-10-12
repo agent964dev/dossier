@@ -438,6 +438,21 @@ export const makeChanges = (deps: ChangesDeps) => {
           })
         const revive: { node: NodeRow; from: VersionRow }[] = []
         const remove: NodeRow[] = []
+        // People's data: what a write holder deleted after the point comes
+        // back; data written since stays as it is.
+        const reviveData = (n: NodeRow) =>
+          Effect.gen(function* () {
+            if (
+              n.kind !== 'file' ||
+              n.deletedAt === null ||
+              n.deletedAt <= time
+            )
+              return
+            const pv = yield* at(n)
+            if (pv === null || pv.state !== 'live') return
+            const now = yield* versionNow(n)
+            if (now?.state === 'deleted') revive.push({ node: n, from: pv })
+          })
         const notThere = () =>
           dossierError(
             'invalid',
@@ -478,6 +493,20 @@ export const makeChanges = (deps: ChangesDeps) => {
           ) {
             revive.push({ node, from: pv })
           }
+          // A page's comments went with it, and come back with it.
+          if (isPageFile(node)) {
+            const folder = commentsFolderOf(node.path).slice(0, -1)
+            const comments = yield* query(() =>
+              DB.prepare(
+                `select * from nodes where tree_id = ?1 and origin = 'data'
+                   and (path = ?2 or substr(path, 1, length(?2) + 1) = ?2 || '/')`,
+              )
+                .bind(tree.id, folder)
+                .all<Record<string, unknown>>(),
+            ).pipe(Effect.map((r) => r.results.map(nodeOfRaw)))
+            below.push(...comments)
+            for (const n of comments) yield* reviveData(n)
+          }
         } else {
           for (const n of below) {
             if (n.kind !== 'file') continue
@@ -498,15 +527,27 @@ export const makeChanges = (deps: ChangesDeps) => {
               }
               continue
             }
-            // People's data: what a write holder deleted after the point
-            // comes back; data written since stays as it is.
-            if (n.deletedAt === null || !then || n.deletedAt <= time) continue
-            const now = yield* versionNow(n)
-            if (now?.state === 'deleted') revive.push({ node: n, from: pv })
+            yield* reviveData(n)
           }
         }
         const removed = new Set(remove.map((n) => n.id))
-        const live = yield* liveNodes(tree.id)
+        const allLive = yield* liveNodes(tree.id)
+        // The comments of the pages it removes go with them, so a later
+        // page at the same path starts with none.
+        const retired = new Set(
+          allLive
+            .filter((n) =>
+              remove.some(
+                (r) =>
+                  isPageFile(r) &&
+                  n.origin === 'data' &&
+                  isUnder(n.path, commentsFolderOf(r.path).slice(0, -1)),
+              ),
+            )
+            .map((n) => n.id),
+        )
+        const retire = allLive.filter((n) => retired.has(n.id))
+        const live = allLive.filter((n) => !retired.has(n.id))
         const liveAt = new Map(live.map((n) => [n.path, n]))
         // A deleted node comes back only where nothing else lives now,
         // even a newer file the point did not hold.
@@ -703,6 +744,7 @@ export const makeChanges = (deps: ChangesDeps) => {
           remove,
           folders: [...folders.values()],
           empty: empty.filter((n) => n.deletedAt === null || folders.has(n.id)),
+          retire,
           tree: tree.deletedAt !== null,
           forms,
         }

@@ -1380,12 +1380,15 @@ const carriedArms = (
   const T = lit(treeId)
   const caller = reachesCaller(workspaceId, f, asOf)
   // The data in a page's comments folder, for a page `q` the caller reads:
-  // `cf` is the folder and `x` what lies in it.
+  // `cf` is the folder and `x` what lies in it, by identity rather than by
+  // path: the folder, a writer's folder in it, or an entry in one. Comments
+  // a deleted page took with it (deleted nodes, which events still name)
+  // stay with their own folder, never a later one at the same path.
   const inComments = tight`join nodes cf on cf.tree_id = q.tree_id
       and cf.path = substr(q.path, 1, length(q.path) - 5) || '.comments'
       and cf.deleted_at is null and cf.kind = 'folder'
-    join nodes x on x.tree_id = q.tree_id and x.origin = 'data'
-      and ${underColumn(tight`x.path`, tight`cf.path`)}`
+    join nodes x on x.origin = 'data' and (x.id = cf.id or x.parent_id = cf.id
+      or x.parent_id in (select w.id from nodes w where w.parent_id = cf.id))`
   const page = tight`q.tree_id = ${T} and q.deleted_at is null and q.kind = 'file'
     and q.origin = 'authored' and substr(q.path, -5) = '.html'`
   return [
