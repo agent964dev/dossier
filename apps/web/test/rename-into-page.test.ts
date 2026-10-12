@@ -231,3 +231,51 @@ describe('a file renamed into a page', () => {
     ).toEqual([])
   })
 })
+
+describe('a page moved', () => {
+  it('keeps its forms taking answers, and so does a layout moved', async () => {
+    const w = await world()
+    const formsOf = (path: string) =>
+      rows<{ target_path: string }>(
+        `select f.target_path from forms f join nodes n on n.id = f.host_node_id
+         where n.tree_id = ? and n.path = ? and n.deleted_at is null
+           and f.host_version_id = n.current_version_id`,
+        w.treeId,
+        path,
+      )
+    await pushAll(
+      w.writerKey,
+      `${w.tree.ws.name}/${w.tree.name}/team`,
+      {
+        'plan.html': NOTES,
+        '_layout.html':
+          '<header><form action="answers/" method="post"><input name="note"><button>Send</button></form></header><slot></slot>',
+        'pic.png': 'pic png',
+        'logo.png': 'logo png',
+      },
+      { force: true },
+    )
+    expect(await formsOf('team/plan.html')).toHaveLength(1)
+    expect(await formsOf('team/_layout.html')).toHaveLength(1)
+    await mv(w.adminKey, w.at('team/plan.html'), w.at('team/renamed.html'))
+    await mv(
+      w.adminKey,
+      w.at('team/_layout.html'),
+      w.at('team/inner/_layout.html'),
+    )
+    expect(await formsOf('team/renamed.html')).toEqual([
+      { target_path: 'team/answers/' },
+    ])
+    expect(await formsOf('team/inner/_layout.html')).toEqual([
+      { target_path: 'team/answers/' },
+    ])
+    const sent = await sendAs(await sessionFor(w.writer), w.tree, {
+      page: 'team/renamed.html',
+      form: await formRef(w.tree, 'team/renamed.html', 'team/answers/'),
+      entries: [['role', 'Driver']],
+    })
+    expect(JSON.stringify(sent)).toContain(
+      `team/answers/${w.writer.email}.json`,
+    )
+  })
+})
