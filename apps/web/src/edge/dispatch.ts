@@ -15,6 +15,7 @@ import { Cause, Effect, Exit, Option } from 'effect'
 import {
   Access,
   BaseLayer,
+  basePathOf,
   Config,
   CurrentCaller,
   Pages,
@@ -366,7 +367,10 @@ export const serve = async (
     if (version === config.baseVersion) return env.ASSETS.fetch(request)
     const file = await run(
       runtime,
-      Effect.flatMap(BaseLayer, (base) => base.file(version, rest.join('/'))),
+      Effect.flatMap(BaseLayer, (base) => {
+        const path = basePathOf(rest)
+        return path === null ? Effect.succeed(null) : base.file(version, path)
+      }),
     )
     if (file === null) return plainNotFound()
     return baseResponse(file, request.method === 'HEAD')

@@ -324,7 +324,7 @@ describe('the plain error page', () => {
     expect(html).toContain('Something went wrong. Try again.')
     expect(html).toMatch(/<a [^>]*>Try again<\/a>/)
     expect(html).not.toContain('stack trace')
-    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('cache-control')).toBe('no-store, no-transform')
   })
 
   it('answers a failure on a link with the plain page, and on the API with the unavailable body', async () => {

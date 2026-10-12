@@ -18,6 +18,13 @@ beforeAll(async () => {
   await env.BLOBS.put(baseKey(OLDER, '_layout.html'), OLD_LAYOUT, {
     httpMetadata: { contentType: 'text/html; charset=utf-8' },
   })
+  await env.BLOBS.put(baseKey(OLDER, '_components/my-élan.js'), '// élan\n', {
+    httpMetadata: { contentType: 'text/javascript; charset=utf-8' },
+  })
+  // What a decoded separator must never reach.
+  await env.BLOBS.put(baseKey(OLDER, 'a/b.js'), '// a/b\n', {
+    httpMetadata: { contentType: 'text/javascript; charset=utf-8' },
+  })
   await env.BLOBS.put(baseKey(OLDER, 'client.js'), '// an older client\n', {
     httpMetadata: { contentType: 'text/javascript; charset=utf-8' },
   })
@@ -28,8 +35,9 @@ const get = (url: string, init: RequestInit = {}) =>
 
 /** The headers every base-layer file carries, whichever version. */
 const expectBaseHeaders = (response: Response) => {
+  const html = response.headers.get('content-type')?.includes('text/html')
   expect(response.headers.get('cache-control')).toBe(
-    'public, max-age=31536000, immutable',
+    `public, max-age=31536000, immutable${html ? ', no-transform' : ''}`,
   )
   expect(response.headers.get('x-content-type-options')).toBe('nosniff')
   expect(response.headers.get('content-security-policy')).toBe(
@@ -76,6 +84,28 @@ describe('the base layer on a content host', () => {
       `/_/base/${OLDER}`,
       '/_/base/not-a-version/client.js',
       '/_/base/test/no-such-file.js',
+    ]) {
+      const response = await get(`${CONTENT}${path}`)
+      expect(response.status, path).toBe(404)
+    }
+  })
+
+  it('reads an older version’s percent-encoded names as the names they encode', async () => {
+    const response = await get(
+      `${CONTENT}/_/base/${OLDER}/_components/my-%C3%A9lan.js`,
+    )
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('// élan\n')
+    expect((await get(`${CONTENT}/_/base/${OLDER}/a/b.js`)).status).toBe(200)
+  })
+
+  it('answers 404 for a name that decodes to a separator, a dot segment or nothing valid', async () => {
+    for (const path of [
+      `/_/base/${OLDER}/a%2Fb.js`,
+      `/_/base/${OLDER}/a%5Cb.js`,
+      `/_/base/${OLDER}/%2E%2E%2Fclient.js`,
+      `/_/base/${OLDER}/_components/%ZZ.js`,
+      `/_/base/${OLDER}/_components/a%00.js`,
     ]) {
       const response = await get(`${CONTENT}${path}`)
       expect(response.status, path).toBe(404)

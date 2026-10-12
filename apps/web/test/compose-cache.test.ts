@@ -149,7 +149,7 @@ describe('the composed-page cache', () => {
       treeId: w.treeId,
       seq: w.seq,
       path: 'guides/page.html',
-      composer: '2.4',
+      composer: '3.6',
       base: 'base0000test',
     })
     expect(kit.cache.entries().size).toBe(1)

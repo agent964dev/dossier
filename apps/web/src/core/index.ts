@@ -78,6 +78,7 @@ export {
   BaseLayerFrom,
   BaseLayerLive,
   baseKey,
+  basePathOf,
   type BaseFile,
   type BaseLayerService,
   type BaseManifest,

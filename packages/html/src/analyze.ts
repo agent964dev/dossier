@@ -1,6 +1,7 @@
 import {
   type Element,
   type Node,
+  type Parsed,
   type ParentNode,
   HTML_NS,
   isElement,
@@ -12,7 +13,7 @@ import { type BodyClose, findRepairs } from './repairs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 4
+export const ANALYZER_VERSION: number = 6
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -123,6 +124,29 @@ export interface HtmlAnalysis {
   readonly forms: readonly FormSummary[]
   /** Where parse5 had to repair the structure. */
   readonly repaired: readonly Repair[]
+  /** What keeps this source's markup inside the slot it is placed in. */
+  readonly seal: Seal
+}
+
+/**
+ * A fragment composed into a layout's slot parses inside the layout's open
+ * elements, so markup its own parse ignored or left open would act on the
+ * layout. These edits make it act as it does on its own.
+ */
+export interface Seal {
+  /**
+   * Each end tag in the body content whose own parse closed nothing of the
+   * source's, as what it made there: '' (ignored), '<p></p>' or '<br>'.
+   */
+  readonly edits: readonly {
+    readonly start: number
+    readonly end: number
+    readonly text: string
+  }[]
+  /** End tags for head elements the source left open, inserted at `at`. */
+  readonly head: readonly { readonly at: number; readonly text: string }[]
+  /** What closes the comment and elements the body content left open. */
+  readonly body: string
 }
 
 const URL_ATTRS = new Set(['href', 'src', 'srcset', 'poster', 'action'])
@@ -540,6 +564,8 @@ export const analyze = (source: string): HtmlAnalysis => {
   }
   end = Math.max(start, end)
 
+  const seal = sealOf(parsed, source, { html, head, body }, at(start, end))
+
   return {
     v: ANALYZER_VERSION,
     complete: doctype !== null || Boolean(htmlLoc?.startTag),
@@ -576,5 +602,73 @@ export const analyze = (source: string): HtmlAnalysis => {
     urls,
     forms,
     repaired: findRepairs(parsed, source, body, bodyClose),
+    seal,
   }
+}
+
+/** Raw text a source ends inside of: a comment that never closed. */
+const openComment = (node: ParentNode, source: string): Node | null => {
+  let found: Node | null = null
+  const walk = (parent: ParentNode): void => {
+    for (const child of parent.childNodes) {
+      if (child.nodeName === '#comment') {
+        const loc = child.sourceCodeLocation
+        if (
+          loc &&
+          loc.endOffset >= source.length &&
+          !/--!?>$/.test(source.slice(loc.startOffset, loc.endOffset))
+        ) {
+          found = child
+        }
+      }
+      if (isElement(child)) {
+        walk(isTemplate(child) ? child.content : child)
+      }
+    }
+  }
+  walk(node)
+  return found
+}
+
+const closersOf = (elements: readonly Element[]): string =>
+  [...elements]
+    .reverse()
+    .map((element) => `</${element.tagName}>`)
+    .join('')
+
+const sealOf = (
+  parsed: Parsed,
+  source: string,
+  own: {
+    readonly html: Element | null
+    readonly head: Element | null
+    readonly body: Element | null
+  },
+  content: Range,
+): Seal => {
+  const document = new Set<Element | null>([own.html, own.head, own.body])
+  const edits: { start: number; end: number; text: string }[] = []
+  for (const tag of parsed.endTags) {
+    if (tag.inTemplate || tag.start < content.start || tag.end > content.end) {
+      continue
+    }
+    if (tag.open !== null && !document.has(tag.open)) continue
+    const text = tag.name === 'p' ? '<p></p>' : tag.name === 'br' ? '<br>' : ''
+    edits.push({ start: tag.start, end: tag.end, text })
+  }
+
+  const open = parsed.openAtEnd.filter((element) => !document.has(element))
+  const inHead = own.head !== null && parsed.openAtEnd.includes(own.head)
+  const head: { at: number; text: string }[] = []
+  let body = ''
+  if (inHead) {
+    // Each open head element closes at the end of the head item holding it.
+    const first = open[0]
+    const range = first === undefined ? null : outerRange(first, source.length)
+    if (range !== null) head.push({ at: range.end, text: closersOf(open) })
+  } else {
+    const comment = own.body === null ? null : openComment(own.body, source)
+    body = (comment === null ? '' : '-->') + closersOf(open)
+  }
+  return { edits, head, body }
 }

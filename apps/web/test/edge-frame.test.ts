@@ -82,7 +82,7 @@ describe('the shell', () => {
     expect(csp).toContain(`frame-src https://${content}`)
     expect(csp).toContain("frame-ancestors 'none'")
     expect(csp).toContain("default-src 'none'")
-    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('cache-control')).toBe('no-store, no-transform')
     expect(response.headers.get('referrer-policy')).toBe('same-origin')
     const html = await response.text()
     expect(html).toContain('<title>dossier.test</title>')
@@ -125,7 +125,7 @@ describe('the link route', () => {
     for (const response of [missing, hidden, folder, workspaceHome]) {
       expect(response.status).toBe(404)
       expect(response.headers.get('content-type')).toContain('text/html')
-      expect(response.headers.get('cache-control')).toBeNull()
+      expect(response.headers.get('cache-control')).toBe('no-transform')
     }
     expect(await missing.text()).toContain(
       `data-screen="/${ws.name}/acme/salaries"`,
@@ -208,7 +208,7 @@ describe('the frame route', () => {
     const page = await frame(owner, `/_/v/${handle}/1/plan`)
     expect(page.status).toBe(200)
     expect(page.headers.get('content-type')).toBe('text/html; charset=utf-8')
-    expectContentHeaders(page, 'private, no-cache')
+    expectContentHeaders(page, 'private, no-cache, no-transform')
     const html = await page.text()
     expect(html).toContain('<script src="/_/base/test/client.js"></script>')
     expect(html).toContain('id="dossier-bootstrap"')
@@ -351,5 +351,59 @@ describe('the frame route', () => {
     expect((await frame(reader, `/_/v/${handle}/1/plan`)).status).toBe(200)
     // The rest of the tree stays closed to a page share.
     expect((await frame(reader, `/_/v/${handle}/1/brief.pdf`)).status).toBe(404)
+  })
+})
+
+describe('HTML on either host', () => {
+  /** Cloudflare adds nothing to a response marked no-transform. */
+  const expectNoTransform = (
+    response: Response,
+    keeps: string,
+    what: string,
+  ) => {
+    expect(response.headers.get('content-type'), what).toContain('text/html')
+    const directives = (response.headers.get('cache-control') ?? '')
+      .split(',')
+      .map((d) => d.trim())
+    expect(directives, what).toContain('no-transform')
+    for (const kept of keeps.split(',').map((d) => d.trim())) {
+      expect(directives, what).toContain(kept)
+    }
+  }
+
+  it('is marked no-transform and keeps its caching', async () => {
+    const handle = await handleOf(owner)
+    expectNoTransform(
+      await owner.fetch(`/${ws.name}/acme/plan`),
+      'no-store',
+      'shell',
+    )
+    expectNoTransform(
+      await frame(owner, `/_/v/${handle}/1/plan`),
+      'private, no-cache',
+      'composed page',
+    )
+    expectNoTransform(
+      await frame(owner, `/_/v/${handle}/1/notes/`),
+      'private, no-cache',
+      'composed folder page',
+    )
+    expectNoTransform(
+      await owner.fetch('/_/base/test/_layout.html', {
+        host: content,
+        purpose: 'none',
+      }),
+      'public, max-age=31536000, immutable',
+      'base layout',
+    )
+    const outsider = await signedIn(fresh())
+    const screen = await outsider.fetch(`/${ws.name}/acme/salaries`)
+    expectNoTransform(screen, 'no-transform', 'no-access page')
+  })
+
+  it('leaves other responses’ caching as it was', async () => {
+    const handle = await handleOf(owner)
+    const pdf = await frame(owner, `/_/v/${handle}/1/brief.pdf`)
+    expect(pdf.headers.get('cache-control')).toBe('private, max-age=86400')
   })
 })

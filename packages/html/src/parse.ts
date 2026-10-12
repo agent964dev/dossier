@@ -51,6 +51,8 @@ export interface Parsed {
   readonly endTags: readonly EndTagSeen[]
   /** Where each doctype was written, kept or not. */
   readonly doctypes: readonly TagSeen[]
+  /** The elements still open when the source ended, outermost first. */
+  readonly openAtEnd: readonly Element[]
   readonly errors: readonly ParserError[]
 }
 
@@ -144,6 +146,31 @@ export const parseDocument = (source: string): Parsed => {
     onDoctype(token)
   }
 
+  // The parser hands the end of input back to itself as it closes things;
+  // the stack is taken as the source first ended.
+  let openAtEnd: Element[] | null = null
+  const onEof = parser.onEof.bind(parser)
+  parser.onEof = (token) => {
+    if (openAtEnd === null) {
+      const stack = parser.openElements
+      openAtEnd = []
+      for (let i = 0; i <= stack.stackTop; i++) {
+        const item = stack.items[i]
+        if (item !== undefined && 'tagName' in item) {
+          openAtEnd.push(item as Element)
+        }
+      }
+    }
+    onEof(token)
+  }
+
   parser.tokenizer.write(source, true)
-  return { document: parser.document, startTags, endTags, doctypes, errors }
+  return {
+    document: parser.document,
+    startTags,
+    endTags,
+    doctypes,
+    errors,
+    openAtEnd: openAtEnd ?? [],
+  }
 }

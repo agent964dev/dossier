@@ -57,13 +57,43 @@ export const BASE_COMPLETE = '.complete'
 
 const VERSION = /^[0-9a-f]{12}$/
 
+// oxlint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f\\]/
+
 /** A path inside a version: plain names, no `.` or `..`, no empty segment. */
 const isBasePath = (path: string): boolean =>
   path !== '' &&
   !path.startsWith('.') &&
   path
     .split('/')
-    .every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+    .every(
+      (segment) =>
+        segment !== '' &&
+        segment !== '.' &&
+        segment !== '..' &&
+        !CONTROL.test(segment),
+    )
+
+/**
+ * A request's path segments after the version, each percent-decoded, as the
+ * file path they name; null when one does not decode or decodes to a
+ * separator, a dot segment, or a control character.
+ */
+export const basePathOf = (segments: readonly string[]): string | null => {
+  const names: string[] = []
+  for (const segment of segments) {
+    let name: string
+    try {
+      name = decodeURIComponent(segment)
+    } catch {
+      return null
+    }
+    if (name.includes('/')) return null
+    names.push(name)
+  }
+  const path = names.join('/')
+  return isBasePath(path) ? path : null
+}
 
 const unavailable = (error: unknown) => {
   console.error('The base layer could not be read', error)

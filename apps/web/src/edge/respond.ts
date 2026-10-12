@@ -238,6 +238,16 @@ export const withCommonHeaders = (
   ) {
     headers.set('content-security-policy', "frame-ancestors 'none'")
   }
+  // Cloudflare adds its analytics beacon to HTML it may transform; nothing
+  // is added to a page or a screen of Dossier's.
+  if (headers.get('content-type')?.includes('text/html') === true) {
+    const cache = headers.get('cache-control')
+    if (cache === null || cache.trim() === '') {
+      headers.set('cache-control', 'no-transform')
+    } else if (!/(^|,)\s*no-transform\s*(,|$)/i.test(cache)) {
+      headers.set('cache-control', `${cache}, no-transform`)
+    }
+  }
   if (host === 'content') {
     headers.delete('set-cookie')
   } else {

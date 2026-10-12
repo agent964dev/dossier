@@ -78,8 +78,8 @@ const expectServedShape = (html: string): void => {
   ])
 }
 
-it('is the second version of the composer', () => {
-  expect(COMPOSER_VERSION).toBe(2)
+it('is the third version of the composer', () => {
+  expect(COMPOSER_VERSION).toBe(3)
 })
 
 describe('a complete document', () => {
@@ -527,5 +527,146 @@ describe('the head rules', () => {
     const { page: install, layouts } = nested()
     const out = compose({ page: install, layouts, inject })
     expect(out.split('href="_theme.css"')).toHaveLength(2)
+  })
+})
+
+describe('a fragment inside a slot', () => {
+  const layout = (body: string) => {
+    const text = `<!doctype html><html><head></head><body>${body}</body></html>`
+    return { source: text, analysis: analyze(text), folder: '' }
+  }
+  const MAIN = layout('<main><slot></slot><footer>Foot</footer></main>')
+  const inMain = (page: string, outer = MAIN): Element => {
+    const html = compose({
+      page: { source: page, analysis: analyze(page), folder: '' },
+      layouts: [outer],
+      inject,
+    })
+    const main = elements(parse(html)).find((e) => e.tagName === 'main')
+    if (main === undefined) throw new Error(`no <main> in ${html}`)
+    return main
+  }
+  const names = (element: Element) => elements(element).map((e) => e.tagName)
+
+  it('never closes the layout’s elements with an end tag its own parse ignored', () => {
+    const main = inMain('</main><p>Page</p></div></footer>')
+    expect(names(main)).toEqual(['main', 'p', 'footer'])
+  })
+
+  it('keeps what an end tag with nothing to close made on its own', () => {
+    expect(names(inMain('<p>a</p></p></br>'))).toEqual([
+      'main',
+      'p',
+      'p',
+      'br',
+      'footer',
+    ])
+  })
+
+  it('closes what the page left open, so the layout’s markup stays outside it', () => {
+    const main = inMain('<div class="open"><section><p>Page')
+    const div = elements(main).find((e) => e.tagName === 'div')!
+    expect(names(div)).toEqual(['div', 'section', 'p'])
+    expect(names(main).at(-1)).toBe('footer')
+    expect(elements(div).some((e) => e.tagName === 'footer')).toBe(false)
+  })
+
+  it('closes raw text a page left open, in its head or body', () => {
+    for (const page of [
+      '<head><style>p{color:red}',
+      '<p>Page</p><style>p{color:red}',
+      '<p>Page</p><textarea>draft',
+      '<p>Page</p><script>let a = 1',
+      '<p>Page</p><!-- an open comment',
+    ]) {
+      const html = compose({
+        page: { source: page, analysis: analyze(page), folder: '' },
+        layouts: [MAIN],
+        inject,
+      })
+      const footer = elements(parse(html)).find((e) => e.tagName === 'footer')
+      expect(footer, page).toBeDefined()
+      expect(textOf(footer!), page).toBe('Foot')
+    }
+  })
+
+  it('seals each fragment layout below the outermost too', () => {
+    const middle = '</main><nav>Nav</nav><div><slot></slot>'
+    const mid = { source: middle, analysis: analyze(middle), folder: '' }
+    const page = '<p>Page</p>'
+    const html = compose({
+      page: { source: page, analysis: analyze(page), folder: '' },
+      layouts: [MAIN, mid],
+      inject,
+    })
+    const main = elements(parse(html)).find((e) => e.tagName === 'main')!
+    expect(names(main)).toEqual(['main', 'nav', 'div', 'p', 'footer'])
+  })
+})
+
+describe('the head rules on queries and fragments', () => {
+  it('keep two scripts of one file with different queries', () => {
+    const outer = `<!doctype html><html><head><script type="module" src="app.js?mode=layout"></script></head><body><slot></slot></body></html>`
+    const page =
+      '<script type="module" src="../app.js?mode=page"></script><p>x</p>'
+    const html = compose({
+      page: { source: page, analysis: analyze(page), folder: 'a' },
+      layouts: [{ source: outer, analysis: analyze(outer), folder: '' }],
+      inject,
+    })
+    expect(html).toContain('app.js?mode=layout')
+    expect(html).toContain('../app.js?mode=page')
+  })
+
+  it('keep two stylesheets that differ only in their fragment', () => {
+    const outer = `<!doctype html><html><head><link rel="stylesheet" href="s.css#a"></head><body><slot></slot></body></html>`
+    const page = '<link rel="stylesheet" href="s.css#b"><p>x</p>'
+    const html = compose({
+      page: { source: page, analysis: analyze(page), folder: '' },
+      layouts: [{ source: outer, analysis: analyze(outer), folder: '' }],
+      inject,
+    })
+    expect(html).toContain('s.css#a')
+    expect(html).toContain('s.css#b')
+  })
+})
+
+describe('the layout rewrite on character references', () => {
+  const rewritten = (body: string) => {
+    const outer = `<!doctype html><html><head></head><body>${body}<slot></slot></body></html>`
+    const page = '<p>x</p>'
+    return compose({
+      page: { source: page, analysis: analyze(page), folder: 'a/b' },
+      layouts: [{ source: outer, analysis: analyze(outer), folder: '' }],
+      inject,
+    })
+  }
+
+  it('reads a URL as the browser does before deciding to rewrite it', () => {
+    expect(rewritten('<a href="&#63;print">P</a>')).toContain(
+      '<a href="&#63;print">',
+    )
+    expect(rewritten('<a href="&#x23;top">T</a>')).toContain(
+      '<a href="&#x23;top">',
+    )
+    expect(
+      rewritten('<img srcset="https&#58;//cdn.example.com/a.png 1x">'),
+    ).toContain('srcset="https&#58;//cdn.example.com/a.png 1x"')
+    expect(rewritten('<a href="&#95;theme.css">U</a>')).toContain(
+      '<a href="&#95;theme.css">',
+    )
+  })
+
+  it('writes a rewritten URL back with its references escaped', () => {
+    const html = rewritten(
+      `<a href="a&amp;b.html?x=1&amp;y=2">A</a><a href='q&#39;s.html'>Q</a>`,
+    )
+    expect(html).toContain('<a href="../../a&amp;b.html?x=1&amp;y=2">')
+    expect(html).toContain(`<a href='../../q&#39;s.html'>`)
+    const links = elements(parse(html)).filter((e) => e.tagName === 'a')
+    expect(links.map((a) => attrsOf(a).href)).toEqual([
+      '../../a&b.html?x=1&y=2',
+      "../../q's.html",
+    ])
   })
 })

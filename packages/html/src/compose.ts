@@ -18,7 +18,7 @@ import {
 } from './urls.ts'
 
 /** Bumped whenever composing changes what it makes of the same input. */
-export const COMPOSER_VERSION: number = 2
+export const COMPOSER_VERSION: number = 3
 
 export interface Source {
   readonly source: string
@@ -109,7 +109,11 @@ const resolvedUrl = (
   const trimmed = trimUrl(url)
   if (!isRelativeUrl(trimmed)) return trimmed
   const folder = isLayout && isRewritable(trimmed) ? owner.folder : page.folder
-  return resolveFrom(folder, trimmed) ?? trimmed
+  // The query and fragment name another resource, or another use of one.
+  const at = trimmed.search(/[?#]/)
+  const suffix = at < 0 ? '' : trimmed.slice(at)
+  const path = resolveFrom(folder, trimmed)
+  return path === null ? trimmed : `${path}${suffix}`
 }
 
 const ruleOf = (
@@ -178,11 +182,23 @@ const droppedItems = (chain: readonly Source[]): Range[][] => {
   )
 }
 
-/** Every edit of one source: charset metas, dropped items, layout URLs. */
+/**
+ * A URL as attribute text: every character that could end the value or read
+ * as a character reference is written as one.
+ */
+const asAttributeText = (url: string): string =>
+  url
+    .replace(/[&"'<>\t\n\f\r ]/g, (char) => `&#${char.codePointAt(0)};`)
+    .replaceAll('&#38;', '&amp;')
+
+/**
+ * Every edit of one source: charset metas, dropped items, layout URLs, and
+ * for a fragment inside a slot, what keeps it there.
+ */
 const editsOf = (
   owner: Source,
   page: Source,
-  isLayout: boolean,
+  role: { readonly isLayout: boolean; readonly sealed: boolean },
   dropped: readonly Range[],
 ): Edit[] => {
   const { analysis } = owner
@@ -190,14 +206,26 @@ const editsOf = (
     ...analysis.charsetMetas.map((r) => ({ ...r, text: '' })),
     ...dropped.map((r) => ({ ...r, text: '' })),
   ]
-  if (isLayout && owner.folder !== page.folder) {
+  if (role.sealed) {
+    edits.push(...analysis.seal.edits)
+    for (const close of analysis.seal.head) {
+      edits.push({ start: close.at, end: close.at, text: close.text })
+    }
+  }
+  if (role.isLayout && owner.folder !== page.folder) {
     for (const url of analysis.urls) {
       if (!url.relative || url.underscore) continue
-      const value = owner.source.slice(url.range.start, url.range.end)
-      // A srcset's candidates arrive one at a time, each its own URL.
+      // Read as the browser reads it; written back over the raw range.
       const attr = url.attr === 'srcset' ? 'src' : url.attr
-      const text = rewriteLayoutUrl(value, attr, owner.folder, page.folder)
-      if (text !== value) edits.push({ ...url.range, text })
+      const text = rewriteLayoutUrl(
+        url.decoded,
+        attr,
+        owner.folder,
+        page.folder,
+      )
+      if (text !== url.decoded) {
+        edits.push({ ...url.range, text: asAttributeText(text) })
+      }
     }
   }
   return edits
@@ -287,9 +315,17 @@ export const compose = (input: ComposeInput): string => {
   const { page, layouts } = input
   const chain = [...layouts, page]
   const dropped = droppedItems(chain)
+  // Every source below the outermost sits inside a slot.
   const edits = chain.map((owner, index) =>
-    editsOf(owner, page, index < chain.length - 1, dropped[index] ?? []),
+    editsOf(
+      owner,
+      page,
+      { isLayout: index < chain.length - 1, sealed: index > 0 },
+      dropped[index] ?? [],
+    ),
   )
+  const sealOf = (index: number): string =>
+    index > 0 ? (chain[index]?.analysis.seal.body ?? '') : ''
   const inject = CHARSET + input.inject({ tags: tagsOf(chain) })
 
   if (layouts.length === 0) {
@@ -310,12 +346,13 @@ export const compose = (input: ComposeInput): string => {
   }
 
   // Bodies from the page outwards: each layout's slot takes in the one below.
-  let body = applyEdits(
-    page.source,
-    page.analysis.body.content.start,
-    page.analysis.body.content.end,
-    edits[chain.length - 1] ?? [],
-  )
+  let body =
+    applyEdits(
+      page.source,
+      page.analysis.body.content.start,
+      page.analysis.body.content.end,
+      edits[chain.length - 1] ?? [],
+    ) + sealOf(chain.length - 1)
   for (let index = layouts.length - 1; index >= 0; index--) {
     const layout = layouts[index]!
     const { content } = layout.analysis.body
@@ -326,8 +363,10 @@ export const compose = (input: ComposeInput): string => {
         ? applyEdits(layout.source, content.start, content.end, [
             ...own,
             { ...slot, text: body },
-          ])
-        : applyEdits(layout.source, content.start, content.end, own) + body
+          ]) + sealOf(index)
+        : applyEdits(layout.source, content.start, content.end, own) +
+          sealOf(index) +
+          body
   }
 
   const head = chain

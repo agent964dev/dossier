@@ -352,7 +352,21 @@ const PATHS = [
   'a/b/_components/x-y.js',
   'f/_old',
   'f/_old/_z.txt',
+  // People's data, including where a `_` name would otherwise reach it.
+  'a/answers',
+  'a/answers/p.json',
+  'f/_old/notes.json',
+  '_inbox',
+  '_inbox/x.json',
 ]
+
+const DATA = new Set([
+  'a/answers',
+  'a/answers/p.json',
+  'f/_old/notes.json',
+  '_inbox',
+  '_inbox/x.json',
+])
 
 interface Scenario {
   readonly shares: readonly {
@@ -446,7 +460,7 @@ const plantTree = async (
       env.DB.prepare(
         `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, created_at,
            deleted_at)
-         values (?, ?, ?, ?, ?, ?, ?, 'authored', ?, ?)`,
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         treeId,
@@ -455,6 +469,7 @@ const plantTree = async (
         path,
         path.split('/').length,
         file ? 'file' : 'folder',
+        DATA.has(path) ? 'data' : 'authored',
         now,
         s.deleted === index ? now : null,
       ),
@@ -486,12 +501,80 @@ const plantTree = async (
   return { treeId, ids, name, pathAt }
 }
 
+const isUnder = (path: string, prefix: string): boolean =>
+  prefix === '' || path === prefix || path.startsWith(`${prefix}/`)
+
+/**
+ * Who reads what, written out on its own: the caller's shares and role on
+ * live nodes, within an agent key's scope, plus read on an authored `_` node
+ * through any node at or below the folder its `_` part starts in that those
+ * grants cover. Never read through reach on people's data.
+ */
+const expectedReadable = (s: Scenario): ReadonlySet<string> => {
+  const index = (path: string) => PATHS.indexOf(path)
+  const live = (path: string) => path === '' || s.deleted !== index(path)
+  const pathAt = (i: number) => (i < 0 ? '' : (PATHS[i] ?? ''))
+  const origin = (path: string) => (DATA.has(path) ? 'data' : 'authored')
+  const matches = (kind: 'email' | 'workspace' | 'anyone') =>
+    kind === 'anyone' ||
+    (kind === 'email' && (s.caller === 'outsider' || s.caller === 'scoped')) ||
+    (kind === 'workspace' && (s.caller === 'member' || s.caller === 'readonly'))
+  const scope = s.caller === 'scoped' ? pathAt(s.scopeAt) : ''
+  const direct = (path: string): boolean => {
+    if (!live(scope) || !isUnder(path, scope)) return false
+    if (s.caller === 'admin') return true
+    return s.shares.some(
+      (given) =>
+        matches(given.kind) &&
+        live(pathAt(given.at)) &&
+        isUnder(path, pathAt(given.at)) &&
+        (given.role !== 'respond' || origin(path) === 'authored'),
+    )
+  }
+  const all = ['', ...PATHS].filter(live)
+  const readable = new Set<string>()
+  for (const path of all) {
+    if (direct(path)) {
+      readable.add(path)
+      continue
+    }
+    const first = path.split('/').findIndex((name) => name.startsWith('_'))
+    if (first < 0 || origin(path) !== 'authored') continue
+    const from = path.split('/').slice(0, first).join('/')
+    if (all.some((other) => isUnder(other, from) && direct(other))) {
+      readable.add(path)
+    }
+  }
+  return readable
+}
+
 describe('the list check', () => {
-  it('agrees with require(read) on random trees, shares and callers', async () => {
+  it('reaches the `_` files above a shared page, never a sibling folder’s or data', () => {
+    const reached = expectedReadable({
+      shares: [
+        { at: PATHS.indexOf('a/b/c.html'), kind: 'email', role: 'read' },
+      ],
+      caller: 'outsider',
+      scopeAt: -1,
+      deleted: null,
+    })
+    expect([...reached].sort()).toEqual([
+      '_layout.html',
+      'a/_theme.css',
+      'a/b/_components',
+      'a/b/_components/x-y.js',
+      'a/b/c.html',
+    ])
+  })
+
+  it('agrees with require(read) and the expected reach on random trees, shares and callers', async () => {
     const { admin, member, outsider, ws } = await base()
     const database = db(env)
+    let reachedSome = false
+    let reachedData = false
     await fc.assert(
       fc.asyncProperty(scenario, async (s) => {
+        const expected = expectedReadable(s)
         const tree = await plantTree(ws, admin, s)
         const caller: Caller =
           s.caller === 'visitor'
@@ -544,12 +627,22 @@ describe('the list check', () => {
               access.require('read', node as NodeRow),
             ).pipe(Effect.either),
           )
-          expect(listedIds.has(node.id), `${s.caller} on ${node.path}`).toBe(
-            point._tag === 'Right',
-          )
+          const what = `${s.caller} on ${node.path} in ${JSON.stringify(s)}`
+          expect(listedIds.has(node.id), what).toBe(point._tag === 'Right')
+          expect(point._tag === 'Right', what).toBe(expected.has(node.path))
+          if (
+            point._tag === 'Right' &&
+            point.right.basis[0]?.kind === 'reach'
+          ) {
+            reachedSome = true
+            if (DATA.has(node.path)) reachedData = true
+          }
         }
       }),
-      { numRuns: 60 },
+      { numRuns: 80 },
     )
+    // The runs exercised reach, and it never gave read on data.
+    expect(reachedSome).toBe(true)
+    expect(reachedData).toBe(false)
   })
 })
