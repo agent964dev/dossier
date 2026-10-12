@@ -524,10 +524,18 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
     (kind === 'email' && (s.caller === 'outsider' || s.caller === 'scoped')) ||
     (kind === 'workspace' && (s.caller === 'member' || s.caller === 'readonly'))
   const scope = s.caller === 'scoped' ? pathAt(s.scopeAt) : ''
+  // A node holds one share per target: a later one for the same node and
+  // target is not planted, as the database keeps the first.
+  const planted = s.shares.filter(
+    (given, i) =>
+      s.shares.findIndex(
+        (other) => other.at === given.at && other.kind === given.kind,
+      ) === i,
+  )
   const direct = (path: string): boolean => {
     if (!live(scope) || !isUnder(path, scope)) return false
     if (s.caller === 'admin') return true
-    return s.shares.some(
+    return planted.some(
       (given) =>
         matches(given.kind) &&
         live(pathAt(given.at)) &&
@@ -785,7 +793,23 @@ describe('the list check', () => {
           }
         }
       }),
-      { numRuns: 80 },
+      {
+        numRuns: 80,
+        // Two shares on one node for one target: only the first is planted.
+        examples: [
+          [
+            {
+              shares: [
+                { at: 15, kind: 'workspace', role: 'respond' },
+                { at: 15, kind: 'workspace', role: 'read' },
+              ],
+              caller: 'member',
+              scopeAt: 0,
+              deleted: null,
+            },
+          ],
+        ],
+      },
     )
     // The runs exercised reach, and it never gave read on data.
     expect(reachedSome).toBe(true)
