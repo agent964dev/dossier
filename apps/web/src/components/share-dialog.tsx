@@ -809,7 +809,7 @@ function RoleSelect({
 function Callout({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   return (
     <div className="flex gap-2.5 rounded-xl border border-warning-400/30 bg-warning-400/10 px-3.5 py-3 text-sm leading-relaxed text-neutral-100">
-      <span aria-hidden className="mt-0.5 text-warning-400 [&_svg]:size-4">
+      <span aria-hidden className="mt-0.5 text-warning-300 [&_svg]:size-4">
         {icon}
       </span>
       <div className="min-w-0 flex-1">{children}</div>
