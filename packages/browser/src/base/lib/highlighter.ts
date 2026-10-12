@@ -61,10 +61,12 @@ export const theme = createCssVariablesTheme({
 let highlighter: Promise<HighlighterCore> | null = null
 
 export const getHighlighter = (): Promise<HighlighterCore> => {
+  // ES2018 regexes: WebKit mis-reads line ends in the `v`-flag patterns
+  // later targets emit, so a comment there swallowed the next line.
   highlighter ??= createHighlighterCore({
     themes: [theme],
     langs: [],
-    engine: createJavaScriptRegexEngine({ forgiving: true }),
+    engine: createJavaScriptRegexEngine({ forgiving: true, target: 'ES2018' }),
   })
   return highlighter
 }
