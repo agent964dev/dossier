@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Home</title>
+<link rel="stylesheet" href="_theme.css">
+<link rel="alternate" type="text/markdown" href="archive/docs/guide.md">
+<script type="module" src="_kit/note.js"></script>
+</head>
+<body>
+<nav>
+  <a href="archive/docs/guide">Guide</a>
+  <a href="archive/docs/">Docs</a>
+  <a href="archive/docs">Docs, without the slash</a>
+  <a href=archive/docs/guide.html#intro>Intro</a>
+  <a href='archive/docs/guide?tab=setup&amp;view=full#steps'>Setup</a>
+  <a href="./archive/docs/my%20file">My file</a>
+  <a href="notes">Notes</a>
+  <a href="about/">About</a>
+  <a href="#top">Top</a>
+  <a href="https://example.com/docs/guide">Elsewhere</a>
+  <a href="//cdn.example.com/docs/guide">CDN</a>
+  <a href="/docs/guide">Root-relative</a>
+  <a href="mailto:team@example.com?subject=docs/guide">Mail</a>
+</nav>
+<p>The guide lives at docs/guide, and <code>href="docs/guide"</code> links it.</p>
+<!-- <a href="docs/guide">a link in a comment</a> -->
+<img src="archive/docs/img/diagram.png"
+     srcset="archive/docs/img/diagram.png 1x, archive/docs/img/diagram@2x.png 2x,img/logo@3x.png 3x"
+     alt="Diagram">
+<video src="archive/docs/media/clip.mp4" poster="archive/docs/media/poster.jpg"></video>
+<img src="archive/docs/img/missing.png" alt="Not pushed yet">
+<form action="archive/docs/answers/" method="post"><input name="q"></form>
+<div data-href="docs/guide">Not a URL attribute</div>
+</body>
+</html>
