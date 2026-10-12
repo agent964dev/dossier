@@ -125,6 +125,11 @@ const HOUR = 60 * 60 * 1000
 export const RETRY_DELAY = 5000
 /** How often the shell tries the sends it keeps while the tab is open. */
 export const REPLAY_INTERVAL = 30_000
+/**
+ * The waits before uploading again when the deployment is cleaning up the
+ * same bytes: a purge finishes in moments, so a few short tries suffice.
+ */
+export const RECLAIM_DELAYS: readonly number[] = [500, 2000, 5000]
 
 const FRAME_ATTRIBUTES: Readonly<Record<string, string>> = {
   id: 'dossier-page',
@@ -360,6 +365,23 @@ export const createShell = (
       .join('')
   }
 
+  /** An upload, tried again while a purge holds its bytes. */
+  const uploadKept = async (
+    params: UploadParamsWire & { readonly body: Blob },
+  ): Promise<UploadResultWire> => {
+    for (let tried = 0; ; tried += 1) {
+      try {
+        return await api.upload(params)
+      } catch (error) {
+        const wait = RECLAIM_DELAYS[tried]
+        if (codeOf(error) !== 'blob_reclaiming' || wait === undefined) {
+          throw error
+        }
+        await new Promise((resolve) => win.setTimeout(resolve, wait))
+      }
+    }
+  }
+
   /** Uploads the send's files, then sends it with the stored uploads. */
   const deliver = async (
     page: string,
@@ -376,7 +398,7 @@ export const createShell = (
       }
       const index = files.get(field) ?? 0
       files.set(field, index + 1)
-      const stored = await api.upload({
+      const stored = await uploadKept({
         tree,
         page,
         seq: send.seq,

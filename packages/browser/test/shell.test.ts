@@ -1436,3 +1436,31 @@ describe('confirming a nested page', () => {
     ])
   })
 })
+
+describe('an upload whose bytes are being cleaned up', () => {
+  test('is tried again shortly with the same op ID', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    it.upload.mockRejectedValueOnce(
+      new DossierError({
+        code: 'blob_reclaiming',
+        message: 'This file is being cleaned up. Send it again shortly.',
+        fix: null,
+        path: 'cv',
+      }),
+    )
+    const file = new File(['%PDF'], 'cv.pdf', { type: 'application/pdf' })
+    page.postMessage(request(1, { entries: [['cv', file]] }))
+    await vi.waitFor(() => expect(it.send).toHaveBeenCalled(), {
+      timeout: 5000,
+    })
+    expect(it.upload.mock.calls.map(([i]) => i.opId)).toEqual([
+      'op-1:cv:0',
+      'op-1:cv:0',
+    ])
+    expect(page.inbox.at(-1)).toMatchObject({ type: 'result', ok: true })
+    it.shell.dispose()
+  })
+})
