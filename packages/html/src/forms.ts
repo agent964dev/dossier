@@ -681,3 +681,72 @@ export const validateSend = (
     ),
   }
 }
+
+/** A stored value as the values a send would have carried for it. */
+const sentOf = (field: FieldRule, value: unknown): unknown[] | string => {
+  if (value === null) return []
+  if (field.type === 'checkbox') {
+    return typeof value === 'boolean'
+      ? value
+        ? [field.options[0]?.value ?? 'on']
+        : []
+      : 'Use true or false for this field.'
+  }
+  if (takesMany(field)) {
+    return Array.isArray(value) ? value : 'Use a list for this field.'
+  }
+  if (field.type === 'number' || field.type === 'range') {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? [String(value)]
+      : 'Enter a number.'
+  }
+  if (field.type === 'file') return [value]
+  return typeof value === 'string' ? [value] : VALID
+}
+
+/**
+ * A page-code write into a form's target, checked against the forms that
+ * target it: each key must be a field of one of them, and its value, typed
+ * as a send would store it, must pass that field's rules. A null removes
+ * the field, which a required field refuses.
+ */
+export const validateValues = (
+  forms: readonly FormSchema[],
+  values: Readonly<Record<string, unknown>>,
+): SendCheck => {
+  const problems: { readonly field: string; readonly message: string }[] = []
+  const decided: Record<string, unknown> = {}
+  for (const [name, value] of Object.entries(values)) {
+    const fields = forms.flatMap((form) =>
+      form.fields.filter((f) => f.name === name && f.type !== 'submit'),
+    )
+    if (fields.length === 0) {
+      problems.push({
+        field: name,
+        message: `This form has no field named ${name}.`,
+      })
+      continue
+    }
+    let message: string | null = null
+    let passed = false
+    for (const field of fields) {
+      const sent = sentOf(field, value)
+      if (typeof sent === 'string') {
+        message ??= sent
+        continue
+      }
+      const outcome = checkField(field, sent)
+      if (outcome !== null && 'message' in outcome) {
+        message ??= outcome.message
+        continue
+      }
+      passed = true
+      break
+    }
+    if (passed) decided[name] = value
+    else problems.push({ field: name, message: message ?? VALID })
+  }
+  return problems.length > 0
+    ? { ok: false, problems }
+    : { ok: true, values: decided }
+}

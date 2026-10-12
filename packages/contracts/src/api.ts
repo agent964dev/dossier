@@ -7,10 +7,12 @@ import {
 import { Schema } from 'effect'
 
 import { DossierError } from './errors.ts'
+import { EventTypeSchema } from './events.ts'
 import {
   AgentKeyId,
   AgentKeySecret,
   AuthoredSeq,
+  EventSeq,
   NodeId,
   OpId,
   PushId,
@@ -243,6 +245,8 @@ export const ViewGrantSchema = Schema.Struct({
   path: Schema.String,
   /** Whom the grant is for: the shell refuses to go on as anyone else. */
   email: Schema.NullOr(Schema.String),
+  /** The tree's event sequence when the view was granted: the first cursor. */
+  events: EventSeq,
 })
 export type ViewGrant = typeof ViewGrantSchema.Type
 
@@ -438,7 +442,7 @@ export type UploadResult = typeof UploadResult.Type
 export const DataReadResult = Schema.Union(
   /** A file; missing and unreadable are both null. */
   Schema.Struct({ file: Schema.NullOr(DocWire) }),
-  /** A folder: every readable data file below it. */
+  /** A folder: every readable file below it, `_` files left out. */
   Schema.Struct({ files: Schema.Array(DocWire) }),
 )
 export type DataReadResult = typeof DataReadResult.Type
@@ -451,6 +455,70 @@ export const WithdrawPayload = Schema.Struct({
   /** Whom the page was shown to, as in a send. */
   as: Schema.optional(Schema.NullOr(Schema.String)),
 })
+
+/** Page code's write into a data file, or a new entry in its own folder. */
+export const WritePayload = Schema.Struct({
+  tree: TreeId,
+  /** The page's tree path: 'board.html'. */
+  page: Schema.String,
+  /** A tree path, already resolved: 'layout.json', or 'ideas/<email>/'. */
+  path: Schema.String,
+  patch: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+  /** The patch is the whole new value of a file the caller owns. */
+  replace: Schema.Boolean,
+  opId: OpId,
+  /** The page's bootstrap sequence; the version records the push seen at it. */
+  seq: AuthoredSeq,
+  /** Whom the page was shown to, as in a send. */
+  as: Schema.optional(Schema.NullOr(Schema.String)),
+})
+export type WritePayload = typeof WritePayload.Type
+
+/** One event as the events route gives it to the caller. */
+export const EventWire = Schema.Struct({
+  seq: EventSeq,
+  type: EventTypeSchema,
+  /** Inside the tree. */
+  path: Schema.String,
+  /** ISO 8601. */
+  at: Schema.String,
+  /**
+   * A data event's writer by email; an authored event's pusher by email to
+   * members of the tree's workspace and to the pusher, by name to anyone
+   * else. Null where the event hides its actor.
+   */
+  by: Schema.NullOr(Schema.String),
+  push: Schema.NullOr(PushNumber),
+})
+export type EventWire = typeof EventWire.Type
+
+export const EventsResponse = Schema.Struct({
+  events: Schema.Array(EventWire),
+  /** The last event scanned: the cursor of the next request. */
+  next: EventSeq,
+  /** More events follow `next`. */
+  more: Schema.Boolean,
+})
+export type EventsResponse = typeof EventsResponse.Type
+
+export class EventsGroup extends HttpApiGroup.make('events')
+  // not_found | sign_in_required
+  .add(
+    HttpApiEndpoint.get('events', '/events')
+      .setUrlParams(
+        Schema.Struct({
+          /** A tree ID, or '<workspace>/<tree>'. */
+          tree: Schema.String,
+          after: Schema.optional(Schema.NumberFromString),
+          /** Only events at, below or above this tree path. */
+          path: Schema.optional(Schema.String),
+        }),
+      )
+      .addSuccess(EventsResponse),
+  ) {}
+
+/** The path of the watch upgrade; outside the HttpApi. */
+export const WATCH_PATH = '/_/api/watch'
 
 export class DataGroup extends HttpApiGroup.make('data')
   // invalid | closed | form_changed | forbidden | not_found |
@@ -474,11 +542,19 @@ export class DataGroup extends HttpApiGroup.make('data')
       .setPayload(WithdrawPayload)
       .addSuccess(Schema.Void, { status: 204 }),
   )
-  // Never not_found: missing and unreadable read as nothing.
+  // Never not_found: missing and unreadable read as nothing. too_large for
+  // a folder over 1,000 files or 10 MiB of data.
   .add(
     HttpApiEndpoint.get('read', '/data/read')
       .setUrlParams(Schema.Struct({ tree: TreeId, path: Schema.String }))
       .addSuccess(DataReadResult),
+  )
+  // forbidden | invalid | not_mergeable | closed | too_large | rate_limited |
+  // sign_in_required
+  .add(
+    HttpApiEndpoint.post('write', '/data/write')
+      .setPayload(WritePayload)
+      .addSuccess(DocWire),
   ) {}
 
 export class DossierApi extends HttpApi.make('dossier')
@@ -490,5 +566,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(ViewGroup)
   .add(ReadGroup)
   .add(DataGroup)
+  .add(EventsGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

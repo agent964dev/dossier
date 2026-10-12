@@ -2,7 +2,12 @@
 // imports only ./codes.ts at run time, so the page client's bundle carries no
 // Effect.
 import type { DocWire } from './api.ts'
-import { isErrorCode, type ErrorCode, type ErrorFields } from './codes.ts'
+import {
+  ERRORS,
+  isErrorCode,
+  type ErrorCode,
+  type ErrorFields,
+} from './codes.ts'
 
 export type { DocWire } from './api.ts'
 export {
@@ -139,6 +144,23 @@ export const resolvePath = (
   return isFolder ? `${out.join('/')}/` : out.join('/')
 }
 
+/**
+ * Whether a change at one tree path concerns a watch of another: the same
+ * path, one below the other, or either the tree's root. Folders may end in
+ * `/`; the rule compares whole segments, so `plan` never meets `plan.json`.
+ */
+export const pathsMeet = (a: string, b: string): boolean => {
+  const x = treePath(a).replace(/\/+$/, '')
+  const y = treePath(b).replace(/\/+$/, '')
+  return (
+    x === '' ||
+    y === '' ||
+    x === y ||
+    x.startsWith(`${y}/`) ||
+    y.startsWith(`${x}/`)
+  )
+}
+
 /** The Doc shape page code sees. */
 export interface Doc<T = Json> {
   /** Relative to the page, like a URL: 'answers/sara@acme.com.json'. */
@@ -249,6 +271,76 @@ export interface PageBootstrap {
   readonly forms: readonly FormInfo[]
 }
 
+/** The codes page code's calls reject with. */
+export type PageErrorCode =
+  | 'forbidden'
+  | 'invalid'
+  | 'not_mergeable'
+  | 'closed'
+  | 'too_large'
+  | 'rate_limited'
+  | 'sign_in_required'
+  | 'offline'
+  | 'not_in_export'
+  | 'unavailable'
+
+export const PAGE_ERROR_CODES: readonly PageErrorCode[] = [
+  'forbidden',
+  'invalid',
+  'not_mergeable',
+  'closed',
+  'too_large',
+  'rate_limited',
+  'sign_in_required',
+  'offline',
+  'not_in_export',
+  'unavailable',
+]
+
+const PAGE_CODES: ReadonlySet<string> = new Set(PAGE_ERROR_CODES)
+
+export type PageOp = 'read' | 'write' | 'withdraw' | 'upload' | 'watch'
+
+/** What an error answer means for page code's call. */
+export type PageOutcome =
+  | {
+      readonly kind: 'error'
+      readonly error: ErrorFields & { readonly code: PageErrorCode }
+    }
+  /** A read answers null, or [] for a folder. */
+  | { readonly kind: 'empty' }
+  /** A withdraw resolves: the file is gone either way. */
+  | { readonly kind: 'done' }
+
+/**
+ * The one mapping from an answer's error to what page code sees: missing
+ * reads as nothing, a withdrawal of something gone is done, a write or an
+ * upload where nothing may be written is forbidden, the page client's codes
+ * pass as they are, and any other code is unavailable with its message.
+ */
+export const toPageError = (fields: ErrorFields, op: PageOp): PageOutcome => {
+  if (fields.code === 'not_found') {
+    if (op === 'read' || op === 'watch') return { kind: 'empty' }
+    if (op === 'withdraw') return { kind: 'done' }
+    return {
+      kind: 'error',
+      error: {
+        code: 'forbidden',
+        message: ERRORS.forbidden.message,
+        fix: fields.fix,
+        path: fields.path,
+      },
+    }
+  }
+  if (PAGE_CODES.has(fields.code)) {
+    return {
+      kind: 'error',
+      error: fields as ErrorFields & { readonly code: PageErrorCode },
+    }
+  }
+  return { kind: 'error', error: { ...fields, code: 'unavailable' } }
+}
+
 /** In a top page's window.name, after WINDOW_NAME_PREFIX. */
 export interface TopBoot {
   readonly v: 1
@@ -304,6 +396,12 @@ export type ShellToPage =
       readonly ok: false
       readonly error: ErrorFields
     }
+  /** A watched path's value now: at once, then after each change. */
+  | {
+      readonly type: 'changed'
+      readonly sub: number
+      readonly value: DocWire | readonly DocWire[] | null
+    }
 
 export type PageToShell =
   | {
@@ -335,6 +433,44 @@ export type PageToShell =
       readonly op: 'withdraw'
       readonly path: string
       readonly opId: string
+    }
+  /** Page code's write: merged into the file, or a new entry for a folder. */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'write'
+      readonly path: string
+      readonly patch: JsonObject
+      readonly replace: boolean
+      readonly opId: string
+      /** PageBootstrap.seq: the push the writer saw. */
+      readonly seq: number
+    }
+  /** Page code's upload, stored beside the page. */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'upload'
+      readonly file: Blob
+      readonly name: string
+      /** The file's MIME type. */
+      readonly contentType: string
+      readonly opId: string
+      readonly seq: number
+    }
+  /** Calls `changed` for `sub` at once, then after each relevant change. */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'watch'
+      readonly sub: number
+      readonly path: string
+    }
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'unwatch'
+      readonly sub: number
     }
   /** A form's unsent values, or null once there are none. */
   | {
@@ -403,6 +539,13 @@ export const isShellToPage = (data: unknown): data is ShellToPage => {
       return Number.isInteger(data.id) && isOutcome(data)
     case 'resumed':
       return isString(data.form) && isOutcome(data)
+    case 'changed':
+      return (
+        Number.isInteger(data.sub) &&
+        (data.value === null ||
+          isRecord(data.value) ||
+          Array.isArray(data.value))
+      )
     default:
       return false
   }
@@ -462,6 +605,27 @@ export const isPageToShell = (data: unknown): data is PageToShell => {
           return isSendRequest(data.send)
         case 'withdraw':
           return isString(data.path) && isString(data.opId)
+        case 'write':
+          return (
+            isString(data.path) &&
+            isRecord(data.patch) &&
+            typeof data.replace === 'boolean' &&
+            isString(data.opId) &&
+            Number.isInteger(data.seq)
+          )
+        case 'upload':
+          return (
+            typeof Blob !== 'undefined' &&
+            data.file instanceof Blob &&
+            isString(data.name) &&
+            isString(data.contentType) &&
+            isString(data.opId) &&
+            Number.isInteger(data.seq)
+          )
+        case 'watch':
+          return Number.isInteger(data.sub) && isString(data.path)
+        case 'unwatch':
+          return Number.isInteger(data.sub)
         default:
           return false
       }

@@ -11,6 +11,7 @@ import {
   formSchema,
   resolveFormAction,
   validateSend,
+  validateValues,
 } from '../src/index.ts'
 import { fixture } from './helpers.ts'
 
@@ -738,5 +739,50 @@ describe('disabled controls and date steps', () => {
     expect(
       stepped('<input type="datetime-local" name="d">', '2026-10-12T09:15:01'),
     ).toMatchObject({ ok: false })
+  })
+})
+
+describe('validateValues', () => {
+  it('accepts the values a valid send stores, field by field', () => {
+    const golden = SENDS[0]!
+    const schema = schemaOf(golden.form)
+    const check = validateSend(schema, golden.entries, golden.submitter)
+    expect(check.ok).toBe(true)
+    if (!check.ok) return
+    const { decision: _button, ...values } = check.values
+    expect(validateValues([schema], values)).toEqual({ ok: true, values })
+    for (const [name, typed] of Object.entries(values)) {
+      expect(validateValues([schema], { [name]: typed }).ok, name).toBe(true)
+    }
+  })
+
+  it('refuses a key no form has, a wrong type and a value the rules refuse', () => {
+    const schema = schemaOf(SENDS[0]!.form)
+    const first = (values: Record<string, unknown>) => {
+      const check = validateValues([schema], values)
+      return check.ok ? null : check.problems[0]
+    }
+    expect(first({ nope: 1 })).toEqual({
+      field: 'nope',
+      message: 'This form has no field named nope.',
+    })
+    expect(first({ decision: 'yes' })?.field).toBe('decision')
+    expect(first({ guests: '3' })).toEqual({
+      field: 'guests',
+      message: 'Enter a number.',
+    })
+    expect(first({ agree: 'yes' })?.field).toBe('agree')
+    expect(first({ workshops: 'a' })?.field).toBe('workshops')
+    expect(first({ meal: 'not offered' })).toEqual({
+      field: 'meal',
+      message: 'Choose one of the options offered.',
+    })
+    expect(first({ name: null })?.field).toBe('name')
+  })
+
+  it('passes a key that one of several forms holds', () => {
+    const a = { title: null, fields: [] }
+    const schema = schemaOf(SENDS[0]!.form)
+    expect(validateValues([a, schema], { guests: 2 }).ok).toBe(true)
   })
 })
