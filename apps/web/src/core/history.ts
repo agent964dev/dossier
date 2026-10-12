@@ -182,7 +182,8 @@ export const makeHistory = (deps: HistoryDeps) => {
              and ${OWN_SEQ} and v.node_id = ?3)`
       const rows = yield* query(() =>
         DB.prepare(
-          `select e.seq, e.type, e.path, e.node_id as nodeId, e.created_at as at,
+          `select e.seq, e.type, e.path, e.node_id as nodeId, e.push_id as pushId,
+             e.created_at as at,
              e.actor_id as actorId, e.detail, u.email, u.name,
              p.number, p.message, p.path as pushPath, ${changedHere} as files,
              (n.id is not null and n.deleted_at is not null and n.deleted_at > ?5
@@ -218,6 +219,7 @@ export const makeHistory = (deps: HistoryDeps) => {
             type: LogLine['kind']
             path: string
             nodeId: string | null
+            pushId: string | null
             at: number
             actorId: string | null
             detail: string | null
@@ -268,8 +270,8 @@ export const makeHistory = (deps: HistoryDeps) => {
       const more = rows.results.length > LOG_PAGE
       return {
         lines,
-        /** Each line's node, when it names one: for what a line may show. */
-        nodes: page.map((row) => row.nodeId),
+        /** Each line's node and push: what decides what a line may show. */
+        meta: page.map((row) => ({ nodeId: row.nodeId, pushId: row.pushId })),
         next: more ? String(page.at(-1)?.seq ?? '') : null,
       }
     })
@@ -357,16 +359,46 @@ export const makeHistory = (deps: HistoryDeps) => {
   const lineCount = (text: string) =>
     text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
 
-  /** The files a push changed at or below a folder, or the one file. */
+  /**
+   * The files a push wrote itself at or below a folder (where they stood
+   * then), or the one file: each node and its path then.
+   */
+  const pushFiles = (pushId: string, node: NodeRow) =>
+    Effect.map(
+      query(() =>
+        DB.prepare(
+          `select x.id as nodeId, ${PATH_THEN} as path
+           from node_versions v join nodes x on x.id = v.node_id
+           where v.push_id = ?1 and ${OWN_SEQ}
+             and ${node.kind === 'folder' ? underParam(PATH_THEN, 2) : 'x.id = ?3'}`,
+        )
+          .bind(
+            ...(node.kind === 'folder'
+              ? [pushId, node.path]
+              : [pushId, '', node.id]),
+          )
+          .all<{ nodeId: string; path: string }>(),
+      ),
+      (rows) => rows.results,
+    )
+
+  /**
+   * The files a push changed at or below a folder, or the one file, those
+   * `keep` lets the caller see.
+   */
   const pushDetail = (i: {
     readonly caller: Caller
     readonly tree: TreeRow
     readonly node: NodeRow
     readonly push: PushRow
+    readonly keep: (
+      nodeId: string,
+      path: string,
+    ) => Effect.Effect<boolean, never, never>
   }) =>
     Effect.gen(function* () {
       const folder = i.node.kind === 'folder'
-      const rows = yield* query(() =>
+      const all = yield* query(() =>
         DB.prepare(
           `select * from (select v.*, ${PATH_THEN} as nodePath, x.name as nodeName
              from node_versions v join nodes x on x.id = v.node_id
@@ -379,9 +411,15 @@ export const makeHistory = (deps: HistoryDeps) => {
           )
           .all<Record<string, unknown>>(),
       )
+      const rows: Record<string, unknown>[] = []
+      for (const row of all.results) {
+        if (yield* i.keep(row.node_id as string, row.nodePath as string)) {
+          rows.push(row)
+        }
+      }
       const files: PushFile[] = []
       let counted = 0
-      for (const row of rows.results) {
+      for (const row of rows) {
         const version = versionOfRaw(row)
         const path = row.nodePath as string
         const name = row.nodeName as string
@@ -556,6 +594,8 @@ export const makeHistory = (deps: HistoryDeps) => {
    * sequences (`to` null: now), as one patch of the text files among them.
    */
   const folderDiff = (i: {
+    /** The files the caller may see the history of. */
+    readonly keep: (nodeId: string) => Effect.Effect<boolean, never, never>
     readonly node: NodeRow
     readonly from: number
     readonly to: number | null
@@ -581,7 +621,11 @@ export const makeHistory = (deps: HistoryDeps) => {
       const parts: string[] = []
       let shown = 0
       let left = 0
-      for (const [index, row] of rows.results.entries()) {
+      const allowed: Record<string, unknown>[] = []
+      for (const row of rows.results) {
+        if (yield* i.keep(row.id as string)) allowed.push(row)
+      }
+      for (const [index, row] of allowed.entries()) {
         const node = nodeOfRow(row)
         const before = yield* versionAtSeq(node.id, i.from)
         const after =
@@ -598,7 +642,7 @@ export const makeHistory = (deps: HistoryDeps) => {
           continue
         }
         if (shown >= COUNTED_FILES) {
-          left = rows.results.length - index
+          left = allowed.length - index
           break
         }
         shown += 1
@@ -638,6 +682,7 @@ export const makeHistory = (deps: HistoryDeps) => {
     pushOf,
     seqOfPush,
     latestPushUnder,
+    pushFiles,
     pushDetail,
     versionAtSeq,
     versionAtTime,

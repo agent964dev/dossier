@@ -276,11 +276,9 @@ describe('history', () => {
     const theirs = await files(await agent(lina)).run(h(2), (x) =>
       x.log({ ref: t.at('questions/'), cursor: null }),
     )
-    expect(theirs.lines[0]).toMatchObject({
-      kind: 'move',
-      path: 'questions/index.html',
-      to: null,
-    })
+    // The node is no longer theirs: its move is not in their history.
+    expect(JSON.stringify(theirs.lines)).not.toContain('private/')
+    expect(theirs.lines.some((l) => l.kind === 'move')).toBe(false)
     const mine = await files(t.ownerAgent).run(h(2), (x) =>
       x.log({ ref: t.at('questions/'), cursor: null }),
     )

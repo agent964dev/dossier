@@ -403,14 +403,100 @@ export const FilesLive: Layer.Layer<
 
     /**
      * What history asks about: a folder, a file or a page by its link path,
-     * live or deleted, read-history checked.
+     * live or deleted, read-history checked. History is for people: a
+     * visitor is asked to sign in, whatever a share gives anyone.
      */
     const historyNode = (ref: LinkRef) =>
       Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        if (caller.person === null) {
+          return yield* Effect.fail(
+            dossierError(
+              'sign_in_required',
+              'Sign in to see history.',
+              'Sign in with Google, or run dossier login.',
+              ref.path,
+            ),
+          )
+        }
         const located = yield* store.locate(ref, { deleted: true })
         if ('missing' in located) return yield* denied(located)
         yield* access.require('read-history', located.node)
         return located
+      })
+
+    /**
+     * What a history may show its caller. Every node a line or a file is
+     * about is checked as itself, through its own line of folders, never by
+     * the path it shares with another; every path a line records must be one
+     * the caller sees now: the asked node or a folder above it, or a place
+     * they read. A write holder of the whole tree sees it all.
+     */
+    const historyAccess = (located: {
+      readonly node: NodeRow
+      readonly tree: TreeRow
+    }) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const root = yield* store.nodeById(located.tree.rootNodeId as NodeId)
+        const whole =
+          root !== null &&
+          (yield* access.require('read-history', root).pipe(Effect.isSuccess))
+        const asked = located.node.path
+        const scoped = caller.via.kind === 'agent' && caller.via.scope !== null
+        const shared = whole
+          ? new Set<string>()
+          : new Set(
+              (yield* Effect.promise(() =>
+                DB.prepare(
+                  'select distinct node_id as id from shares where tree_id = ?',
+                )
+                  .bind(located.tree.id)
+                  .all<{ id: string }>(),
+              )).results.map((r) => r.id),
+            )
+        const byKey = new Map<string, boolean>()
+        const identity = (id: string) =>
+          Effect.gen(function* () {
+            if (whole) return true
+            const node = yield* store.nodeById(id as NodeId).pipe(Effect.orDie)
+            if (node === null) return false
+            // Siblings without shares of their own answer alike.
+            const key =
+              scoped || shared.has(id)
+                ? `node:${id}`
+                : `in:${node.parentId}:${node.deletedAt === null}`
+            const kept = byKey.get(key)
+            if (kept !== undefined) return kept
+            const ok = yield* access
+              .require('read-history', node)
+              .pipe(Effect.isSuccess)
+            byKey.set(key, ok)
+            return ok
+          })
+        const byPath = new Map<string, boolean>()
+        const sees = (path: string) =>
+          Effect.gen(function* () {
+            if (whole || isUnder(asked, path)) return true
+            const kept = byPath.get(path)
+            if (kept !== undefined) return kept
+            const near = yield* store
+              .nearest(located.tree.id, path)
+              .pipe(Effect.orDie)
+            const ok =
+              near !== null &&
+              (yield* access.require('read', near).pipe(Effect.isSuccess))
+            byPath.set(path, ok)
+            return ok
+          })
+        // Asked as the caller, whoever runs them.
+        return {
+          identity: (id: string) =>
+            identity(id).pipe(Effect.provideService(CurrentCaller, caller)),
+          sees: (path: string) =>
+            sees(path).pipe(Effect.provideService(CurrentCaller, caller)),
+          whole,
+        }
       })
 
     const retention = () =>
@@ -428,38 +514,47 @@ export const FilesLive: Layer.Layer<
           cursor,
           retentionDays,
         })
-        // A line names only paths the caller may see: at or below what
-        // they asked about, a folder above it, or a place they read.
-        const asked = located.node.path
-        const sees = (path: string) =>
-          Effect.gen(function* () {
-            if (isUnder(path, asked) || isUnder(asked, path)) return true
-            const near = yield* store.nearest(located.tree.id, path)
-            return (
-              near !== null &&
-              (yield* access.require('read', near).pipe(Effect.isSuccess))
-            )
-          })
-        const shown: LogLine[] = []
-        for (const line of page.lines) {
-          if (yield* sees(line.path)) shown.push(line)
-        }
-        // A move names where the node went only to whoever reads it there.
-        const nodeOf = new Map(page.lines.map((l, n) => [l, page.nodes[n]]))
-        const lines = yield* Effect.forEach(shown, (line) =>
-          Effect.gen(function* () {
-            const id = nodeOf.get(line)
-            if (line.kind !== 'move' || line.to === null || id == null) {
-              return line
+        const can = yield* historyAccess(located)
+        const here = `${ref.workspace}/${located.tree.name}`
+        const lines: LogLine[] = []
+        for (const [n, line] of page.lines.entries()) {
+          const meta = page.meta[n]!
+          if (line.kind === 'push') {
+            // A push shows only through the files it wrote that the caller
+            // may see, counted where they stood.
+            if (meta.pushId === null || line.push === null) continue
+            let files = 0
+            for (const f of yield* history.pushFiles(
+              meta.pushId,
+              located.node,
+            )) {
+              if ((yield* can.identity(f.nodeId)) && (yield* can.sees(f.path)))
+                files += 1
             }
-            const node = yield* store.nodeById(id as NodeId)
-            const reads =
-              node !== null &&
-              node.deletedAt === null &&
-              (yield* access.require('read', node).pipe(Effect.isSuccess))
-            return reads ? line : { ...line, to: null }
-          }),
-        )
+            if (files === 0 && !isUnder(line.path, located.node.path)) continue
+            if (!(yield* can.sees(line.path))) continue
+            lines.push({ ...line, push: { ...line.push, files } })
+            continue
+          }
+          if (meta.nodeId !== null && !(yield* can.identity(meta.nodeId))) {
+            continue
+          }
+          if (!(yield* can.sees(line.path))) continue
+          // A destination shows only where the caller sees it: a tree's
+          // only as the place it is now.
+          if (line.kind === 'move' && line.to !== null) {
+            const shown =
+              line.path === '' ? line.to === here : yield* can.sees(line.to)
+            lines.push(shown ? line : { ...line, to: null })
+            continue
+          }
+          if (line.kind === 'delete' && line.push !== null && !can.whole) {
+            // What the deletion took is the caller's only as far as they see.
+            lines.push({ ...line, push: null })
+            continue
+          }
+          lines.push(line)
+        }
         return {
           path: located.node.path,
           lines,
@@ -474,37 +569,36 @@ export const FilesLive: Layer.Layer<
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         const located = yield* historyNode(ref)
-        const push = yield* history.pushOf(located.tree.id, number)
-        if (push === null) {
-          return yield* Effect.fail(
-            dossierError(
-              'not_found',
-              `There is no push ${number} in ${located.tree.name}.`,
-              null,
-              ref.path,
-            ),
+        const missing = () =>
+          dossierError(
+            'not_found',
+            `There is no push ${number} in this history.`,
+            null,
+            ref.path,
           )
-        }
+        const push = yield* history.pushOf(located.tree.id, number)
+        if (push === null) return yield* Effect.fail(missing())
+        const can = yield* historyAccess(located)
+        // Only the files the caller may see, where they stood; then only a
+        // push in this history gives its message, author and time.
         const detail = yield* history.pushDetail({
           caller,
           tree: located.tree,
           node: located.node,
           push,
+          keep: (nodeId, path) =>
+            Effect.gen(function* () {
+              return (yield* can.identity(nodeId)) && (yield* can.sees(path))
+            }),
         })
-        // Only a push in this history: one that changed something here, or
-        // one pushed here.
         if (
           detail.files.length === 0 &&
-          !isUnder(push.path, located.node.path)
-        ) {
-          return yield* Effect.fail(
-            dossierError(
-              'not_found',
-              `There is no push ${number} in this history.`,
-              null,
-              ref.path,
-            ),
+          !(
+            isUnder(push.path, located.node.path) &&
+            (yield* can.sees(push.path))
           )
+        ) {
+          return yield* Effect.fail(missing())
         }
         return detail
       }).pipe(Effect.catchTag('DossierError', narrowHistory)) as ReturnType<
@@ -560,7 +654,9 @@ export const FilesLive: Layer.Layer<
             fromSeq = yield* seqOf(from)
             toSeq = to === null ? null : yield* seqOf(to)
           }
+          const can = yield* historyAccess(located)
           const patch = yield* history.folderDiff({
+            keep: can.identity,
             node,
             from: fromSeq,
             to: toSeq,
