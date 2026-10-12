@@ -1,5 +1,6 @@
 // Event cursors as callers hold them: sealed, so they say nothing about how
-// many events a tree holds, and bound to the tree they were given for.
+// many events a tree holds, and bound to the tree and the caller they were
+// given to.
 import type { TreeId } from '@dossier/contracts'
 
 const encoder = new TextEncoder()
@@ -36,15 +37,26 @@ const toBase64Url = (bytes: Uint8Array): string =>
     .replaceAll('/', '_')
     .replace(/=+$/, '')
 
+/** Only the one canonical spelling of some bytes decodes. */
 const fromBase64Url = (text: string): Uint8Array | null => {
   if (!/^[A-Za-z0-9_-]+$/.test(text)) return null
   try {
     const raw = atob(text.replaceAll('-', '+').replaceAll('_', '/'))
-    return Uint8Array.from(raw, (c) => c.charCodeAt(0))
+    const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0))
+    return toBase64Url(bytes) === text ? bytes : null
   } catch {
     return null
   }
 }
+
+/** Who a cursor is for, as fixed-length bytes: a person's id, '' for a visitor. */
+const callerTag = async (who: string): Promise<Uint8Array> =>
+  new Uint8Array(
+    await crypto.subtle.digest('SHA-256', encoder.encode(`caller:${who}`)),
+  )
+
+/** tree (20) + position (8) + caller (32): one length for every cursor. */
+const PLAIN = 60
 
 /**
  * Seals a position in a tree's events. The plain text has one length for
@@ -55,10 +67,12 @@ export const sealCursor = async (
   secret: string,
   treeId: TreeId,
   seq: number,
+  who: string,
 ): Promise<string> => {
-  const plain = new Uint8Array(28)
+  const plain = new Uint8Array(PLAIN)
   plain.set(encoder.encode(treeId.padEnd(20).slice(0, 20)))
   new DataView(plain.buffer).setBigUint64(20, BigInt(seq))
+  plain.set(await callerTag(who), 28)
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const sealed = new Uint8Array(
     await crypto.subtle.encrypt(
@@ -73,14 +87,18 @@ export const sealCursor = async (
   return toBase64Url(out)
 }
 
-/** The position a cursor seals, or null when it is not this tree's own. */
+/**
+ * The position a cursor seals, or null when it is not one this deployment
+ * sealed for this tree and this caller.
+ */
 export const openCursor = async (
   secret: string,
   treeId: TreeId,
   cursor: string,
+  who: string,
 ): Promise<number | null> => {
   const bytes = fromBase64Url(cursor)
-  if (bytes === null || bytes.length !== 12 + 28 + 16) return null
+  if (bytes === null || bytes.length !== 12 + PLAIN + 16) return null
   try {
     const plain = new Uint8Array(
       await crypto.subtle.decrypt(
@@ -91,6 +109,8 @@ export const openCursor = async (
     )
     const tree = new TextDecoder().decode(plain.slice(0, 20)).trimEnd()
     if (tree !== treeId) return null
+    const tag = await callerTag(who)
+    if (!tag.every((byte, i) => plain[28 + i] === byte)) return null
     const seq = new DataView(plain.buffer).getBigUint64(20)
     return seq > BigInt(Number.MAX_SAFE_INTEGER) ? null : Number(seq)
   } catch {

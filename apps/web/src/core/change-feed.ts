@@ -1,24 +1,24 @@
 import type {
-  AgentKeyId,
   AuthoredSeq,
   EventSeq,
   EventType,
-  NodeId,
-  Person,
   PersonId,
-  SessionId,
   TreeId,
   WorkspaceId,
 } from '@dossier/contracts'
+import { sql } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
 
-import { matching } from '../hub/match.ts'
+import { db } from '../db/client.ts'
+
 import type { Subscriber } from '../hub/tree-hub.ts'
-import { Access } from './access.ts'
 import { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
-import { CurrentCaller, type Caller } from './caller.ts'
-import { visibleEvents, type EventRef } from './event-visibility.ts'
+import {
+  callersCte,
+  visibleEventSql,
+  type CallerRef,
+} from './event-visibility.ts'
 
 /** Whose watching sockets a change closes, so they reconnect and are checked again. */
 export type CloseSockets =
@@ -75,72 +75,51 @@ const logged = (what: string, detail: Record<string, unknown>) =>
   )
 
 /** The tree hubs: closes, then hints addressed socket by socket. */
-export const ChangeFeedLive: Layer.Layer<ChangeFeed, never, Bindings | Access> =
+export const ChangeFeedLive: Layer.Layer<ChangeFeed, never, Bindings> =
   Layer.effect(
     ChangeFeed,
     Effect.gen(function* () {
       const env = yield* Bindings
-      const access = yield* Access
       const { DB } = env
       const hubOf = (treeId: TreeId) =>
         env.TREE_HUB.get(env.TREE_HUB.idFromName(treeId))
       const query = <A>(run: () => Promise<A>) =>
         Effect.tryPromise(run).pipe(Effect.orDie)
 
-      /** The caller a socket now stands for, or null when it may not go on. */
-      const callerOf = (s: Subscriber) =>
+      const database = db(env)
+
+      /**
+       * Each distinct caller behind the sockets, as it stands now: a visitor,
+       * a live session, or an unrevoked key of a person. One query for all.
+       */
+      const callersNow = (
+        callers: readonly Pick<Subscriber, 'person' | 'session' | 'key'>[],
+      ) =>
         Effect.gen(function* () {
-          const requestId = `hub:${s.id}`
-          if (s.person === null) {
-            return {
-              person: null,
-              via: { kind: 'visitor', anonSessionId: null },
-              requestId,
-            } satisfies Caller as Caller
-          }
           const now = yield* Clock.currentTimeMillis
-          const person = yield* query(() =>
-            DB.prepare('select id, email, name, image from "user" where id = ?')
-              .bind(s.person)
-              .first<Person>(),
-          )
-          if (person === null) return null
-          if (s.session !== null) {
-            const live = yield* query(() =>
-              DB.prepare(
-                `select 1 as one from "session" where id = ? and user_id = ?
-                 and expires_at > ?`,
-              )
-                .bind(s.session, s.person, now)
-                .first(),
-            )
-            if (live === null) return null
-            return {
-              person,
-              via: { kind: 'browser', sessionId: s.session as SessionId },
-              requestId,
-            } satisfies Caller as Caller
-          }
-          if (s.key === null) return null
-          const key = yield* query(() =>
-            DB.prepare(
-              `select scope_node_id as scope, read_only as readOnly from agent_keys
-             where id = ? and user_id = ? and revoked_at is null`,
-            )
-              .bind(s.key, s.person)
-              .first<{ scope: string | null; readOnly: number }>(),
-          )
-          if (key === null) return null
-          return {
-            person,
-            via: {
-              kind: 'agent',
-              keyId: s.key as AgentKeyId,
-              scope: key.scope as NodeId | null,
-              readOnly: key.readOnly === 1,
-            },
-            requestId,
-          } satisfies Caller as Caller
+          const rows = (yield* query(() =>
+            database.all(sql`select c.key as i, lower(u.email) as email,
+              (select k.scope_node_id from agent_keys k
+                 where k.id = json_extract(c.value, '$.key')) as scope,
+              case
+                when json_extract(c.value, '$.person') is null then 1
+                when u.id is null then 0
+                when json_extract(c.value, '$.session') is not null then exists (
+                  select 1 from "session" ss where ss.id = json_extract(c.value, '$.session')
+                    and ss.user_id = u.id and ss.expires_at > ${now})
+                when json_extract(c.value, '$.key') is not null then exists (
+                  select 1 from agent_keys k where k.id = json_extract(c.value, '$.key')
+                    and k.user_id = u.id and k.revoked_at is null)
+                else 0 end as ok
+            from json_each(${JSON.stringify(callers)}) c
+              left join "user" u on u.id = json_extract(c.value, '$.person')`),
+          )) as {
+            i: number
+            email: string | null
+            scope: string | null
+            ok: number
+          }[]
+          return rows
         })
 
       const address = (c: Committed) =>
@@ -156,44 +135,88 @@ export const ChangeFeedLive: Layer.Layer<ChangeFeed, never, Bindings | Access> =
             hub.subscribers(),
           )) as unknown as readonly Subscriber[]
           if (subscribers.length === 0) return
-          const seqs = c.events.map((e) => e.seq)
-          const rows = (yield* query(() =>
-            DB.prepare(
-              `select seq, type, path, node_id as nodeId, push_id as pushId
-             from events where tree_id = ? and seq between ? and ?`,
+          const fanOut = Effect.gen(function* () {
+            const tree = yield* query(() =>
+              DB.prepare(
+                `select t.workspace_id as workspaceId,
+                 (t.deleted_at is null and w.deleted_at is null
+                   and w.suspended_at is null) as live
+               from trees t join workspaces w on w.id = t.workspace_id where t.id = ?`,
+              )
+                .bind(c.treeId)
+                .first<{ workspaceId: string; live: number }>(),
             )
-              .bind(c.treeId, Math.min(...seqs), Math.max(...seqs))
-              .all<EventRef>(),
-          )).results
-          const hints: { id: string; sub: number }[] = []
-          const refused: string[] = []
-          const byCaller = new Map<string, Subscriber[]>()
-          for (const s of subscribers) {
-            const who = `${s.person}|${s.session}|${s.key}`
-            byCaller.set(who, [...(byCaller.get(who) ?? []), s])
-          }
-          for (const group of byCaller.values()) {
-            const caller = yield* callerOf(group[0]!)
-            if (caller === null) {
-              refused.push(...group.map((s) => s.id))
-              continue
+            if (tree === null || tree.live !== 1) {
+              yield* query(() => hub.drop(subscribers.map((s) => s.id)))
+              return
             }
-            const visible = yield* visibleEvents(
-              DB,
-              access,
-              c.treeId,
-              rows,
-            ).pipe(Effect.provideService(CurrentCaller, caller))
-            const paths = [...visible.values()].flat()
-            if (paths.length === 0) continue
-            for (const s of group) {
-              for (const sub of matching(s.paths, paths)) {
-                hints.push({ id: s.id, sub })
+            const keyOf = (s: Subscriber) => `${s.person}|${s.session}|${s.key}`
+            const distinct = [
+              ...new Map(subscribers.map((s) => [keyOf(s), s])).values(),
+            ]
+            const now = yield* callersNow(
+              distinct.map((s) => ({
+                person: s.person,
+                session: s.session,
+                key: s.key,
+              })),
+            )
+            const index = new Map<string, number>()
+            const refs: CallerRef[] = []
+            const refused: string[] = []
+            distinct.forEach((s, n) => {
+              const row = now.find((r) => r.i === n)
+              if (row === undefined || row.ok !== 1) return
+              index.set(keyOf(s), refs.length)
+              refs.push({
+                person: s.person,
+                email: row.email,
+                scope: row.scope,
+              })
+            })
+            const subs: { c: number; id: string; sub: number; path: string }[] =
+              []
+            for (const s of subscribers) {
+              const who = index.get(keyOf(s))
+              if (who === undefined) {
+                refused.push(s.id)
+                continue
               }
+              for (const [sub, path] of s.paths)
+                subs.push({ c: who, id: s.id, sub, path })
             }
-          }
-          if (refused.length > 0) yield* query(() => hub.drop(refused))
-          if (hints.length > 0) yield* query(() => hub.notify(hints))
+            if (refused.length > 0) yield* query(() => hub.drop(refused))
+            if (subs.length === 0) return
+            const seqs = c.events.map((e) => e.seq)
+            const hints = (yield* query(() =>
+              database.all(sql`/* watch hints */ with ${callersCte(c.treeId, tree.workspaceId, refs)},
+              subs as (select json_extract(value, '$.c') as c,
+                  json_extract(value, '$.id') as id,
+                  json_extract(value, '$.sub') as sub,
+                  json_extract(value, '$.path') as path
+                from json_each(${JSON.stringify(subs)}))
+              select distinct subs.id as id, subs.sub as sub
+              from subs join cs on cs.i = subs.c
+                join events e on e.tree_id = ${c.treeId}
+                  and e.seq between ${Math.min(...seqs)} and ${Math.max(...seqs)}
+              where ${visibleEventSql(c.treeId, tree.workspaceId, sql`subs.path`)}`),
+            )) as { id: string; sub: number }[]
+            if (hints.length > 0) yield* query(() => hub.notify(hints))
+          })
+          // A fan-out that cannot finish closes the tree's sockets: their
+          // clients poll until they reconnect, rather than wait in silence.
+          yield* fanOut.pipe(
+            Effect.catchAllCause((cause) =>
+              Effect.gen(function* () {
+                console.error('A change fan-out failed; closing its sockets', {
+                  tree: c.treeId,
+                  seq: c.seq,
+                  cause: String(cause),
+                })
+                yield* query(() => hub.close({ all: true }))
+              }),
+            ),
+          )
         })
 
       const treesOf = (scope: InvalidationScope) =>

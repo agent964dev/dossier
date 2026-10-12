@@ -554,7 +554,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
      * Phase 2's condition for the nodes of a tree the caller may read, over
      * the table `column` names: the caller's grants, without reach.
      */
-    const grantedWhere = (treeId: TreeId, asOf: number | null = null) =>
+    /**
+     * The caller's facts on a tree as SQL values, and the tree's workspace:
+     * null when nothing in the tree can be the caller's to read.
+     */
+    const factsOn = (treeId: TreeId, asOf: number | null = null) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (
@@ -577,71 +581,31 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           if (scopeNode === null) return null
           scopePath = scopeNode.path
         }
-        const email = caller.person?.email.toLowerCase() ?? null
-        const member = facts.memberRole === null ? 0 : 1
-        const admin = facts.memberRole === 'admin'
-        const teams = JSON.stringify(member === 1 ? facts.teams : [])
-        return (column: (name: 'tree_id' | 'path' | 'origin') => SQL): SQL => {
-          const scope =
-            scopePath === null
-              ? sql`1`
-              : underColumn(column('path'), sql`${scopePath}`)
-          const inTree = sql`${column('tree_id')} = ${treeId} and ${scope}`
-          if (admin) return inTree
-          return sql`${inTree} and exists (
-            select 1 from shares s join nodes a on a.id = s.node_id and a.deleted_at is null
-            where s.tree_id = ${treeId}
-              and (s.target_kind = 'anyone'
-                or (s.target_kind = 'email' and s.target = ${email})
-                or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1)
-                or (s.target_kind = 'team' and s.target in (select value from json_each(${teams}))))
-              and ${asOf === null ? sql`1` : sql`s.grant_order <= ${asOf}`}
-              and ${underColumn(column('path'), sql`a.path`)}
-              and (s.role <> 'respond' or ${column('origin')} = 'authored')
-              and (s.target_kind <> 'anyone' or ${column('origin')} = 'authored'
-                or a.origin = 'data'))`
+        const member = facts.memberRole !== null
+        return {
+          workspaceId: facts.workspaceId,
+          facts: {
+            email: sql`${caller.person?.email.toLowerCase() ?? null}`,
+            person: sql`${caller.person?.id ?? null}`,
+            member: sql`${member ? 1 : 0}`,
+            admin: sql`${facts.memberRole === 'admin' ? 1 : 0}`,
+            teams: sql`${JSON.stringify(member ? facts.teams : [])}`,
+            within: (path: SQL) =>
+              scopePath === null
+                ? sql`1`
+                : underColumn(path, sql`${scopePath}`),
+          } satisfies CallerFacts,
         }
       })
 
-    /** The data nodes the caller wrote, within what its key reaches. */
-    const ownedWhere = (treeId: TreeId) =>
-      Effect.gen(function* () {
-        const caller = yield* CurrentCaller
-        const person = caller.person
-        if (
-          person === null ||
-          caller.via.kind === 'system' ||
-          (caller.via.kind === 'handle' && caller.via.treeId !== treeId)
-        ) {
-          return null
-        }
-        let scope = sql`1`
-        if (caller.via.kind === 'agent' && caller.via.scope !== null) {
-          const scopeNode = yield* query(() =>
-            DB.prepare(
-              'select path from nodes where id = ? and tree_id = ? and deleted_at is null',
-            )
-              .bind(caller.via.kind === 'agent' ? caller.via.scope : '', treeId)
-              .first<{ path: string }>(),
-          )
-          if (scopeNode === null) return null
-          scope = underColumn(sql`${nodes.path}`, sql`${scopeNode.path}`)
-        }
-        return sql`${nodes.origin} = 'data' and ${nodes.ownerId} = ${person.id} and ${scope}`
-      })
-
-    /** The live nodes of the tree at or below `from` the caller may read. */
-    const reachFrom = (
-      grants: (column: (name: 'tree_id' | 'path' | 'origin') => SQL) => SQL,
-      treeId: TreeId,
-      from: SQL,
-    ): SQL => {
-      const r = (name: 'tree_id' | 'path' | 'origin') => sql.raw(`r.${name}`)
-      return sql`exists (select 1 from nodes r
-        where r.tree_id = ${treeId} and r.deleted_at is null
-          and ${underColumn(sql`r.path`, from)}
-          and ${grants(r)})`
-    }
+    /**
+     * Phase 2's condition for the nodes of a tree the caller may read, over
+     * the table `column` names: the caller's grants, without reach.
+     */
+    const grantedWhere = (treeId: TreeId, asOf: number | null = null) =>
+      Effect.map(factsOn(treeId, asOf), (on) =>
+        on === null ? null : grantOn(treeId, on.workspaceId, on.facts, asOf),
+      )
 
     /** Read on an authored `_` node through a node it is reached from. */
     const reached = (node: NodeRow, asOf: number | null = null) =>
@@ -676,23 +640,13 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       })
 
     const readable = (treeId: TreeId) =>
-      Effect.gen(function* () {
-        const grants = yield* grantedWhere(treeId)
-        if (grants === null) return { where: sql`0` } satisfies ReadableNodes
-        const own = grants((name) =>
-          name === 'tree_id'
-            ? sql`${nodes.treeId}`
-            : name === 'path'
-              ? sql`${nodes.path}`
-              : sql`${nodes.origin}`,
-        )
-        const owned = (yield* ownedWhere(treeId)) ?? sql`0`
-        return {
-          where: sql`${nodes.treeId} = ${treeId} and ((${own}) or (${owned}) or (
-            ${nodes.origin} = 'authored' and ${nodes.underscoreFrom} is not null
-            and ${reachFrom(grants, treeId, sql`${nodes.underscoreFrom}`)}))`,
-        } satisfies ReadableNodes
-      })
+      Effect.map(factsOn(treeId), (on) =>
+        on === null
+          ? ({ where: sql`0` } satisfies ReadableNodes)
+          : ({
+              where: readableOn(treeId, on.workspaceId, on.facts)(nodeColumn),
+            } satisfies ReadableNodes),
+      )
 
     const member = (workspace: WorkspaceRow | null) =>
       Effect.gen(function* () {
@@ -756,6 +710,90 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
   }),
 )
 
+/**
+ * Who asks, as SQL values: one caller's facts as bound literals, or many
+ * callers' as the columns of a table, so one rule serves both.
+ */
+export interface CallerFacts {
+  /** Lower-cased, or NULL for a visitor. */
+  readonly email: SQL
+  /** The person's id, or NULL for a visitor. */
+  readonly person: SQL
+  /** 1 when a member of the tree's workspace. */
+  readonly member: SQL
+  /** 1 when an admin of it. */
+  readonly admin: SQL
+  /** A JSON array of the person's team ids there. */
+  readonly teams: SQL
+  /** Holds when a path is within what the caller's key reaches. */
+  readonly within: (path: SQL) => SQL
+}
+
+export type NodeColumn = (
+  name: 'tree_id' | 'path' | 'origin' | 'owner_id' | 'underscore_from',
+) => SQL
+
+/** The unaliased `nodes` table's columns. */
+export const nodeColumn: NodeColumn = (name) => sql.raw(`"nodes"."${name}"`)
+
+/**
+ * The caller's grants on a node of the tree, without reach: admin write, or
+ * a share on it or a folder above it whose target is the caller, where a
+ * respond share reads authored files only and an anyone share reaches
+ * people's data only when it sits on a data node.
+ */
+export const grantOn =
+  (
+    treeId: TreeId,
+    workspaceId: string,
+    f: CallerFacts,
+    asOf: number | null = null,
+  ) =>
+  (column: (name: 'tree_id' | 'path' | 'origin') => SQL): SQL =>
+    sql`${column('tree_id')} = ${treeId} and ${f.within(column('path'))} and (${f.admin} = 1 or exists (
+      select 1 from shares s join nodes a on a.id = s.node_id and a.deleted_at is null
+      where s.tree_id = ${treeId}
+        and (s.target_kind = 'anyone'
+          or (s.target_kind = 'email' and s.target = ${f.email})
+          or (s.target_kind = 'workspace' and s.target = ${workspaceId} and ${f.member} = 1)
+          or (s.target_kind = 'team' and s.target in (select value from json_each(${f.teams}))))
+        and ${asOf === null ? sql`1` : sql`s.grant_order <= ${asOf}`}
+        and ${underColumn(column('path'), sql`a.path`)}
+        and (s.role <> 'respond' or ${column('origin')} = 'authored')
+        and (s.target_kind <> 'anyone' or ${column('origin')} = 'authored'
+          or a.origin = 'data')))`
+
+/** The live nodes of the tree at or below `from` the caller may read. */
+export const reachFrom = (
+  grants: (column: (name: 'tree_id' | 'path' | 'origin') => SQL) => SQL,
+  treeId: TreeId,
+  from: SQL,
+): SQL => {
+  const r = (name: 'tree_id' | 'path' | 'origin') => sql.raw(`r.${name}`)
+  return sql`exists (select 1 from nodes r
+    where r.tree_id = ${treeId} and r.deleted_at is null
+      and ${underColumn(sql`r.path`, from)}
+      and ${grants(r)})`
+}
+
+/**
+ * The one read rule over a node's columns: the caller's grants, their own
+ * data within what their key reaches, and an authored `_` node through a
+ * readable node at or below where its `_` part starts. The tree must be
+ * live, which the caller of this checks.
+ */
+export const readableOn =
+  (treeId: TreeId, workspaceId: string, f: CallerFacts) =>
+  (column: NodeColumn): SQL => {
+    const grants = grantOn(treeId, workspaceId, f)
+    return sql`${column('tree_id')} = ${treeId} and ((${grants(column)})
+      or (${column('origin')} = 'data' and ${f.person} is not null
+        and ${column('owner_id')} = ${f.person}
+        and ${f.within(column('path'))})
+      or (${column('origin')} = 'authored' and ${column('underscore_from')} is not null
+        and ${reachFrom(grants, treeId, column('underscore_from'))}))`
+  }
+
 /** `column` is the path `prefix` or lies below it. */
-const underColumn = (column: SQL, prefix: SQL): SQL =>
+export const underColumn = (column: SQL, prefix: SQL): SQL =>
   sql`(${prefix} = '' or ${column} = ${prefix} or substr(${column}, 1, length(${prefix}) + 1) = ${prefix} || '/')`

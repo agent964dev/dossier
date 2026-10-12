@@ -1,145 +1,108 @@
-// Which of a tree's events the caller may see, and at which paths: the one
-// rule the events route and the watch hints both follow.
+// Which of a tree's events a caller may see, and where: the one rule the
+// events route and the watch hints follow, written as SQL over a table of
+// callers so that one query answers for one caller or for hundreds.
 import type { TreeId } from '@dossier/contracts'
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
-import { Effect } from 'effect'
+import { sql, type SQL } from 'drizzle-orm'
 
-import { db, schema } from '../db/client.ts'
-import type { AccessService } from './access.ts'
-import type { CurrentCaller } from './caller.ts'
-import { ancestorPaths, type NodeRow } from './rows.ts'
+import {
+  nodeColumn,
+  readableOn,
+  underColumn,
+  type CallerFacts,
+} from './access.ts'
+import type { Caller } from './caller.ts'
 
-/** An event as it is stored. */
-export interface EventRef {
-  readonly seq: number
-  readonly type: string
-  readonly path: string
-  readonly nodeId: string | null
-  readonly pushId: string | null
+/** A caller as the SQL table `cs` holds it. */
+export interface CallerRef {
+  readonly person: string | null
+  /** Lower-cased. */
+  readonly email: string | null
+  /** The node an agent key is limited to. */
+  readonly scope: string | null
 }
 
-const parentPath = (path: string): string =>
-  path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+/** The caller of a request, or null for one who reads nothing in a tree. */
+export const callerRefOf = (
+  caller: Caller,
+  treeId: TreeId,
+): CallerRef | null => {
+  if (caller.via.kind === 'system') return null
+  if (caller.via.kind === 'handle' && caller.via.treeId !== treeId) return null
+  return {
+    person: caller.person?.id ?? null,
+    email: caller.person?.email.toLowerCase() ?? null,
+    scope: caller.via.kind === 'agent' ? caller.via.scope : null,
+  }
+}
 
 /**
- * Each event the caller may see, with the paths it concerns for them: its
- * own node's path when they may read that node, and for a push every node it
- * changed that they may read. A push of a folder above what they read is
- * seen through what it changed there. An event with no node is seen by
- * read on the folder its path lies in.
+ * The CTE `cs (i, person, email, scope_id, scope_path, role, teams)`: each
+ * caller, indexed from 0 in the order given, with their place in the tree's
+ * workspace.
  */
-export const visibleEvents = (
-  DB: D1Database,
-  access: AccessService,
+export const callersCte = (
   treeId: TreeId,
-  events: readonly EventRef[],
-): Effect.Effect<
-  ReadonlyMap<number, readonly string[]>,
-  never,
-  CurrentCaller
-> =>
-  Effect.gen(function* () {
-    const out = new Map<number, string[]>()
-    if (events.length === 0) return out
-    const database = db({ DB } as Env)
-    const readable = yield* access.readable(treeId)
-    const read = <A>(run: () => Promise<A>) =>
-      Effect.tryPromise(run).pipe(Effect.orDie)
-    const nodeIds = [
-      ...new Set(events.flatMap((e) => (e.nodeId === null ? [] : [e.nodeId]))),
-    ]
-    const seenNodes = new Set<string>()
-    for (let i = 0; i < nodeIds.length; i += 90) {
-      const rows = yield* read(() =>
-        database
-          .select({ id: schema.nodes.id })
-          .from(schema.nodes)
-          .where(
-            and(
-              inArray(schema.nodes.id, nodeIds.slice(i, i + 90)),
-              readable.where,
-            ),
-          )
-          .all(),
-      )
-      for (const row of rows) seenNodes.add(row.id)
-    }
-    const pushIds = [
-      ...new Set(
-        events.flatMap((e) =>
-          e.type === 'push' && e.pushId !== null ? [e.pushId] : [],
-        ),
-      ),
-    ]
-    const changed = new Map<string, string[]>()
-    for (let i = 0; i < pushIds.length; i += 90) {
-      const rows = yield* read(() =>
-        database
-          .selectDistinct({
-            pushId: schema.nodeVersions.pushId,
-            path: schema.nodes.path,
-          })
-          .from(schema.nodeVersions)
-          .innerJoin(
-            schema.nodes,
-            eq(schema.nodes.id, schema.nodeVersions.nodeId),
-          )
-          .where(
-            and(
-              inArray(schema.nodeVersions.pushId, pushIds.slice(i, i + 90)),
-              readable.where,
-            ),
-          )
-          .all(),
-      )
-      for (const row of rows) {
-        if (row.pushId === null) continue
-        const list = changed.get(row.pushId) ?? []
-        list.push(row.path)
-        changed.set(row.pushId, list)
-      }
-    }
-    for (const e of events) {
-      const paths: string[] = []
-      if (e.nodeId !== null) {
-        if (seenNodes.has(e.nodeId)) paths.push(e.path)
-      } else {
-        // No node: the folder the path lies in decides.
-        const folder = yield* nearestNode(database, treeId, parentPath(e.path))
-        if (
-          folder !== null &&
-          (yield* access.require('read', folder).pipe(Effect.isSuccess))
-        ) {
-          paths.push(e.path)
-        }
-      }
-      if (e.pushId !== null) paths.push(...(changed.get(e.pushId) ?? []))
-      if (paths.length > 0) out.set(e.seq, [...new Set(paths)])
-    }
-    return out
-  })
+  workspaceId: string,
+  callers: readonly CallerRef[],
+): SQL => sql`cs as (select c.key as i,
+    json_extract(c.value, '$.person') as person,
+    json_extract(c.value, '$.email') as email,
+    json_extract(c.value, '$.scope') as scope_id,
+    (select sn.path from nodes sn where sn.id = json_extract(c.value, '$.scope')
+       and sn.tree_id = ${treeId} and sn.deleted_at is null) as scope_path,
+    (select m.role from workspace_members m where m.workspace_id = ${workspaceId}
+       and m.user_id = json_extract(c.value, '$.person')) as role,
+    (select json_group_array(tm.team_id) from team_members tm
+       join teams tt on tt.id = tm.team_id
+       where tt.workspace_id = ${workspaceId}
+         and tm.user_id = json_extract(c.value, '$.person')) as teams
+  from json_each(${JSON.stringify(callers)}) c)`
 
-/** The deepest live node at or above a tree path. */
-const nearestNode = (
-  database: ReturnType<typeof db>,
+/** The facts of the caller in the current row of `cs`. */
+const csFacts: CallerFacts = {
+  email: sql`cs.email`,
+  person: sql`cs.person`,
+  member: sql`(cs.role is not null)`,
+  admin: sql`(cs.role = 'admin')`,
+  teams: sql`(case when cs.role is not null then cs.teams else '[]' end)`,
+  // A key whose node is gone reaches nothing.
+  within: (path) =>
+    sql`(cs.scope_id is null or (cs.scope_path is not null
+      and ${underColumn(path, sql`cs.scope_path`)}))`,
+}
+
+/** Whole segments, either root, trailing slashes ignored: pathsMeet in SQL. */
+export const meetsSql = (a: SQL, b: SQL): SQL => {
+  const x = sql`rtrim(${a}, '/')`
+  const y = sql`rtrim(${b}, '/')`
+  return sql`(${x} = '' or ${y} = '' or ${x} = ${y}
+    or substr(${x}, 1, length(${y}) + 1) = ${y} || '/'
+    or substr(${y}, 1, length(${x}) + 1) = ${x} || '/')`
+}
+
+/**
+ * Holds when the event `e` is one the caller in the current row of `cs` may
+ * see at a path meeting `path` (NULL for any path): its own node is readable
+ * there, or it is a push and a node it versioned is readable there, or it has
+ * no node and the folder its path lies in is readable. A push of a folder
+ * above what someone reads is seen through what it changed there.
+ */
+export const visibleEventSql = (
   treeId: TreeId,
-  path: string,
-) =>
-  Effect.tryPromise(() =>
-    database
-      .select()
-      .from(schema.nodes)
-      .where(
-        and(
-          eq(schema.nodes.treeId, treeId),
-          isNull(schema.nodes.deletedAt),
-          inArray(schema.nodes.path, [...ancestorPaths(path)]),
-        ),
-      )
-      .orderBy(sql`${schema.nodes.depth} desc`)
-      .limit(1)
-      .get(),
-  ).pipe(
-    Effect.orDie,
-    Effect.map((row) => (row ?? null) as NodeRow | null),
-  )
+  workspaceId: string,
+  path: SQL,
+): SQL => {
+  const read = readableOn(treeId, workspaceId, csFacts)(nodeColumn)
+  const at = (p: SQL) => sql`(${path} is null or ${meetsSql(p, path)})`
+  return sql`(exists (select 1 from nodes where nodes.id = e.node_id and ${read}
+        and ${at(sql`e.path`)})
+    or (e.type = 'push' and e.push_id is not null and exists (
+        select 1 from node_versions v join nodes on nodes.id = v.node_id
+        where v.push_id = e.push_id and ${read} and ${at(sql`nodes.path`)}))
+    or (e.node_id is null and ${at(sql`e.path`)} and coalesce((
+        select case when ${read} then 1 else 0 end from nodes
+        where nodes.tree_id = ${treeId} and nodes.deleted_at is null
+          and (nodes.path = ''
+            or substr(e.path, 1, length(nodes.path) + 1) = nodes.path || '/')
+        order by nodes.depth desc limit 1), 0) = 1))`
+}

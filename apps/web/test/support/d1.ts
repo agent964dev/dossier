@@ -236,3 +236,23 @@ export const afterRead = (
     },
   })
 }
+
+/** A database that counts every statement it is asked to run. */
+export const countingStatements = (
+  database: D1Database,
+): { readonly db: D1Database; readonly count: () => number } => {
+  let statements = 0
+  const db = new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => {
+          statements += 1
+          return target.prepare(query)
+        }
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return { db, count: () => statements }
+}

@@ -1754,23 +1754,9 @@ export const DataLive: Layer.Layer<
                 ),
               )
             }
-            const check = validateValues(
-              stores.map((row) => row.schema),
-              values,
-            )
-            if (!check.ok) {
-              const [problem] = check.problems
-              return yield* Effect.fail(
-                dossierError(
-                  'invalid',
-                  problem?.message ?? 'This value is not valid.',
-                  null,
-                  problem?.field ?? null,
-                ),
-              )
-            }
             // Every upload named is one of the writer's own for the form,
-            // recorded as the stored file is, whatever the write says.
+            // taken as the stored file is, whatever the write says, before
+            // the form's rules look at it.
             const rebuilt: Record<string, Json> = { ...values }
             for (const [field, value] of Object.entries(values)) {
               const row = stores.find((r) =>
@@ -1816,6 +1802,21 @@ export const DataLive: Layer.Layer<
               rebuilt[field] = Array.isArray(value) ? stored : stored[0]!
             }
             values = rebuilt as JsonObject
+            const check = validateValues(
+              stores.map((row) => row.schema),
+              values,
+            )
+            if (!check.ok) {
+              const [problem] = check.problems
+              return yield* Effect.fail(
+                dossierError(
+                  'invalid',
+                  problem?.message ?? 'This value is not valid.',
+                  null,
+                  problem?.field ?? null,
+                ),
+              )
+            }
           }
           // An early refusal; the batch's storage guard decides.
           yield* limits.requireStorage(

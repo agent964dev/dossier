@@ -162,43 +162,82 @@ describe('the events route', () => {
     ).toBe(1)
   })
 
-  it('gives cursors that tell nothing of how many events the tree holds', async () => {
+  it('binds a cursor to its tree and its caller, and refuses any made up', async () => {
     const { caller } = await guestOn('open')
     const a = (await eventsAs(caller, { after: null })).next
     await writeAs(ownerBrowser, 'private/hidden.json', 'private/page.html')
-    const b = (await eventsAs(caller, { after: null })).next
-    for (const cursor of [a, b]) {
-      expect(cursor).toMatch(/^[A-Za-z0-9_-]{20,}$/)
-      expect(
-        atob(cursor.replaceAll('-', '+').replaceAll('_', '/')),
-      ).not.toMatch(/\d{2,}/)
-    }
     // The withheld write leaves nothing to see, and no `more`.
     expect(await eventsAs(caller, { after: a })).toMatchObject({
       events: [],
       more: false,
     })
-    // A cursor is the tree's own and cannot be made up.
     const other = await pushForms(owner, ws, FILES)
-    for (const bad of ['5', 'not-a-cursor', a.slice(0, -2) + 'AA']) {
-      expect(
-        await failureAs(
-          caller,
-          Effect.flatMap(TreeStore, (store) =>
-            store.events({ tree: tree.treeId, after: bad, path: null }),
-          ),
+    const refused = (who: Caller, treeId: string, after: string) =>
+      failureAs(
+        who,
+        Effect.flatMap(TreeStore, (store) =>
+          store.events({ tree: treeId, after, path: null }),
         ),
-        bad,
-      ).toMatchObject({ code: 'invalid' })
+      )
+    const flipped = `${a.slice(0, 40)}${a[40] === 'A' ? 'B' : 'A'}${a.slice(41)}`
+    for (const bad of ['5', 'not-a-cursor', flipped, a.slice(0, -4)]) {
+      expect(await refused(caller, tree.treeId, bad), bad).toMatchObject({
+        code: 'invalid',
+      })
     }
-    expect(
-      await failureAs(
+    // Another tree's, or another person's, is not this caller's cursor here.
+    expect(await refused(ownerBrowser, other.treeId, a)).toMatchObject({
+      code: 'invalid',
+    })
+    expect(await refused(ownerBrowser, tree.treeId, a)).toMatchObject({
+      code: 'invalid',
+    })
+  })
+
+  it('says more only when a visible event follows, never for a withheld one', async () => {
+    const paged = await pushForms(owner, ws, FILES)
+    const guest = await person('looker')
+    await share(
+      paged.treeId,
+      (await nodeAt(paged.treeId, 'open'))!.id,
+      'email',
+      guest.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const guestCaller = await sessionFor(guest)
+    const read = (after: string | null) =>
+      runAs(
+        guestCaller,
+        Effect.flatMap(TreeStore, (store) =>
+          store.events({ tree: paged.treeId, after, path: null }),
+        ),
+      )
+    const burst = (path: string, n: number) =>
+      runAs(
         ownerBrowser,
         Effect.flatMap(TreeStore, (store) =>
-          store.events({ tree: other.treeId, after: a, path: null }),
+          store.change(paged.treeId, (cs) =>
+            Effect.sync(() => {
+              for (let i = 0; i < n; i += 1) cs.event({ type: 'share', path })
+              return {}
+            }),
+          ),
         ),
-      ),
-    ).toMatchObject({ code: 'invalid' })
+      )
+    const start = (await read(null)).next
+    await burst('open/page.html', 500)
+    await burst('private/page.html', 1)
+    const exactly = await read(start)
+    expect(exactly.events).toHaveLength(500)
+    expect(exactly.more).toBe(false)
+    await burst('open/page.html', 1)
+    const first = await read(start)
+    expect(first.events).toHaveLength(500)
+    expect(first.more).toBe(true)
+    const second = await read(first.next)
+    expect(second.events).toHaveLength(1)
+    expect(second.more).toBe(false)
   })
 
   it('filters by path: at, below or above it', async () => {

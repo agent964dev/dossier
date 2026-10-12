@@ -48,6 +48,10 @@ const FILES = {
     '<form action="closed.json" data-closed><input name="state"></form>',
     'Closed',
   ),
+  'apply.html': pageWith(
+    '<form action="applications/"><input name="cv" type="file" accept=".pdf,application/pdf"><input name="other" type="file"></form>',
+    'Apply',
+  ),
   'late.html': pageWith(
     '<form action="late/" data-closed><input name="note"></form>',
     'Late',
@@ -545,6 +549,39 @@ describe('an upload named by a write', () => {
       size: stored.size,
       type: stored.type,
     })
+  })
+})
+
+describe('an upload named by a write, as it is stored', () => {
+  it('is checked against the field by what was stored, not what the write claims', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const email = owner.email.toLowerCase()
+    const form = await formRef(tree, 'apply.html', 'applications/')
+    const page = await uploadAs(browser, tree, {
+      page: 'apply.html',
+      form,
+      field: 'other',
+      name: 'page.html',
+      type: 'text/html',
+      bytes: '<script>alert(1)</script>',
+    })
+    expect(
+      await writeFailure(browser, tree, {
+        page: 'apply.html',
+        path: `applications/${email}.json`,
+        patch: {
+          cv: {
+            file: page.file,
+            name: 'cv.pdf',
+            size: page.size,
+            type: 'application/pdf',
+          },
+        },
+      }),
+    ).toMatchObject({ code: 'invalid', path: 'cv' })
+    expect(
+      await liveValue(tree.treeId, `applications/${email}.json`),
+    ).toBeNull()
   })
 })
 

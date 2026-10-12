@@ -16,7 +16,7 @@ import {
   type TreeId,
   type VersionId,
 } from '@dossier/contracts'
-import { pathsMeet, type JsonObject } from '@dossier/contracts/bridge'
+import type { JsonObject } from '@dossier/contracts/bridge'
 import {
   MARKDOWN_VERSION,
   toMarkdown,
@@ -40,7 +40,7 @@ import { Bindings } from './bindings.ts'
 import { ChangeFeed, type CloseSockets, type Committed } from './change-feed.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { openCursor, sealCursor } from './cursors.ts'
-import { visibleEvents } from './event-visibility.ts'
+import { callerRefOf, callersCte, visibleEventSql } from './event-visibility.ts'
 import { newId, newTreeId } from './ids.ts'
 import { bytesText, Limits } from './limits.ts'
 import {
@@ -484,8 +484,6 @@ interface Statement {
 
 /** At most this many events a page of the events route. */
 const EVENTS_PAGE = 500
-/** Pages of events one request scans at most, looking for visible ones. */
-const EVENTS_SCAN_PAGES = 4
 
 /** Event types written by people's data, which always name the writer. */
 const DATA_EVENTS: ReadonlySet<string> = new Set([
@@ -2344,78 +2342,75 @@ export const TreeStoreLive: Layer.Layer<
           if (any.length === 0) return yield* deny(t.id)
         }
         const secret = bindings.HANDLE_SECRET
+        const who = caller.person?.id ?? ''
+        const seal = (seq: number) =>
+          Effect.promise(() => sealCursor(secret, t.id, seq, who))
         if (i.after === null) {
           return {
             events: [],
-            next: yield* Effect.promise(() =>
-              sealCursor(secret, t.id, t.eventSeq),
-            ),
+            next: yield* seal(t.eventSeq),
             more: false,
           } satisfies EventsResponse
         }
         const afterText = i.after
         const after = yield* Effect.promise(() =>
-          openCursor(secret, t.id, afterText),
+          openCursor(secret, t.id, afterText, who),
         )
         if (after === null) {
           return yield* Effect.fail(
             dossierError(
               'invalid',
-              'This cursor is not one this tree gave.',
+              'This cursor is not one this tree gave you.',
               'Start again without after.',
             ),
           )
         }
-        const e = schema.events
-        const member = sql`exists (select 1 from workspace_members m
-          where m.workspace_id = ${t.workspaceId} and m.user_id = ${caller.person?.id ?? ''})`
-        const out: (EventsResponse['events'][number] & { seq: number })[] = []
-        let scanned: number = after
-        let more = false
-        // Scans on past what the caller may not see, so neither `more` nor
-        // a short page tells of withheld events, up to a bound per request.
-        for (let pages = 0; pages < EVENTS_SCAN_PAGES; pages += 1) {
-          const from = scanned
-          const rows = yield* read(() =>
-            database
-              .select({
-                seq: e.seq,
-                type: e.type,
-                path: e.path,
-                at: e.createdAt,
-                actorId: e.actorId,
-                nodeId: e.nodeId,
-                pushId: e.pushId,
-                push: schema.pushes.number,
-                email: schema.user.email,
-                name: schema.user.name,
-                member: sql<number>`${member}`,
-              })
-              .from(e)
-              .leftJoin(schema.pushes, eq(schema.pushes.id, e.pushId))
-              .leftJoin(schema.user, eq(schema.user.id, e.actorId))
-              .where(and(eq(e.treeId, t.id), sql`${e.seq} > ${from}`))
-              .orderBy(e.seq)
-              .limit(EVENTS_PAGE)
-              .all(),
-          )
-          if (rows.length === 0) break
-          const visible = yield* visibleEvents(DB, access, t.id, rows)
-          let full = false
-          for (const row of rows) {
-            scanned = row.seq
-            const paths = visible.get(row.seq)
-            if (paths === undefined) continue
-            if (i.path !== null && !paths.some((p) => pathsMeet(p, i.path!))) {
-              continue
-            }
+        const ref = callerRefOf(caller, t.id)
+        if (ref === null || found.workspace.suspendedAt !== null) {
+          return {
+            events: [],
+            next: yield* seal(Math.max(after, t.eventSeq)),
+            more: false,
+          } satisfies EventsResponse
+        }
+        // Only what the caller may see is ever scanned for, so a page is
+        // short and `more` is set only by the visible events that follow.
+        const rows = (yield* read(() =>
+          database.all(sql`with ${callersCte(t.id, t.workspaceId, [ref])}
+            select e.seq as seq, e.type as type, e.path as path,
+              e.created_at as at, e.actor_id as actorId, p.number as push,
+              u.email as email, u.name as name,
+              exists (select 1 from workspace_members m
+                where m.workspace_id = ${t.workspaceId} and m.user_id = cs.person) as member
+            from events e
+              left join pushes p on p.id = e.push_id
+              left join "user" u on u.id = e.actor_id
+              join cs on cs.i = 0
+            where e.tree_id = ${t.id} and e.seq > ${after}
+              and ${visibleEventSql(t.id, t.workspaceId, sql`${i.path}`)}
+            order by e.seq
+            limit ${EVENTS_PAGE + 1}`),
+        )) as {
+          seq: number
+          type: string
+          path: string
+          at: number
+          actorId: string | null
+          push: number | null
+          email: string | null
+          name: string | null
+          member: number
+        }[]
+        const more = rows.length > EVENTS_PAGE
+        const page = rows.slice(0, EVENTS_PAGE)
+        const listed = yield* Effect.forEach(page, (row) =>
+          Effect.map(seal(row.seq), (cursor) => {
             const named =
               DATA_EVENTS.has(row.type) ||
               row.member === 1 ||
               (caller.person !== null && caller.person.id === row.actorId)
-            out.push({
-              seq: row.seq,
-              cursor: '',
+            return {
+              cursor,
               type: row.type as EventType,
               path: row.path,
               at: new Date(row.at).toISOString(),
@@ -2424,30 +2419,14 @@ export const TreeStoreLive: Layer.Layer<
                   ? null
                   : ((named ? row.email : row.name) ?? null),
               push: (row.push ?? null) as PushNumber | null,
-            })
-            if (out.length === EVENTS_PAGE) {
-              full = true
-              break
             }
-          }
-          if (full) {
-            more = scanned < t.eventSeq || rows.at(-1)!.seq > scanned
-            break
-          }
-          if (rows.length < EVENTS_PAGE) break
-          more = pages === EVENTS_SCAN_PAGES - 1
-        }
-        const sealed = yield* Effect.promise(() =>
-          Promise.all(
-            out.map(async ({ seq, ...event }) => ({
-              ...event,
-              cursor: await sealCursor(secret, t.id, seq),
-            })),
-          ),
+          }),
         )
+        const last = page.at(-1)?.seq ?? after
         return {
-          events: sealed,
-          next: yield* Effect.promise(() => sealCursor(secret, t.id, scanned)),
+          events: listed,
+          // Past what the caller may not see, up to the tree's head.
+          next: yield* seal(more ? last : Math.max(last, t.eventSeq)),
           more,
         } satisfies EventsResponse
       })

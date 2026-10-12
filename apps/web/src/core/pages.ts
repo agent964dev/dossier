@@ -847,7 +847,12 @@ export const PagesLive: Layer.Layer<
               email: person.email,
               // Read before the handle was issued, so no later event is missed.
               events: yield* Effect.promise(() =>
-                sealCursor(bindings.HANDLE_SECRET, tree.id, tree.eventSeq),
+                sealCursor(
+                  bindings.HANDLE_SECRET,
+                  tree.id,
+                  tree.eventSeq,
+                  person.id,
+                ),
               ),
             } satisfies ViewGrant
           }
