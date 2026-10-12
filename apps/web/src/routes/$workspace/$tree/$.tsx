@@ -1,5 +1,6 @@
 import {
   createFileRoute,
+  notFound,
   Link,
   redirect,
   useRouter,
@@ -40,6 +41,10 @@ type Loaded =
   | { readonly kind: 'no-access'; readonly email: string | null }
 
 export const Route = createFileRoute('/$workspace/$tree/$')({
+  // No workspace is named _: a /_/ path no screen has is not found.
+  beforeLoad: ({ params }) => {
+    if (params.workspace === '_') throw notFound()
+  },
   loader: async ({ params, location }): Promise<Loaded> => {
     const view = await listingView({
       data: {
