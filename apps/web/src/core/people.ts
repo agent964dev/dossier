@@ -42,6 +42,11 @@ import {
   type SettingKey,
   type WorkspaceCreation,
 } from './settings.ts'
+import {
+  defaultPrivacyText,
+  PRIVACY_TEXT_LIMIT,
+  privacyTextOf,
+} from './privacy.ts'
 import { closeStatements } from './sign-in.ts'
 import {
   ancestorPaths,
@@ -365,6 +370,13 @@ export interface PeopleService {
   ) => Effect.Effect<LimitValues, AdminFail | Fail<'invalid'>, CurrentCaller>
   readonly setRetention: (
     days: number,
+  ) => Effect.Effect<void, AdminFail | Fail<'invalid'>, CurrentCaller>
+  /**
+   * The privacy page's text. Empty text, or null, returns the page to the
+   * generated text.
+   */
+  readonly setPrivacyText: (
+    text: string | null,
   ) => Effect.Effect<void, AdminFail | Fail<'invalid'>, CurrentCaller>
   /** The person must have signed in once. */
   readonly addSuperAdmin: (
@@ -2011,6 +2023,35 @@ export const PeopleLive: Layer.Layer<
         yield* runSaved([yield* saveSetting('retention_days', days, me.id)])
       })
 
+    const setPrivacyText: PeopleService['setPrivacyText'] = (text) =>
+      Effect.gen(function* () {
+        const me = yield* superAdmin
+        const given = text === null ? null : privacyTextOf(text)
+        // The generated text saved as it is stays generated, so it follows
+        // later changes to what Dossier keeps.
+        const value =
+          given === privacyTextOf(defaultPrivacyText(config.deploymentName))
+            ? null
+            : given
+        if (value !== null && value.length > PRIVACY_TEXT_LIMIT) {
+          return yield* Effect.fail(
+            dossierError(
+              'invalid',
+              `The privacy text is at most ${PRIVACY_TEXT_LIMIT.toLocaleString('en-US')} characters.`,
+              'Shorten it, or press Reset to use the generated text.',
+              'text',
+            ),
+          )
+        }
+        yield* runSaved([
+          value === null
+            ? DB.prepare(
+                `delete from deployment_settings where key = 'privacy_text'`,
+              )
+            : yield* saveSetting('privacy_text', value, me.id),
+        ])
+      })
+
     const addSuperAdmin: PeopleService['addSuperAdmin'] = (email) =>
       Effect.gen(function* () {
         const me = yield* superAdmin
@@ -2176,6 +2217,7 @@ export const PeopleLive: Layer.Layer<
       removeCreator,
       setLimits,
       setRetention,
+      setPrivacyText,
       addSuperAdmin,
       removeSuperAdmin,
       suspendWorkspace,

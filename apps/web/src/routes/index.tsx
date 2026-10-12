@@ -9,6 +9,7 @@ import { useState } from 'react'
 
 import { HostName } from '../components/host-name'
 import { MentionedBadge } from '../components/mentioned-badge'
+import { PrivacyLink } from '../components/privacy-link'
 import { SearchField } from '../components/search-field'
 import { AppHeader } from '../components/app-header'
 import { SectionLabel } from '../components/section-label'
@@ -73,6 +74,7 @@ function FrontPage({ deployment }: { deployment: string }) {
       <Button asChild size="lg" className="w-full">
         <Link to="/_/sign-in">Sign in with Google</Link>
       </Button>
+      <PrivacyLink />
     </main>
   )
 }

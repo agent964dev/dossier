@@ -127,6 +127,13 @@
       "when": 1791814111569,
       "tag": "0024_search_fallback",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1791815284962,
+      "tag": "0025_privacy_setting",
+      "breakpoints": true
     }
   ]
 }

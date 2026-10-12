@@ -41,10 +41,12 @@ import {
   setRetention,
   setWorkspaceCreation,
   suspendWorkspace,
+  type AdminPrivacy,
   type AdminView,
   type LimitRow,
 } from '../../../server/admin'
 import { isScreenFailure } from '../../../server/failure'
+import { setPrivacyText } from '../../../server/privacy'
 import { noAccessView } from '../../../server/no-access'
 
 type Loaded =
@@ -124,6 +126,7 @@ function SuperAdmin({ view }: { view: AdminView }) {
             <SuperAdmins view={view} onChange={refresh} />
             <Workspaces view={view} onChange={refresh} />
             <LookRow look={view.look} />
+            <PrivacyPage privacy={view.privacy} onChange={refresh} />
           </>
         )}
       </main>
@@ -932,6 +935,123 @@ function LookRow({ look }: { look: AdminView['look'] }) {
           <ChevronRight aria-hidden className="size-4" />
         </span>
       </Link>
+    </section>
+  )
+}
+
+const PRIVACY_LIMIT = 20_000
+
+/**
+ * The privacy page's text, shown at /_/privacy. Until a super admin edits
+ * it, the page says what Dossier keeps; Reset brings that text back.
+ */
+function PrivacyPage({
+  privacy,
+  onChange,
+}: {
+  privacy: AdminPrivacy
+  onChange: () => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(privacy.text)
+  const [busy, setBusy] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+  const close = () => {
+    setRefused(null)
+    setEditing(false)
+  }
+  const save = async (text: string | null) => {
+    setBusy(true)
+    setRefused(null)
+    const message = refusalOf(await setPrivacyText({ data: { text } }))
+    setRefused(message)
+    await onChange()
+    setBusy(false)
+    if (message === null) setEditing(false)
+  }
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    void save(draft)
+  }
+  return (
+    <section aria-labelledby="privacy-label" className="flex flex-col gap-3">
+      <SectionLabel id="privacy-label">Privacy page</SectionLabel>
+      <div className="rounded-xl border border-border bg-card">
+        <div className={ROW}>
+          <span className="min-w-0 flex-1">
+            <a
+              href="/_/privacy"
+              className="block truncate text-[0.9375rem] text-neutral-50 underline-offset-4 hover:underline"
+            >
+              /_/privacy
+            </a>
+            <span className="block font-mono text-xs text-neutral-400">
+              {privacy.custom
+                ? 'your text'
+                : 'generated from what Dossier keeps'}
+            </span>
+          </span>
+          <Button
+            variant="outline"
+            size="xs"
+            aria-label="Edit the privacy page"
+            onClick={() => {
+              setDraft(privacy.text)
+              setRefused(null)
+              setEditing(true)
+            }}
+          >
+            Edit
+          </Button>
+        </div>
+      </div>
+      <Modal
+        open={editing}
+        onClose={close}
+        title="Privacy page"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              type="button"
+              disabled={busy || !privacy.custom}
+              className="sm:mr-auto"
+              onClick={() => save(null)}
+            >
+              Reset
+            </Button>
+            <Button variant="ghost" type="button" onClick={close}>
+              Cancel
+            </Button>
+            <Button type="submit" form="privacy-form" disabled={busy}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="privacy-form"
+          onSubmit={submit}
+          className="flex flex-col gap-2"
+        >
+          <Label htmlFor="privacy-text">Text</Label>
+          <textarea
+            id="privacy-text"
+            value={draft}
+            rows={14}
+            maxLength={PRIVACY_LIMIT}
+            aria-describedby="privacy-help"
+            aria-invalid={refused === null ? undefined : true}
+            className="w-full rounded-lg border border-border bg-input px-3 py-2 font-mono text-base leading-relaxed text-neutral-100 outline-none transition-[color,border-color,box-shadow] duration-200 ease-agent focus-visible:border-brand-300/50 focus-visible:ring-[3px] focus-visible:ring-ring/40 md:text-sm"
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <p id="privacy-help" className="text-sm text-neutral-400">
+            Plain text. The first line is the heading. Empty text, or Reset,
+            shows the generated text again.
+          </p>
+          <Refusal message={refused} />
+        </form>
+      </Modal>
     </section>
   )
 }

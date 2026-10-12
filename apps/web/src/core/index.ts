@@ -117,6 +117,11 @@ export {
   type WorkspaceRole,
 } from './people.ts'
 export {
+  defaultPrivacyText,
+  PRIVACY_TEXT_LIMIT,
+  privacyTextOf,
+} from './privacy.ts'
+export {
   Settings,
   type DeploymentSettings,
   type Health,

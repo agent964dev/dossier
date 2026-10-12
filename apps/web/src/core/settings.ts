@@ -9,6 +9,7 @@ import {
   DEFAULT_RETENTION_DAYS,
   type LimitValues,
 } from './limits-values.ts'
+import { PRIVACY_TEXT_LIMIT } from './privacy.ts'
 
 /** Who may create workspaces, besides super admins. */
 export type WorkspaceCreation = 'super_admins' | 'listed' | 'anyone'
@@ -20,6 +21,8 @@ export interface DeploymentSettings {
   readonly retentionDays: number
   /** A super admin has chosen who may create workspaces. */
   readonly firstRunDone: boolean
+  /** A super admin's privacy text; null shows the generated one. */
+  readonly privacyText: string | null
 }
 
 export interface HealthCheck {
@@ -54,6 +57,7 @@ export type SettingKey =
   | 'limits'
   | 'retention_days'
   | 'look'
+  | 'privacy_text'
 
 const CREATIONS: ReadonlySet<string> = new Set([
   'super_admins',
@@ -91,6 +95,7 @@ export const settingsOf = (
   const saved = new Map(rows.map((row) => [row.key, parse(row.valueJson)]))
   const creation = saved.get('workspace_creation')
   const retention = saved.get('retention_days')
+  const privacy = saved.get('privacy_text')
   return {
     workspaceCreation:
       typeof creation === 'string' && CREATIONS.has(creation)
@@ -105,6 +110,12 @@ export const settingsOf = (
         ? retention
         : DEFAULT_RETENTION_DAYS,
     firstRunDone: saved.has('workspace_creation'),
+    privacyText:
+      typeof privacy === 'string' &&
+      privacy.trim() !== '' &&
+      privacy.length <= PRIVACY_TEXT_LIMIT
+        ? privacy
+        : null,
   }
 }
 

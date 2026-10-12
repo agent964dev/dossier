@@ -81,6 +81,7 @@ describe('deployment settings', () => {
       limits: DEFAULT_LIMITS,
       retentionDays: 30,
       firstRunDone: false,
+      privacyText: null,
     })
     expect(DEFAULT_LIMITS).toEqual({
       fileBytes: 50 * 1024 ** 2,

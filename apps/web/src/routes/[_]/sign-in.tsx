@@ -3,6 +3,7 @@ import { AlertTriangle, Info } from 'lucide-react'
 import { useState } from 'react'
 
 import { HostName } from '../../components/host-name'
+import { PrivacyLink } from '../../components/privacy-link'
 import { GoogleMark } from '../../components/google-mark'
 import { Button } from '../../components/ui/button'
 import { safeNext, startGoogleSignIn } from '../../lib/auth-client'
@@ -76,6 +77,7 @@ function SignInScreen() {
           Sign-in is not set up on this deployment yet.
         </p>
       )}
+      <PrivacyLink />
     </main>
   )
 }

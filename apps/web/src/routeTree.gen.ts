@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as WorkspaceIndexRouteImport } from './routes/$workspace/index'
 import { Route as Char91_Char93DeviceRouteImport } from './routes/[_]/device'
 import { Route as Char91_Char93NoAccessRouteImport } from './routes/[_]/no-access'
+import { Route as Char91_Char93PrivacyRouteImport } from './routes/[_]/privacy'
 import { Route as Char91_Char93SearchRouteImport } from './routes/[_]/search'
 import { Route as Char91_Char93SettingsRouteImport } from './routes/[_]/settings'
 import { Route as Char91_Char93SignInRouteImport } from './routes/[_]/sign-in'
@@ -46,6 +47,11 @@ const Char91_Char93DeviceRoute = Char91_Char93DeviceRouteImport.update({
 const Char91_Char93NoAccessRoute = Char91_Char93NoAccessRouteImport.update({
   id: '/_/no-access',
   path: '/_/no-access',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const Char91_Char93PrivacyRoute = Char91_Char93PrivacyRouteImport.update({
+  id: '/_/privacy',
+  path: '/_/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const Char91_Char93SearchRoute = Char91_Char93SearchRouteImport.update({
@@ -131,6 +137,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/_/device': typeof Char91_Char93DeviceRoute
   '/_/no-access': typeof Char91_Char93NoAccessRoute
+  '/_/privacy': typeof Char91_Char93PrivacyRoute
   '/_/search': typeof Char91_Char93SearchRoute
   '/_/settings': typeof Char91_Char93SettingsRoute
   '/_/sign-in': typeof Char91_Char93SignInRoute
@@ -151,6 +158,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/_/device': typeof Char91_Char93DeviceRoute
   '/_/no-access': typeof Char91_Char93NoAccessRoute
+  '/_/privacy': typeof Char91_Char93PrivacyRoute
   '/_/search': typeof Char91_Char93SearchRoute
   '/_/settings': typeof Char91_Char93SettingsRoute
   '/_/sign-in': typeof Char91_Char93SignInRoute
@@ -171,6 +179,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_/device': typeof Char91_Char93DeviceRoute
   '/_/no-access': typeof Char91_Char93NoAccessRoute
+  '/_/privacy': typeof Char91_Char93PrivacyRoute
   '/_/search': typeof Char91_Char93SearchRoute
   '/_/settings': typeof Char91_Char93SettingsRoute
   '/_/sign-in': typeof Char91_Char93SignInRoute
@@ -193,6 +202,7 @@ export interface FileRouteTypes {
     | '/'
     | '/_/device'
     | '/_/no-access'
+    | '/_/privacy'
     | '/_/search'
     | '/_/settings'
     | '/_/sign-in'
@@ -213,6 +223,7 @@ export interface FileRouteTypes {
     | '/'
     | '/_/device'
     | '/_/no-access'
+    | '/_/privacy'
     | '/_/search'
     | '/_/settings'
     | '/_/sign-in'
@@ -232,6 +243,7 @@ export interface FileRouteTypes {
     | '/'
     | '/_/device'
     | '/_/no-access'
+    | '/_/privacy'
     | '/_/search'
     | '/_/settings'
     | '/_/sign-in'
@@ -253,6 +265,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   Char91_Char93DeviceRoute: typeof Char91_Char93DeviceRoute
   Char91_Char93NoAccessRoute: typeof Char91_Char93NoAccessRoute
+  Char91_Char93PrivacyRoute: typeof Char91_Char93PrivacyRoute
   Char91_Char93SearchRoute: typeof Char91_Char93SearchRoute
   Char91_Char93SettingsRoute: typeof Char91_Char93SettingsRoute
   Char91_Char93SignInRoute: typeof Char91_Char93SignInRoute
@@ -293,6 +306,13 @@ declare module '@tanstack/react-router' {
       path: '/_/no-access'
       fullPath: '/_/no-access'
       preLoaderRoute: typeof Char91_Char93NoAccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/privacy': {
+      id: '/_/privacy'
+      path: '/_/privacy'
+      fullPath: '/_/privacy'
+      preLoaderRoute: typeof Char91_Char93PrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_/search': {
@@ -427,6 +447,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   Char91_Char93DeviceRoute: Char91_Char93DeviceRoute,
   Char91_Char93NoAccessRoute: Char91_Char93NoAccessRoute,
+  Char91_Char93PrivacyRoute: Char91_Char93PrivacyRoute,
   Char91_Char93SearchRoute: Char91_Char93SearchRoute,
   Char91_Char93SettingsRoute: Char91_Char93SettingsRoute,
   Char91_Char93SignInRoute: Char91_Char93SignInRoute,

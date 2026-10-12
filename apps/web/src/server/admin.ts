@@ -4,9 +4,12 @@ import { Effect } from 'effect'
 
 import {
   bytesText,
+  Config,
+  defaultPrivacyText,
   LookSettings,
   People,
   Purge,
+  Settings,
   type PurgeOutcome,
   type PurgeRun,
   type AdminOverview,
@@ -51,6 +54,15 @@ export type AdminView = Omit<AdminOverview, 'workspaces'> & {
   readonly look: AdminLookRow
   /** The newest purge, weekly or pressed, for the Health section. */
   readonly lastPurge: PurgeRun | null
+  readonly privacy: AdminPrivacy
+}
+
+/** The privacy page's text as the super admin screen edits it. */
+export interface AdminPrivacy {
+  /** What /_/privacy shows now. */
+  readonly text: string
+  /** A super admin replaced the generated text. */
+  readonly custom: boolean
 }
 
 export type { PurgeOutcome, PurgeRun }
@@ -89,9 +101,16 @@ export const adminView = createServerFn({ method: 'GET' }).handler(() =>
       const overview = yield* people.adminOverview()
       const look = yield* Effect.flatMap(LookSettings, (l) => l.current())
       const lastPurge = yield* Effect.flatMap(Purge, (p) => p.lastRun())
+      const config = yield* Config
+      const settings = yield* Effect.flatMap(Settings, (s) => s.current())
       return {
         ...overview,
         lastPurge,
+        privacy: {
+          text:
+            settings.privacyText ?? defaultPrivacyText(config.deploymentName),
+          custom: settings.privacyText !== null,
+        },
         limitRows: LIMITS.map(({ key, label, bytes }) => {
           const value = overview.limits[key]
           return {
