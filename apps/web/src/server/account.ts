@@ -30,6 +30,8 @@ export interface AccountView {
   readonly mayCreateWorkspace: boolean
   /** The trees a new key may be limited to, as `workspace/tree/`. */
   readonly trees: readonly string[]
+  /** Whether the page leads to the deployment's settings. */
+  readonly superAdmin: boolean
 }
 
 export const accountView = createServerFn({ method: 'GET' }).handler(() =>
@@ -60,6 +62,7 @@ export const accountView = createServerFn({ method: 'GET' }).handler(() =>
         })),
         mayCreateWorkspace: yield* people.mayCreateWorkspace(),
         trees,
+        superAdmin: yield* people.isSuperAdmin(),
       } satisfies AccountView
     }),
   ),

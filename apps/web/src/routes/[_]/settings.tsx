@@ -16,6 +16,7 @@ import {
 import { useState, type FormEvent, type ReactNode } from 'react'
 
 import { AppHeader } from '../../components/app-header'
+import { DeploymentSettings } from '../../components/deployment-settings'
 import { SectionLabel } from '../../components/section-label'
 import { Button } from '../../components/ui/button'
 import { Refusal, refusalOf } from '../../components/settings-parts'
@@ -120,6 +121,8 @@ function AccountSettings() {
           trees={view.trees}
           onChange={() => router.invalidate()}
         />
+
+        <DeploymentSettings superAdmin={view.superAdmin} />
 
         <section
           aria-labelledby="signing-out-label"
