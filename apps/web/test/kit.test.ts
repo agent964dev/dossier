@@ -581,7 +581,10 @@ describe('what a view issues with a composed page', () => {
       await frame(open.handle, w.treeId, w.seq, 'guides/setup/install'),
     )
     expect(old).toContain('<nav class="sidebar">Guides</nav>')
-    expect(old).not.toContain('v2')
+    // Look for the pushed markers themselves: a random tree id in the page
+    // may contain "v2" too.
+    expect(old).not.toContain('<footer>v2</footer>')
+    expect(old).not.toContain('Guides v2')
     for (const path of ['logo.svg', 'guides/_components/acme-card.js']) {
       expect(
         await frame(open.handle, w.treeId, w.seq, path),
