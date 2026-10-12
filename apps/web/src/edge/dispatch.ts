@@ -133,6 +133,12 @@ export const classify = (
 /** API writes that need no one signed in: the CLI's device login. */
 const ANONYMOUS_WRITES: ReadonlySet<string> = new Set(['/_/api/device/token'])
 
+/**
+ * API writes a visitor makes on their anonymous session: asking for a view
+ * handle of a public page.
+ */
+const VISITOR_WRITES: ReadonlySet<string> = new Set(['/_/api/view'])
+
 /** Kinds whose failure is shown as a document rather than an error body. */
 const isDocumentKind = (kind: RequestKind) =>
   kind === 'screen' || kind === 'link'
@@ -271,10 +277,15 @@ export const serve = async (
         const who = await caller()
         // A write by no one is refused before its body is read, so an
         // anonymous caller learns nothing from how a payload is checked.
+        const visitorWrite =
+          who.via.kind === 'visitor' &&
+          who.via.anonSessionId !== null &&
+          VISITOR_WRITES.has(url.pathname)
         if (
           kind === 'api-write' &&
           who.person === null &&
-          !ANONYMOUS_WRITES.has(url.pathname)
+          !ANONYMOUS_WRITES.has(url.pathname) &&
+          !visitorWrite
         ) {
           throw dossierError(
             'sign_in_required',
