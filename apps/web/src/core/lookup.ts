@@ -14,7 +14,7 @@ import {
   type HtmlAnalysis,
   type JsAnalysis,
 } from '@dossier/html'
-import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
+import { and, eq, sql, type SQL } from 'drizzle-orm'
 import { Clock, Effect } from 'effect'
 
 import { db, schema } from '../db/client.ts'
@@ -111,11 +111,12 @@ type Match =
   | { readonly paths: readonly string[] }
   | { readonly underscoreFrom: readonly string[] }
 
+/**
+ * `column in (values)` with the list bound once as JSON: a page 32 folders
+ * deep asks for 32 paths, three times over, and D1 binds at most 100 values.
+ */
 const inList = (column: SQL, values: readonly string[]): SQL =>
-  sql`${column} in (${sql.join(
-    values.map((v) => sql`${v}`),
-    sql`, `,
-  )})`
+  sql`${column} in (select value from json_each(${JSON.stringify(values)}))`
 
 /**
  * The condition, over `nodes` joined to `node_versions`, for the authored
@@ -135,8 +136,8 @@ const authoredWhere = (
   if (at === null) {
     const on =
       'paths' in match
-        ? inArray(n.path, [...match.paths])
-        : inArray(n.underscoreFrom, [...match.underscoreFrom])
+        ? inList(sql`${n.path}`, match.paths)
+        : inList(sql`${n.underscoreFrom}`, match.underscoreFrom)
     return sql`${file} and ${on} and ${n.deletedAt} is null
       and ${v.id} = ${n.currentVersionId} and ${v.state} = 'live'`
   }
