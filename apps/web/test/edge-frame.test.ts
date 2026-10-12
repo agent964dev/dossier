@@ -107,6 +107,12 @@ describe('the shell', () => {
     expect(response.headers.get('referrer-policy')).toBe('same-origin')
     const html = await response.text()
     expect(html).toContain('<title>dossier.test</title>')
+    // The frame is named for assistive technology by the link's path, never
+    // by a private page's own title.
+    expect(html).toContain(
+      `<iframe id="dossier-page" title="${ws.name}/acme/plan" `,
+    )
+    expect(html).not.toContain('title="Plan"')
     expect(html).toContain('<script type="module" src="/_/base/test/shell.js">')
     const boot = JSON.parse(
       /<script type="application\/json" id="dossier-shell">(.*?)<\/script>/s.exec(

@@ -181,7 +181,7 @@ describe('createShell', () => {
     expect(frame.getAttribute('allow')).toBe(
       'fullscreen; clipboard-write; autoplay; picture-in-picture',
     )
-    expect(frame.getAttribute('title')).toBe('')
+    expect(frame.getAttribute('title')).toBe('agent964/acme/questions/')
     expect(bootOf(frame)).toEqual({
       v: 1,
       me: { email: 'sara@acme.com', name: 'Sara', role: 'write' },
@@ -322,6 +322,26 @@ describe('createShell', () => {
       '/agent964/acme/',
     )
     expect(it.win.document.title).toBe('Acme Dossier')
+    it.shell.dispose()
+  })
+
+  test('names the page frame for assistive technology: the page’s title, else its path', async () => {
+    const it = openShell()
+    await it.shell.start()
+    // Before the page says its title, the frame carries the link's path.
+    expect(it.frame().getAttribute('title')).toBe('agent964/acme/questions/')
+    const { page } = it.hello({ source: it.page() })
+    page.postMessage({
+      type: 'location',
+      path: 'questions/plan',
+      hash: '',
+      title: 'Plan',
+    })
+    await flush()
+    expect(it.frame().getAttribute('title')).toBe('Plan')
+    page.postMessage({ type: 'location', path: 'plans/', hash: '', title: '' })
+    await flush()
+    expect(it.frame().getAttribute('title')).toBe('agent964/acme/plans/')
     it.shell.dispose()
   })
 
@@ -859,6 +879,7 @@ describe('shell drafts and sends', () => {
         ok: true,
         value: { doc: null, replayed: false },
         sent: { name: 'Sara' },
+        op: 'op-visitor',
       },
       {
         type: 'resumed',
@@ -866,6 +887,7 @@ describe('shell drafts and sends', () => {
         ok: true,
         value: { doc: null, replayed: false },
         sent: { name: 'Sara' },
+        op: 'op-sara',
       },
     ])
     expect(store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
@@ -908,6 +930,8 @@ describe('shell drafts and sends', () => {
       ok: true,
       value: { doc: null, replayed: false },
       sent: { name: 'Sara' },
+      // The page tells its own failed attempt from an older kept send by it.
+      op: 'op-1',
     })
     expect(it.store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
     expect(it.store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({})

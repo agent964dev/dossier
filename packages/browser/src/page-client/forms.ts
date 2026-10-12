@@ -1038,8 +1038,28 @@ export const startForms = (deps: {
       for (const m of managed) {
         if (m.key !== notice.form) continue
         if (notice.ok) {
-          // A kept send is older than any attempt this page load made.
-          if (m.attempted) continue
+          if (m.attempted) {
+            // The page's own attempt, kept by the shell when it could not
+            // go and sent since: it went as this page sent it.
+            const last = m.last
+            if (
+              last !== null &&
+              !m.inflight &&
+              m.state === 'failed' &&
+              notice.op !== undefined &&
+              notice.op === last.request.opId
+            ) {
+              succeeded(
+                m,
+                notice.value,
+                last.autosave,
+                last.edits,
+                filesOf(last.request),
+              )
+            }
+            // Any other kept send is older than what this page load sent.
+            continue
+          }
           if (notice.sent !== undefined) {
             // The answers the form holds now, or the draft about to be put
             // in it: when they are not what the kept send held, they are

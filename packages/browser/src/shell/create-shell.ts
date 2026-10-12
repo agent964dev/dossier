@@ -194,7 +194,6 @@ export const NO_ANSWER_WAITS: readonly number[] = [1000, 3000, 9000]
 
 const FRAME_ATTRIBUTES: Readonly<Record<string, string>> = {
   id: 'dossier-page',
-  title: '',
   sandbox: [
     'allow-scripts',
     'allow-same-origin',
@@ -214,6 +213,14 @@ const REFUSALS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   'not_found',
   'sign_in_required',
 ])
+
+/** What the page frame is called: the page's title, else its link's path. */
+const frameTitleFor =
+  (boot: ShellBoot) =>
+  (title: string, path: string): string =>
+    title.trim() === ''
+      ? `${boot.tree.workspace}/${boot.tree.name}/${treePath(path)}`
+      : title
 
 const hashOf = (hash: string): string =>
   hash === '' || hash.startsWith('#') ? hash : ''
@@ -309,6 +316,7 @@ export const createShell = (
   const { window: win, boot, api, store } = deps
   const doc = win.document
   const treePrefix = `/${encodeURIComponent(boot.tree.workspace)}/${encodeURIComponent(boot.tree.name)}/`
+  const frameTitle = frameTitleFor(boot)
 
   let frame = deps.frame
   /** The newest grant's handle, for the next load and hello checks. */
@@ -706,6 +714,7 @@ export const createShell = (
             ok: true,
             value,
             sent: draftOf(send),
+            op: send.opId,
           })
         } catch (error) {
           if (codeOf(error) === 'sign_in_required') {
@@ -719,6 +728,7 @@ export const createShell = (
             form,
             ok: false,
             error: fieldsOf(error),
+            op: send.opId,
           })
           // Still no answer: the rest waits for the next try.
           if (codeOf(error) === 'offline') return
@@ -950,6 +960,9 @@ export const createShell = (
     for (const [name, value] of Object.entries(FRAME_ATTRIBUTES)) {
       next.setAttribute(name, value)
     }
+    // Until the page says its title, assistive technology names the frame
+    // by the link's path.
+    next.title = frameTitle('', path)
     const topBoot: TopBoot = {
       v: BRIDGE_VERSION,
       me: me(),
@@ -1013,6 +1026,7 @@ export const createShell = (
         linkPath = data.path
         setUrl('replace', treePrefix + data.path + hashOf(data.hash))
         doc.title = data.title || boot.deployment.name
+        frame.title = frameTitle(data.title, data.path)
         return
       case 'open':
         setUrl('push', treePrefix + data.path + hashOf(data.hash))

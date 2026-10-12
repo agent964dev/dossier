@@ -372,6 +372,15 @@ const previewTags = (boot: ShellBoot): string => {
 }
 
 /**
+ * What assistive technology calls the page frame until the page says its
+ * title: a public page's title, or the link's path, which the address bar
+ * shows anyway.
+ */
+const frameTitleOf = (boot: ShellBoot): string =>
+  boot.preview?.title ??
+  `${boot.tree.workspace}/${boot.tree.name}/${boot.linkPath}`
+
+/**
  * The shell: a small first-party document that frames the page from its
  * tree's content host. It adds nothing visible. A private page's title is
  * only the deployment's name, so a link preview shows nothing of it.
@@ -391,7 +400,7 @@ ${previewTags(boot)}
 <script type="application/json" id="dossier-shell">${data}</script>
 <script type="module" src="/_/base/${encodeURIComponent(boot.base)}/shell.js"></script>
 </head>
-<body><iframe id="dossier-page" title="" sandbox="${SANDBOX}" allow="${FRAME_ALLOW}"></iframe></body>
+<body><iframe id="dossier-page" title="${escapeHtml(frameTitleOf(boot))}" sandbox="${SANDBOX}" allow="${FRAME_ALLOW}"></iframe></body>
 </html>
 `
   return new Response(html, {

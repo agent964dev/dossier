@@ -95,7 +95,8 @@ export const openShell = (
   )
   const doc = win.document
   doc.title = boot.deployment.name
-  doc.body.innerHTML = '<iframe id="dossier-page" title=""></iframe>'
+  doc.body.innerHTML =
+    '<iframe id="dossier-page" title="agent964/acme/questions/"></iframe>'
   const placeholder = doc.getElementById(
     'dossier-page',
   ) as unknown as HTMLIFrameElement

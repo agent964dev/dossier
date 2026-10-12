@@ -441,12 +441,18 @@ export type ShellToPage =
        * answers or drafts never takes the acknowledgement for them.
        */
       readonly sent?: DraftValues
+      /**
+       * The kept send's op ID: a page whose own attempt failed while offline
+       * knows the replay as that attempt, not as an older send.
+       */
+      readonly op?: string
     }
   | {
       readonly type: 'resumed'
       readonly form: string
       readonly ok: false
       readonly error: ErrorFields
+      readonly op?: string
     }
   /** A watched path's value now: at once, then after each change. */
   | {
@@ -590,7 +596,11 @@ export const isShellToPage = (data: unknown): data is ShellToPage => {
     case 'result':
       return Number.isInteger(data.id) && isOutcome(data)
     case 'resumed':
-      return isString(data.form) && isOutcome(data)
+      return (
+        isString(data.form) &&
+        (data.op === undefined || isString(data.op)) &&
+        isOutcome(data)
+      )
     case 'changed':
       return (
         Number.isInteger(data.sub) &&

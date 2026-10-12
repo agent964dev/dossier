@@ -1093,3 +1093,72 @@ describe('second review fixes', () => {
     expect(sendsOf(it)[0]!.entries).toContainEqual(['name', 'Now'])
   })
 })
+
+describe('a send kept offline and replayed by the shell', () => {
+  const ack = (data: unknown) => ({
+    doc: wire(data, '2026-10-12T15:00:00'),
+    replayed: true,
+  })
+
+  test("is shown sent when the shell replays this page's own failed attempt", async () => {
+    const key = formKey(PERSON)
+    const it = await openEmpty()
+    type(it, '[name=name]', 'Sara')
+    await submit(it)
+    const [attempt] = it.requests('send')
+    await it.fail(attempt!.id, 'offline')
+    expect(it.form().getAttribute('data-state')).toBe('failed')
+    it.page.shell.tell({
+      type: 'resumed',
+      form: key,
+      ok: true,
+      value: ack({ name: 'Sara' }),
+      sent: { name: 'Sara' },
+      op: attempt!.send!.opId,
+    })
+    await flush()
+    expect(it.form().getAttribute('data-state')).toBe('sent')
+    expect(it.status()).toBe('Sent on 12 Oct at 15:00')
+    expect(it.doc.querySelector('[data-dossier-retry]')).toBeNull()
+  })
+
+  test('keeps the newer answers when they changed after the failed attempt', async () => {
+    const key = formKey(PERSON)
+    const it = await openEmpty()
+    type(it, '[name=name]', 'Sara')
+    await submit(it)
+    const [attempt] = it.requests('send')
+    await it.fail(attempt!.id, 'offline')
+    type(it, '[name=name]', 'Sara, changed offline')
+    it.page.shell.tell({
+      type: 'resumed',
+      form: key,
+      ok: true,
+      value: ack({ name: 'Sara' }),
+      sent: { name: 'Sara' },
+      op: attempt!.send!.opId,
+    })
+    await flush()
+    expect(it.field('[name=name]').value).toBe('Sara, changed offline')
+    expect(it.form().getAttribute('data-state')).not.toBe('sent')
+  })
+
+  test('ignores the replay of another attempt once this page sent the form', async () => {
+    const key = formKey(PERSON)
+    const it = await openEmpty()
+    type(it, '[name=name]', 'Sara')
+    await submit(it)
+    const [attempt] = it.requests('send')
+    await it.fail(attempt!.id, 'offline')
+    it.page.shell.tell({
+      type: 'resumed',
+      form: key,
+      ok: true,
+      value: ack({ name: 'Older' }),
+      sent: { name: 'Older' },
+      op: 'an-older-kept-send',
+    })
+    await flush()
+    expect(it.form().getAttribute('data-state')).toBe('failed')
+  })
+})
