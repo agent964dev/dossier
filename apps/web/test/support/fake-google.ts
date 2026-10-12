@@ -14,6 +14,8 @@ export interface FakeIdentity {
   readonly email_verified?: boolean
   readonly hd?: string
   readonly name?: string
+  /** Google's photo address; null for an account Google sends none for. */
+  readonly picture?: string | null
 }
 
 export interface FakeGoogle {
@@ -101,7 +103,13 @@ const signIdToken = async (
     email_verified: identity.email_verified ?? true,
     name,
     given_name: name,
-    picture: `https://lh3.googleusercontent.com/a/${identity.sub}`,
+    ...(identity.picture === null
+      ? {}
+      : {
+          picture:
+            identity.picture ??
+            `https://lh3.googleusercontent.com/a/${identity.sub}`,
+        }),
     iat: now,
     exp: now + 3600,
     ...(identity.hd === undefined ? {} : { hd: identity.hd }),

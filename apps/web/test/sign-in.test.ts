@@ -253,6 +253,42 @@ describe('signing in with Google', () => {
     expect(await userIdOf(free.email)).toBe(linaId)
   })
 
+  it('keeps the name and photo address Google sends, and follows them', async () => {
+    const photoOf = async (email: string) =>
+      (
+        await rows<{ name: string; image: string | null }>(
+          'select name, image from "user" where email = ?',
+          email,
+        )
+      )[0]
+    const sara = {
+      ...fresh('agent964.com', 'sara'),
+      hd: 'agent964.com',
+      name: 'Sara Haddad',
+    }
+    const browser = await signedIn(sara)
+    const first = `https://lh3.googleusercontent.com/a/${sara.sub}`
+    expect(await photoOf(sara.email)).toEqual({
+      name: 'Sara Haddad',
+      image: first,
+    })
+    const body = (await (await me(browser)).json()) as {
+      person: { name: string; image: string | null }
+    }
+    expect(body.person).toMatchObject({ name: 'Sara Haddad', image: first })
+
+    const next = 'https://lh3.googleusercontent.com/a/new-photo=s96-c'
+    await signedIn({ ...sara, name: 'Sara H.', picture: next })
+    expect(await photoOf(sara.email)).toEqual({ name: 'Sara H.', image: next })
+
+    // An account Google sends no photo for has none, then or later.
+    await signedIn({ ...sara, picture: null })
+    expect((await photoOf(sara.email))?.image).toBeNull()
+    const plain = { ...fresh('agent964.com', 'plain'), picture: null }
+    await signedIn(plain)
+    expect((await photoOf(plain.email))?.image).toBeNull()
+  })
+
   it('seeds super admins from SUPER_ADMINS at their first sign-in only', async () => {
     await exec(
       `delete from "user" where email in ('root@example.com', 'chief@example.com')`,

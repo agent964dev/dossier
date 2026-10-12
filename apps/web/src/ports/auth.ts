@@ -451,9 +451,18 @@ export const authOptions = (
       user: {
         update: {
           before: async (data) => {
-            const keepEmail = scopes.getStore()?.keepEmail
-            if (keepEmail === undefined || !('email' in data)) return
-            return { data: { ...data, email: keepEmail } }
+            const scope = scopes.getStore()
+            // The profile Google sent at this sign-in. Better Auth leaves out
+            // a photo Google no longer sends; the person has none now.
+            const profile =
+              scope?.claims !== undefined && 'name' in data
+                ? { image: scope.claims.picture ?? null }
+                : {}
+            const email =
+              scope?.keepEmail !== undefined && 'email' in data
+                ? { email: scope.keepEmail }
+                : {}
+            return { data: { ...data, ...profile, ...email } }
           },
         },
       },
