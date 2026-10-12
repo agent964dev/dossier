@@ -229,8 +229,8 @@ export const withCommonHeaders = (
     headers.set(PROTOCOL_HEADER, String(PROTOCOL))
     if (!headers.has('cache-control')) headers.set('cache-control', NO_STORE)
   }
-  // A link answers people and agents differently, by Accept.
-  if (kind === 'link') headers.append('vary', 'Accept')
+  // A link and a frame answer people and agents differently, by Accept.
+  if (kind === 'link' || kind === 'frame') headers.append('vary', 'Accept')
   if (
     kind !== null &&
     SCREEN_KINDS.has(kind) &&
@@ -400,9 +400,21 @@ export const frameResponse = (served: Served): Response => {
       headers.set('location', served.to)
       return new Response(null, { status: served.status, headers })
     }
+    // The agent version for the page's own `<dossier-copy>`: the viewer's
+    // own text, so never stored.
+    case 'agent': {
+      const headers = contentHeaders(NO_STORE)
+      headers.delete('accept-ranges')
+      headers.set(
+        'content-type',
+        served.type === 'application/json'
+          ? 'application/json'
+          : 'text/markdown; charset=utf-8',
+      )
+      return new Response(served.body, { status: 200, headers })
+    }
     case 'shell':
     case 'listing':
-    case 'agent':
       return frameFailure(404)
   }
 }

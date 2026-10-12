@@ -267,3 +267,76 @@ export const share = (
     by.id,
     Date.now(),
   )
+
+/**
+ * A data file as a form's sending writes it, with any missing folders above
+ * it made as data folders.
+ */
+export const dataFile = async (
+  treeId: string,
+  path: string,
+  value: unknown,
+  writer: Person,
+  seen = 1,
+) => {
+  const segments = path.split('/')
+  let parent = (await nodeAt(treeId, ''))!.id as string
+  for (let depth = 1; depth < segments.length; depth += 1) {
+    const at = segments.slice(0, depth).join('/')
+    const existing = await nodeAt(treeId, at)
+    if (existing !== undefined) {
+      parent = existing.id
+      continue
+    }
+    const id = crypto.randomUUID()
+    await exec(
+      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin,
+         owner_id, current_version_id, created_at, deleted_at)
+       values (?, ?, ?, ?, ?, ?, 'folder', 'data', null, null, ?, null)`,
+      id,
+      treeId,
+      parent,
+      segments[depth - 1],
+      at,
+      depth,
+      Date.now(),
+    )
+    parent = id
+  }
+  const nodeId = crypto.randomUUID()
+  const versionId = crypto.randomUUID()
+  const json = JSON.stringify(value)
+  await env.DB.batch([
+    env.DB.prepare(
+      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin,
+         owner_id, current_version_id, created_at, deleted_at)
+       values (?, ?, ?, ?, ?, ?, 'file', 'data', ?, ?, ?, null)`,
+    ).bind(
+      nodeId,
+      treeId,
+      parent,
+      segments[segments.length - 1],
+      path,
+      segments.length,
+      writer.id,
+      versionId,
+      Date.now(),
+    ),
+    env.DB.prepare(
+      `insert into node_versions (id, node_id, tree_id, revision, authored_seq, state,
+         blob_sha256, json_value, size, content_type, author_id, key_id, push_id,
+         seen_push_number, op_id, created_at)
+       values (?, ?, ?, 1, null, 'live', null, ?, ?, 'application/json', ?, null,
+         null, ?, null, ?)`,
+    ).bind(
+      versionId,
+      nodeId,
+      treeId,
+      json,
+      json.length,
+      writer.id,
+      seen,
+      Date.UTC(2026, 9, 12, 14, 20),
+    ),
+  ])
+}

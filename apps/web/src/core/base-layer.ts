@@ -1,9 +1,13 @@
 // The base layer: Dossier's own files under /_/base/<version>/ (the shell,
-// the page client, the base layout and the base components). This build's
-// version is in Static Assets; each deploy also copies its files into R2
-// under base/<version>/, so a page opened before a deploy keeps loading the
-// version it started with.
-import { dossierError, type DossierError } from '@dossier/contracts'
+// the page client, the base layout, the base components and the libraries
+// pages load when they use their markup). This build's version is in Static
+// Assets; each deploy also copies its files into R2 under base/<version>/, so
+// a page opened before a deploy keeps loading the version it started with.
+import {
+  dossierError,
+  type BaseLibraries,
+  type DossierError,
+} from '@dossier/contracts'
 import { analyze, tagOf, type Source } from '@dossier/html'
 import { Context, Effect, Layer } from 'effect'
 
@@ -18,6 +22,8 @@ export interface BaseManifest {
   readonly files: Readonly<
     Record<string, { readonly type: string; readonly size: number }>
   >
+  /** The build's libraries.json: each library's and component's files. */
+  readonly libraries: BaseLibraries
 }
 
 export interface BaseFile {
@@ -28,14 +34,23 @@ export interface BaseFile {
 
 export interface BaseLayerService {
   readonly version: string
+  /** Where each library's and base component's files are in this version. */
+  readonly libraries: BaseLibraries
   /** A `_` path the base layer answers, such as '_components/dossier-copy.js'. */
   readonly has: (path: string) => boolean
-  /** Tag → '_components/<tag>.js'. */
+  /** Tag → '_components/<tag>.js'; export builds are not components. */
   readonly components: () => Readonly<Record<string, string>>
   /** '/_/base/<version>/<path>': root-relative, so it stays on the page's host. */
   readonly url: (path: string) => string
   /** _layout.html with its analysis, read once per isolate. */
   readonly layout: () => Effect.Effect<Source, DossierError<'unavailable'>>
+  /**
+   * The text of one of this version's files, such as
+   * '_components/dossier-copy.md'; null when the version holds no such file.
+   */
+  readonly read: (
+    path: string,
+  ) => Effect.Effect<string | null, DossierError<'unavailable'>>
   /** An older version's file, from R2 base/<version>/<path>. */
   readonly file: (
     version: string,
@@ -95,6 +110,9 @@ export const basePathOf = (segments: readonly string[]): string | null => {
   return isBasePath(path) ? path : null
 }
 
+/** A single-file build Phase 15 inlines into exports, never a component. */
+const EXPORT_BUILD = /\.export\.js$/
+
 const unavailable = (error: unknown) => {
   console.error('The base layer could not be read', error)
   return dossierError('unavailable')
@@ -104,13 +122,14 @@ const unavailable = (error: unknown) => {
 const fromManifest = (manifest: BaseManifest) => {
   const components: Record<string, string> = {}
   for (const path of Object.keys(manifest.files)) {
-    if (!path.startsWith('_components/')) continue
+    if (!path.startsWith('_components/') || EXPORT_BUILD.test(path)) continue
     const tag = tagOf(path)
     if (tag !== null) components[tag] = path
   }
   const frozen = Object.freeze(components)
   return {
     version: manifest.version,
+    libraries: manifest.libraries,
     has: (path: string) =>
       path.startsWith('_') && Object.hasOwn(manifest.files, path),
     components: () => frozen,
@@ -141,15 +160,21 @@ export const BaseLayerLive: Layer.Layer<BaseLayer, never, Bindings> =
       const shared = fromManifest(manifest)
       let layout: Promise<Source> | null = null
 
-      const readLayout = async (): Promise<Source> => {
+      /** A current-version file's text from Static Assets. */
+      const textOf = async (path: string): Promise<string> => {
         const response = await ASSETS.fetch(
-          new Request(`https://assets.invalid${shared.url('_layout.html')}`),
+          new Request(`https://assets.invalid${shared.url(path)}`),
         )
         if (!response.ok) {
-          throw new Error(`The base layout answered ${response.status}`)
+          throw new Error(
+            `The base layer's ${path} answered ${response.status}`,
+          )
         }
-        return sourceOf(await response.text())
+        return response.text()
       }
+
+      const readLayout = async (): Promise<Source> =>
+        sourceOf(await textOf('_layout.html'))
 
       return {
         ...shared,
@@ -164,6 +189,13 @@ export const BaseLayerLive: Layer.Layer<BaseLayer, never, Bindings> =
             },
             catch: unavailable,
           }),
+        read: (path) =>
+          !Object.hasOwn(manifest.files, path)
+            ? Effect.succeed(null)
+            : Effect.tryPromise({
+                try: () => textOf(path),
+                catch: unavailable,
+              }),
         file: (version, path) =>
           !VERSION.test(version) || !isBasePath(path)
             ? Effect.succeed(null)
@@ -189,7 +221,8 @@ export const BaseLayerLive: Layer.Layer<BaseLayer, never, Bindings> =
 
 /**
  * A base layer from a manifest and the text of its files, for tests. Older
- * versions are never held.
+ * versions are never held; a file the manifest lists without a text reads as
+ * null.
  */
 export const BaseLayerFrom = (
   manifest: BaseManifest,
@@ -204,6 +237,10 @@ export const BaseLayerFrom = (
         ? Effect.fail(dossierError('unavailable'))
         : Effect.succeed(sourceOf(text))
     },
+    read: (path) =>
+      Effect.succeed(
+        Object.hasOwn(manifest.files, path) ? (sources[path] ?? null) : null,
+      ),
     file: () => Effect.succeed(null),
   })
 }

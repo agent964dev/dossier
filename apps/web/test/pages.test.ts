@@ -123,6 +123,7 @@ const frame = (
         range: null,
         ifNoneMatch: null,
         host: `${treeId}.content.test`,
+        wantsAgent: false,
       })
       .pipe(
         Effect.provideService(CurrentCaller, caller),

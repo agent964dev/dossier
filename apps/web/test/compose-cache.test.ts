@@ -74,6 +74,7 @@ const frameWith = (
           range: null,
           ifNoneMatch: null,
           host,
+          wantsAgent: false,
         })
         .pipe(Effect.provideService(CurrentCaller, caller))
     }),
@@ -149,7 +150,7 @@ describe('the composed-page cache', () => {
       treeId: w.treeId,
       seq: w.seq,
       path: 'guides/page.html',
-      composer: '3.6',
+      composer: '4.7',
       base: 'base0000test',
     })
     expect(kit.cache.entries().size).toBe(1)

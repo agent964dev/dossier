@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cloudflare } from '@cloudflare/vite-plugin'
@@ -51,13 +51,40 @@ const filesUnder = (dir: string, at = ''): string[] =>
     .sort()
 
 /**
+ * libraries.json from the browser build: where each library's and base
+ * component's files are. The Worker preloads libraries and reads component
+ * documentation from it, so a build without it is not a base layer.
+ */
+const librariesOf = (dir: string): unknown => {
+  const path = join(dir, 'libraries.json')
+  if (!existsSync(path)) {
+    throw new Error(
+      `The browser build wrote no ${path}; the base layer needs its libraries.json.`,
+    )
+  }
+  const libraries = JSON.parse(readFileSync(path, 'utf8')) as {
+    libraries?: unknown
+    components?: unknown
+  } | null
+  if (
+    typeof libraries?.libraries !== 'object' ||
+    libraries.libraries === null ||
+    typeof libraries.components !== 'object' ||
+    libraries.components === null
+  ) {
+    throw new Error(`${path} names no libraries or components.`)
+  }
+  return libraries
+}
+
+/**
  * The base layer: every file @dossier/browser builds into dist/base/ (the
- * shell, the page client, the base layout and the base components), built
- * with the Worker. Its version is the first 12 hex characters of the SHA-256
- * over every file's path and bytes in path order, so a new build never mixes
- * with the files of an open page. The manifest of versions and files goes to
- * dist/base-manifest.json for the deploy's copy into R2, and into the Worker
- * as __BASE_MANIFEST__.
+ * shell, the page client, the base layout, the base components and the
+ * libraries), built with the Worker. Its version is the first 12 hex
+ * characters of the SHA-256 over every file's path and bytes in path order,
+ * so a new build never mixes with the files of an open page. The manifest of
+ * versions, files and libraries goes to dist/base-manifest.json for the
+ * deploy's copy into R2, and into the Worker as __BASE_MANIFEST__.
  */
 function baseLayer(): {
   version: string
@@ -69,6 +96,7 @@ function baseLayer(): {
   )
   execFileSync('bun', ['run', 'build'], { cwd: browser, stdio: 'inherit' })
   const dir = join(browser, 'dist/base')
+  const libraries = librariesOf(dir)
   const files = filesUnder(dir).map((path) => ({
     path,
     source: readFileSync(join(dir, path)),
@@ -87,6 +115,7 @@ function baseLayer(): {
         { type: typeOf(file.path), size: file.source.byteLength },
       ]),
     ),
+    libraries,
   })
   return {
     version,

@@ -17,7 +17,7 @@ import {
 } from '../src/core/index.ts'
 import { kitNames } from '../src/server/kit-row.ts'
 import { signedIn } from './support/browser.ts'
-import { kitRuntime } from './support/base.ts'
+import { BASE_COPY_DOC, kitRuntime } from './support/base.ts'
 import { harness } from './support/harness.ts'
 import { callerOf, fresh, runAs } from './support/people.ts'
 import {
@@ -147,6 +147,7 @@ const frame = (
           range: null,
           ifNoneMatch: null,
           host,
+          wantsAgent: false,
         })
         .pipe(
           Effect.provideService(CurrentCaller, caller),
@@ -349,6 +350,7 @@ describe('the kit map', () => {
       'acme-card': '../_components/acme-card.js',
       'dossier-probe': '../../_components/dossier-probe.js',
       'dossier-copy': '/_/base/base0000test/_components/dossier-copy.js',
+      'dossier-diff': '/_/base/base0000test/_components/dossier-diff.js',
     })
     expect(boot.used).toEqual(['acme-card', 'dossier-probe'])
     expect(boot.base).toBe('base0000test')
@@ -391,6 +393,8 @@ describe('the kit map', () => {
       ['', '_components/acme-badge.js', 'component', 'acme-badge'],
       ['', '_components/dossier-probe.js', 'component', 'dossier-probe'],
       [null, '_components/dossier-copy.js', 'component', 'dossier-copy'],
+      // The base layer's export build of dossier-diff is not a component.
+      [null, '_components/dossier-diff.js', 'component', 'dossier-diff'],
     ])
     const reader = await sharedWith(w, [{ path: 'guides', role: 'read' }])
     const refused = await failureAs(
@@ -405,6 +409,44 @@ describe('the kit map', () => {
       ),
     )
     expect(refused.code).toBe('forbidden')
+  })
+})
+
+describe('a folder read', () => {
+  it('shows a write holder each base component with the base layer’s documentation, and a tree component that replaces one with its own', async () => {
+    const w = await world()
+    const read = await runAs(
+      w.owner,
+      Effect.flatMap(Pages, (pages) =>
+        pages.read({
+          workspace: w.ws.name,
+          tree: 'kit',
+          path: 'mockups',
+          folder: true,
+        }),
+      ),
+    )
+    if (read.kind !== 'folder') throw new Error(`not a folder: ${read.kind}`)
+    const doc = BASE_COPY_DOC.trimEnd()
+      .split('\n')
+      .map((line) => (line === '' ? '' : `  ${line}`))
+      .join('\n')
+    expect(read.text).toContain(`\n- <dossier-copy> base layer\n${doc}\n`)
+    expect(read.kit?.find((item) => item.tag === 'dossier-copy')?.doc).toBe(
+      BASE_COPY_DOC,
+    )
+    // A base component without documentation is listed alone.
+    expect(read.text.endsWith('\n- <dossier-diff> base layer\n')).toBe(true)
+    // The tree's dossier-probe replaces the base one, and has no notes.
+    expect(read.text).toContain(
+      '\n- <dossier-probe> _components/dossier-probe.js (from kit/)\n- ',
+    )
+    expect(read.text).not.toContain('The base probe.')
+    // The base layer's export build is not a component.
+    expect(read.text).not.toContain('export')
+    expect(read.kit?.map((item) => item.tag)).not.toContain(
+      'dossier-diff.export',
+    )
   })
 })
 

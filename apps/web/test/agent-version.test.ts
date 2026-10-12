@@ -16,6 +16,7 @@ import { harness } from './support/harness.ts'
 import { runAs, sessionFor } from './support/people.ts'
 import {
   agent,
+  dataFile,
   failureAs,
   join,
   nodeAt,
@@ -73,70 +74,6 @@ let admin: Person
 let owner: Caller
 let tree: { id: string; workspace: string }
 
-/** A data file as a form's sending writes it. */
-const dataFile = async (
-  path: string,
-  value: unknown,
-  writer: Person,
-  seen = 1,
-) => {
-  const segments = path.split('/')
-  let parent = (await nodeAt(tree.id, ''))!.id as string
-  for (let depth = 1; depth < segments.length; depth += 1) {
-    const at = segments.slice(0, depth).join('/')
-    const existing = await nodeAt(tree.id, at)
-    if (existing !== undefined) {
-      parent = existing.id
-      continue
-    }
-    const id = crypto.randomUUID()
-    await env.DB.prepare(
-      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin,
-         owner_id, current_version_id, created_at, deleted_at)
-       values (?, ?, ?, ?, ?, ?, 'folder', 'data', null, null, ?, null)`,
-    )
-      .bind(id, tree.id, parent, segments[depth - 1], at, depth, Date.now())
-      .run()
-    parent = id
-  }
-  const nodeId = crypto.randomUUID()
-  const versionId = crypto.randomUUID()
-  const json = JSON.stringify(value)
-  await env.DB.batch([
-    env.DB.prepare(
-      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin,
-         owner_id, current_version_id, created_at, deleted_at)
-       values (?, ?, ?, ?, ?, ?, 'file', 'data', ?, ?, ?, null)`,
-    ).bind(
-      nodeId,
-      tree.id,
-      parent,
-      segments[segments.length - 1],
-      path,
-      segments.length,
-      writer.id,
-      versionId,
-      Date.now(),
-    ),
-    env.DB.prepare(
-      `insert into node_versions (id, node_id, tree_id, revision, authored_seq, state,
-         blob_sha256, json_value, size, content_type, author_id, key_id, push_id,
-         seen_push_number, op_id, created_at)
-       values (?, ?, ?, 1, null, 'live', null, ?, ?, 'application/json', ?, null,
-         null, ?, null, ?)`,
-    ).bind(
-      versionId,
-      nodeId,
-      tree.id,
-      json,
-      json.length,
-      writer.id,
-      seen,
-      Date.UTC(2026, 9, 12, 14, 20),
-    ),
-  ])
-}
-
 const read = (caller: Caller, target: string) =>
   runAs(
     caller,
@@ -162,10 +99,14 @@ beforeAll(async () => {
   )
   tree = { id: result.treeId, workspace: ws.name }
   const writer = await person('sara')
-  await dataFile('answers/sara@example.com.json', { trucks: 12 }, writer, 1)
-  await dataFile('answers/omar@example.com.json', { trucks: 3 }, writer, 1)
-  await dataFile('decisions.json', { go: true }, writer, 1)
-  await dataFile('plan.comments/c1.json', { text: 'Looks good' }, writer, 1)
+  for (const [path, value] of [
+    ['answers/sara@example.com.json', { trucks: 12 }],
+    ['answers/omar@example.com.json', { trucks: 3 }],
+    ['decisions.json', { go: true }],
+    ['plan.comments/c1.json', { text: 'Looks good' }],
+  ] as const) {
+    await dataFile(tree.id, path, value, writer, 1)
+  }
 })
 
 const at = (path: string) => `${tree.workspace}/handoff/${path}`

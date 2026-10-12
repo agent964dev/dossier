@@ -124,6 +124,11 @@ export interface PagesService {
     readonly ifNoneMatch: string | null
     /** The content host the edge matched, for the composed-page cache. */
     readonly host: string
+    /**
+     * Accept names text/markdown: a page or folder answers with its agent
+     * version (a page's as it was at the sequence), as a link answers agents.
+     */
+    readonly wantsAgent: boolean
   }) => Effect.Effect<
     Served,
     DossierError<'not_found' | 'unavailable'>,
@@ -1006,7 +1011,7 @@ export const PagesLive: Layer.Layer<
         const html = compose({
           page,
           layouts,
-          inject: ({ tags }) => {
+          inject: ({ tags, libraries }) => {
             const used = tags.filter((tag) => Object.hasOwn(urls, tag))
             const bootstrap: PageBootstrap = {
               v: 1,
@@ -1020,16 +1025,101 @@ export const PagesLive: Layer.Layer<
               kit: urls,
               used,
             }
+            // The components the page uses, then each library it uses, which
+            // the page client imports once it finds the library's markup.
             return bootstrapTags(
               JSON.stringify(bootstrap),
               base.url('client.js'),
-              used.map((tag) => urls[tag]!),
+              [
+                ...used.map((tag) => urls[tag]!),
+                ...libraries.map((name) =>
+                  base.url(base.libraries.libraries[name].live),
+                ),
+              ],
             )
           },
         })
         yield* cache.put(i.key, html)
         return html
       })
+
+    /**
+     * A data folder as it is now, or what leads to it. It holds no authored
+     * file, so no sequence holds it; its listing is live in any case.
+     */
+    const liveDataFolder = (ref: TreeRef) =>
+      Effect.gen(function* () {
+        const live = yield* store.resolve(ref)
+        if ('missing' in live) return null
+        const leads =
+          (live.kind === 'folder' || live.kind === 'redirect') &&
+          live.node.kind === 'folder' &&
+          live.node.origin === 'data'
+        return leads ? live : null
+      })
+
+    /** What the frame resolves at its sequence, data folders for agents. */
+    const frameResolve = (
+      ref: TreeRef,
+      i: { seq: AuthoredSeq; wantsAgent: boolean },
+    ) =>
+      Effect.gen(function* () {
+        const found: Resolved | MissingNode = yield* store.resolve(ref, i.seq)
+        if (!i.wantsAgent || !('missing' in found)) return found
+        return (yield* liveDataFolder(ref)) ?? found
+      })
+
+    /**
+     * Whether the frame's handle may have the agent version of a page or
+     * folder: a page it reads now and may open at the sequence (layouts do
+     * not change its text), a folder that still exists and that it reads now.
+     */
+    const agentOpens = (
+      handleHash: string,
+      seq: AuthoredSeq,
+      target: Extract<Resolved, { kind: 'page' | 'folder' }>,
+    ) =>
+      Effect.gen(function* () {
+        if (target.kind === 'folder') {
+          if (target.node.deletedAt !== null) return false
+          return yield* access
+            .require('read', target.node)
+            .pipe(Effect.isSuccess)
+        }
+        const roles = yield* access.roleOn(target.node)
+        if (!readsWith(roles, target.node)) return false
+        return yield* opensAt(handleHash, seq, [
+          { node: target.node, version: target.version },
+        ])
+      })
+
+    /** The agent version at the frame's sequence, as Served.agent. */
+    const agentAt = (
+      handleHash: string,
+      i: {
+        readonly treeId: TreeId
+        readonly seq: AuthoredSeq
+        readonly path: string
+      },
+      target: Extract<Resolved, { kind: 'page' | 'folder' }>,
+    ) =>
+      Effect.gen(function* () {
+        const found = yield* store.treeById(i.treeId)
+        if (found === null) return yield* Effect.fail(notFound(i.path))
+        return yield* reader.servedAt({
+          tree: { workspace: found.workspace.name, name: found.tree.name },
+          target,
+          at: i.seq,
+          opens: (file) => opensAt(handleHash, i.seq, [file]),
+        })
+      }).pipe(
+        // A handle's caller is signed in; any refusal is the frame's 404.
+        Effect.mapError((error) =>
+          error.code === 'unavailable'
+            ? (error as DossierError<'unavailable'>)
+            : notFound(i.path),
+        ),
+      )
 
     const frame: PagesService['frame'] = (i) =>
       Effect.gen(function* () {
@@ -1039,11 +1129,14 @@ export const PagesLive: Layer.Layer<
         }
         const via = caller.via
         const asked = linkPathOf(i.path, i.folder)
-        const resolved = yield* store.resolve(
+        const resolved = yield* frameResolve(
           { treeId: i.treeId, path: i.path, folder: i.folder },
-          i.seq,
+          i,
         )
-        if ('missing' in resolved || resolved.kind === 'folder') {
+        if (
+          'missing' in resolved ||
+          (resolved.kind === 'folder' && !i.wantsAgent)
+        ) {
           return yield* Effect.fail(notFound(i.path))
         }
         if (resolved.kind === 'kit') {
@@ -1080,7 +1173,25 @@ export const PagesLive: Layer.Layer<
           target =
             next === null
               ? { missing: true, treeId: i.treeId, path: i.path }
-              : yield* store.resolve(next, i.seq)
+              : yield* frameResolve(next, i)
+        }
+        // Accept names Markdown: a page's or folder's agent version.
+        if (
+          i.wantsAgent &&
+          !('missing' in target) &&
+          (target.kind === 'page' || target.kind === 'folder')
+        ) {
+          if (!(yield* agentOpens(via.handleHash, i.seq, target))) {
+            return yield* Effect.fail(notFound(i.path))
+          }
+          if (resolved.kind === 'redirect') {
+            return {
+              kind: 'redirect',
+              to: relativeTo(asked, resolved.to),
+              status: 301,
+            } satisfies Served
+          }
+          return yield* agentAt(via.handleHash, i, target)
         }
         if (
           'missing' in target ||

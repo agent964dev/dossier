@@ -404,6 +404,8 @@ export const serve = async (
             range: request.headers.get('range'),
             ifNoneMatch: request.headers.get('if-none-match'),
             host: url.host,
+            // `<dossier-copy>` asks its own frame URL for the agent version.
+            wantsAgent: acceptsMarkdown(request.headers.get('accept')),
           }),
         ),
       )

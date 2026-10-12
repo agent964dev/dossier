@@ -1,4 +1,5 @@
 import type { TreeId } from '@dossier/contracts'
+import { toMarkdown } from '@dossier/html'
 import { SELF } from 'cloudflare:test'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
@@ -7,7 +8,14 @@ import { SANDBOX_TOKENS } from '../src/edge/respond.ts'
 import { Browser, signedIn } from './support/browser.ts'
 import { harness, ORIGIN } from './support/harness.ts'
 import { callerOf, fresh } from './support/people.ts'
-import { agent, nodeAt, pushAll, share, workspace } from './support/trees.ts'
+import {
+  agent,
+  dataFile,
+  nodeAt,
+  pushAll,
+  share,
+  workspace,
+} from './support/trees.ts'
 import { everything } from './support/keys.ts'
 
 afterEach(() => harness.reset())
@@ -41,24 +49,36 @@ beforeAll(async () => {
   content = `${treeId}.content.test`
 })
 
-const viewAs = async (browser: Browser, path: string) => {
+const viewAs = async (browser: Browser, path: string, tree = treeId) => {
   const response = await browser.fetch('/_/api/view', {
     method: 'POST',
     purpose: 'write',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tree: treeId, path }),
+    body: JSON.stringify({ tree, path }),
   })
   return response
 }
 
-const handleOf = async (browser: Browser, path = 'plan') => {
-  const response = await viewAs(browser, path)
+const handleOf = async (browser: Browser, path = 'plan', tree = treeId) => {
+  const response = await viewAs(browser, path, tree)
   expect(response.status).toBe(200)
   return ((await response.json()) as { handle: string }).handle
 }
 
-const frame = (browser: Browser, path: string, init: RequestInit = {}) =>
-  browser.fetch(path, { ...init, host: content, purpose: 'none' })
+const frame = (
+  browser: Browser,
+  path: string,
+  init: RequestInit = {},
+  host = content,
+) => browser.fetch(path, { ...init, host, purpose: 'none' })
+
+const MARKDOWN = { headers: { accept: 'text/markdown' } }
+
+const varies = (response: Response) =>
+  (response.headers.get('vary') ?? '')
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .includes('accept')
 
 const expectContentHeaders = (response: Response, cache: string) => {
   const csp = response.headers.get('content-security-policy') ?? ''
@@ -231,6 +251,7 @@ describe('the frame route', () => {
       expect(response.status, path).toBe(404)
       expect(response.headers.get('content-type')).toContain('text/plain')
       expect(response.headers.getSetCookie()).toEqual([])
+      expect(varies(response)).toBe(true)
     }
     const other = await owner.fetch(`/_/v/${handle}/1/plan`, {
       host: 'abcdefghij0123456789.content.test',
@@ -405,5 +426,178 @@ describe('HTML on either host', () => {
     const handle = await handleOf(owner)
     const pdf = await frame(owner, `/_/v/${handle}/1/brief.pdf`)
     expect(pdf.headers.get('cache-control')).toBe('private, max-age=86400')
+  })
+})
+
+describe('the frame route for agents', () => {
+  const NOTES_1 = '<title>Notes</title><h1>Notes</h1><p>First version</p>'
+  const NOTES_2 = '<title>Notes</title><h1>Notes</h1><p>Second version</p>'
+  const DIAGRAM =
+    '<title>Diagram</title><pre class="mermaid">graph TD\n  A --> B</pre>' +
+    '<pre><code class="language-ts">const a = 1</code></pre>' +
+    '<pre><code class="language-ts">const b = 2</code></pre>'
+  const BASE = {
+    'notes.html': NOTES_1,
+    'brief.html': '<title>Brief</title><p>Brief</p>',
+    'brief.md': '# Brief\n\nFirst companion.\n',
+    'diagram.html': DIAGRAM,
+    'guides/setup.html': '<title>Setup</title><p>Set up</p>',
+    'old/page.html': '<p>Old</p>',
+  }
+  const pointer = '\n\nData: none · Comments: 0\n'
+  const generated = (html: string) =>
+    `${toMarkdown(html).replace(/\s+$/, '')}${pointer}`
+
+  let tree: TreeId
+  let host: string
+  let pushAgain: () => Promise<void>
+
+  beforeAll(async () => {
+    const caller = await callerOf(owner)
+    const key = await agent(caller.person!)
+    const target = `${ws.name}/agentframe`
+    tree = committed(await pushAll(key, target, BASE)).treeId
+    host = `${tree}.content.test`
+    pushAgain = async () => {
+      // old/ goes; notes.html and brief.md change.
+      const kept = Object.fromEntries(
+        Object.entries(BASE).filter(([path]) => !path.startsWith('old/')),
+      )
+      committed(
+        await pushAll(
+          key,
+          target,
+          { ...kept, 'notes.html': NOTES_2, 'brief.md': '# Brief\n\nNew.\n' },
+          { force: true },
+        ),
+      )
+    }
+    await dataFile(
+      tree,
+      'answers/sara@example.com.json',
+      { ok: true },
+      caller.person!,
+    )
+  })
+
+  /** A person who reads the whole tree, signed in with a browser. */
+  const reader = async () => {
+    const browser = await signedIn(fresh())
+    const root = (await nodeAt(tree, ''))!
+    await share(
+      tree,
+      root.id,
+      'email',
+      (await callerOf(browser)).person!.email,
+      'read',
+      (await callerOf(owner)).person!,
+    )
+    return browser
+  }
+
+  const ask = (browser: Browser, handle: string, seq: number, path: string) =>
+    frame(browser, `/_/v/${handle}/${seq}/${path}`, MARKDOWN, host)
+
+  it('answers a page’s agent version at the frame’s sequence, and only as the frame would open it', async () => {
+    const ownerHandle = await handleOf(owner, 'notes', tree)
+    const early = await reader()
+    const earlyHandle = await handleOf(early, 'notes', tree)
+    await handleOf(early, 'brief', tree)
+
+    const first = await ask(owner, ownerHandle, 1, 'notes')
+    expect(first.status).toBe(200)
+    expect(first.headers.get('content-type')).toBe(
+      'text/markdown; charset=utf-8',
+    )
+    expectContentHeaders(first, 'no-store')
+    expect(varies(first)).toBe(true)
+    expect(await first.text()).toBe(generated(NOTES_1))
+    const companion = await ask(owner, ownerHandle, 1, 'brief')
+    expect(await companion.text()).toBe(`# Brief\n\nFirst companion.${pointer}`)
+
+    await pushAgain()
+    const late = await reader()
+    const lateHandle = await handleOf(late, 'notes', tree)
+
+    // A write holder reads any sequence; each answer is the text then.
+    expect(await (await ask(owner, ownerHandle, 1, 'notes')).text()).toBe(
+      generated(NOTES_1),
+    )
+    expect(await (await ask(owner, ownerHandle, 2, 'notes')).text()).toBe(
+      generated(NOTES_2),
+    )
+    expect(await (await ask(owner, ownerHandle, 1, 'brief')).text()).toBe(
+      `# Brief\n\nFirst companion.${pointer}`,
+    )
+    // A reader gets the old text of what a view issued at that sequence.
+    expect(await (await ask(early, earlyHandle, 1, 'notes')).text()).toBe(
+      generated(NOTES_1),
+    )
+    // Its companion changed and was never issued, but the reader could read
+    // it when the sequence was issued: the open tab keeps the text then.
+    expect(await (await ask(early, earlyHandle, 1, 'brief')).text()).toBe(
+      `# Brief\n\nFirst companion.${pointer}`,
+    )
+    // A sequence the reader was never issued recovers nothing replaced.
+    const refused = await ask(late, lateHandle, 1, 'notes')
+    expect(refused.status).toBe(404)
+    expect(varies(refused)).toBe(true)
+    expect(await (await ask(late, lateHandle, 2, 'notes')).text()).toBe(
+      generated(NOTES_2),
+    )
+    // A folder the sequence holds that is gone now has no text.
+    expect((await ask(owner, ownerHandle, 1, 'old/')).status).toBe(404)
+    // Without the Accept header the frame still answers the page.
+    const html = await frame(late, `/_/v/${lateHandle}/2/notes`, {}, host)
+    expect(html.headers.get('content-type')).toBe('text/html; charset=utf-8')
+  })
+
+  it('answers a folder’s text now, a data folder’s files, and redirects as the frame does', async () => {
+    const handle = await handleOf(owner, 'diagram', tree)
+    const root = await ask(owner, handle, 1, '')
+    expect(root.status).toBe(200)
+    expect(root.headers.get('content-type')).toBe(
+      'text/markdown; charset=utf-8',
+    )
+    expectContentHeaders(root, 'no-store')
+    const text = await root.text()
+    expect(text.startsWith('# agentframe/\n\nPages\n')).toBe(true)
+    expect(text).toContain('- Notes · notes.html · push ')
+    expect(text).toContain('- guides/ · 1 page')
+    expect(text).toContain('\nKit\n')
+
+    const guides = await ask(owner, handle, 1, 'guides/')
+    expect(await guides.text()).toContain('# agentframe/guides/\n\nPages\n')
+    const bare = await ask(owner, handle, 1, 'guides')
+    expect(bare.status).toBe(301)
+    expect(bare.headers.get('location')).toBe('./guides/')
+
+    const answers = await ask(owner, handle, 1, 'answers/')
+    expect(answers.status).toBe(200)
+    expect(await answers.text()).toContain('# answers/ (1 file)\n')
+    expect(
+      (await ask(owner, handle, 1, 'answers')).headers.get('location'),
+    ).toBe('./answers/')
+
+    // Without the Accept header a folder without index.html is nothing.
+    expect(
+      (await frame(owner, `/_/v/${handle}/1/guides/`, {}, host)).status,
+    ).toBe(404)
+  })
+
+  it('preloads each library the page uses once, and varies the page by Accept', async () => {
+    const handle = await handleOf(owner, 'diagram', tree)
+    const page = await frame(owner, `/_/v/${handle}/1/diagram`, {}, host)
+    expect(page.status).toBe(200)
+    expect(varies(page)).toBe(true)
+    const html = await page.text()
+    const preloads = [
+      ...html.matchAll(/<link rel="modulepreload" href="([^"]*)">/g),
+    ].map((match) => match[1])
+    expect(preloads).toEqual([
+      '/_/base/test/lib/mermaid.js',
+      '/_/base/test/lib/shiki.js',
+    ])
+    expect(html).not.toContain('katex')
   })
 })

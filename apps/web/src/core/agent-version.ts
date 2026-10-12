@@ -24,11 +24,11 @@ import {
   type HtmlAnalysis,
 } from '@dossier/html'
 import { sql } from 'drizzle-orm'
-import { Clock, Effect, type Context } from 'effect'
+import { Clock, Context, Effect } from 'effect'
 
 import { db, schema } from '../db/client.ts'
 import type { AccessService } from './access.ts'
-import type { BaseLayer } from './base-layer.ts'
+import { BaseLayer } from './base-layer.ts'
 import type { Bindings } from './bindings.ts'
 import type { CurrentCaller } from './caller.ts'
 import { entryWire, type FilesService } from './files.ts'
@@ -290,6 +290,17 @@ type Target =
   | Extract<Resolved, { readonly kind: 'folder' }>
   | Extract<Resolved, { readonly kind: 'file' }>
 
+interface Companion {
+  readonly path: string
+  readonly version: VersionRow
+}
+
+/** Whether the frame's handle may open a file at the frame's sequence. */
+export type Opens = (file: {
+  readonly node: NodeRow
+  readonly version: VersionRow
+}) => Effect.Effect<boolean, DossierError<'unavailable'>, CurrentCaller>
+
 export interface ReaderDeps {
   readonly store: TreeStoreService
   readonly access: AccessService
@@ -319,6 +330,14 @@ const asAsked = <A, C extends ErrorCode, R>(
       : dossierError(error.code, error.message, error.fix, path),
   )
 
+const notFound = (path: string | null) =>
+  dossierError(
+    'not_found',
+    'Nothing is here, or you cannot open it.',
+    'Check the path, or ask someone who can open it to share it with you.',
+    path,
+  )
+
 /** Reading never asks for more than read, so forbidden reads as not found. */
 const readOnly = <A, R>(
   effect: Effect.Effect<
@@ -332,20 +351,25 @@ const readOnly = <A, R>(
   Effect.catchIf(
     effect,
     (error): error is DossierError<'forbidden'> => error.code === 'forbidden',
-    (error) =>
-      Effect.fail(
-        dossierError(
-          'not_found',
-          'Nothing is here, or you cannot open it.',
-          'Check the path, or ask someone who can open it to share it with you.',
-          error.path,
-        ),
-      ),
+    (error) => Effect.fail(notFound(error.path)),
   ) as Effect.Effect<A, ReadError, R>
+
+/** A read's text as the agent answer it is served as. */
+const agentOf = (result: ReadResult): AgentServed => ({
+  kind: 'agent',
+  body: result.text ?? '',
+  type:
+    result.kind === 'page'
+      ? result.type
+      : result.kind === 'file'
+        ? 'application/json'
+        : 'text/markdown',
+})
 
 export const makeReader = (deps: ReaderDeps) => {
   const { store, access, files, bindings, context } = deps
   const { DB, BLOBS } = bindings
+  const base = Context.get(context, BaseLayer)
 
   const query = <A>(run: () => Promise<A>) =>
     Effect.tryPromise({
@@ -449,10 +473,14 @@ export const makeReader = (deps: ReaderDeps) => {
       return Number(rows[0]?.count ?? 0)
     })
 
-  /** Where else an agent looks from a page: its forms' data and its comments. */
+  /**
+   * Where else an agent looks from a page: its forms' data and its comments,
+   * with the layouts composed into it at `at`.
+   */
   const pointerOf = (
     page: Extract<Target, { readonly kind: 'page' }>,
     analysis: HtmlAnalysis | null,
+    at: AuthoredSeq,
   ) =>
     Effect.gen(function* () {
       const sources: { path: string; analysis: HtmlAnalysis }[] = []
@@ -461,7 +489,7 @@ export const makeReader = (deps: ReaderDeps) => {
         const layouts = yield* composedLayouts({
           treeId: page.tree.id,
           page: { node: page.node, version: page.version, analysis },
-          at: page.tree.authoredSeq as AuthoredSeq,
+          at,
         }).pipe(Effect.provide(context))
         for (const layout of layouts) {
           sources.push({ path: layout.node.path, analysis: layout.analysis })
@@ -499,6 +527,19 @@ export const makeReader = (deps: ReaderDeps) => {
       return { data, comments } satisfies Pointer
     })
 
+  /** Where a page's companion may be: the named one, then the same-name .md. */
+  const companionPaths = (
+    page: Extract<Target, { readonly kind: 'page' }>,
+    analysis: HtmlAnalysis | null,
+  ): string[] => {
+    const named =
+      analysis === null ? null : companionOf(page.node.path, analysis)
+    const same = page.node.path.replace(/\.html$/, '.md')
+    return [named, same].filter(
+      (path): path is string => path !== null && path !== page.node.path,
+    )
+  }
+
   /** The page's companion the caller can read: the named one, else the same-name .md. */
   const companionFor = (
     ref: LinkRef,
@@ -506,11 +547,7 @@ export const makeReader = (deps: ReaderDeps) => {
     analysis: HtmlAnalysis | null,
   ) =>
     Effect.gen(function* () {
-      const named =
-        analysis === null ? null : companionOf(page.node.path, analysis)
-      const same = page.node.path.replace(/\.html$/, '.md')
-      for (const path of [named, same]) {
-        if (path === null || path === page.node.path) continue
+      for (const path of companionPaths(page, analysis)) {
         const located = yield* store.locate({
           workspace: ref.workspace,
           tree: ref.tree,
@@ -523,19 +560,59 @@ export const makeReader = (deps: ReaderDeps) => {
           .require('read', located.node)
           .pipe(Effect.isSuccess)
         if (!readable) continue
-        return { path, version: located.version }
+        return { path, version: located.version } satisfies Companion
       }
       return null
     })
 
+  /**
+   * The page's companion as the tree was at `at`, for a frame pinned there.
+   * One the caller cannot read is skipped, as a live read skips it; one the
+   * caller reads but the handle may not open at `at` refuses the whole read,
+   * so the page never silently answers with other text.
+   */
+  const companionAt = (
+    page: Extract<Target, { readonly kind: 'page' }>,
+    analysis: HtmlAnalysis | null,
+    at: AuthoredSeq,
+    opens: Opens,
+  ) =>
+    Effect.gen(function* () {
+      for (const path of companionPaths(page, analysis)) {
+        const found = yield* store.resolve(
+          { treeId: page.tree.id, path, folder: false },
+          at,
+        )
+        if ('missing' in found || found.kind !== 'file') continue
+        if (found.node.path !== path) continue
+        const readable = yield* access
+          .require('read', found.node)
+          .pipe(Effect.isSuccess)
+        if (!readable) continue
+        if (!(yield* opens(found))) {
+          return yield* Effect.fail(notFound(page.node.path))
+        }
+        return { path, version: found.version } satisfies Companion
+      }
+      return null
+    })
+
+  /**
+   * A page's agent version for its version in `page`, with the layouts and
+   * companion `findCompanion` finds as the tree was at `at`.
+   */
   const pageResult = (
     ref: LinkRef,
     page: Extract<Target, { readonly kind: 'page' }>,
+    at: AuthoredSeq,
+    findCompanion: (
+      analysis: HtmlAnalysis | null,
+    ) => Effect.Effect<Companion | null, ReadError, CurrentCaller>,
   ) =>
     Effect.gen(function* () {
       const sha = page.version.blobSha256 as Sha256 | null
       const analysis = sha === null ? null : yield* store.analysis(sha)
-      const pointer = yield* pointerOf(page, analysis)
+      const pointer = yield* pointerOf(page, analysis, at)
       const push = yield* pushNumberOf(page.version)
       const located = {
         path: page.node.path,
@@ -543,7 +620,7 @@ export const makeReader = (deps: ReaderDeps) => {
         push,
         pointer,
       }
-      const companion = yield* companionFor(ref, page, analysis)
+      const companion = yield* findCompanion(analysis)
       if (companion !== null) {
         const text = yield* textOf(companion.version)
         const json = companion.path.toLowerCase().endsWith('.json')
@@ -569,6 +646,16 @@ export const makeReader = (deps: ReaderDeps) => {
       } satisfies ReadResult
     })
 
+  /** A component's documentation: the tree's `<tag>.md`, else the base layer's. */
+  const docOf = (item: KitItem, docs: ReadonlyMap<string, VersionRow>) =>
+    Effect.gen(function* () {
+      if (item.kind !== 'component' || item.tag === null) return null
+      const doc = docs.get(item.tag)
+      if (doc !== undefined) return yield* textOf(doc)
+      if (item.from !== null) return null
+      return yield* base.read(item.path.replace(/\.js$/, '.md'))
+    })
+
   const kitWire = (items: readonly KitItem[]) =>
     Effect.gen(function* () {
       const docs = new Map<string, VersionRow>()
@@ -579,16 +666,12 @@ export const makeReader = (deps: ReaderDeps) => {
       }
       const out: KitItemWire[] = []
       for (const item of items) {
-        const doc =
-          item.kind === 'component' && item.tag !== null
-            ? docs.get(item.tag)
-            : undefined
         out.push({
           path: item.path,
           from: item.from,
           kind: item.kind,
           tag: item.tag,
-          doc: doc === undefined ? null : yield* textOf(doc),
+          doc: yield* docOf(item, docs),
           variables:
             item.kind === 'theme' && item.version !== null
               ? [...themeVariables(yield* textOf(item.version))]
@@ -730,7 +813,9 @@ export const makeReader = (deps: ReaderDeps) => {
   ): Effect.Effect<ReadResult, ReadError, CurrentCaller> => {
     switch (t.kind) {
       case 'page':
-        return pageResult(ref, t)
+        return pageResult(ref, t, t.tree.authoredSeq as AuthoredSeq, (found) =>
+          companionFor(ref, t, found),
+        )
       case 'folder':
         return folderResult(ref, t)
       case 'file':
@@ -773,20 +858,47 @@ export const makeReader = (deps: ReaderDeps) => {
             cache: 'private',
           } satisfies AgentServed
         }
-        const result = yield* resultOf(ref, t)
-        const type: AgentType =
-          result.kind === 'page'
-            ? result.type
-            : result.kind === 'file'
-              ? 'application/json'
-              : 'text/markdown'
-        return {
-          kind: 'agent',
-          body: result.text ?? '',
-          type,
-        } satisfies AgentServed
+        return agentOf(yield* resultOf(ref, t))
       }),
     )
 
-  return { read, served }
+  /**
+   * The frame's answer to a request for the agent version, once the frame
+   * has checked the handle may open what it resolved at `at`: a page's text
+   * for that version, with its companion as the tree was then (which `opens`
+   * must also allow), or a folder's text now. A listing of what the caller
+   * reads now recovers nothing replaced, so a folder needs no sequence, only
+   * to still exist.
+   */
+  const servedAt = (i: {
+    readonly tree: { readonly workspace: string; readonly name: string }
+    readonly target:
+      | Extract<Target, { readonly kind: 'page' }>
+      | Extract<Target, { readonly kind: 'folder' }>
+    readonly at: AuthoredSeq
+    readonly opens: Opens
+  }): Effect.Effect<AgentServed, ReadError, CurrentCaller> =>
+    Effect.gen(function* () {
+      const found = i.target
+      const ref: LinkRef = {
+        workspace: i.tree.workspace,
+        tree: i.tree.name,
+        path: found.node.path,
+        folder: found.kind === 'folder',
+      }
+      if (found.kind === 'page') {
+        return agentOf(
+          yield* pageResult(ref, found, i.at, (analysis) =>
+            companionAt(found, analysis, i.at, i.opens),
+          ),
+        )
+      }
+      if (found.node.deletedAt !== null) {
+        return yield* Effect.fail(notFound(found.node.path))
+      }
+      yield* readOnly(access.require('read', found.node))
+      return agentOf(yield* folderResult(ref, found))
+    })
+
+  return { read, served, servedAt }
 }

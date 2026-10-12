@@ -1,6 +1,7 @@
 import { copyFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
+import type { BaseLibraries } from '@dossier/contracts'
 import { defineConfig } from 'vitest/config'
 
 const BASE_LAYOUT = path.join(
@@ -8,17 +9,69 @@ const BASE_LAYOUT = path.join(
   '../../packages/browser/src/base/_layout.html',
 )
 
+/** Stand-in scripts of the test build's base layer. */
+const SCRIPTS = [
+  'shell.js',
+  'client.js',
+  'lib/mermaid.js',
+  'lib/shiki.js',
+  'lib/katex.js',
+]
+
+const standIn = (name: string) => `// the test build's stand-in ${name}\n`
+
+/** The test build's libraries.json, over the stand-in scripts. */
+const TEST_LIBRARIES = {
+  libraries: {
+    mermaid: { live: 'lib/mermaid.js', export: 'lib/mermaid.export.js' },
+    shiki: {
+      live: 'lib/shiki.js',
+      export: 'lib/shiki.export.js',
+      grammars: {
+        ts: { file: 'lib/shiki-grammars/typescript.json', embedded: [] },
+        typescript: {
+          file: 'lib/shiki-grammars/typescript.json',
+          embedded: [],
+        },
+      },
+    },
+    katex: {
+      live: 'lib/katex.js',
+      export: 'lib/katex.export.js',
+      css: 'lib/katex/katex.css',
+      exportCss: 'lib/katex.export.css',
+    },
+  },
+  components: {
+    'dossier-diff': {
+      live: '_components/dossier-diff.js',
+      export: '_components/dossier-diff.export.js',
+      doc: '_components/dossier-diff.md',
+    },
+    'dossier-copy': {
+      live: '_components/dossier-copy.js',
+      export: '_components/dossier-copy.export.js',
+      doc: '_components/dossier-copy.md',
+    },
+  },
+} satisfies BaseLibraries
+
 /** The test build's base layer: stand-in scripts and the real layout. */
 const testManifest = () => ({
   version: 'test',
   files: {
-    'shell.js': { type: 'text/javascript; charset=utf-8', size: 0 },
-    'client.js': { type: 'text/javascript; charset=utf-8', size: 0 },
+    ...Object.fromEntries(
+      SCRIPTS.map((name) => [
+        name,
+        { type: 'text/javascript; charset=utf-8', size: standIn(name).length },
+      ]),
+    ),
     '_layout.html': {
       type: 'text/html; charset=utf-8',
       size: statSync(BASE_LAYOUT).size,
     },
   },
+  libraries: TEST_LIBRARIES,
 })
 
 /**
@@ -36,11 +89,10 @@ const testAssets = (): string => {
     path.join(import.meta.dirname, 'public/_headers'),
     path.join(directory, '_headers'),
   )
-  for (const name of ['shell.js', 'client.js']) {
-    writeFileSync(
-      path.join(directory, '_/base/test', name),
-      `// the test build's stand-in ${name}\n`,
-    )
+  for (const name of SCRIPTS) {
+    const file = path.join(directory, '_/base/test', name)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, standIn(name))
   }
   copyFileSync(BASE_LAYOUT, path.join(directory, '_/base/test/_layout.html'))
   return directory
