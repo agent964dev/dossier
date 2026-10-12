@@ -279,6 +279,17 @@ export interface ChangeSet {
     node: Granted<'withdraw-own'>,
     mode: 'withdrawn',
   ) => void
+  /**
+   * Fails the change if any live answer of `owner` in the folder `own`,
+   * other than `except`, names one of `files` (relative to `own`): an
+   * upload a withdrawal takes must be one no answer still names.
+   */
+  readonly guardUnnamed: (i: {
+    readonly owner: PersonId
+    readonly own: string
+    readonly files: readonly string[]
+    readonly except: NodeId
+  }) => void
   /** Records a data write's result under its operation ID. */
   readonly operation: (op: NewOperation) => void
   /** The forms the push staged, for the versions it leaves current. */
@@ -2049,6 +2060,35 @@ export const TreeStoreLive: Layer.Layer<
                 binds: [node.id],
               },
             )
+          },
+
+          guardUnnamed: (g) => {
+            const t = tid()
+            if (g.files.length === 0) return
+            stateGuards.push({
+              sql: `not exists (select 1 from nodes n
+                      join node_versions v on v.id = n.current_version_id
+                      where n.tree_id = ? and n.owner_id = ? and n.deleted_at is null
+                        and n.origin = 'data' and n.kind = 'file' and n.id <> ?
+                        and n.path like '%.json'
+                        and (n.path = ? || '.json'
+                          or (substr(n.path, 1, length(?) + 1) = ? || '/'
+                            and n.depth = ?))
+                        and v.json_value is not null
+                        and exists (select 1 from json_tree(v.json_value) j
+                          where j.key = 'file'
+                            and j.value in (select value from json_each(?))))`,
+              binds: [
+                t,
+                g.owner,
+                g.except,
+                g.own,
+                g.own,
+                g.own,
+                g.own.split('/').length + 1,
+                JSON.stringify(g.files),
+              ],
+            })
           },
 
           operation: (op) => {

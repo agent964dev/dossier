@@ -18,7 +18,9 @@ import {
   withdrawAs,
   type FormTree,
 } from '../support/forms.ts'
-import { harness } from '../support/harness.ts'
+import { env } from 'cloudflare:workers'
+import { beforeBatch } from '../support/d1.ts'
+import { harness, testRuntime } from '../support/harness.ts'
 import { runAs, sessionFor } from '../support/people.ts'
 import {
   nodeAt,
@@ -358,5 +360,138 @@ describe('a withdrawal', () => {
     )
     const questions = (await nodeAt(tree.treeId, 'questions'))!.id
     expect(forms.get(questions)?.people).toBe(0)
+  })
+})
+
+describe('a withdrawal after review', () => {
+  it('reads each answer’s uploads against its own folder, so another form’s answer never keeps this one’s', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await respondent(tree, 'email')
+    const email = sara.who.email.toLowerCase()
+    const q = await formRef(tree, 'questions/index.html', 'questions/answers/')
+    const cv = await uploadAs(sara.caller, tree, {
+      page: 'questions/index.html',
+      form: q,
+      field: 'cv',
+      name: 'image.png',
+      type: 'image/png',
+      bytes: 'cv bytes',
+    })
+    await sendAs(sara.caller, tree, {
+      page: 'questions/index.html',
+      form: q,
+      entries: [
+        ['role', 'Driver'],
+        ['cv', { file: cv.file, name: cv.name, size: cv.size, type: cv.type }],
+      ],
+    })
+    // An entry in another form names `files/image.png` too, in its own folder.
+    const ideas = await formRef(tree, 'ideas.html', 'ideas/')
+    const photo = await uploadAs(sara.caller, tree, {
+      page: 'ideas.html',
+      form: ideas,
+      field: 'photo',
+      name: 'image.png',
+      type: 'image/png',
+      bytes: 'photo bytes',
+    })
+    expect(photo.file).toBe(cv.file)
+    await sendAs(sara.caller, tree, {
+      page: 'ideas.html',
+      form: ideas,
+      entries: [
+        ['idea', 'x'],
+        [
+          'photo',
+          {
+            file: photo.file,
+            name: photo.name,
+            size: photo.size,
+            type: photo.type,
+          },
+        ],
+      ],
+    })
+    await withdrawAs(sara.caller, tree, `questions/answers/${email}.json`)
+    expect(await liveValue(tree.treeId, cv.path)).toBeNull()
+    expect(await liveValue(tree.treeId, photo.path)).not.toBeNull()
+  })
+
+  it('never takes an upload that an entry written meanwhile names', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const form = await formRef(tree, 'ideas.html', 'ideas/')
+    const photo = await uploadAs(ownerCaller, tree, {
+      page: 'ideas.html',
+      form,
+      field: 'photo',
+      name: 'shared.png',
+      type: 'image/png',
+      bytes: 'one photo',
+    })
+    const value = {
+      file: photo.file,
+      name: photo.name,
+      size: photo.size,
+      type: photo.type,
+    }
+    const first = await sendAs(ownerCaller, tree, {
+      page: 'ideas.html',
+      form,
+      entries: [
+        ['idea', 'first'],
+        ['photo', value],
+      ],
+    })
+    const own = first.doc!.path.slice(0, first.doc!.path.lastIndexOf('/'))
+    // Just before the withdrawal's batch, another entry naming the photo lands.
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (query) => query.includes("'withdrawn'"),
+            async () => {
+              const node = crypto.randomUUID()
+              const version = crypto.randomUUID()
+              const now = Date.now()
+              await env.DB.batch([
+                env.DB.prepare(
+                  `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin,
+                     owner_id, current_version_id, created_at)
+                   select ?, ?, (select id from nodes where tree_id = ? and path = ?
+                     and deleted_at is null), 'later.json', ?, ?, 'file', 'data', ?, ?, ?`,
+                ).bind(
+                  node,
+                  tree.treeId,
+                  tree.treeId,
+                  own,
+                  `${own}/later.json`,
+                  own.split('/').length + 1,
+                  owner.id,
+                  version,
+                  now,
+                ),
+                env.DB.prepare(
+                  `insert into node_versions (id, node_id, tree_id, revision, state, json_value,
+                     size, content_type, author_id, created_at)
+                   values (?, ?, ?, 1, 'live', ?, 1, 'application/json', ?, ?)`,
+                ).bind(
+                  version,
+                  node,
+                  tree.treeId,
+                  JSON.stringify({ idea: 'later', photo: value }),
+                  owner.id,
+                  now,
+                ),
+              ])
+            },
+          ),
+        },
+      }),
+    )
+    await withdrawAs(ownerCaller, tree, first.doc!.path)
+    harness.reset()
+    expect(await liveValue(tree.treeId, first.doc!.path)).toBeNull()
+    expect(await liveValue(tree.treeId, photo.path)).not.toBeNull()
   })
 })

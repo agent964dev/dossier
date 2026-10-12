@@ -1358,76 +1358,90 @@ export const DataLive: Layer.Layer<
           )
         }
         const granted = yield* access.require('withdraw-own', file.node)
-        // The uploads only this file refers to go with it.
-        const own = folderOf(i.path).endsWith(`/${person.email.toLowerCase()}`)
-          ? folderOf(i.path)
-          : `${folderOf(i.path)}/${person.email.toLowerCase()}`
-        const versions = yield* query(() =>
-          DB.prepare(
-            'select json_value as json from node_versions where node_id = ?',
+        const email = person.email.toLowerCase()
+        // The folder an answer's uploads sit in: `answers/<email>` beside a
+        // person file, the folder an entry is in.
+        const ownOfAnswer = (path: string) =>
+          path.slice(path.lastIndexOf('/') + 1) === `${email}.json`
+            ? path.slice(0, -'.json'.length)
+            : folderOf(path)
+        const own = ownOfAnswer(i.path)
+        const once = Effect.gen(function* () {
+          // The uploads this answer named, and every upload of theirs in its
+          // folder that no other answer names: ones a failed or changed send
+          // left behind.
+          const versions = yield* query(() =>
+            DB.prepare(
+              'select json_value as json from node_versions where node_id = ?',
+            )
+              .bind(file.node.id)
+              .all<{ json: string | null }>(),
           )
-            .bind(file.node.id)
-            .all<{ json: string | null }>(),
-        )
-        const named = new Set(
-          versions.results.flatMap((v) => uploadsNamed(v.json, own)),
-        )
-        const others = yield* query(() =>
-          DB.prepare(
-            `select v.json_value as json from nodes n join node_versions v on v.node_id = n.id
-             where n.tree_id = ? and n.owner_id = ? and n.origin = 'data'
-               and n.deleted_at is null and n.id <> ? and v.json_value is not null`,
+          const named = new Set(
+            versions.results.flatMap((v) => uploadsNamed(v.json, own)),
           )
-            .bind(i.treeId, person.id, file.node.id)
-            .all<{ json: string | null }>(),
-        )
-        for (const other of others.results) {
-          const otherOwn = own
-          for (const path of uploadsNamed(other.json, otherOwn))
-            named.delete(path)
-        }
-        // And every upload of theirs in this form's folder that no other
-        // answer of theirs names: ones a failed or changed send left behind.
-        const loose = yield* query(() =>
-          DB.prepare(
-            `select path from nodes where tree_id = ? and owner_id = ?
-               and origin = 'data' and kind = 'file' and deleted_at is null
-               and substr(path, 1, length(?3) + 7) = ?3 || '/files/'`,
+          const loose = yield* query(() =>
+            DB.prepare(
+              `select path from nodes where tree_id = ? and owner_id = ?
+                 and origin = 'data' and kind = 'file' and deleted_at is null
+                 and substr(path, 1, length(?3) + 7) = ?3 || '/files/'`,
+            )
+              .bind(i.treeId, person.id, own)
+              .all<{ path: string }>(),
           )
-            .bind(i.treeId, person.id, own)
-            .all<{ path: string }>(),
-        )
-        for (const { path } of loose.results) named.add(path)
-        for (const other of others.results) {
-          for (const path of uploadsNamed(other.json, own)) named.delete(path)
-        }
-        const uploads: Granted<'withdraw-own'>[] = []
-        for (const path of named) {
-          const kept = yield* liveData(i.treeId, path)
-          if (kept === null || kept.node.ownerId !== person.id) continue
-          const ok = yield* access
-            .require('withdraw-own', kept.node)
-            .pipe(Effect.option)
-          if (ok._tag === 'Some') uploads.push(ok.value)
-        }
-        // The writer's folders this leaves empty go too, innermost first.
-        const folders: Granted<'withdraw-own'>[] = []
-        for (const path of [`${own}/files`, own]) {
-          const row = yield* folderOrFile(i.treeId, path)
-          if (
-            row === null ||
-            row.kind !== 'folder' ||
-            row.ownerId !== person.id
+          for (const { path } of loose.results) named.add(path)
+          // Each other answer names uploads relative to its own folder.
+          const others = yield* query(() =>
+            DB.prepare(
+              `select n.path, v.json_value as json from nodes n
+                 join node_versions v on v.id = n.current_version_id
+               where n.tree_id = ? and n.owner_id = ? and n.origin = 'data'
+                 and n.deleted_at is null and n.id <> ? and v.json_value is not null`,
+            )
+              .bind(i.treeId, person.id, file.node.id)
+              .all<{ path: string; json: string | null }>(),
           )
-            continue
-          const ok = yield* access
-            .require('withdraw-own', row)
-            .pipe(Effect.option)
-          if (ok._tag === 'Some') folders.push(ok.value)
-        }
-        yield* store
-          .change(i.treeId, (cs) =>
+          for (const other of others.results) {
+            for (const path of uploadsNamed(
+              other.json,
+              ownOfAnswer(other.path),
+            ))
+              named.delete(path)
+          }
+          const uploads: Granted<'withdraw-own'>[] = []
+          for (const path of named) {
+            const kept = yield* liveData(i.treeId, path)
+            if (kept === null || kept.node.ownerId !== person.id) continue
+            const ok = yield* access
+              .require('withdraw-own', kept.node)
+              .pipe(Effect.option)
+            if (ok._tag === 'Some') uploads.push(ok.value)
+          }
+          // The writer's folders this leaves empty go too, innermost first.
+          const folders: Granted<'withdraw-own'>[] = []
+          for (const path of [`${own}/files`, own]) {
+            const row = yield* folderOrFile(i.treeId, path)
+            if (
+              row === null ||
+              row.kind !== 'folder' ||
+              row.ownerId !== person.id
+            )
+              continue
+            const ok = yield* access
+              .require('withdraw-own', row)
+              .pipe(Effect.option)
+            if (ok._tag === 'Some') folders.push(ok.value)
+          }
+          yield* store.change(i.treeId, (cs) =>
             Effect.sync(() => {
+              // An answer written since this read that names one of these
+              // uploads fails the change, which reads again.
+              cs.guardUnnamed({
+                owner: person.id,
+                own,
+                files: uploads.map((u) => u.path.slice(own.length + 1)),
+                except: file.node.id,
+              })
               cs.markDeleted(granted, 'withdrawn')
               for (const kept of uploads) cs.markDeleted(kept, 'withdrawn')
               for (const folder of folders) cs.markDeleted(folder, 'withdrawn')
@@ -1441,15 +1455,19 @@ export const DataLive: Layer.Layer<
               return {}
             }),
           )
-          .pipe(
-            Effect.mapError((error) =>
-              isRace(error) || error.code === 'blob_reclaiming'
-                ? notFound(i.path)
-                : error.code === 'not_mergeable' || error.code === 'too_large'
-                  ? dossierError('unavailable')
-                  : error,
-            ),
-          )
+        })
+        yield* retrying(once).pipe(
+          Effect.mapError((error) =>
+            error.code === 'blob_reclaiming'
+              ? notFound(i.path)
+              : error.code === 'not_mergeable' ||
+                  error.code === 'too_large' ||
+                  error.code === 'stale_head' ||
+                  error.code === 'conflict'
+                ? dossierError('unavailable')
+                : error,
+          ),
+        )
       }) as ReturnType<DataService['withdraw']>
 
     /** The forms in the tree as it stands that send to a target. */
