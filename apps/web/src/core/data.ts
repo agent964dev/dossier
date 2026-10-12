@@ -2579,20 +2579,21 @@ export const DataLive: Layer.Layer<
           ? page.path.slice(0, page.path.lastIndexOf('/'))
           : ''
         const comments = commentsFolderOf(page.path).slice(0, -1)
-        // Under the page's folder, at or under each folder target, or a
-        // file target itself.
-        const under = (prefix: string) =>
-          prefix === ''
+        // Under the page's folder, under each folder target, or a file
+        // target itself. The targets travel as one bound value each kind,
+        // each once: a page may hold any number of forms.
+        const unique = [...new Set(targets)]
+        const folderTargets = unique
+          .filter((target) => target.endsWith('/'))
+          .map((target) => target.slice(0, -1))
+        const fileTargets = unique.filter((target) => !target.endsWith('/'))
+        const places =
+          folder === '' || folderTargets.includes('')
             ? sql`1`
-            : sql`substr(nodes.path, 1, length(${prefix}) + 1) = ${`${prefix}/`}`
-        const places = [
-          under(folder),
-          ...targets.map((target) =>
-            target.endsWith('/')
-              ? under(target.slice(0, -1))
-              : sql`nodes.path = ${target}`,
-          ),
-        ]
+            : sql`(substr(nodes.path, 1, length(${folder}) + 1) = ${`${folder}/`}
+                or exists (select 1 from json_each(${JSON.stringify(folderTargets)}) t
+                  where substr(nodes.path, 1, length(t.value) + 1) = t.value || '/')
+                or nodes.path in (select value from json_each(${JSON.stringify(fileTargets)})))`
         const rows = yield* query(() =>
           db(bindings).all<{
             path: string
@@ -2617,7 +2618,7 @@ export const DataLive: Layer.Layer<
                 where nodes.tree_id = ${page.treeId} and nodes.deleted_at is null
                   and nodes.kind = 'file' and nodes.origin = 'data'
                   and v.state = 'live'
-                  and (${sql.join(places, sql` or `)})
+                  and ${places}
                   and ${readable.where}
                 order by nodes.path`,
           ),
