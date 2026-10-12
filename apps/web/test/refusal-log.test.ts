@@ -169,6 +169,25 @@ describe('a refused request', () => {
       path: 'secret/plan',
     })
     expect(lines[0]).not.toContain(handle)
+
+    const posted = await refusals(async () => {
+      const response = await new Browser().fetch(
+        `/_/v/${handle}/1/secret/plan`,
+        {
+          method: 'POST',
+          host: `${tree.treeId}.content.test`,
+          purpose: 'none',
+        },
+      )
+      expect(response.status).toBe(404)
+    })
+    expect(one(posted)).toMatchObject({
+      code: 'not_found',
+      method: 'POST',
+      route: '/_/v',
+      tree: tree.treeId,
+    })
+    expect(posted[0]).not.toContain(handle)
   })
 
   it("logs a screen's refused read as the person who asked", async () => {

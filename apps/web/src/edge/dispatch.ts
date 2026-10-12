@@ -564,13 +564,17 @@ export const serve = async (
   /** A tree's content host: only what the view handle in the path opens. */
   async function frame(): Promise<Response> {
     if (host?.kind !== 'content') return frameFailure(404)
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      return frameFailure(404)
-    }
     const treeId = host.treeId
     const path = framePathOf(url.pathname)
     const ref = path === null ? null : treeRefOf(treeId, path.linkPath)
-    if (path === null || ref === null) return frameFailure(404)
+    if (
+      (request.method !== 'GET' && request.method !== 'HEAD') ||
+      path === null ||
+      ref === null
+    ) {
+      refused('not_found', ref?.path ?? null)
+      return frameFailure(404)
+    }
     try {
       const viewer = await run(
         runtime,
