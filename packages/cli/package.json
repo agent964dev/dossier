@@ -37,12 +37,12 @@
     "release": "bun run build && npm publish"
   },
   "dependencies": {
-    "@effect/cli": "0.77.1",
+    "@effect/cli": "0.77.2",
     "@effect/platform": "0.97.2",
-    "@effect/platform-bun": "0.91.2",
-    "@effect/platform-node": "0.108.2",
+    "@effect/platform-bun": "4.0.2",
+    "@effect/platform-node": "4.0.2",
     "diff": "9.0.0",
-    "effect": "3.22.2"
+    "effect": "4.0.2"
   },
   "devDependencies": {
     "@dossier/contracts": "workspace:*",
