@@ -11,8 +11,10 @@ import {
   type StageResult,
 } from '../src/core/index.ts'
 import { signedIn, type Browser } from './support/browser.ts'
-import { count, exec, rows } from './support/d1.ts'
-import { harness } from './support/harness.ts'
+import { env } from 'cloudflare:workers'
+
+import { beforeBatch, beforeRead, count, exec, rows } from './support/d1.ts'
+import { harness, testRuntime } from './support/harness.ts'
 import { callerOf, fresh, run, runAs } from './support/people.ts'
 import {
   agent,
@@ -197,16 +199,27 @@ describe('the URL forms of a link', () => {
       const refused = await openFailure(outsider, w.at(target))
       expect(refused.code, target).toBe('not_found')
     }
-    const missing = await openFailure(outsider, w.at('salaries'))
+    // The same denial, whole, for a path before and after it exists
+    // privately: nothing in it names what the link resolved to.
+    const before = await openFailure(outsider, w.at('salaries'))
+    await w.repush({ 'salaries.html': '<p>Private</p>' })
+    const after = await openFailure(outsider, w.at('salaries'))
+    expect(after).toEqual(before)
+    expect(after.path).toBe('salaries')
     const hidden = await openFailure(outsider, w.at('plan'))
-    expect({ ...missing, path: null }).toEqual({ ...hidden, path: null })
-    const visitorMissing = await openFailure(visitorCaller(), w.at('salaries'))
-    const visitorHidden = await openFailure(visitorCaller(), w.at('plan.html'))
-    expect(visitorMissing.code).toBe('sign_in_required')
-    expect({ ...visitorMissing, path: null }).toEqual({
-      ...visitorHidden,
-      path: null,
-    })
+    expect(hidden).toEqual(
+      expect.objectContaining({
+        code: before.code,
+        message: before.message,
+        fix: before.fix,
+        path: 'plan',
+      }),
+    )
+    const visitorBefore = await openFailure(visitorCaller(), w.at('budget'))
+    await w.repush({ 'budget.html': '<p>Private</p>' })
+    const visitorAfter = await openFailure(visitorCaller(), w.at('budget'))
+    expect(visitorBefore.code).toBe('sign_in_required')
+    expect(visitorAfter).toEqual(visitorBefore)
   })
 })
 
@@ -232,10 +245,11 @@ describe('view handles', () => {
 
     const old = await atTime(frame(first.handle, w.treeId, 1, 'plan'))
     expect(htmlOf(old)).toContain('Plan one')
-    // The newer sequence was never issued to this handle.
-    expect(await atTime(frame(first.handle, w.treeId, 2, 'plan'))).toBe(
-      'not_found',
-    )
+    // Never issued at the newer sequence, but that is the page as it is
+    // now, so nothing is recovered by opening it there.
+    expect(
+      htmlOf(await atTime(frame(first.handle, w.treeId, 2, 'plan'))),
+    ).toContain('Plan two')
     const second = await atTime(view(reader, w.treeId, 'plan'))
     expect(second).toMatchObject({ handle: first.handle, seq: 2 })
     expect(
@@ -272,7 +286,7 @@ describe('view handles', () => {
     ).toContain('Plan one')
   })
 
-  it('expires 24 hours after the last renewal, is renewed by view, and a new generation drops the old sequences', async () => {
+  it('expires 24 hours after the last renewal, is renewed by view, and a new generation drops what the old one was issued', async () => {
     const w = await world()
     const outcome = await run(
       Effect.gen(function* () {
@@ -306,7 +320,7 @@ describe('view handles', () => {
     expect(htmlOf(outcome.reopened)).toContain('Plan one')
     expect(
       await count(
-        'view_handle_seqs',
+        'view_handle_nodes',
         `handle_hash not in (select hash_sha256 from view_handles)`,
       ),
     ).toBe(0)
@@ -320,7 +334,7 @@ describe('view handles', () => {
     ).toBe(1)
   })
 
-  it('drops the sequences of the old generation, so a reader cannot reopen them', async () => {
+  it('drops what the old generation was issued, so a reader cannot reopen it', async () => {
     const w = await world()
     const { caller: reader } = await someone()
     const root = (await nodeAt(w.treeId, ''))!
@@ -474,5 +488,281 @@ describe('Seen by', () => {
       Effect.flatMap(Pages, (pages) => pages.seenBy(ref(w.at('plan')))),
     )
     expect(refused.code).toBe('forbidden')
+  })
+})
+
+describe('what a handle may recover', () => {
+  it('never lets a renewal that read the old generation undo a newer one', async () => {
+    const w = await world()
+    const start = Date.now()
+    const first = await run(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(start)
+        return yield* view(w.owner, w.treeId, 'plan')
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    )
+    const atTimeOf = <A, E>(at: number, effect: Effect.Effect<A, E, Pages>) =>
+      run(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(at)
+          return yield* effect
+        }).pipe(Effect.provide(TestContext.TestContext)),
+      )
+    let newer: { handle: string } | null = null
+    // A renewal reads the row just before it lapses; another view replaces
+    // the lapsed generation before the first renewal's batch runs.
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (query) => /view_handles/.test(query) && !/^\s*select/i.test(query),
+            async () => {
+              newer = await atTimeOf(
+                start + 24 * HOUR + 1,
+                view(w.owner, w.treeId, 'plan'),
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const late = await atTimeOf(
+      start + 24 * HOUR - 1,
+      view(w.owner, w.treeId, 'plan'),
+    )
+    harness.reset()
+    expect(newer).not.toBeNull()
+    expect(newer!.handle).not.toBe(first.handle)
+    const later = start + 24 * HOUR + 2
+    // The newer generation stands; the lapsed one stays gone.
+    expect(
+      htmlOf(await atTimeOf(later, frame(newer!.handle, w.treeId, 1, 'plan'))),
+    ).toContain('Plan one')
+    expect(
+      await atTimeOf(later, frame(first.handle, w.treeId, 1, 'plan')),
+    ).toBe('refused')
+    // The late renewal answers with the handle that stands.
+    expect(late.handle).toBe(newer!.handle)
+  })
+
+  it("never serves another page's content from before it was shared", async () => {
+    const w = await world()
+    const secret = '<title>Notes</title><p>Unredacted salaries</p>'
+    await w.repush({ 'notes/index.html': secret })
+    const { caller: reader } = await someone()
+    const plan = (await nodeAt(w.treeId, 'plan.html'))!
+    await share(
+      w.treeId,
+      plan.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    const issued = grant.seq
+    // The notes are redacted in a new push, then shared.
+    await w.repush({
+      'notes/index.html': '<title>Notes</title><p>Redacted</p>',
+    })
+    const notes = (await nodeAt(w.treeId, 'notes'))!
+    await share(
+      w.treeId,
+      notes.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+
+    expect(
+      await atTime(frame(grant.handle, w.treeId, issued, 'notes', true)),
+    ).toBe('not_found')
+    // The page issued at that sequence still opens there.
+    expect(
+      htmlOf(await atTime(frame(grant.handle, w.treeId, issued, 'plan'))),
+    ).toContain('Plan one')
+    // Content unchanged since then is no history: the redacted notes at the
+    // current sequence open with the same handle.
+    expect(
+      htmlOf(
+        await atTime(frame(grant.handle, w.treeId, issued + 1, 'notes', true)),
+      ),
+    ).toContain('Redacted')
+  })
+
+  it('issues with a page the files it loads, so an open tab keeps its push', async () => {
+    const w = await world()
+    await w.repush({
+      'plan.html':
+        '<!doctype html><title>Plan</title><img src="logo.svg" alt=""><a href="notes/">Notes</a>',
+    })
+    const { caller: reader } = await someone()
+    const root = (await nodeAt(w.treeId, ''))!
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    await w.repush({
+      'plan.html':
+        '<!doctype html><title>Plan</title><img src="logo.svg" alt=""><a href="notes/">Notes</a>',
+      'logo.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>',
+      'notes/index.html': '<title>Notes</title><p>Rewritten</p>',
+    })
+    const logo = await atTime(
+      frame(grant.handle, w.treeId, grant.seq, 'logo.svg'),
+    )
+    expect(logo).toMatchObject({ kind: 'file' })
+    // A page it only links to is not issued: following the link is a view.
+    expect(
+      await atTime(frame(grant.handle, w.treeId, grant.seq, 'notes', true)),
+    ).toBe('not_found')
+  })
+
+  it('issues what a page loads as it was at the sequence the view captured', async () => {
+    const w = await world()
+    const unredacted =
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>salaries</text></svg>'
+    const page = {
+      'plan.html':
+        '<!doctype html><title>Plan</title><img src="secret.svg" alt="">',
+      'secret.svg': unredacted,
+    }
+    await w.repush(page)
+    const { caller: reader } = await someone()
+    const plan = (await nodeAt(w.treeId, 'plan.html'))!
+    await share(
+      w.treeId,
+      plan.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const captured = (await treeOf(w.ws.name, 'acme'))!.authored_seq
+    // After the view has read the tree, and before it looks up what the
+    // page loads, the file is redacted in a new push and shared.
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeRead(
+            env.DB,
+            (query) => /from\s+analyses/.test(query),
+            async () => {
+              await w.repush({
+                ...page,
+                'secret.svg':
+                  '<svg xmlns="http://www.w3.org/2000/svg"><text>redacted</text></svg>',
+              })
+              const secret = (await nodeAt(w.treeId, 'secret.svg'))!
+              await share(
+                w.treeId,
+                secret.id,
+                'email',
+                reader.person!.email,
+                'read',
+                w.owner.person!,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    harness.reset()
+    const old = await atTime(
+      frame(grant.handle, w.treeId, captured, 'secret.svg'),
+    )
+    expect(old).toBe('not_found')
+    // The view answers with the sequence it could issue whole.
+    expect(grant.seq).toBe(captured + 1)
+    expect(
+      await atTime(frame(grant.handle, w.treeId, grant.seq, 'secret.svg')),
+    ).toMatchObject({
+      kind: 'file',
+    })
+  })
+
+  it('issues files named with character references, in src and srcset', async () => {
+    const w = await world()
+    const html =
+      '<!doctype html><title>Plan</title><img src="lo&#103;o.svg" alt=""><img srcset="bri&#101;f.pdf 1x" alt="">'
+    await w.repush({ 'plan.html': html })
+    const { caller: reader } = await someone()
+    const root = (await nodeAt(w.treeId, ''))!
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    await w.repush({
+      'plan.html': html,
+      'logo.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle r="2"/></svg>',
+      'brief.pdf': '%PDF-1.7 changed',
+    })
+    for (const path of ['logo.svg', 'brief.pdf']) {
+      expect(
+        await atTime(frame(grant.handle, w.treeId, grant.seq, path)),
+        path,
+      ).toMatchObject({
+        kind: 'file',
+      })
+    }
+  })
+
+  it('answers an old redirect only when its target may be opened at that sequence', async () => {
+    const w = await world()
+    const { caller: reader } = await someone()
+    const root = (await nodeAt(w.treeId, ''))!
+    await w.repush({ 'obsolete.html': '<p>Old plan</p>' })
+    // The page goes in the next push, and the reader is given the tree.
+    committed(await pushAll(w.key, `${w.ws.name}/acme`, FILES, { force: true }))
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    expect(grant.seq).toBe(3)
+    const old = await atTime(frame(grant.handle, w.treeId, 2, 'obsolete.html'))
+    const missing = await atTime(frame(grant.handle, w.treeId, 2, 'never.html'))
+    expect(missing).toBe('not_found')
+    expect(old).toBe(missing)
+  })
+})
+
+describe('denials', () => {
+  it('say nothing of the private path a view would have opened', async () => {
+    const w = await world()
+    const { caller: outsider } = await someone()
+    const ask = () =>
+      failureAs(
+        outsider,
+        Effect.flatMap(Pages, (pages) =>
+          pages.view({ treeId: w.treeId, path: 'salary' }),
+        ),
+      )
+    const before = await ask()
+    await w.repush({ 'salary.html': '<p>Private</p>' })
+    const after = await ask()
+    expect(after).toEqual(before)
+    expect(after.path).toBe('salary')
+    const opened = await openFailure(outsider, w.at('salary'))
+    expect(opened.path).toBe('salary')
   })
 })

@@ -12,7 +12,7 @@ import { type BodyClose, findRepairs } from './repairs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 2
+export const ANALYZER_VERSION: number = 3
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -47,8 +47,10 @@ export interface HeadItem {
 }
 export interface UrlRef {
   readonly attr: 'href' | 'src' | 'srcset' | 'poster' | 'action'
-  /** As written. */
+  /** As written, for rewriting the source at `range`. */
   readonly value: string
+  /** With character references decoded: what the browser requests. */
+  readonly decoded: string
   /** The attribute value. */
   readonly range: Range
   /** No scheme, not protocol-relative, not root-relative, not a fragment. */
@@ -305,24 +307,34 @@ export const analyze = (source: string): HtmlAnalysis => {
       const raw = source.slice(value.start, value.end)
       const name = attr.name as UrlRef['attr']
       if (name === 'srcset') {
-        for (const candidate of srcsetUrls(raw)) {
+        // Candidates of the written value, for their ranges, paired with the
+        // candidates of the decoded value, for what is requested.
+        const candidates = srcsetUrls(raw)
+        const decoded = srcsetUrls(attr.value).map((c) =>
+          attr.value.slice(c.start, c.end),
+        )
+        candidates.forEach((candidate, index) => {
           const url = raw.slice(candidate.start, candidate.end)
+          const plain =
+            decoded.length === candidates.length ? (decoded[index] ?? url) : url
           urls.push({
             attr: name,
             value: url,
+            decoded: plain,
             range: at(
               value.start + candidate.start,
               value.start + candidate.end,
             ),
-            relative: isRelativeUrl(url),
-            underscore: isUnderscoreUrl(url),
+            relative: isRelativeUrl(plain),
+            underscore: isUnderscoreUrl(plain),
             inHead: place.inHead,
           })
-        }
+        })
       } else {
         urls.push({
           attr: name,
           value: raw,
+          decoded: attr.value,
           range: value,
           relative: isRelativeUrl(attr.value),
           underscore: isUnderscoreUrl(attr.value),

@@ -113,7 +113,10 @@ describe('the link route', () => {
     }
   })
 
-  it('shows the same no-access page, with status 404, for missing and unreadable links', async () => {
+  // Edge scope: the screen stand-in renders no real screen, so this proves
+  // the edge's answer (status, document, the screen it hands over), not the
+  // rendered page, which the browser checks look at.
+  it('hands missing and unreadable links to the same screen, with status 404', async () => {
     const outsider = await signedIn(fresh())
     const missing = await outsider.fetch(`/${ws.name}/acme/salaries`)
     const hidden = await outsider.fetch(`/${ws.name}/acme/plan`)
@@ -122,9 +125,39 @@ describe('the link route', () => {
     for (const response of [missing, hidden, folder, workspaceHome]) {
       expect(response.status).toBe(404)
       expect(response.headers.get('content-type')).toContain('text/html')
+      expect(response.headers.get('cache-control')).toBeNull()
     }
-    const strip = (text: string) => text.replace(/data-screen="[^"]*"/, '')
-    expect(strip(await missing.text())).toBe(strip(await hidden.text()))
+    expect(await missing.text()).toContain(
+      `data-screen="/${ws.name}/acme/salaries"`,
+    )
+    expect(await hidden.text()).toContain(`data-screen="/${ws.name}/acme/plan"`)
+  })
+
+  it('answers a view of a missing and of a private path with the same body', async () => {
+    const outsider = await signedIn(fresh())
+    const key = await agent((await callerOf(owner)).person!)
+    const vault = committed(
+      await pushAll(key, `${ws.name}/vault`, { 'a.html': '<p>A</p>' }),
+    )
+    const ask = async () => {
+      const response = await outsider.fetch('/_/api/view', {
+        method: 'POST',
+        purpose: 'write',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tree: vault.treeId, path: 'payroll' }),
+      })
+      return { status: response.status, body: await response.json() }
+    }
+    const before = await ask()
+    await pushAll(
+      key,
+      `${ws.name}/vault`,
+      { 'a.html': '<p>A</p>', 'payroll.html': '<p>Private</p>' },
+      { force: true },
+    )
+    const after = await ask()
+    expect(before.status).toBe(404)
+    expect(after).toEqual(before)
   })
 
   it('redirects a tree without its slash and a workspace to the home, for those who may open them', async () => {

@@ -692,18 +692,24 @@ export const viewHandles = sqliteTable(
   ],
 )
 
-/** The authored sequences a view issued to a handle. */
-export const viewHandleSeqs = sqliteTable(
-  'view_handle_seqs',
+/**
+ * The nodes a view issued to a handle at a sequence: the page or file it
+ * opened and the files the page loads. At an older sequence, a frame without
+ * write opens only these, or files unchanged since.
+ */
+export const viewHandleNodes = sqliteTable(
+  'view_handle_nodes',
   {
     handleHash: text('handle_hash')
       .notNull()
       .references(() => viewHandles.hashSha256, { onDelete: 'cascade' }),
-    /** A frame without write opens only these. */
     seq: integer('seq').notNull(),
+    nodeId: text('node_id')
+      .notNull()
+      .references(() => nodes.id, { onDelete: 'cascade' }),
     createdAt: integer('created_at').notNull(),
   },
-  (t) => [primaryKey({ columns: [t.handleHash, t.seq] })],
+  (t) => [primaryKey({ columns: [t.handleHash, t.seq, t.nodeId] })],
 )
 
 /** Who opened a page, and about when they last did. */

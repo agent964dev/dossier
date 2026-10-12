@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(2)
+    expect(page.v).toBe(3)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })
@@ -495,6 +495,21 @@ describe('URLs', () => {
 
   it('keeps each value as written', () => {
     for (const url of page.urls) expect(text(url.range)).toBe(url.value)
+  })
+
+  it('decodes character references in what is requested, keeping the written value', () => {
+    const written =
+      '<img src="lo&#103;o.svg" srcset="a&amp;b.png 1x, sm&#97;ll.png 2x"><video poster="p&#x6f;ster.png"></video>'
+    const urls = analyze(written).urls
+    expect(urls.map((url) => [url.attr, url.value, url.decoded])).toEqual([
+      ['src', 'lo&#103;o.svg', 'logo.svg'],
+      ['srcset', 'a&amp;b.png', 'a&b.png'],
+      ['srcset', 'sm&#97;ll.png', 'small.png'],
+      ['poster', 'p&#x6f;ster.png', 'poster.png'],
+    ])
+    for (const url of urls) {
+      expect(written.slice(url.range.start, url.range.end)).toBe(url.value)
+    }
   })
 
   it('reads srcset candidates with commas inside the URL', () => {

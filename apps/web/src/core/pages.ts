@@ -5,6 +5,7 @@ import {
   MAX_DEPTH,
   type AuthoredSeq,
   type DossierError,
+  type ErrorCode,
   type LinkRef,
   type PersonId,
   type SessionId,
@@ -96,7 +97,7 @@ export interface PagesService {
     readonly wantsAgent: boolean
   }) => Effect.Effect<
     Served,
-    Denied | DossierError<'unavailable'>,
+    DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
   readonly view: (i: {
@@ -105,7 +106,7 @@ export interface PagesService {
     readonly path: string
   }) => Effect.Effect<
     ViewGrant,
-    Denied | DossierError<'unavailable'>,
+    DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
   /** The tree is the content host's; the caller comes from its handle. */
@@ -145,6 +146,32 @@ const HOUR = 60 * 60 * 1000
 /** A handle lasts this long after its last renewal. */
 const HANDLE_LIFE = 24 * HOUR
 const HANDLE = /^[A-Za-z0-9_-]{43}$/
+/** How many of a page's own references a view looks up to issue. */
+const MAX_LOADED = 200
+/** How often a view reads again when another one changed the handle. */
+const ISSUE_ATTEMPTS = 4
+
+/** Whether these roles read the node: respond reads authored files only. */
+const readsWith = (
+  roles: RoleSet,
+  node: { readonly origin: string },
+): boolean =>
+  roles.caps.has('read') ||
+  (roles.caps.has('read-authored') && node.origin === 'authored')
+
+/**
+ * A denial names only the path that was asked, never the node it resolved
+ * to, so it says nothing about what exists.
+ */
+const askedAs = <A, C extends ErrorCode, R>(
+  path: string,
+  effect: Effect.Effect<A, DossierError<C>, R>,
+): Effect.Effect<A, DossierError<C>, R> =>
+  Effect.mapError(effect, (error) =>
+    error.code === 'unavailable'
+      ? error
+      : dossierError(error.code, error.message, error.fix, path),
+  )
 
 const notFound = (path: string | null = null) =>
   dossierError(
@@ -333,211 +360,392 @@ export const PagesLive: Layer.Layer<
       })
 
     const open: PagesService['open'] = ({ ref }) =>
+      askedAs(
+        ref.path,
+        Effect.gen(function* () {
+          let resolved = yield* store.resolve(ref)
+          if ('missing' in resolved) return yield* denied(resolved)
+          if (resolved.kind === 'kit') {
+            const chosen = yield* kitChoice(resolved, 'read')
+            if (chosen === null) {
+              return yield* denied({
+                missing: true,
+                treeId: resolved.tree.id,
+                path: ref.path,
+              })
+            }
+            if (chosen.kind === 'base') {
+              return {
+                kind: 'redirect',
+                to: base.url(chosen.path),
+                status: 302,
+              } satisfies Served
+            }
+            // The frame looks the same `_` path up again, at the shell's push.
+            resolved = {
+              kind: 'file',
+              node: { ...chosen.node, path: ref.path },
+              version: chosen.version,
+              tree: resolved.tree,
+            }
+          } else {
+            yield* asDenied(access.require('read', resolved.node))
+          }
+          const caller = yield* CurrentCaller
+          switch (resolved.kind) {
+            case 'redirect':
+              return {
+                kind: 'redirect',
+                to: `/${encodeURIComponent(ref.workspace)}/${encodeURIComponent(ref.tree)}/${resolved.to}`,
+                status: 301,
+              } satisfies Served
+            case 'folder':
+              return { kind: 'listing', ref } satisfies Served
+            case 'page':
+            case 'file': {
+              const linkPath =
+                resolved.kind === 'page'
+                  ? resolved.linkPath
+                  : linkPathOf(resolved.node.path, false)
+              const person = caller.person
+              return {
+                kind: 'shell',
+                boot: {
+                  v: 1,
+                  deployment: {
+                    origin: config.origin.origin,
+                    name: config.deploymentName,
+                  },
+                  tree: {
+                    id: resolved.tree.id,
+                    workspace: ref.workspace,
+                    name: ref.tree,
+                  },
+                  contentOrigin: contentOrigin(
+                    config.contentHost,
+                    resolved.tree.id,
+                  ),
+                  path: resolved.node.path,
+                  link: linkOf(ref.workspace, ref.tree, linkPath),
+                  linkPath,
+                  seq: resolved.tree.authoredSeq as AuthoredSeq,
+                  base: config.baseVersion,
+                  me:
+                    person === null
+                      ? null
+                      : { email: person.email, name: person.name },
+                },
+              } satisfies Served
+            }
+          }
+        }),
+      )
+
+    /**
+     * The node a reference names at a sequence, when the caller may read it
+     * now: a page or file (one redirect followed), or the first tree
+     * candidate of a `_` lookup. The base layer's files are not issued; they
+     * are the same for everyone.
+     */
+    const issuable = (ref: TreeRef, seq: AuthoredSeq) =>
       Effect.gen(function* () {
-        let resolved = yield* store.resolve(ref)
-        if ('missing' in resolved) return yield* denied(resolved)
-        if (resolved.kind === 'kit') {
-          const chosen = yield* kitChoice(resolved, 'read')
-          if (chosen === null) {
-            return yield* denied({
-              missing: true,
-              treeId: resolved.tree.id,
-              path: ref.path,
-            })
-          }
-          if (chosen.kind === 'base') {
-            return {
-              kind: 'redirect',
-              to: base.url(chosen.path),
-              status: 302,
-            } satisfies Served
-          }
-          // The frame looks the same `_` path up again, at the shell's push.
-          resolved = {
-            kind: 'file',
-            node: { ...chosen.node, path: ref.path },
-            version: chosen.version,
-            tree: resolved.tree,
-          }
-        } else {
-          yield* asDenied(access.require('read', resolved.node))
+        let found: Resolved | MissingNode = yield* store.resolve(ref, seq)
+        if (!('missing' in found) && found.kind === 'redirect') {
+          const next = treeRefOf(ref.treeId, found.to)
+          found = next === null ? found : yield* store.resolve(next, seq)
         }
-        const caller = yield* CurrentCaller
-        switch (resolved.kind) {
-          case 'redirect':
-            return {
-              kind: 'redirect',
-              to: `/${encodeURIComponent(ref.workspace)}/${encodeURIComponent(ref.tree)}/${resolved.to}`,
-              status: 301,
-            } satisfies Served
-          case 'folder':
-            return { kind: 'listing', ref } satisfies Served
-          case 'page':
-          case 'file': {
-            const linkPath =
-              resolved.kind === 'page'
-                ? resolved.linkPath
-                : linkPathOf(resolved.node.path, false)
-            const person = caller.person
-            return {
-              kind: 'shell',
-              boot: {
-                v: 1,
-                deployment: {
-                  origin: config.origin.origin,
-                  name: config.deploymentName,
-                },
-                tree: {
-                  id: resolved.tree.id,
-                  workspace: ref.workspace,
-                  name: ref.tree,
-                },
-                contentOrigin: contentOrigin(
-                  config.contentHost,
-                  resolved.tree.id,
-                ),
-                path: resolved.node.path,
-                link: linkOf(ref.workspace, ref.tree, linkPath),
-                linkPath,
-                seq: resolved.tree.authoredSeq as AuthoredSeq,
-                base: config.baseVersion,
-                me:
-                  person === null
-                    ? null
-                    : { email: person.email, name: person.name },
-              },
-            } satisfies Served
+        if ('missing' in found) return null
+        if (found.kind === 'kit') {
+          for (const candidate of found.found) {
+            if (candidate.kind === 'base') return null
+            const reads = yield* access
+              .require('read', candidate.node)
+              .pipe(Effect.isSuccess)
+            if (reads) return candidate.node
           }
+          return null
         }
+        if (found.kind !== 'page' && found.kind !== 'file') return null
+        const roles = yield* access.roleOn(found.node)
+        return readsWith(roles, found.node) ? found.node : null
       })
 
-    /** The handle of this session on this tree, renewed or replaced. */
-    const issue = (sessionId: SessionId, tree: TreeRow) =>
+    /**
+     * The nodes a view issues with a page, as the tree was at `seq`: the
+     * page, the tree layouts composed into it, the files the page and those
+     * layouts load (scripts, styles, images, media, frames), and the tree's
+     * components the page may load, each only when the caller may read it
+     * now. Links to other pages are not issued: following one is a view.
+     */
+    const loadedBy = (
+      resolved: Extract<Resolved, { kind: 'page' | 'file' }>,
+      seq: AuthoredSeq,
+    ) =>
       Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis
-        const row = yield* query(() =>
-          DB.prepare(
-            `select hash_sha256 as hash, generation, expires_at as expiresAt
-             from view_handles where session_id = ? and tree_id = ?`,
+        const ids = new Set<string>([resolved.node.id])
+        const sha = resolved.version.blobSha256
+        if (resolved.kind !== 'page' || sha === null) return [...ids]
+        const analysis = yield* store.analysis(sha as Sha256)
+        if (analysis === null) return [...ids]
+        const treeId = resolved.tree.id
+        const folder = folderOf(resolved.node.path)
+        const chain = yield* composedLayouts({
+          treeId,
+          page: { node: resolved.node, version: resolved.version, analysis },
+          at: seq,
+        }).pipe(Effect.provide(context))
+        for (const link of chain) ids.add(link.node.id)
+        let looked = 0
+        const references = [
+          { folder, analysis },
+          ...chain.map((link) => ({
+            folder: link.folder,
+            analysis: link.analysis,
+          })),
+        ]
+        for (const source of references) {
+          const from = `https://tree.invalid/${linkPathOf(source.folder, true)}`
+          for (const url of source.analysis.urls) {
+            const loads =
+              url.relative &&
+              (url.attr === 'src' ||
+                url.attr === 'srcset' ||
+                url.attr === 'poster' ||
+                (url.attr === 'href' && url.inHead))
+            if (!loads || looked >= MAX_LOADED) continue
+            looked += 1
+            let target: URL
+            try {
+              // What the browser requests: character references decoded.
+              target = new URL(url.decoded, from)
+            } catch {
+              continue
+            }
+            if (target.origin !== 'https://tree.invalid') continue
+            const ref = treeRefOf(treeId, target.pathname.slice(1))
+            if (ref === null) continue
+            const node = yield* issuable(ref, seq)
+            if (node !== null) ids.add(node.id)
+          }
+        }
+        // The components the page may load, by the kit map it is served with.
+        const items = yield* kitAt({ treeId, folder, at: seq }).pipe(
+          Effect.provide(context),
+        )
+        for (const found of Object.values(kitMap(items))) {
+          if (found.from !== 'tree' || looked >= MAX_LOADED) continue
+          looked += 1
+          const ref = treeRefOf(treeId, linkPathOf(found.path, false))
+          if (ref === null) continue
+          const node = yield* issuable(ref, seq)
+          if (node !== null) ids.add(node.id)
+        }
+        return [...ids]
+      })
+
+    /**
+     * Renews this session's handle on the tree, or replaces a lapsed one with
+     * the next generation, and issues the nodes at the sequence. Every write
+     * is conditioned on the row it read, so an operation that read an older
+     * state never undoes a newer generation; a lost race reads again.
+     */
+    const issue = (
+      sessionId: SessionId,
+      personId: string,
+      tree: TreeRow,
+      seq: AuthoredSeq,
+      nodeIds: readonly string[],
+      extra: readonly D1PreparedStatement[],
+    ) =>
+      Effect.gen(function* () {
+        for (let attempt = 0; attempt < ISSUE_ATTEMPTS; attempt += 1) {
+          const now = yield* Clock.currentTimeMillis
+          const row = yield* query(() =>
+            DB.prepare(
+              `select hash_sha256 as hash, generation, expires_at as expiresAt
+               from view_handles where session_id = ? and tree_id = ?`,
+            )
+              .bind(sessionId, tree.id)
+              .first<{ hash: string; generation: number; expiresAt: number }>(),
           )
-            .bind(sessionId, tree.id)
-            .first<{ hash: string; generation: number; expiresAt: number }>(),
-        )
-        const generation =
-          row !== null && row.expiresAt > now
-            ? row.generation
-            : (row?.generation ?? 0) + 1
-        const handle = yield* Effect.promise(() =>
-          hmacSha256(
-            Redacted.value(config.handleSecret),
-            `view:${sessionId}:${tree.id}:${generation}`,
-          ),
-        )
-        const hash = yield* Effect.promise(() => sha256Hex(handle))
-        const expiresAt = now + HANDLE_LIFE
-        return { handle, hash, generation, now, expiresAt }
+          const live = row !== null && row.expiresAt > now
+          const generation = live ? row.generation : (row?.generation ?? 0) + 1
+          const handle = yield* Effect.promise(() =>
+            hmacSha256(
+              Redacted.value(config.handleSecret),
+              `view:${sessionId}:${tree.id}:${generation}`,
+            ),
+          )
+          const hash = yield* Effect.promise(() => sha256Hex(handle))
+          const expiresAt = now + HANDLE_LIFE
+          const statements: D1PreparedStatement[] = []
+          if (live) {
+            // Only a handle still live renews: a lapsed one never returns.
+            statements.push(
+              DB.prepare(
+                `update view_handles set expires_at = max(expires_at, ?), renewed_at = ?
+                 where hash_sha256 = ? and expires_at > ?`,
+              ).bind(expiresAt, now, hash, now),
+            )
+          } else {
+            if (row !== null) {
+              // Drop only the lapsed row this read saw.
+              statements.push(
+                DB.prepare(
+                  `delete from view_handle_nodes where handle_hash = ?1
+                     and exists (select 1 from view_handles
+                                 where hash_sha256 = ?1 and expires_at <= ?2)`,
+                ).bind(row.hash, now),
+                DB.prepare(
+                  'delete from view_handles where hash_sha256 = ? and expires_at <= ?',
+                ).bind(row.hash, now),
+              )
+            }
+            statements.push(
+              DB.prepare(
+                `insert into view_handles (hash_sha256, generation, user_id, session_id,
+                   anon_session_id, tree_id, expires_at, renewed_at, created_at)
+                 select ?1, ?2, ?3, ?4, null, ?5, ?6, ?7, ?7
+                 where not exists (select 1 from view_handles
+                                   where session_id = ?4 and tree_id = ?5)`,
+              ).bind(
+                hash,
+                generation,
+                personId,
+                sessionId,
+                tree.id,
+                expiresAt,
+                now,
+              ),
+            )
+          }
+          for (const nodeId of nodeIds) {
+            statements.push(
+              DB.prepare(
+                `insert into view_handle_nodes (handle_hash, seq, node_id, created_at)
+                 select ?1, ?2, ?3, ?4 where exists
+                   (select 1 from view_handles where hash_sha256 = ?1 and expires_at > ?4)
+                   and (select authored_seq from trees where id = ?5) = ?2
+                 on conflict do nothing`,
+              ).bind(hash, seq, nodeId, now, tree.id),
+            )
+          }
+          statements.push(
+            ...extra,
+            DB.prepare(
+              `select hash_sha256 as hash, expires_at as expiresAt,
+                 (select authored_seq from trees where id = ?2) as seq
+               from view_handles where session_id = ?1 and tree_id = ?2`,
+            ).bind(sessionId, tree.id),
+          )
+          const results = yield* query(() => DB.batch(statements))
+          const stands = results[results.length - 1]?.results[0] as
+            | { hash: string; expiresAt: number; seq: number }
+            | undefined
+          if (stands?.hash === hash && stands.expiresAt > now) {
+            // A push since the view read the tree: what it resolved may not
+            // be the tree at `seq`, so nothing was issued and the view starts
+            // again.
+            return {
+              handle,
+              expiresAt: stands.expiresAt,
+              moved: stands.seq !== seq,
+            }
+          }
+        }
+        console.error('A view handle kept changing while it was issued', {
+          tree: tree.id,
+        })
+        return yield* Effect.fail(dossierError('unavailable'))
       })
 
     const view: PagesService['view'] = ({ treeId, path }) =>
-      Effect.gen(function* () {
-        const caller = yield* CurrentCaller
-        // Agent keys never get a handle: frames are for browsers.
-        if (caller.via.kind === 'agent' || caller.via.kind === 'handle') {
-          return yield* Effect.fail(notFound(path))
-        }
-        const ref = treeRefOf(treeId, path)
-        const missing: MissingNode = { missing: true, treeId, path }
-        if (ref === null) return yield* denied(missing)
-        let resolved: Resolved | MissingNode = yield* store.resolve(ref)
-        if (!('missing' in resolved) && resolved.kind === 'redirect') {
-          yield* asDenied(access.require('read', resolved.node))
-          const next = treeRefOf(treeId, resolved.to)
-          resolved = next === null ? missing : yield* store.resolve(next)
-        }
-        if ('missing' in resolved) return yield* denied(resolved)
-        if (resolved.kind === 'kit') {
-          // A `_` file opens as the file its lookup gives this viewer.
-          const chosen = yield* kitChoice(resolved, 'read')
-          if (chosen === null || chosen.kind === 'base') {
-            return yield* denied(missing)
+      askedAs(
+        path,
+        Effect.gen(function* () {
+          const caller = yield* CurrentCaller
+          // Agent keys never get a handle: frames are for browsers.
+          if (caller.via.kind === 'agent' || caller.via.kind === 'handle') {
+            return yield* Effect.fail(notFound(path))
           }
-          resolved = {
-            kind: 'file',
-            node: chosen.node,
-            version: chosen.version,
-            tree: resolved.tree,
+          const ref = treeRefOf(treeId, path)
+          const missing: MissingNode = { missing: true, treeId, path }
+          if (ref === null) return yield* denied(missing)
+          for (let attempt = 0; attempt < ISSUE_ATTEMPTS; attempt += 1) {
+            let resolved: Resolved | MissingNode = yield* store.resolve(ref)
+            if (!('missing' in resolved) && resolved.kind === 'redirect') {
+              yield* asDenied(access.require('read', resolved.node))
+              const next = treeRefOf(treeId, resolved.to)
+              resolved = next === null ? missing : yield* store.resolve(next)
+            }
+            if ('missing' in resolved) return yield* denied(missing)
+            if (resolved.kind === 'kit') {
+              // A `_` file opens as the file its lookup gives this viewer.
+              const chosen = yield* kitChoice(resolved, 'read')
+              if (chosen === null || chosen.kind === 'base') {
+                return yield* denied(missing)
+              }
+              resolved = {
+                kind: 'file',
+                node: chosen.node,
+                version: chosen.version,
+                tree: resolved.tree,
+              }
+            }
+            yield* asDenied(access.require('read', resolved.node))
+            // A folder without index.html is a listing, which no frame shows.
+            if (resolved.kind !== 'page' && resolved.kind !== 'file') {
+              return yield* Effect.fail(notFound(path))
+            }
+            const person = caller.person
+            if (person === null || caller.via.kind !== 'browser') {
+              return yield* Effect.fail(
+                dossierError(
+                  'sign_in_required',
+                  'Sign in to open this.',
+                  'Sign in with Google.',
+                  path,
+                ),
+              )
+            }
+            const roles = yield* access.roleOn(resolved.node)
+            const tree = resolved.tree
+            const seq = tree.authoredSeq as AuthoredSeq
+            const nodeIds = yield* loadedBy(resolved, seq)
+            const now = yield* Clock.currentTimeMillis
+            const seen =
+              resolved.kind === 'page'
+                ? [
+                    // Seen by moves at most once an hour per person and page.
+                    DB.prepare(
+                      `insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?)
+                     on conflict (node_id, user_id) do update set last_seen_at = excluded.last_seen_at
+                     where seen_by.last_seen_at < excluded.last_seen_at - ?`,
+                    ).bind(resolved.node.id, person.id, now, HOUR),
+                  ]
+                : []
+            const h = yield* issue(
+              caller.via.sessionId,
+              person.id,
+              tree,
+              seq,
+              nodeIds,
+              seen,
+            )
+            if (h.moved) continue
+            return {
+              handle: h.handle,
+              expiresAt: new Date(h.expiresAt).toISOString(),
+              seq,
+              role: highest(roles),
+            } satisfies ViewGrant
           }
-        }
-        yield* asDenied(access.require('read', resolved.node))
-        // A folder without index.html is a listing, which no frame shows.
-        if (resolved.kind !== 'page' && resolved.kind !== 'file') {
-          return yield* Effect.fail(notFound(path))
-        }
-        const person = caller.person
-        if (person === null || caller.via.kind !== 'browser') {
-          return yield* Effect.fail(
-            dossierError(
-              'sign_in_required',
-              'Sign in to open this.',
-              'Sign in with Google.',
-              path,
-            ),
-          )
-        }
-        const roles = yield* access.roleOn(resolved.node)
-        const tree = resolved.tree
-        const seq = tree.authoredSeq as AuthoredSeq
-        const h = yield* issue(caller.via.sessionId, tree)
-        const statements = [
-          // A new generation drops the old handle and the sequences it held.
-          DB.prepare(
-            `delete from view_handle_seqs where handle_hash in
-               (select hash_sha256 from view_handles
-                 where session_id = ? and tree_id = ? and hash_sha256 <> ?)`,
-          ).bind(caller.via.sessionId, tree.id, h.hash),
-          DB.prepare(
-            `delete from view_handles
-             where session_id = ? and tree_id = ? and hash_sha256 <> ?`,
-          ).bind(caller.via.sessionId, tree.id, h.hash),
-          DB.prepare(
-            `insert into view_handles (hash_sha256, generation, user_id, session_id,
-               anon_session_id, tree_id, expires_at, renewed_at, created_at)
-             values (?, ?, ?, ?, null, ?, ?, ?, ?)
-             on conflict (hash_sha256) do update set
-               expires_at = excluded.expires_at, renewed_at = excluded.renewed_at`,
-          ).bind(
-            h.hash,
-            h.generation,
-            person.id,
-            caller.via.sessionId,
-            tree.id,
-            h.expiresAt,
-            h.now,
-            h.now,
-          ),
-          DB.prepare(
-            `insert into view_handle_seqs (handle_hash, seq, created_at)
-             values (?, ?, ?) on conflict do nothing`,
-          ).bind(h.hash, seq, h.now),
-        ]
-        if (resolved.kind === 'page') {
-          // Seen by moves at most once an hour per person and page.
-          statements.push(
-            DB.prepare(
-              `insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?)
-               on conflict (node_id, user_id) do update set last_seen_at = excluded.last_seen_at
-               where seen_by.last_seen_at < excluded.last_seen_at - ?`,
-            ).bind(resolved.node.id, person.id, h.now, HOUR),
-          )
-        }
-        yield* query(() => DB.batch(statements))
-        return {
-          handle: h.handle,
-          expiresAt: new Date(h.expiresAt).toISOString(),
-          seq,
-          role: highest(roles),
-        } satisfies ViewGrant
-      })
+          console.error('The tree kept moving while a view was issued', {
+            tree: treeId,
+          })
+          return yield* Effect.fail(dossierError('unavailable'))
+        }),
+      )
 
     const pushNumberOf = (version: VersionRow) =>
       version.pushId === null
@@ -603,32 +811,70 @@ export const PagesLive: Layer.Layer<
       })
 
     /**
-     * Whether the handle may open a node at a sequence: the sequence was
-     * issued to it, or the caller holds write on every node given (for a
-     * page: the page and every tree layout composed into it at that
-     * sequence). History is for write holders.
+     * Whether the handle may open these nodes at a sequence (for a page: the
+     * page and every tree layout composed into it there). Each must be one a
+     * view issued to this handle at that sequence, or unchanged since then
+     * (nothing replaced, so nothing recovered), or one the caller writes:
+     * history is for write holders.
      */
     const opensAt = (
       handleHash: string,
       seq: AuthoredSeq,
-      nodes: readonly NodeRow[],
+      nodes: readonly {
+        readonly node: NodeRow
+        readonly version: VersionRow
+      }[],
     ) =>
       Effect.gen(function* () {
-        const issued = yield* query(() =>
-          DB.prepare(
-            'select 1 as issued from view_handle_seqs where handle_hash = ? and seq = ?',
+        for (const { node, version } of nodes) {
+          const issued = yield* query(() =>
+            DB.prepare(
+              `select 1 as issued from view_handle_nodes
+               where handle_hash = ? and seq = ? and node_id = ?`,
+            )
+              .bind(handleHash, seq, node.id)
+              .first<{ issued: number }>(),
           )
-            .bind(handleHash, seq)
-            .first<{ issued: number }>(),
-        )
-        if (issued !== null) return true
-        for (const node of nodes) {
+          if (issued !== null) continue
+          const now = yield* query(() =>
+            DB.prepare(
+              `select v.blob_sha256 as sha from nodes n
+                 join node_versions v on v.id = n.current_version_id
+               where n.tree_id = ? and n.path = ? and n.deleted_at is null
+                 and v.state = 'live'`,
+            )
+              .bind(node.treeId, node.path)
+              .first<{ sha: string | null }>(),
+          )
+          if (now !== null && now.sha === version.blobSha256) continue
           const writes = yield* access
             .require('write', node)
             .pipe(Effect.isSuccess)
           if (!writes) return false
         }
         return true
+      })
+
+    /** A page or file at a sequence with what composes it there. */
+    const composedAt = (
+      target: Extract<Resolved, { kind: 'page' | 'file' }>,
+      treeId: TreeId,
+      seq: AuthoredSeq,
+    ) =>
+      Effect.gen(function* () {
+        if (target.kind === 'file') {
+          return { analysis: null, chain: [] as readonly LayoutLink[] }
+        }
+        const sha = target.version.blobSha256
+        const analysis =
+          sha === null ? null : yield* store.analysis(sha as Sha256)
+        if (analysis === null) return null
+        const chain = yield* composedLayouts({
+          treeId,
+          page: { node: target.node, version: target.version, analysis },
+          at: seq,
+        }).pipe(Effect.provide(context))
+        return { analysis, chain }
       })
 
     /** The composed page: from the cache, or composed and stored. */
@@ -736,17 +982,46 @@ export const PagesLive: Layer.Layer<
               .require('read', found.node)
               .pipe(Effect.isSuccess)
             if (!readable) continue
-            if (!(yield* opensAt(via.handleHash, i.seq, [found.node]))) continue
+            if (
+              !(yield* opensAt(via.handleHash, i.seq, [
+                { node: found.node, version: found.version },
+              ]))
+            ) {
+              continue
+            }
             return yield* serveFile(i.path, found.version, i)
           }
           return yield* Effect.fail(notFound(i.path))
         }
-        const roles = yield* access.roleOn(resolved.node)
-        const reads =
-          roles.caps.has('read') ||
-          (roles.caps.has('read-authored') &&
-            resolved.node.origin === 'authored')
-        if (!reads) return yield* Effect.fail(notFound(i.path))
+        // A redirect is answered only once its target may be opened here.
+        let target: Resolved | MissingNode = resolved
+        if (resolved.kind === 'redirect') {
+          const next = treeRefOf(i.treeId, resolved.to)
+          target =
+            next === null
+              ? { missing: true, treeId: i.treeId, path: i.path }
+              : yield* store.resolve(next, i.seq)
+        }
+        if (
+          'missing' in target ||
+          (target.kind !== 'page' && target.kind !== 'file')
+        ) {
+          return yield* Effect.fail(notFound(i.path))
+        }
+        const roles = yield* access.roleOn(target.node)
+        if (!readsWith(roles, target.node)) {
+          return yield* Effect.fail(notFound(i.path))
+        }
+        const parts = yield* composedAt(target, i.treeId, i.seq)
+        if (parts === null) return yield* Effect.fail(notFound(i.path))
+        const opens = yield* opensAt(via.handleHash, i.seq, [
+          { node: target.node, version: target.version },
+          ...parts.chain.map((link) => ({
+            node: link.node,
+            version: link.version,
+          })),
+        ])
+        if (!opens) return yield* Effect.fail(notFound(i.path))
         if (resolved.kind === 'redirect') {
           return {
             kind: 'redirect',
@@ -754,34 +1029,18 @@ export const PagesLive: Layer.Layer<
             status: 301,
           } satisfies Served
         }
-        if (resolved.kind === 'file') {
-          if (!(yield* opensAt(via.handleHash, i.seq, [resolved.node]))) {
-            return yield* Effect.fail(notFound(i.path))
-          }
-          return yield* serveFile(i.path, resolved.version, i)
+        if (target.kind === 'file') {
+          return yield* serveFile(i.path, target.version, i)
         }
-        // A page, with the tree layouts composed into it at this sequence.
-        const sha = resolved.version.blobSha256
-        const analysis =
-          sha === null ? null : yield* store.analysis(sha as Sha256)
-        if (analysis === null) return yield* Effect.fail(notFound(i.path))
-        const chain = yield* composedLayouts({
-          treeId: i.treeId,
-          page: { node: resolved.node, version: resolved.version, analysis },
-          at: i.seq,
-        }).pipe(Effect.provide(context))
-        const opens = yield* opensAt(via.handleHash, i.seq, [
-          resolved.node,
-          ...chain.map((link) => link.node),
-        ])
-        if (!opens) return yield* Effect.fail(notFound(i.path))
+        const analysis = parts.analysis!
+        const chain = parts.chain
         const found = yield* store.treeById(i.treeId)
         if (found === null) return yield* Effect.fail(notFound(i.path))
         const key: ComposedKey = {
           host: i.host,
           treeId: i.treeId,
           seq: i.seq,
-          path: resolved.node.path,
+          path: target.node.path,
           composer: `${COMPOSER_VERSION}.${ANALYZER_VERSION}`,
           base: base.version,
         }
@@ -797,47 +1056,50 @@ export const PagesLive: Layer.Layer<
             workspace: found.workspace.name,
             name: found.tree.name,
           },
-          node: resolved.node,
-          version: resolved.version,
+          node: target.node,
+          version: target.version,
           analysis,
           chain,
-          linkPath: resolved.linkPath,
+          linkPath: target.linkPath,
         })
         return { kind: 'framePage', html, etag } satisfies Served
       })
 
     const seenBy: PagesService['seenBy'] = (ref) =>
-      Effect.gen(function* () {
-        const resolved = yield* store.resolve(ref)
-        if ('missing' in resolved) return yield* denied(resolved)
-        if (resolved.kind !== 'page') {
-          if (resolved.kind !== 'kit') {
-            yield* asDenied(access.require('read', resolved.node))
-          } else if ((yield* kitChoice(resolved, 'read')) === null) {
-            return yield* denied({
-              missing: true,
-              treeId: resolved.tree.id,
-              path: ref.path,
-            })
+      askedAs(
+        ref.path,
+        Effect.gen(function* () {
+          const resolved = yield* store.resolve(ref)
+          if ('missing' in resolved) return yield* denied(resolved)
+          if (resolved.kind !== 'page') {
+            if (resolved.kind !== 'kit') {
+              yield* asDenied(access.require('read', resolved.node))
+            } else if ((yield* kitChoice(resolved, 'read')) === null) {
+              return yield* denied({
+                missing: true,
+                treeId: resolved.tree.id,
+                path: ref.path,
+              })
+            }
+            return yield* Effect.fail(notFound(ref.path))
           }
-          return yield* Effect.fail(notFound(ref.path))
-        }
-        yield* access.require('read-history', resolved.node)
-        const now = yield* Clock.currentTimeMillis
-        const rows = yield* query(() =>
-          DB.prepare(
-            `select u.email, u.name, s.last_seen_at as lastSeenAt
+          yield* access.require('read-history', resolved.node)
+          const now = yield* Clock.currentTimeMillis
+          const rows = yield* query(() =>
+            DB.prepare(
+              `select u.email, u.name, s.last_seen_at as lastSeenAt
              from seen_by s join "user" u on u.id = s.user_id
              where s.node_id = ? order by s.last_seen_at desc, u.email`,
+            )
+              .bind(resolved.node.id)
+              .all<{ email: string; name: string; lastSeenAt: number }>(),
           )
-            .bind(resolved.node.id)
-            .all<{ email: string; name: string; lastSeenAt: number }>(),
-        )
-        return rows.results.map((row) => ({
-          ...row,
-          withinHour: now - row.lastSeenAt < HOUR,
-        }))
-      })
+          return rows.results.map((row) => ({
+            ...row,
+            withinHour: now - row.lastSeenAt < HOUR,
+          }))
+        }),
+      )
 
     const handleCaller: PagesService['handleCaller'] = (handle, treeId) =>
       Effect.gen(function* () {

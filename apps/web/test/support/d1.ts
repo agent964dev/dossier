@@ -145,3 +145,50 @@ export const beforeBatch = (
     },
   })
 }
+
+/**
+ * A database that runs `before` once, just ahead of the first read of a
+ * statement whose SQL matches, to land a racing write between two reads.
+ */
+export const beforeRead = (
+  database: D1Database,
+  matches: (sql: string) => boolean,
+  before: () => Promise<void>,
+): D1Database => {
+  let armed = true
+  const wrap = (
+    statement: D1PreparedStatement,
+    hit: boolean,
+  ): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values), hit)
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        if (
+          hit &&
+          (property === 'first' || property === 'all' || property === 'raw') &&
+          typeof value === 'function'
+        ) {
+          return async (...args: unknown[]) => {
+            if (armed) {
+              armed = false
+              await before()
+            }
+            return (value as (...a: unknown[]) => unknown).apply(target, args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => wrap(target.prepare(query), matches(query))
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}

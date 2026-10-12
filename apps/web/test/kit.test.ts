@@ -446,7 +446,15 @@ describe('the layout chain', () => {
 describe('a sequence never issued to the handle', () => {
   it('opens a page only for write on the page and every layout composed into it then', async () => {
     const w = await world()
-    await w.repush({ 'guides/setup/install.html': '<h1>Install two</h1>' })
+    // The page and its layouts all change, so the old sequence is history.
+    await w.repush({
+      'guides/setup/install.html': '<h1>Install two</h1>',
+      '_layout.html': ROOT_LAYOUT.replace(
+        '</body>',
+        '<footer>v2</footer></body>',
+      ),
+      'guides/_layout.html': `${FILES['guides/_layout.html']}<!-- v2 -->`,
+    })
     const pageOnly = await sharedWith(w, [
       { path: 'guides/setup/install.html', role: 'write' },
     ])
@@ -505,5 +513,68 @@ describe('the kit row', () => {
     )
     const mockups = root.entries.find((e) => e.path === 'mockups')
     expect(mockups?.pages).toBe(1)
+  })
+})
+
+describe('what a view issues with a composed page', () => {
+  it("keeps an open tab's layouts after a push changes them, and never shows them to a reader shared later", async () => {
+    const w = await world()
+    const reader = await sharedWith(w, [{ path: '', role: 'read' }])
+    const open = await handleFor(reader, w.treeId, 'guides/setup/install')
+    expect(open.seq).toBe(w.seq)
+    await w.repush({
+      '_layout.html': ROOT_LAYOUT.replace(
+        '</body>',
+        '<footer>v2</footer></body>',
+      ),
+      'guides/_layout.html':
+        '<nav class="sidebar">Guides v2</nav><main><slot></slot></main>',
+      'logo.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle r="3"/></svg>',
+      'guides/_components/acme-card.js': 'export const card = 2',
+    })
+    // The open tab still composes the layouts it was issued, and loads the
+    // files they and the page use, as they were.
+    const old = htmlOf(
+      await frame(open.handle, w.treeId, w.seq, 'guides/setup/install'),
+    )
+    expect(old).toContain('<nav class="sidebar">Guides</nav>')
+    expect(old).not.toContain('v2')
+    for (const path of ['logo.svg', 'guides/_components/acme-card.js']) {
+      expect(
+        await frame(open.handle, w.treeId, w.seq, path),
+        path,
+      ).toMatchObject({ kind: 'file' })
+    }
+    // A reader given the tree after the push was never issued the old
+    // layouts, so the old sequence is not theirs to open.
+    const laterReader = await sharedWith(w, [{ path: '', role: 'read' }])
+    const renewed = await handleFor(
+      laterReader,
+      w.treeId,
+      'guides/setup/install',
+    )
+    expect(renewed.seq).toBe(w.seq + 1)
+    expect(
+      await frame(renewed.handle, w.treeId, w.seq, 'guides/setup/install'),
+    ).toBe('not_found')
+    expect(
+      await frame(
+        renewed.handle,
+        w.treeId,
+        w.seq,
+        'guides/_components/acme-card.js',
+      ),
+    ).toBe('not_found')
+    expect(
+      htmlOf(
+        await frame(
+          renewed.handle,
+          w.treeId,
+          renewed.seq,
+          'guides/setup/install',
+        ),
+      ),
+    ).toContain('Guides v2')
   })
 })
