@@ -2,6 +2,7 @@
 // page. It adds nothing visible.
 import type { ShellBoot } from '@dossier/contracts/bridge'
 import { shellApi } from './api.ts'
+import { pollingChanges, webSocketChanges } from './changes.ts'
 import { createShell } from './create-shell.ts'
 import { browserStore } from './store.ts'
 
@@ -16,4 +17,9 @@ void createShell({
   boot,
   api: shellApi(window.fetch.bind(window), boot.deployment.origin),
   store: browserStore(window.indexedDB),
+  changes: webSocketChanges(
+    window,
+    boot.deployment.origin,
+    pollingChanges(window),
+  ),
 }).start()

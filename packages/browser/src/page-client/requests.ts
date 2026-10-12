@@ -3,6 +3,7 @@
 import {
   DossierError,
   type DraftValues,
+  type JsonObject,
   type PageToShell,
   type SendRequest,
   type ShellToPage,
@@ -14,6 +15,24 @@ export type RequestOp =
   | { readonly op: 'read'; readonly path: string }
   | { readonly op: 'send'; readonly send: SendRequest }
   | { readonly op: 'withdraw'; readonly path: string; readonly opId: string }
+  | {
+      readonly op: 'write'
+      readonly path: string
+      readonly patch: JsonObject
+      readonly replace: boolean
+      readonly opId: string
+      readonly seq: number
+    }
+  | {
+      readonly op: 'upload'
+      readonly file: Blob
+      readonly name: string
+      readonly contentType: string
+      readonly opId: string
+      readonly seq: number
+    }
+  | { readonly op: 'watch'; readonly sub: number; readonly path: string }
+  | { readonly op: 'unwatch'; readonly sub: number }
 
 /** The shell's answer to a pending send it replayed, by formKey. */
 export type Resumed = Extract<ShellToPage, { type: 'resumed' }>

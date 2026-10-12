@@ -1,7 +1,8 @@
 // Fake pages around a happy-dom shell document, for the shell's tests.
-import type { ShellBoot } from '@dossier/contracts/bridge'
+import type { DocWire, ShellBoot } from '@dossier/contracts/bridge'
 import type { Window as DomWindow } from 'happy-dom'
 import { vi } from 'vitest'
+import type { ChangeSource } from '../src/shell/changes.ts'
 import {
   createShell,
   type ShellApi,
@@ -29,6 +30,7 @@ export const grant = (
   role: ViewGrant['role'] = 'write',
   path = 'questions/index.html',
   email?: string | null,
+  events = 40,
 ): ViewGrant =>
   ({
     handle,
@@ -36,8 +38,40 @@ export const grant = (
     role,
     expiresAt: '2026-10-12T03:00:00.000Z',
     path,
+    events,
     ...(email === undefined ? {} : { email }),
   }) as ViewGrant
+
+/** One connection a fake change source was asked for. */
+export interface FakeConnection {
+  readonly tree: string
+  readonly paths: readonly string[]
+  readonly onHint: (seq: number) => void
+  readonly onState: (state: 'live' | 'polling') => void
+  closed: boolean
+}
+
+/** A change source that records its connections; tests send the hints. */
+export const fakeChanges = () => {
+  const connections: FakeConnection[] = []
+  const source: ChangeSource = {
+    connect: (input) => {
+      const connection: FakeConnection = { ...input, closed: false }
+      connections.push(connection)
+      return {
+        close: () => {
+          connection.closed = true
+        },
+      }
+    },
+  }
+  return {
+    source,
+    connections,
+    /** The connections not closed. */
+    open: () => connections.filter((connection) => !connection.closed),
+  }
+}
 
 /** A page window as the shell sees it: only its place among the frames. */
 export interface FakeFrameWindow {
@@ -50,6 +84,7 @@ export const openShell = (
     readonly url?: string
     readonly grants?: readonly (ViewGrant | Error)[]
     readonly store?: MemoryStore
+    readonly changes?: ReturnType<typeof fakeChanges>
   } = {},
 ) => {
   const boot = options.boot ?? BOOT
@@ -96,6 +131,22 @@ export const openShell = (
     type: i.type,
   }))
   const withdraw = vi.fn<ShellApi['withdraw']>(async () => {})
+  const write = vi.fn<ShellApi['write']>(
+    async (i) =>
+      ({
+        path: i.path,
+        data: i.patch,
+        by: boot.me?.email ?? '',
+        at: '2026-10-12T10:00:00.000Z',
+        push: 2,
+      }) as DocWire,
+  )
+  const events = vi.fn<ShellApi['events']>(async ({ after }) => ({
+    events: [],
+    next: after,
+    more: false,
+  }))
+  const changes = options.changes ?? fakeChanges()
   const reload = vi.spyOn(win.location, 'reload').mockImplementation(() => {})
   const assign = vi.spyOn(win.location, 'assign').mockImplementation(() => {})
   const pushState = vi.spyOn(win.history, 'pushState')
@@ -105,8 +156,9 @@ export const openShell = (
     window: win as unknown as Window,
     frame: placeholder,
     boot,
-    api: { view, confirm, read, send, upload, withdraw },
+    api: { view, confirm, read, send, upload, withdraw, write, events },
     store,
+    changes: changes.source,
   })
 
   /** The iframe element in the shell now. */
@@ -163,6 +215,9 @@ export const openShell = (
     send,
     upload,
     withdraw,
+    write,
+    events,
+    changes,
     reload,
     assign,
     pushState,

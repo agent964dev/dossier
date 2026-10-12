@@ -6,12 +6,15 @@ import {
   type RoleName,
 } from '@dossier/contracts/bridge'
 import type {
+  EventWire,
+  EventsResponseWire,
   SendPayloadWire,
   SendResultWire,
   ShellApi,
   UploadParamsWire,
   UploadResultWire,
   ViewGrant,
+  WritePayloadWire,
 } from './create-shell.ts'
 
 // The API's CSRF header. Written out here because the contracts root, where
@@ -59,6 +62,7 @@ const readGrant = (body: unknown): ViewGrant | null => {
     typeof body.seq !== 'number' ||
     typeof body.path !== 'string' ||
     !(body.email === null || typeof body.email === 'string') ||
+    typeof body.events !== 'number' ||
     !ROLES.has(body.role)
   ) {
     return null
@@ -70,6 +74,7 @@ const readGrant = (body: unknown): ViewGrant | null => {
     role: body.role as RoleName,
     path: body.path,
     email: body.email as string | null,
+    events: body.events,
   }
 }
 
@@ -146,6 +151,24 @@ const readUploadResult = (body: unknown): UploadResultWire | null =>
         size: body.size,
         type: body.type,
       }
+    : null
+
+const isEventWire = (value: unknown): value is EventWire =>
+  isRecord(value) &&
+  typeof value.seq === 'number' &&
+  typeof value.type === 'string' &&
+  typeof value.path === 'string' &&
+  typeof value.at === 'string' &&
+  (value.by === null || typeof value.by === 'string') &&
+  (value.push === null || typeof value.push === 'number')
+
+const readEvents = (body: unknown): EventsResponseWire | null =>
+  isRecord(body) &&
+  Array.isArray(body.events) &&
+  body.events.every(isEventWire) &&
+  typeof body.next === 'number' &&
+  typeof body.more === 'boolean'
+    ? { events: body.events, next: body.next, more: body.more }
     : null
 
 /** The shell's calls to the deployment's API on its own origin. */
@@ -275,5 +298,21 @@ export const shellApi = (
         true,
       )
     },
+    write: (payload: WritePayloadWire) =>
+      call(
+        `${origin}/_/api/data/write`,
+        {
+          method: 'POST',
+          headers: writeHeaders('application/json'),
+          body: JSON.stringify(payload),
+        },
+        (body) => known(isDocWire(body) ? body : null),
+      ),
+    events: ({ tree, after }) =>
+      call(
+        `${origin}/_/api/events?${new URLSearchParams({ tree, after: String(after) })}`,
+        { method: 'GET' },
+        (body) => known(readEvents(body)),
+      ),
   }
 }

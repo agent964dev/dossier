@@ -5,9 +5,12 @@ import {
   readTopBoot,
   type Doc,
   type DraftValues,
+  type Json,
+  type JsonObject,
   type Me,
   type PageBootstrap,
 } from '@dossier/contracts/bridge'
+import { createPageData } from './data.ts'
 import { startForms, type FormsController } from './forms.ts'
 import { startKit } from './kit.ts'
 import { trackLocation } from './location.ts'
@@ -51,6 +54,26 @@ export interface Dossier {
   }
   /** Identity in place; already resolved for the top page. */
   readonly ready: Promise<void>
+  /** Every readable file below a folder. */
+  read<T = Json>(path: `${string}/`): Promise<Doc<T>[]>
+  /** A file; missing and unreadable look the same. */
+  read<T = Json>(path: string): Promise<Doc<T> | null>
+  /** Calls back at once, then after each change; returns the stop. */
+  watch(path: string, onChange: (value: Doc | Doc[] | null) => void): () => void
+  /** A folder path: a new entry in your own folder. */
+  write<T = Json>(
+    path: string,
+    patch: JsonObject,
+    opts?: { replace?: true },
+  ): Promise<Doc<T>>
+  /** Your own submission or entry, for good. */
+  withdraw(path: string): Promise<void>
+  upload(file: File | Blob): Promise<{
+    file: string
+    name: string
+    size: number
+    type: string
+  }>
 }
 
 export type HostPort = Pick<
@@ -88,11 +111,15 @@ export const createPageClient = (deps: {
   let me: Me | null = boot?.me ?? null
   let welcomed = (): void => {}
   let timer: number | undefined
+  let isReady = boot !== null || alone
   const ready =
     boot !== null || alone
       ? Promise.resolve()
       : new Promise<void>((resolve, reject) => {
-          welcomed = resolve
+          welcomed = () => {
+            isReady = true
+            resolve()
+          }
           timer = win.setTimeout(() => {
             reject(
               new DossierError({
@@ -138,17 +165,35 @@ export const createPageClient = (deps: {
     }
   }
 
+  const data = createPageData({
+    bootstrap,
+    requests,
+    me: () => me,
+    isReady: () => isReady,
+    ready,
+    connected: !alone,
+    newOpId: () => win.crypto.randomUUID(),
+    report: (error: unknown) =>
+      queueMicrotask(() => {
+        throw error
+      }),
+  })
+
   port.addEventListener('message', (event) => {
-    const data: unknown = event.data
-    if (!isShellToPage(data)) return
-    if (data.type !== 'welcome') {
-      requests.receive(data)
+    const message: unknown = event.data
+    if (!isShellToPage(message)) return
+    if (message.type === 'changed') {
+      data.changed(message)
       return
     }
-    me = data.me
+    if (message.type !== 'welcome') {
+      requests.receive(message)
+      return
+    }
+    me = message.me
     win.clearTimeout(timer)
     welcomed()
-    beginForms(data.drafts, data.resume)
+    beginForms(message.drafts, message.resume)
   })
   port.start()
   if (boot !== null) beginForms(boot.drafts, boot.resume)
@@ -167,5 +212,10 @@ export const createPageClient = (deps: {
     },
     page,
     ready,
-  })
+    read: data.read,
+    watch: data.watch,
+    write: data.write,
+    withdraw: data.withdraw,
+    upload: data.upload,
+  }) as Dossier
 }

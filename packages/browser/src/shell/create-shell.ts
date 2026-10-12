@@ -12,6 +12,7 @@ import {
   type ErrorCode,
   type ErrorFields,
   type FormRef,
+  type JsonObject,
   type Me,
   type PageToShell,
   type PendingSend,
@@ -22,8 +23,10 @@ import {
   type TopBoot,
   type UploadRef,
 } from '@dossier/contracts/bridge'
+import type { ChangeSource } from './changes.ts'
 import { within } from './frames.ts'
 import type { ShellStore } from './store.ts'
+import { createWatches } from './watch.ts'
 
 export interface ViewGrant {
   readonly handle: string
@@ -34,6 +37,8 @@ export interface ViewGrant {
   readonly path: string
   /** Whom the grant is for; null for a visitor. */
   readonly email: string | null
+  /** The tree's event sequence when the view was granted: the first cursor. */
+  readonly events: number
 }
 
 /** The body of a send, as the API takes it. */
@@ -57,16 +62,19 @@ export interface SendResultWire {
   readonly replayed: boolean
 }
 
-/** The query of an upload, as the API takes it. */
+/**
+ * The query of an upload, as the API takes it. A form's file names its form
+ * and field; page code's upload has neither and is stored beside the page.
+ */
 export interface UploadParamsWire {
   readonly tree: string
   readonly page: string
   readonly seq: number
-  readonly host: string
-  readonly target: string
-  readonly id: string | null
+  readonly host?: string
+  readonly target?: string
+  readonly id?: string | null
   /** The file field's name. */
-  readonly field: string
+  readonly field?: string
   readonly name: string
   readonly type: string
   readonly size: number
@@ -78,6 +86,42 @@ export interface UploadParamsWire {
 export interface UploadResultWire extends UploadRef {
   /** The tree path of the stored file. */
   readonly path: string
+}
+
+/** Page code's write, as the API takes it. */
+export interface WritePayloadWire {
+  readonly tree: string
+  /** The page's tree path: 'board.html'. */
+  readonly page: string
+  /** A tree path, resolved by the shell: 'layout.json', 'ideas/<email>/'. */
+  readonly path: string
+  readonly patch: JsonObject
+  readonly replace: boolean
+  readonly opId: string
+  /** The page's bootstrap sequence. */
+  readonly seq: number
+  /** Whom the page was shown to: the deployment refuses anyone else. */
+  readonly as: string | null
+}
+
+/** One event the caller may read. */
+export interface EventWire {
+  readonly seq: number
+  readonly type: string
+  /** Inside the tree. */
+  readonly path: string
+  /** ISO 8601. */
+  readonly at: string
+  readonly by: string | null
+  readonly push: number | null
+}
+
+export interface EventsResponseWire {
+  readonly events: readonly EventWire[]
+  /** The last event scanned: the cursor of the next request. */
+  readonly next: number
+  /** More events follow `next`. */
+  readonly more: boolean
 }
 
 /** Every call rejects with a DossierError; offline when nothing answered. */
@@ -110,6 +154,12 @@ export interface ShellApi {
     readonly opId: string
     readonly as: string | null
   }) => Promise<void>
+  readonly write: (payload: WritePayloadWire) => Promise<DocWire>
+  /** The events after `after` that the caller may read. */
+  readonly events: (i: {
+    readonly tree: string
+    readonly after: number
+  }) => Promise<EventsResponseWire>
 }
 
 export interface ShellDeps {
@@ -118,6 +168,7 @@ export interface ShellDeps {
   readonly boot: ShellBoot
   readonly api: ShellApi
   readonly store: ShellStore
+  readonly changes: ChangeSource
 }
 
 const HOUR = 60 * 60 * 1000
@@ -130,6 +181,8 @@ export const REPLAY_INTERVAL = 30_000
  * same bytes: a purge finishes in moments, so a few short tries suffice.
  */
 export const RECLAIM_DELAYS: readonly number[] = [500, 2000, 5000]
+/** The waits before page code's request is tried again without an answer. */
+export const NO_ANSWER_WAITS: readonly number[] = [1000, 3000, 9000]
 
 const FRAME_ATTRIBUTES: Readonly<Record<string, string>> = {
   id: 'dossier-page',
@@ -202,6 +255,31 @@ const offlineError = (): DossierError =>
     path: null,
   })
 
+const unavailableError = (): DossierError =>
+  new DossierError({
+    code: 'unavailable',
+    message: ERRORS.unavailable.message,
+    fix: null,
+    path: null,
+  })
+
+/** The answer to a path that leaves the tree, or names `~` for a visitor. */
+const unresolved = (
+  code: 'not_found' | 'forbidden' | 'sign_in_required',
+  path: string,
+): DossierError =>
+  new DossierError({
+    code,
+    message:
+      code === 'sign_in_required'
+        ? 'Sign in first.'
+        : code === 'forbidden'
+          ? 'This path is not inside this tree.'
+          : 'Not found.',
+    fix: null,
+    path,
+  })
+
 const isWebUrl = (href: string): boolean => {
   try {
     const { protocol } = new URL(href)
@@ -267,7 +345,10 @@ export const createShell = (
   const tree = boot.tree.id
 
   const closePorts = (): void => {
-    for (const port of ports.keys()) port.close()
+    for (const port of ports.keys()) {
+      watches.drop(port)
+      port.close()
+    }
     ports.clear()
   }
 
@@ -331,6 +412,15 @@ export const createShell = (
     // oxlint-disable-next-line unicorn/require-post-message-target-origin
     port.postMessage(message)
   }
+
+  /** Every page's watches, on one connection for the tree. */
+  const watches = createWatches({
+    window: win,
+    tree,
+    api,
+    changes: deps.changes,
+    post,
+  })
 
   const answer = (
     port: MessagePort,
@@ -576,51 +666,148 @@ export const createShell = (
     for (const page of new Set(ports.values())) void replay(page)
   }
 
+  const sleep = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      win.setTimeout(resolve, ms)
+    })
+
+  /**
+   * Page code's request: offline only when the browser says so; the same
+   * request, op ID and all, again after an answer that never came or while a
+   * purge holds its blob; then unavailable. Any other answer is passed on.
+   */
+  const pageCall = async <T>(work: () => Promise<T>): Promise<T> => {
+    if (win.navigator.onLine === false) throw offlineError()
+    let lost = 0
+    let reclaiming = 0
+    for (;;) {
+      try {
+        return await work()
+      } catch (error) {
+        const code = codeOf(error)
+        // The API answers offline only when the request got no answer.
+        const noAnswer = code === 'offline'
+        if (!noAnswer && code !== 'blob_reclaiming') throw error
+        const waits = noAnswer ? NO_ANSWER_WAITS : RECLAIM_DELAYS
+        const tries = noAnswer ? lost++ : reclaiming++
+        const wait = waits[tries]
+        if (wait === undefined || disposed) throw unavailableError()
+        await sleep(wait)
+        if (disposed) throw unavailableError()
+      }
+    }
+  }
+
+  const reply = (
+    port: MessagePort,
+    id: number,
+    work: Promise<unknown>,
+  ): void => {
+    work.then(
+      (value) => answer(port, id, { value }),
+      (error: unknown) => answer(port, id, { error }),
+    )
+  }
+
   const onRequest = (
     port: MessagePort,
     page: string,
     request: Request,
   ): void => {
     const email = boot.me?.email ?? null
+    /** The tree path, or the answer for one that leaves the tree. */
+    const resolve = (
+      path: string,
+      missing: 'not_found' | 'forbidden',
+    ): string | null => {
+      const resolved = resolvePath(page, path, email)
+      if (resolved !== null) return resolved
+      const code =
+        email === null && path.includes('~') && missing === 'forbidden'
+          ? 'sign_in_required'
+          : missing
+      answer(port, request.id, { error: unresolved(code, path) })
+      return null
+    }
     switch (request.op) {
       case 'read': {
-        const path = resolvePath(page, request.path, email)
-        if (path === null) {
-          answer(port, request.id, {
-            error: new DossierError({
-              code: 'not_found',
-              message: 'Not found.',
-              fix: null,
-              path: request.path,
-            }),
-          })
-          return
-        }
-        api.read({ tree, path }).then(
-          (value) => answer(port, request.id, { value }),
-          (error: unknown) => answer(port, request.id, { error }),
+        const path = resolve(request.path, 'not_found')
+        if (path === null) return
+        reply(
+          port,
+          request.id,
+          pageCall(() => api.read({ tree, path })),
         )
         return
       }
       case 'withdraw': {
-        const path = resolvePath(page, request.path, email)
-        if (path === null) {
-          answer(port, request.id, {
-            error: new DossierError({
-              code: 'not_found',
-              message: 'Not found.',
-              fix: null,
-              path: request.path,
-            }),
-          })
-          return
-        }
-        api.withdraw({ tree, path, opId: request.opId, as: shownTo() }).then(
-          () => answer(port, request.id, { value: null }),
-          (error: unknown) => answer(port, request.id, { error }),
+        const path = resolve(request.path, 'not_found')
+        if (path === null) return
+        reply(
+          port,
+          request.id,
+          pageCall(() =>
+            api.withdraw({ tree, path, opId: request.opId, as: shownTo() }),
+          ).then(() => null),
         )
         return
       }
+      case 'write': {
+        const path = resolve(request.path, 'forbidden')
+        if (path === null) return
+        reply(
+          port,
+          request.id,
+          pageCall(() =>
+            api.write({
+              tree,
+              page,
+              path,
+              patch: request.patch,
+              replace: request.replace,
+              opId: request.opId,
+              seq: request.seq,
+              as: shownTo(),
+            }),
+          ),
+        )
+        return
+      }
+      case 'upload': {
+        const { file } = request
+        let digest: string | null = null
+        reply(
+          port,
+          request.id,
+          pageCall(async () => {
+            digest ??= await sha256(file)
+            return api.upload({
+              tree,
+              page,
+              seq: request.seq,
+              name: request.name,
+              type: request.contentType || 'application/octet-stream',
+              size: file.size,
+              sha256: digest,
+              opId: request.opId,
+              as: shownTo(),
+              body: file,
+            })
+          }),
+        )
+        return
+      }
+      case 'watch': {
+        const path = resolve(request.path, 'forbidden')
+        if (path === null) return
+        watches.add({ port, sub: request.sub, path })
+        answer(port, request.id, { value: null })
+        return
+      }
+      case 'unwatch':
+        watches.remove(port, request.sub)
+        answer(port, request.id, { value: null })
+        return
       case 'send':
         void onSend(port, page, request.id, request.send)
         return
@@ -666,6 +853,7 @@ export const createShell = (
     const state = await pageState(treePath(grant.path))
     if (current !== loads || disposed) return
     win.clearTimeout(retryTimer)
+    watches.seen(grant.events)
     shown = current
     handle = grant.handle
     framedHandle = grant.handle
@@ -781,7 +969,8 @@ export const createShell = (
       return
     }
     // A nested page says which page it is; the deployment confirms it for
-    // this person before it gets drafts or sends anything.
+    // this person before it gets drafts or asks anything: sends, reads,
+    // writes, uploads and watches all wait for a listening port.
     const navigation = shown
     api.confirm({ tree, page }).then(
       (found) => {
@@ -860,6 +1049,7 @@ export const createShell = (
       win.removeEventListener('popstate', onPopState)
       doc.removeEventListener('visibilitychange', onVisibility)
       closePorts()
+      watches.dispose()
     },
   }
 }
