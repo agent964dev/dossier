@@ -225,8 +225,314 @@ a:hover > .mark-glow {
   animation: rise-in 0.36s var(--ease-agent) both;
 }
 
+/* =============================================================================
+ * FRONT PAGE — the figures a visitor sees before signing in.
+ *
+ * Each figure loops on one clock (--lp-loop). A part joins at its --lp-at
+ * and leaves near the end of its own loop, so parts leave in the order they
+ * came and every figure holds its finished frame for a few seconds. A part's
+ * resting style is its finished state, so with reduced motion each figure is
+ * one complete, still frame; parts that only show motion (a travelling dot,
+ * a ping, a highlight) rest hidden. Never put a part's class on an element
+ * with a transform attribute: the animation's transform replaces it.
+ * ============================================================================= */
+
+.lp-figure {
+  --lp-loop: 12s;
+  overflow: visible;
+}
+
+.lp-in,
+.lp-type,
+.lp-grow,
+.lp-rise,
+.lp-draw,
+.lp-move,
+.lp-ping,
+.lp-flash {
+  animation-duration: var(--lp-loop);
+  animation-delay: var(--lp-at, 0s);
+  animation-iteration-count: infinite;
+  animation-fill-mode: backwards;
+  animation-timing-function: var(--ease-agent);
+}
+
+@keyframes lp-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  5%,
+  86% {
+    opacity: 1;
+    transform: none;
+  }
+  94%,
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+}
+
+.lp-in {
+  animation-name: lp-in;
+}
+
+/* Typed text: revealed left to right, a few characters at a time. */
+@keyframes lp-type {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    animation-timing-function: steps(12, end);
+  }
+  8%,
+  86% {
+    clip-path: inset(0);
+    opacity: 1;
+  }
+  94%,
+  100% {
+    clip-path: inset(0);
+    opacity: 0;
+  }
+}
+
+.lp-type {
+  animation-name: lp-type;
+}
+
+@keyframes lp-grow {
+  0% {
+    transform: scaleX(0);
+  }
+  10%,
+  86% {
+    transform: none;
+    opacity: 1;
+  }
+  94%,
+  100% {
+    transform: none;
+    opacity: 0;
+  }
+}
+
+.lp-grow {
+  animation-name: lp-grow;
+  transform-box: fill-box;
+  transform-origin: 0 50%;
+}
+
+@keyframes lp-rise {
+  0% {
+    transform: scaleY(0);
+  }
+  7%,
+  86% {
+    transform: none;
+    opacity: 1;
+  }
+  94%,
+  100% {
+    transform: none;
+    opacity: 0;
+  }
+}
+
+.lp-rise {
+  animation-name: lp-rise;
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+
+/* A line drawn along its length; give it pathLength="1". */
+@keyframes lp-draw {
+  0% {
+    stroke-dashoffset: 1;
+  }
+  8%,
+  86% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  94%,
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+.lp-draw {
+  animation-name: lp-draw;
+  stroke-dasharray: 1;
+}
+
+/* A dot travelling to --lp-dx/--lp-dy, turning at --lp-cx/--lp-cy. */
+@keyframes lp-move {
+  0% {
+    opacity: 0;
+    transform: none;
+  }
+  1% {
+    opacity: 1;
+  }
+  5% {
+    transform: translate(var(--lp-cx, var(--lp-dx, 0px)), var(--lp-cy, 0px));
+  }
+  9% {
+    opacity: 1;
+    transform: translate(var(--lp-dx, 0px), var(--lp-dy, 0px));
+  }
+  11%,
+  100% {
+    opacity: 0;
+    transform: translate(var(--lp-dx, 0px), var(--lp-dy, 0px));
+  }
+}
+
+.lp-move {
+  animation-name: lp-move;
+  animation-timing-function: linear;
+  opacity: 0;
+}
+
+@keyframes lp-ping {
+  0% {
+    opacity: 0;
+    transform: none;
+  }
+  1% {
+    opacity: 0.9;
+  }
+  8%,
+  100% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+}
+
+.lp-ping {
+  animation-name: lp-ping;
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+}
+
+@keyframes lp-flash {
+  0% {
+    opacity: 0;
+  }
+  2% {
+    opacity: 1;
+  }
+  16%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.lp-flash {
+  animation-name: lp-flash;
+  opacity: 0;
+}
+
+@keyframes lp-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.lp-caret {
+  animation: lp-blink 1.1s steps(1, end) infinite;
+}
+
+/* Figure surfaces: the window or terminal a part sits in. */
+.lp-surface {
+  fill: var(--card);
+  stroke: color-mix(in oklab, var(--neutral-700) 75%, transparent);
+}
+
+.lp-console {
+  fill: var(--neutral-950);
+  stroke: color-mix(in oklab, var(--neutral-600) 80%, transparent);
+}
+
+.lp-field {
+  fill: color-mix(in oklab, var(--neutral-800) 60%, transparent);
+  stroke: var(--border);
+  rx: clamp(2px, calc(var(--radius) - 4px), 8px);
+}
+
+/* Windows and cards round their corners as the Look's own cards do. */
+.lp-frame {
+  rx: min(calc(var(--radius) + 2px), 14px);
+}
+
+/* The light behind the hero, and the stage each figure stands on. */
+.lp-atmosphere {
+  background:
+    radial-gradient(
+      55% 45% at 78% 18%,
+      color-mix(in oklab, var(--brand-300) 13%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      40% 35% at 8% 0%,
+      color-mix(in oklab, var(--accent-500) 9%, transparent),
+      transparent 70%
+    );
+}
+
+.lp-dots {
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--neutral-700) 55%, transparent) 1px,
+    transparent 1.5px
+  );
+  background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse 70% 60% at 70% 30%, #000, transparent);
+}
+
+.lp-stage {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 8px);
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--card) 75%, transparent),
+    color-mix(in oklab, var(--card) 25%, transparent)
+  );
+  box-shadow: inset 0 1px 0 0
+    color-mix(in oklab, var(--neutral-50) 4%, transparent);
+}
+
+.lp-stage::before {
+  content: '';
+  position: absolute;
+  inset-inline: 14%;
+  top: -1px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--glow-cyan) 50%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* The second sentence of the headline glows on dark Looks only. */
+.dark .lp-glow {
+  text-shadow:
+    0 0 18px color-mix(in oklab, var(--glow-cyan) 30%, transparent),
+    0 0 56px color-mix(in oklab, var(--glow-cyan) 14%, transparent);
+}
+
 /* A hard contract: reduced motion collapses every animation and transition. */
 @media (prefers-reduced-motion: reduce) {
+  /* Every figure rests on its finished frame. */
+  .lp-figure * {
+    animation: none !important;
+  }
+
   *,
   *::before,
   *::after {

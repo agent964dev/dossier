@@ -1,18 +1,12 @@
-import {
-  createFileRoute,
-  Link,
-  redirect,
-  useNavigate,
-} from '@tanstack/react-router'
+import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
 import { FileText, Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
 import { LocalTime } from '../components/local-time'
-import { HostName } from '../components/host-name'
 import { MentionedBadge } from '../components/mentioned-badge'
-import { PrivacyLink } from '../components/privacy-link'
 import { SearchField } from '../components/search-field'
 import { AppHeader } from '../components/app-header'
+import { LandingPage } from '../components/landing-page'
 import { SectionLabel } from '../components/section-label'
 import { Note } from '../components/settings-parts'
 import { Badge } from '../components/ui/badge'
@@ -45,7 +39,14 @@ export const Route = createFileRoute('/')({
     return view
   },
   head: ({ loaderData }) => ({
-    meta: [{ title: loaderData?.deployment ?? 'Dossier' }],
+    meta: [
+      { title: loaderData?.deployment ?? 'Dossier' },
+      {
+        name: 'description',
+        content:
+          "Your agents write the page. Dossier handles the rest: pages that share a theme and layout, forms that keep each person's answers, sharing with any Google account, and a version agents can read.",
+      },
+    ],
   }),
   component: HomeScreen,
 })
@@ -53,30 +54,9 @@ export const Route = createFileRoute('/')({
 function HomeScreen() {
   const view = Route.useLoaderData()
   return view.me === null ? (
-    <FrontPage deployment={view.deployment} />
+    <LandingPage deployment={view.deployment} />
   ) : (
     <Home view={view} me={view.me} />
-  )
-}
-
-function FrontPage({ deployment }: { deployment: string }) {
-  return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 px-6 py-12">
-      <span className="inline-flex w-fit items-center gap-1.5 rounded-md border border-brand-300/35 bg-brand-300/10 px-2 py-0.5 font-mono text-[0.625rem] tracking-[0.16em] text-brand-200 uppercase">
-        <span aria-hidden className="size-1.5 rounded-full bg-brand-300" />
-        Dossier
-      </span>
-      <h1 className="font-clash text-[2rem] leading-[1.05] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
-        <HostName host={deployment} />
-      </h1>
-      <p className="text-neutral-400">
-        Open what is shared with you, signed in with your Google account.
-      </p>
-      <Button asChild size="lg" className="w-full">
-        <Link to="/_/sign-in">Sign in with Google</Link>
-      </Button>
-      <PrivacyLink />
-    </main>
   )
 }
 
