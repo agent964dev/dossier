@@ -9,6 +9,8 @@ import embedding from './guide/embedding.md' with { type: 'text' }
 import forms from './guide/forms.md' with { type: 'text' }
 import kitFiles from './guide/kit-files.md' with { type: 'text' }
 import layouts from './guide/layouts.md' with { type: 'text' }
+import liveData from './guide/live-data.md' with { type: 'text' }
+import pageClient from './guide/page-client.md' with { type: 'text' }
 import reading from './guide/reading.md' with { type: 'text' }
 import themes from './guide/themes.md' with { type: 'text' }
 import treeAndLinks from './guide/tree-and-links.md' with { type: 'text' }
@@ -48,6 +50,8 @@ const CONVENTIONS: readonly string[] = [
   baseLayer,
   embedding,
   forms,
+  pageClient,
+  liveData,
   agentVersions,
   reading,
 ]

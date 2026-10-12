@@ -17,12 +17,22 @@ export interface CliIo {
   readonly stderr: (text: string) => void
   readonly configPath: string
   readonly cwd: string
-  /** Waits between device polls; tests pass one that only records. */
-  readonly sleep?: (ms: number) => Promise<void>
+  /**
+   * Waits between polls; settles early when the signal aborts. Tests pass one
+   * that only records.
+   */
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   /** Opens a link in the browser, best effort. */
   readonly openUrl?: (url: string) => void
   /** Names the device: "cli on <hostname>". */
   readonly hostname?: string
+  /** Opens live connections for `dossier watch`; tests pass a fake. */
+  readonly webSocket?: typeof globalThis.WebSocket
+  /**
+   * Calls `stop` on Ctrl-C instead of ending the process; answers a function
+   * that gives Ctrl-C back.
+   */
+  readonly onInterrupt?: (stop: () => void) => () => void
 }
 
 /** The running command's io and output. */
@@ -31,8 +41,24 @@ export class Cli extends Context.Tag('dossier/Cli')<
   { readonly io: CliIo; readonly output: Output }
 >() {}
 
-export const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms))
+export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+
+const onInterrupt = (stop: () => void): (() => void) => {
+  process.once('SIGINT', stop)
+  return () => {
+    process.off('SIGINT', stop)
+  }
+}
 
 const browserCommand = (url: string): [string, string[]] => {
   switch (process.platform) {
@@ -66,4 +92,8 @@ export const nodeIo = (): CliIo => ({
   sleep,
   openUrl,
   hostname: hostname().split('.')[0] || hostname(),
+  ...(typeof globalThis.WebSocket === 'function'
+    ? { webSocket: globalThis.WebSocket }
+    : {}),
+  onInterrupt,
 })

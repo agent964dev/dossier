@@ -1,3 +1,4 @@
+import { PAGE_ERROR_CODES } from '@dossier/contracts/bridge'
 import { describe, expect, it } from 'vitest'
 
 import { verbs } from './commands/index.ts'
@@ -13,6 +14,8 @@ const TITLES = [
   'Base layer',
   'Embedding',
   'Forms',
+  'Page client',
+  'Live data',
   'Agent versions',
   'Reading',
 ]
@@ -81,6 +84,55 @@ describe('the agent guide', () => {
         TITLES,
       )
       expect(data).toEqual(guide())
+    } finally {
+      await cli.cleanup()
+    }
+  })
+
+  it('gives agents the page client: its calls, path rules, ten error codes and the live example', async () => {
+    const fetch = stubFetch(() => new Response(null, { status: 500 }))
+    const cli = await harness({ fetch: fetch.fetch })
+    try {
+      expect(await cli.run(['--agent-info'])).toBe(0)
+      const markdown = cli.stdout()
+      for (const call of [
+        'dossier.me',
+        'dossier.page // { path, push, embedded, exported }',
+        'await dossier.ready',
+        'dossier.read(path)',
+        'dossier.watch(path, onChange)',
+        'dossier.write(path, patch, { replace })',
+        'dossier.withdraw(path)',
+        'dossier.upload(file)',
+        '`{ path, data, by, at, push }`',
+        "`write('ideas/~/', patch)`",
+        '`<page name>.uploads/<email>/<name>`',
+      ]) {
+        expect(markdown).toContain(call)
+      }
+      for (const rule of [
+        'Paths are relative to the page, like a URL',
+        '`/` starts at the tree root and\nnever goes above it',
+        "`~` is the viewer's email",
+        '`answers/~.json` is `questions/answers/sara@acme.com.json`',
+        '`../../../x.json` leaves the tree and is refused with `forbidden`',
+      ]) {
+        expect(markdown).toContain(rule)
+      }
+      expect(markdown).toContain('`DossierError { code, message, fix, path }`')
+      for (const code of PAGE_ERROR_CODES) {
+        expect(markdown).toContain(`- \`${code}\`: `)
+      }
+      expect(markdown).toContain('Any other code\n  arrives as `unavailable`')
+      for (const line of [
+        "customElements.define('acme-results', AcmeResults)",
+        "this.stop = dossier.watch(this.getAttribute('src'), (docs) =>",
+        '`<acme-results src="../questions/answers/"></acme-results>`',
+        'Paths resolve from\nthe page, not the module',
+        'dossier watch <workspace>/<tree>/<path>',
+      ]) {
+        expect(markdown).toContain(line)
+      }
     } finally {
       await cli.cleanup()
     }

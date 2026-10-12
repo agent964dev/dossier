@@ -5,6 +5,7 @@ import { pull } from './pull.ts'
 import { push } from './push.ts'
 import { read } from './read.ts'
 import { update } from './update.ts'
+import { watch } from './watch.ts'
 import { whoami } from './whoami.ts'
 
 /** Every verb, in the order help and the agent guide list them. */
@@ -17,4 +18,5 @@ export const verbs = [
   pull,
   ls,
   read,
+  watch,
 ] as const

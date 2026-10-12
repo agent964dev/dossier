@@ -78,6 +78,10 @@ export interface Harness {
 export const harness = async (options: {
   readonly fetch: typeof globalThis.fetch
   readonly env?: Record<string, string | undefined>
+  /** Replaces the recording sleep; the harness still records each wait. */
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+  readonly webSocket?: typeof globalThis.WebSocket
+  readonly onInterrupt?: (stop: () => void) => () => void
 }): Promise<Harness> => {
   const dir = await mkdtemp(join(tmpdir(), 'dossier-cli-'))
   const configPath = join(dir, 'dossier', 'config.json')
@@ -96,13 +100,20 @@ export const harness = async (options: {
     },
     configPath,
     cwd: dir,
-    sleep: async (ms) => {
+    sleep: async (ms, signal) => {
       sleeps.push(ms)
+      await options.sleep?.(ms, signal)
     },
     openUrl: (url) => {
       opened.push(url)
     },
     hostname: 'm4',
+    ...(options.webSocket === undefined
+      ? {}
+      : { webSocket: options.webSocket }),
+    ...(options.onInterrupt === undefined
+      ? {}
+      : { onInterrupt: options.onInterrupt }),
   }
   return {
     dir,

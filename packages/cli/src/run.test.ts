@@ -144,6 +144,7 @@ describe('the agent guide', () => {
     )
     expect(markdown).toContain('dossier pull [--json] <target> <dir>')
     expect(markdown).toContain('dossier ls [--json] <target>')
+    expect(markdown).toContain('dossier watch [--next] [--json] <target>')
     for (const [code, meaning] of [
       [0, 'success'],
       [1, 'failure'],
@@ -173,6 +174,7 @@ describe('the agent guide', () => {
       'pull',
       'ls',
       'read',
+      'watch',
     ])
     expect(Object.keys(data.exitCodes)).toEqual([
       '0',
