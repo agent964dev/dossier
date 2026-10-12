@@ -69,6 +69,7 @@ const OWN_STYLES = `
   outline: 2px solid var(--ring, currentColor); outline-offset: 2px;
 }
 :where(.dossier-diff-code:empty) { display: none; }
+:where(.dossier-diff-code [data-line]) { unicode-bidi: plaintext; }
 `
 
 /** A --dossier-code- variable with its light-dark() default. */

@@ -474,4 +474,22 @@ describe('<dossier-diff>', () => {
     expectBaseLayerFirst()
     expect(library.textContent).not.toContain(':host')
   }, 20_000)
+
+  test('lets each line take the direction of its own text, so Arabic reads right to left in the left-to-right grid', async () => {
+    sizing()
+    const diff = diffPage('before="v1/plan.md" after="plan.md" lang="text"')
+    await loaded(diff)
+    const own = document.querySelector(
+      'style[data-dossier-base="dossier-diff"]',
+    )!
+    const rule = /([^{}]+)\{[^}]*unicode-bidi:\s*plaintext/.exec(
+      own.textContent ?? '',
+    )
+    expect(rule).not.toBeNull()
+    const lines = diff.querySelectorAll('[data-line]')
+    expect(lines.length).toBeGreaterThan(0)
+    // happy-dom cannot match :where() with a combinator; read it instead.
+    const scoped = /^:where\((.*)\)$/.exec(rule![1]!.trim())![1]!
+    for (const line of lines) expect(line.matches(scoped)).toBe(true)
+  }, 20_000)
 })
