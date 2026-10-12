@@ -181,6 +181,9 @@ export class DossierDiff extends HTMLElement {
     files.className = 'dossier-diff-files'
     const counts = doc.createElement('span')
     counts.className = 'dossier-diff-counts'
+    // "−2 +3" keeps its signs before its numbers in a right-to-left page.
+    counts.dir = 'ltr'
+    files.dir = 'auto'
     toolbar.append(files, counts)
     const status = doc.createElement('p')
     status.className = 'dossier-diff-status'

@@ -387,6 +387,9 @@ describe('<dossier-diff>', () => {
     expect(
       diff.querySelector('.dossier-diff-toolbar')!.hasAttribute('dir'),
     ).toBe(false)
+    expect(
+      diff.querySelector('.dossier-diff-counts')!.getAttribute('dir'),
+    ).toBe('ltr')
     const code = diff.querySelector('.dossier-diff-code')!
     expect(code.getAttribute('dir')).toBe('ltr')
     expect(code.getAttribute('tabindex')).toBe('0')
