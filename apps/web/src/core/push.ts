@@ -240,6 +240,11 @@ const COMMIT_TRIES = 8
 /** The first wait before checking again; it doubles, with jitter. */
 const BACKOFF_MS = 20
 const BACKOFF_CAP_MS = 640
+/**
+ * How long a commit may keep trying, well inside the CLI's 30-second request
+ * timeout: no new try starts unless the longest try so far still fits.
+ */
+const COMMIT_BUDGET_MS = 20_000
 
 interface StagedPush {
   readonly id: PushId
@@ -1227,41 +1232,66 @@ export const PushLive: Layer.Layer<
     >
 
     /**
-     * Commits, checking again with a jittered, doubling wait while other
-     * pushes keep moving the tree. A push whose own path moved answers
-     * stale_head from its check; a tree that stays too busy answers conflict.
+     * The answer when a commit stops trying: stale_head if the push's own
+     * path moved since its base, read fresh now; otherwise conflict. A rule
+     * refusal read from a tree that kept moving is never the answer.
      */
-    const commit = (pushId: PushId) => {
-      const attempt = (
-        tried: number,
-      ): Effect.Effect<CommitResult, CommitError, CurrentCaller> =>
-        commitOnce(pushId).pipe(
-          Effect.catchAll(
-            (
-              error,
-            ): Effect.Effect<CommitResult, CommitError, CurrentCaller> => {
-              if (!(error instanceof Retry)) return Effect.fail(error)
-              if (tried + 1 >= COMMIT_TRIES) {
-                return Effect.fail(
-                  error.contention
-                    ? dossierError(
-                        'conflict',
-                        'Other pushes kept changing this tree, so nothing was applied.',
-                        'Push again.',
-                      )
-                    : (error.error as CommitError),
-                )
-              }
-              const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_MS * 2 ** tried)
-              return Random.nextIntBetween(ceiling / 2, ceiling + 1).pipe(
-                Effect.flatMap((ms) => Effect.sleep(ms)),
-                Effect.zipRight(attempt(tried + 1)),
-              )
-            },
-          ),
-        )
-      return attempt(0)
-    }
+    const exhausted = (pushId: PushId) =>
+      Effect.gen(function* () {
+        const push = yield* stagedPush(pushId)
+        const workspace = yield* store.workspace(push.workspace_name)
+        const tree =
+          workspace === null
+            ? null
+            : yield* store.tree(workspace, push.tree_name)
+        if (tree !== null && push.force === 0) {
+          const since = yield* pushedSince(
+            tree.id,
+            push.path,
+            push.base_seq ?? 0,
+          )
+          if (since.length > 0) {
+            return staleHead(
+              push.workspace_name,
+              tree.name,
+              push.path,
+              since,
+            ) as CommitError
+          }
+        }
+        return dossierError(
+          'conflict',
+          'Other pushes kept changing this tree, so nothing was applied.',
+          'Push again.',
+        ) as CommitError
+      })
+
+    /**
+     * Commits, checking again with a jittered, doubling wait while other
+     * pushes keep moving the tree, within a number of tries and a time
+     * budget. Running out of either answers through `exhausted`.
+     */
+    const commit = (pushId: PushId) =>
+      Effect.gen(function* () {
+        const started = yield* Clock.currentTimeMillis
+        let longest = 0
+        for (let tried = 0; ; tried += 1) {
+          const begun = yield* Clock.currentTimeMillis
+          const outcome = yield* Effect.either(commitOnce(pushId))
+          const ended = yield* Clock.currentTimeMillis
+          longest = Math.max(longest, ended - begun)
+          if (outcome._tag === 'Right') return outcome.right
+          const error = outcome.left
+          if (!(error instanceof Retry)) return yield* Effect.fail(error)
+          const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_MS * 2 ** tried)
+          const wait = yield* Random.nextIntBetween(ceiling / 2, ceiling + 1)
+          const outOfTime = ended - started + wait + longest > COMMIT_BUDGET_MS
+          if (tried + 1 >= COMMIT_TRIES || outOfTime) {
+            return yield* Effect.fail(yield* exhausted(pushId))
+          }
+          yield* Effect.sleep(wait)
+        }
+      }) as Effect.Effect<CommitResult, CommitError, CurrentCaller>
 
     return { stage, putBlob, commit }
   }),

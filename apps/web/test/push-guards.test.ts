@@ -675,3 +675,194 @@ describe('the second look at a push', () => {
     expect(await nodeAt(first.treeId, 'answers/x.txt')).toBeDefined()
   })
 })
+
+/**
+ * The real database, with `run` landing another change at each matching
+ * moment of a commit: after every page read, or before every batch (after
+ * an optional delay, as a slow D1 would add). Changes `run` makes itself
+ * pass straight through.
+ */
+const everyTime = (
+  database: D1Database,
+  at: {
+    readonly read?: string
+    readonly batch?: string
+    readonly delayMs?: number
+  },
+  run: (count: number) => Promise<unknown>,
+): D1Database => {
+  let busy = false
+  let count = 0
+  const fire = async () => {
+    if (busy) return
+    busy = true
+    count += 1
+    try {
+      if (at.delayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, at.delayMs))
+      }
+      await run(count)
+    } finally {
+      busy = false
+    }
+  }
+  const marked = new WeakSet<object>()
+  const real = new WeakMap<object, D1PreparedStatement>()
+  const wrap = (
+    statement: D1PreparedStatement,
+    sql: string,
+  ): D1PreparedStatement => {
+    const proxy: D1PreparedStatement = new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values), sql)
+        }
+        if (
+          property === 'all' &&
+          at.read !== undefined &&
+          sql.includes(at.read)
+        ) {
+          return async () => {
+            const result = await target.all()
+            await fire()
+            return result
+          }
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    real.set(proxy, statement)
+    if (at.batch !== undefined && sql.includes(at.batch)) marked.add(proxy)
+    return proxy
+  }
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => wrap(target.prepare(query), query)
+      }
+      if (property === 'batch') {
+        return async (statements: D1PreparedStatement[]) => {
+          if (statements.some((s) => marked.has(s))) await fire()
+          return target.batch(statements.map((s) => real.get(s) ?? s))
+        }
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+describe('when a commit runs out of tries', () => {
+  /** A push elsewhere in the tree, enough to move it. */
+  const noise = (caller: Caller, ws: string) =>
+    pushAll(
+      caller,
+      `${ws}/acme/noise`,
+      { 'n.txt': crypto.randomUUID() },
+      { force: true },
+    )
+
+  const commitUnder = async (
+    caller: Caller,
+    pushId: PushId,
+    db: D1Database,
+  ) => {
+    harness.use(testRuntime({ env: { DB: db } }))
+    try {
+      return await runAs(
+        caller,
+        Effect.flatMap(Push, (push) => push.commit(pushId)).pipe(Effect.either),
+      )
+    } finally {
+      harness.reset()
+    }
+  }
+
+  it('never answers a rule refusal read from a tree that kept moving', async () => {
+    const { ws, key } = await setUp()
+    const first = committed(
+      await pushAll(key, `${ws.name}/acme`, {
+        'question.html':
+          '<title>Q</title>\n<form method="post" action="answers/"><input name="a"></form>',
+      }),
+    )
+    const files = { 'x.txt': 'authored' }
+    const p = await stage(key, `${ws.name}/acme/answers`, files, {
+      baseSeq: first.seq,
+      baseTree: first.treeId,
+    })
+    await upload(key, p.pushId as PushId, files, p.missing)
+    const outcome = await commitUnder(
+      key,
+      p.pushId as PushId,
+      everyTime(env.DB, { read: "like '%.html'" }, () => noise(key, ws.name)),
+    )
+    expect(outcome._tag).toBe('Left')
+    if (outcome._tag === 'Left') expect(outcome.left.code).toBe('conflict')
+  })
+
+  it('answers stale_head when its own path moved during the last try', async () => {
+    const { ws, key } = await setUp()
+    const first = committed(
+      await pushAll(key, `${ws.name}/acme`, {
+        'index.html': '<title>A</title>',
+      }),
+    )
+    const files = { 'x.txt': 'mine' }
+    const p = await stage(key, `${ws.name}/acme/p`, files, {
+      baseSeq: first.seq,
+      baseTree: first.treeId,
+    })
+    await upload(key, p.pushId as PushId, files, p.missing)
+    const outcome = await commitUnder(
+      key,
+      p.pushId as PushId,
+      everyTime(env.DB, { batch: 'insert into change_guards' }, (count) =>
+        count < 8
+          ? noise(key, ws.name)
+          : pushAll(
+              key,
+              `${ws.name}/acme/p`,
+              { 'y.txt': 'theirs' },
+              { force: true },
+            ),
+      ),
+    )
+    expect(outcome._tag).toBe('Left')
+    if (outcome._tag === 'Left') expect(outcome.left.code).toBe('stale_head')
+  })
+
+  it(
+    'stops trying well inside the CLI timeout when D1 is slow',
+    { timeout: 90_000 },
+    async () => {
+      const { ws, key } = await setUp()
+      const first = committed(
+        await pushAll(key, `${ws.name}/acme`, {
+          'index.html': '<title>A</title>',
+        }),
+      )
+      const files = { 'x.txt': 'mine' }
+      const p = await stage(key, `${ws.name}/acme/p`, files, {
+        baseSeq: first.seq,
+        baseTree: first.treeId,
+      })
+      await upload(key, p.pushId as PushId, files, p.missing)
+      const started = Date.now()
+      const outcome = await commitUnder(
+        key,
+        p.pushId as PushId,
+        everyTime(
+          env.DB,
+          { batch: 'insert into change_guards', delayMs: 4_000 },
+          () => noise(key, ws.name),
+        ),
+      )
+      const elapsed = Date.now() - started
+      expect(outcome._tag).toBe('Left')
+      if (outcome._tag === 'Left') expect(outcome.left.code).toBe('conflict')
+      expect(elapsed).toBeLessThan(25_000)
+    },
+  )
+})
