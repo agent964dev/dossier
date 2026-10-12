@@ -468,7 +468,7 @@ describe('dossier watch', () => {
     expect(await cli.run(['watch', 'agent964/live/nope/'])).toBe(3)
     expect(log).toEqual(['events', 'socket', 'events'])
     expect(cli.stderr()).toContain(
-      'dossier: Stopped. live/nope/ was not found, or you cannot open it.\n' +
+      'dossier: Stopped. agent964/live/nope/ was not found, or you cannot open it.\n' +
         'Check the path, or ask someone who can open it to share it with you.\n',
     )
     expect(cli.stdout()).toBe('')
@@ -485,7 +485,8 @@ describe('dossier watch', () => {
     expect(sockets.made).toHaveLength(0)
     expect(JSON.parse(cli.stdout()).error).toMatchObject({
       code: 3,
-      message: 'Stopped. live/nope/ was not found, or you cannot open it.',
+      message:
+        'Stopped. agent964/live/nope/ was not found, or you cannot open it.',
     })
   })
 

@@ -44,15 +44,12 @@ export const describeRead = (result: ReadResult): string => {
 }
 
 /**
- * The path the read endpoint takes. A folder keeps its trailing slash:
- * `open/` names the folder even when `open.html` exists beside it.
+ * The path the read endpoint takes, and how a refusal names what was asked.
+ * A folder keeps its trailing slash: `open/` names the folder even when
+ * `open.html` exists beside it.
  */
 export const readPath = (ref: LinkRef): string =>
   ref.folder && ref.path !== '' ? `${targetString(ref)}/` : targetString(ref)
-
-/** 'acme/pricing', the way a person names what they asked for. */
-const asked = (ref: LinkRef) =>
-  ref.path === '' ? ref.tree : `${ref.tree}/${ref.path}`
 
 export const read = Command.make(
   'read',
@@ -78,7 +75,7 @@ export const read = Command.make(
             Effect.fail(
               dossierError(
                 'not_found',
-                `Stopped. ${asked(ref)} was not found, or you cannot open it.`,
+                `Stopped. ${readPath(ref)} was not found, or you cannot open it.`,
                 (error as DossierError).fix,
                 (error as DossierError).path,
               ),

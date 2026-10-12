@@ -99,7 +99,7 @@ export const watchEvents = (i: {
     const { deployment, key } = i.remote
     const tree = treeOf(i.ref)
     const path = watchedPath(i.ref)
-    const asked = path === null ? i.ref.tree : `${i.ref.tree}/${path}`
+    const asked = path === null ? tree : `${tree}/${path}`
 
     const fetchEvents = (after: string | undefined) =>
       callApi(deployment, key, (client) =>
