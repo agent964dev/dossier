@@ -282,8 +282,24 @@ describe('signing in with Google', () => {
     expect(await photoOf(sara.email)).toEqual({ name: 'Sara H.', image: next })
 
     // An account Google sends no photo for has none, then or later.
-    await signedIn({ ...sara, picture: null })
+    const later = await signedIn({ ...sara, picture: null })
     expect((await photoOf(sara.email))?.image).toBeNull()
+
+    // Only Google sets them: the sign-in library's own profile edit is closed.
+    const edit = await later.fetch('/_/auth/update-user', {
+      purpose: 'write',
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Someone else',
+        image: 'https://example.net/pixel',
+      }),
+    })
+    expect(edit.status).toBe(404)
+    expect(await photoOf(sara.email)).toEqual({
+      name: 'Sara Haddad',
+      image: null,
+    })
     const plain = { ...fresh('agent964.com', 'plain'), picture: null }
     await signedIn(plain)
     expect((await photoOf(plain.email))?.image).toBeNull()

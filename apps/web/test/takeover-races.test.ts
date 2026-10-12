@@ -81,10 +81,11 @@ describe('a takeover racing the account it detaches', () => {
     // Better Auth's own session routes do not accept it either.
     const session = await late.fetch('/_/auth/get-session', { purpose: 'read' })
     expect(await session.json()).toBeNull()
+    // Nor can it rename the person: that route is closed to everyone.
     const rename = await late.postAuth('/_/auth/update-user', {
       name: 'not yours',
     })
-    expect(rename.status).toBe(401)
+    expect(rename.status).toBe(404)
     expect(
       await rows(
         'select 1 from "user" where email = ? and name = ?',
