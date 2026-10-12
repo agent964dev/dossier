@@ -8,6 +8,7 @@ import {
   type CommitResult,
   type StageResult,
 } from '../src/core/index.ts'
+import { bearerOf } from '../src/edge/caller.ts'
 import { Browser, signedIn } from './support/browser.ts'
 import { harness, ORIGIN } from './support/harness.ts'
 import { everything } from './support/keys.ts'
@@ -288,5 +289,61 @@ describe('a folder beside a page of the same name', () => {
     expect(own.status).toBe(200)
     expect(own.body).toMatchObject({ kind: 'folder', path: 'open' })
     expect((await read(`${ws.name}/twins/open`, scoped)).status).toBe(404)
+  })
+})
+
+describe('several credentials in one Authorization value', () => {
+  const scopedKey = async () =>
+    (
+      await runAs(
+        await callerOf(owner),
+        Effect.flatMap(SignIn, (signIn) =>
+          signIn.createKey({
+            name: 'notes only, twice',
+            reach: { kind: 'node', ref: ref(`${base}/notes/`) },
+            readOnly: false,
+          }),
+        ),
+      )
+    ).secret
+
+  it('reads only a lone well-formed Bearer as a key, and every other Bearer as malformed', () => {
+    expect(bearerOf('Bearer dsk_a')).toEqual({ kind: 'key', secret: 'dsk_a' })
+    expect(bearerOf('Basic abc')).toEqual({ kind: 'none' })
+    expect(bearerOf('Digest username="a", realm="b", nonce="c"')).toEqual({
+      kind: 'none',
+    })
+    for (const value of [
+      'Basic abc, Bearer dsk_a extra',
+      'Basic abc, Bearer dsk_a',
+      'Bearer dsk_a, Basic abc',
+      'Bearer dsk_a, Bearer dsk_b',
+      'Basic abc, Basic def',
+      'Bearer dsk_a,',
+      'Basic Bearer',
+    ]) {
+      expect(bearerOf(value), value).toEqual({ kind: 'malformed' })
+    }
+  })
+
+  it('fails closed when duplicate Authorization headers coalesce, on a link and on the API', async () => {
+    const secret = await scopedKey()
+    for (const [first, second] of [
+      ['Basic abc', `Bearer ${secret} extra`],
+      ['Basic abc', `Bearer ${secret}`],
+      [`Bearer ${secret}`, 'Basic abc'],
+    ]) {
+      const headers = new Headers()
+      headers.append('authorization', first!)
+      headers.append('authorization', second!)
+      const link = await owner.fetch(`/${base}/plan`, { headers })
+      expect(link.status, `${first} + ${second}`).toBe(401)
+      expect(link.headers.getSetCookie()).toEqual([])
+      const api = await owner.fetch(
+        `/_/api/read?path=${encodeURIComponent(`${base}/plan`)}`,
+        { purpose: 'read', headers },
+      )
+      expect(api.status, `${first} + ${second}`).toBe(401)
+    }
   })
 })

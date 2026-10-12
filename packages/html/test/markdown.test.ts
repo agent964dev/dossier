@@ -17,7 +17,7 @@ const pair = (name: string) => ({
 
 describe('toMarkdown', () => {
   it('has a version that stored conversions are keyed by', () => {
-    expect(MARKDOWN_VERSION).toBe(2)
+    expect(MARKDOWN_VERSION).toBe(3)
   })
 
   it('holds a golden pair for every rule', () => {
@@ -225,5 +225,66 @@ describe('toMarkdown', () => {
     expect(
       select('', '<option disabled>Gone</option><option>One</option>'),
     ).toContain('- S (select): One')
+  })
+
+  it('gives nothing from a hidden body or a hidden <html>', () => {
+    expect(
+      toMarkdown(
+        '<!doctype html><html><head><title>T</title></head><body hidden><p>Secret body</p></body></html>',
+      ),
+    ).toBe('# T')
+    expect(
+      toMarkdown(
+        '<!doctype html><html hidden><head><title>T</title></head><body><p>Secret page</p></body></html>',
+      ),
+    ).toBe('# T')
+  })
+
+  it('drops what an inline style hides with display: none, and only that', () => {
+    const md = toMarkdown(
+      [
+        '<p style="display:none">Hidden one</p>',
+        '<div style="color: red; DISPLAY : None !important"><p>Hidden two</p></div>',
+        '<p style="display: none; display: block">Shown again</p>',
+        '<p style="visibility: hidden">Still in the text</p>',
+        '<p style="content: \'display:none\'">Not a declaration</p>',
+        '<style>.x { display: none }</style><p class="x">Stylesheets are not read</p>',
+        '<form action="a/"><input name="gone" aria-label="Gone" style="display:none"><input name="kept" aria-label="Kept"></form>',
+      ].join(''),
+    )
+    expect(md).not.toContain('Hidden one')
+    expect(md).not.toContain('Hidden two')
+    expect(md).not.toContain('Gone')
+    for (const kept of [
+      'Shown again',
+      'Still in the text',
+      'Not a declaration',
+      'Stylesheets are not read',
+      '- Kept (text)',
+    ]) {
+      expect(md).toContain(kept)
+    }
+  })
+
+  it('compares hidden="until-found" in any case', () => {
+    const md = toMarkdown(
+      '<p hidden="UNTIL-FOUND">Found in capitals</p><p hidden="Until-Found">And mixed</p>',
+    )
+    expect(md).toContain('Found in capitals')
+    expect(md).toContain('And mixed')
+  })
+
+  it('decides a required select’s placeholder from the options as written, before hidden ones go', () => {
+    const md = toMarkdown(
+      [
+        '<form action="a/"><select name="s" aria-label="S" required>',
+        '<option value="" hidden>Pick one</option>',
+        '<option value="">None</option>',
+        '<option>One</option>',
+        '</select></form>',
+      ].join(''),
+    )
+    expect(md).toContain('- S (select, required): None, One')
+    expect(md).not.toContain('Pick one')
   })
 })

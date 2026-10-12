@@ -12,22 +12,33 @@ import type { RequestKind } from './dispatch.ts'
 
 /**
  * The one reading of `Authorization` for agent keys, shared by
- * authentication and the link route's agent intent: no Bearer scheme, one
- * key, or a Bearer header of any other shape, which fails closed.
+ * authentication and the link route's agent intent: no Bearer anywhere, one
+ * well-formed Bearer key as the only credential, or anything else that
+ * mentions Bearer or carries several credentials, which fails closed.
+ * Duplicate headers arrive joined by commas, so a comma that starts a new
+ * credential counts as a second one.
  */
 export type BearerHeader =
   | { readonly kind: 'none' }
   | { readonly kind: 'key'; readonly secret: string }
   | { readonly kind: 'malformed' }
 
+/** An auth scheme, then white space or the end: where a credential starts. */
+const CREDENTIAL = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+(?:[\t ]|$)/
+const ANY_BEARER = /(?:^|[\t ,])bearer(?=[\t ,]|$)/i
+const ONE_BEARER = /^bearer[\t ]+([^\t ,]+)$/i
+
 export const bearerOf = (header: string | null): BearerHeader => {
   const value = (header ?? '').trim()
-  if (!/^bearer(?:[\t ]|$)/i.test(value)) return { kind: 'none' }
-  const parts = value.split(/[\t ]+/)
-  return parts.length === 2 && parts[1] !== ''
-    ? { kind: 'key', secret: parts[1]! }
-    : { kind: 'malformed' }
+  if (value === '') return { kind: 'none' }
+  const parts = value.split(',').map((part) => part.trim())
+  const credentials = parts.filter((part) => CREDENTIAL.test(part)).length
+  const one = ONE_BEARER.exec(value)
+  if (one !== null) return { kind: 'key', secret: one[1]! }
+  if (ANY_BEARER.test(value) || credentials > 1) return { kind: 'malformed' }
+  return { kind: 'none' }
 }
+
 const BEARER_KINDS: ReadonlySet<RequestKind> = new Set([
   'link',
   'api-read',

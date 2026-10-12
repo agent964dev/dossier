@@ -28,7 +28,7 @@ import { parse } from 'parse5'
 import { isCustomElementName } from './kit.ts'
 
 /** Bumped whenever the generated text changes for the same page. */
-export const MARKDOWN_VERSION: number = 2
+export const MARKDOWN_VERSION: number = 3
 
 /** A line Dossier writes as it stands, never escaped. */
 interface Line {
@@ -80,12 +80,69 @@ const textOf = (
  */
 const isHidden = (element: Element): boolean => {
   const value = element.properties.hidden
-  return (
+  const hidden =
     value !== undefined &&
     value !== null &&
     value !== false &&
-    value !== 'until-found'
+    String(value).trim().toLowerCase() !== 'until-found'
+  return hidden || displaysNone(prop(element, 'style'))
+}
+
+/**
+ * Whether an inline style attribute's last `display` declaration is
+ * `none`. Stylesheets are never read: the page's text does not depend on
+ * which rules match.
+ */
+const displaysNone = (style: string | null): boolean => {
+  if (style === null) return false
+  let none = false
+  const code = style.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, ' ')
+  for (const declaration of code.split(';')) {
+    const colon = declaration.indexOf(':')
+    if (colon < 0) continue
+    if (declaration.slice(0, colon).trim().toLowerCase() !== 'display') continue
+    none =
+      declaration
+        .slice(colon + 1)
+        .replace(/!\s*important\s*$/i, '')
+        .trim()
+        .toLowerCase() === 'none'
+  }
+  return none
+}
+
+/**
+ * A required single select's placeholder: its first option in tree order,
+ * when that option sits directly in the select and has `value=""`, as HTML
+ * defines it. Decided on the page as written, before anything is pruned.
+ */
+const placeholderOf = (select: Element): Element | null => {
+  if (prop(select, 'required') === null || prop(select, 'multiple') !== null) {
+    return null
+  }
+  if (Number(prop(select, 'size') ?? '1') > 1) return null
+  const first = descendants(select).find(
+    ({ element }) => element.tagName === 'option',
   )
+  if (first === undefined) return null
+  const direct = first.above[first.above.length - 1] === select
+  return direct && prop(first.element, 'value') === '' ? first.element : null
+}
+
+/** The page without any required select's placeholder option. */
+const withoutPlaceholders = (element: Element): Element => {
+  const placeholder =
+    element.tagName === 'select' ? placeholderOf(element) : null
+  return {
+    ...element,
+    children: element.children.flatMap((child): ElementContent[] =>
+      !isElement(child)
+        ? [child]
+        : child === placeholder
+          ? []
+          : [withoutPlaceholders(child)],
+    ),
+  }
 }
 
 /**
@@ -254,39 +311,20 @@ const formsOf = (root: Element): Forms => {
 
 /**
  * The options a person can choose and send: every enabled option with text,
- * an empty value included, except a required single select's leading
- * empty-valued option written directly in it, which HTML treats as the
- * select's placeholder and sending refuses.
+ * an empty value included. A required select's placeholder is already gone
+ * (`withoutPlaceholders`), and so are hidden options.
  */
-const selectOptions = (select: Element): readonly string[] => {
-  const options = descendants(select).filter(
-    ({ element }) => element.tagName === 'option',
-  )
-  const single =
-    prop(select, 'multiple') === null &&
-    Number(prop(select, 'size') ?? '1') <= 1
-  const placeholder =
-    prop(select, 'required') !== null && single ? options[0] : undefined
-  return options
+const selectOptions = (select: Element): readonly string[] =>
+  descendants(select)
+    .filter(({ element }) => element.tagName === 'option')
     .filter(({ element, above }) => {
       if (prop(element, 'disabled') !== null) return false
-      if (
-        above.some(
-          (el) => el.tagName === 'optgroup' && prop(el, 'disabled') !== null,
-        )
-      ) {
-        return false
-      }
-      return !(
-        placeholder !== undefined &&
-        element === placeholder.element &&
-        above[above.length - 1] === select &&
-        prop(element, 'value') === ''
+      return !above.some(
+        (el) => el.tagName === 'optgroup' && prop(el, 'disabled') !== null,
       )
     })
     .map(({ element }) => textOf(element))
     .filter((text) => text !== '')
-}
 
 /** A form's questions in order: its labels, types and options, never a value. */
 const formFields = (form: Element, forms: Forms): readonly Field[] => {
@@ -551,7 +589,12 @@ export const toMarkdown = (source: string): string => {
   const body = html === null ? null : find(html, 'body')
   const title = head === null ? null : find(head, 'title')
   const titleText = title === null ? '' : textOf(title)
-  const seen = body === null ? null : visible({ ...body, tagName: 'div' })
+  // A hidden <html> or <body> hides the whole page.
+  const shown =
+    html === null || body === null || isHidden(html) || isHidden(body)
+      ? null
+      : withoutPlaceholders({ ...body, tagName: 'div' })
+  const seen = shown === null ? null : visible(shown)
   const prepared = seen === null ? null : prepare(seen, formsOf(seen))
   const root: HastRoot = {
     type: 'root',
