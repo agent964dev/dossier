@@ -329,6 +329,15 @@ const fieldsOf = (
       min: attrOf(first, 'min'),
       max: attrOf(first, 'max'),
       step: attrOf(first, 'step'),
+      value:
+        first.tagName === 'input' &&
+        type !== 'checkbox' &&
+        type !== 'checkboxes' &&
+        type !== 'radio' &&
+        type !== 'file' &&
+        type !== 'submit'
+          ? attrOf(first, 'value')
+          : null,
       minLength: integerOf(attrOf(first, 'minlength')),
       maxLength: integerOf(attrOf(first, 'maxlength')),
       pattern: attrOf(first, 'pattern'),

@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(8)
+    expect(page.v).toBe(9)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })

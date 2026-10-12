@@ -16,7 +16,7 @@ import { type BodyClose, findRepairs } from './repairs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 8
+export const ANALYZER_VERSION: number = 9
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {

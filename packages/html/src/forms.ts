@@ -147,6 +147,11 @@ export interface FieldRule {
   readonly min: string | null
   readonly max: string | null
   readonly step: string | null
+  /**
+   * The control's own value attribute, for a field that takes typed text:
+   * a date or time's step counts from it when there is no min.
+   */
+  readonly value?: string | null
   readonly minLength: number | null
   readonly maxLength: number | null
   readonly pattern: string | null
@@ -457,8 +462,13 @@ const dateStepProblem = (field: FieldRule, text: string): string | null => {
     written !== null && written > 0 ? written : (DEFAULT_STEP[field.type] ?? 1)
   const value = stepNumber(field.type, text)
   if (value === null) return null
+  // From min, else the control's own value, else the epoch.
   const base =
-    (field.min === null ? null : stepNumber(field.type, field.min)) ?? 0
+    (field.min === null ? null : stepNumber(field.type, field.min)) ??
+    (field.value === null || field.value === undefined
+      ? null
+      : stepNumber(field.type, field.value)) ??
+    0
   // Whole units, counted exactly: a remainder, not a ratio of large numbers.
   const rest = (((value - base) % unit) + unit) % unit
   return rest > 1e-6 && unit - rest > 1e-6 ? VALID : null

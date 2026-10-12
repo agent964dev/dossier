@@ -786,3 +786,23 @@ describe('validateValues', () => {
     expect(validateValues([a, schema], { guests: 2 }).ok).toBe(true)
   })
 })
+
+describe('the step base of a date without min', () => {
+  const sent = (input: string, text: string) => {
+    const [form] = analyze(`<form action="a/">${input}</form>`).forms
+    return validateSend(formSchema(form!), [['d', text]], null)
+  }
+
+  it('is the control’s own value, as the browser takes it', () => {
+    const week = '<input type="date" name="d" step="7" value="2026-10-05">'
+    expect(sent(week, '2026-10-19')).toMatchObject({ ok: true })
+    expect(sent(week, '2026-10-20')).toMatchObject({ ok: false })
+    const time = '<input type="time" name="d" step="600" value="09:05">'
+    expect(sent(time, '09:15')).toMatchObject({ ok: true })
+    expect(sent(time, '09:10')).toMatchObject({ ok: false })
+    // min still comes first.
+    const both =
+      '<input type="date" name="d" step="7" min="2026-10-06" value="2026-10-05">'
+    expect(sent(both, '2026-10-13')).toMatchObject({ ok: true })
+  })
+})
