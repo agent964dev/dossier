@@ -19,6 +19,7 @@ import { deploymentHistory, mayShip } from './freshness.mjs'
 import { releaseDecision } from './registry.mjs'
 import {
   checkConfig,
+  checkContent,
   checkHealth,
   checkSecrets,
   production,
@@ -30,9 +31,20 @@ const healthy = {
   ok: true,
   service: 'dossier',
   version: sha,
-  features: ['state'],
+  protocol: 1,
+  deployment: 'dossier.agent964.com',
+  db: 'ok',
 }
 const reply = (status, body) => ({ status, json: async () => body })
+const CONTENT_HEADERS = {
+  'content-type': 'text/plain; charset=utf-8',
+  'content-security-policy':
+    'sandbox allow-scripts allow-same-origin allow-forms',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'x-content-type-options': 'nosniff',
+}
+const contentReply = (status = 404, headers = CONTENT_HEADERS) =>
+  new Response('Not found.\n', { status, headers })
 const registry = { name: '@agent964/dossier', versions: { '0.2.2': {} } }
 
 test('version policy requires monotonic explicit stable bumps only for changed packages', () => {
@@ -85,20 +97,64 @@ test('registry publication is idempotent and fails closed for every ambiguous re
   )
 })
 
-test('health validates full SHA and revision capabilities', () => {
+test('health accepts the new body only at the expected SHA, protocol and deployment', () => {
   checkHealth(healthy, sha)
   for (const body of [
     { ...healthy, version: sha.slice(0, 7) },
-    { ...healthy, features: [] },
+    { ...healthy, version: 'b'.repeat(40) },
+    { ...healthy, protocol: 2 },
+    { ...healthy, protocol: '1' },
+    { ...healthy, deployment: 'dossier-next-dev.tech964.workers.dev' },
+    { ...healthy, db: 'unavailable' },
     { ...healthy, ok: false },
     { ...healthy, service: 'other' },
+    // Today's health body, from before Dossier next.
+    { ok: true, service: 'dossier', version: sha, features: ['state'] },
+    null,
   ]) {
     assert.throws(() => checkHealth(body, sha), /expected SHA/)
   }
-  checkHealth({ ...healthy, features: [] }, sha, [])
 })
 
-test('smoke retries stale, HTTP, malformed and network responses then succeeds', async () => {
+test('the content probe wants a 404 with the sandbox and referrer headers and no cookie', () => {
+  checkContent(contentReply())
+  const refused = [
+    [contentReply(200), /not 404/],
+    [contentReply(302), /not 404/],
+    [
+      contentReply(404, {
+        ...CONTENT_HEADERS,
+        'content-security-policy': "frame-ancestors 'none'",
+      }),
+      /sandbox/,
+    ],
+    [
+      contentReply(404, {
+        'referrer-policy': 'strict-origin-when-cross-origin',
+      }),
+      /sandbox/,
+    ],
+    [
+      contentReply(404, {
+        ...CONTENT_HEADERS,
+        'referrer-policy': 'no-referrer-when-downgrade',
+      }),
+      /Referrer-Policy/,
+    ],
+    [
+      contentReply(404, {
+        ...CONTENT_HEADERS,
+        'set-cookie': 'x=1; Path=/',
+      }),
+      /cookie/,
+    ],
+  ]
+  for (const [response, message] of refused) {
+    assert.throws(() => checkContent(response), message)
+  }
+})
+
+test('smoke retries stale, HTTP, malformed and network responses, then checks the content host once', async () => {
   const responses = [
     new Error('network'),
     reply(503, {}),
@@ -110,24 +166,52 @@ test('smoke retries stale, HTTP, malformed and network responses then succeeds',
     },
     reply(200, { ...healthy, version: 'old' }),
     reply(200, healthy),
+    contentReply(),
   ]
-  let calls = 0
+  const urls = []
   let waits = 0
   await smoke(sha, {
     attempts: 5,
     wait: async () => {
       waits++
     },
-    fetcher: async (_url, options) => {
+    fetcher: async (url, options) => {
       assert.equal(options.redirect, 'error')
       assert.ok(options.signal)
-      const response = responses[calls++]
+      urls.push(url)
+      const response = responses[urls.length - 1]
       if (response instanceof Error) throw response
       return response
     },
   })
-  assert.equal(calls, 5)
+  assert.equal(urls.length, 6)
   assert.equal(waits, 4)
+  assert.deepEqual(urls, [
+    ...Array(5).fill(production.healthUrl),
+    production.contentProbeUrl,
+  ])
+  assert.equal(
+    production.contentProbeUrl,
+    'https://releasecheck.dossier-content.com/_/api/health',
+  )
+})
+
+test('smoke blocks publication when the content host answers wrongly', async () => {
+  for (const content of [contentReply(200), new Error('DNS')]) {
+    const answers = [reply(200, healthy), content]
+    await assert.rejects(
+      smoke(sha, {
+        attempts: 1,
+        wait: async () => {},
+        fetcher: async () => {
+          const next = answers.shift()
+          if (next instanceof Error) throw next
+          return next
+        },
+      }),
+      /Content host check failed; publication is blocked/,
+    )
+  }
 })
 
 test('exhausted smoke fails with a bounded attempt count', async () => {
@@ -138,7 +222,7 @@ test('exhausted smoke fails with a bounded attempt count', async () => {
       wait: async () => {},
       fetcher: async () => {
         calls++
-        return reply(200, { ...healthy, features: [] })
+        return reply(200, { ...healthy, db: 'unavailable' })
       },
     }),
     /publication is blocked/,
@@ -146,48 +230,174 @@ test('exhausted smoke fails with a bounded attempt count', async () => {
   assert.equal(calls, 3)
 })
 
-test('production prerequisites reject missing secrets and development resources', () => {
+/** The production config Vite builds from apps/web/wrangler.jsonc. */
+const productionConfig = () => ({
+  name: 'dossier',
+  routes: [
+    { pattern: 'dossier.agent964.com', custom_domain: true },
+    { pattern: '*.dossier-content.com/*', zone_name: 'dossier-content.com' },
+  ],
+  vars: {
+    PUBLIC_ORIGIN: 'https://dossier.agent964.com',
+    DEPLOYMENT_NAME: 'dossier.agent964.com',
+    CONTENT_HOST: '{tree}.dossier-content.com',
+  },
+  d1_databases: [
+    {
+      binding: 'DB',
+      database_name: 'dossier-next-production',
+      database_id: production.d1.id,
+    },
+  ],
+  r2_buckets: [{ binding: 'BLOBS', bucket_name: 'dossier-next-production' }],
+  durable_objects: { bindings: [{ name: 'TREE_HUB', class_name: 'TreeHub' }] },
+  migrations: [{ tag: 'v1', new_sqlite_classes: ['TreeHub'] }],
+  queues: {
+    producers: [{ binding: 'WEBHOOKS', queue: 'dossier-next-production' }],
+    consumers: [{ queue: 'dossier-next-production', max_retries: 10 }],
+  },
+  triggers: { crons: ['*/5 * * * *', '17 3 * * SUN'] },
+  ratelimits: [],
+})
+
+test('secret names: every production secret must be present, and a missing one is named', () => {
   checkSecrets(production.secrets.map((name) => ({ name })))
-  assert.throws(() => checkSecrets([{ name: 'SESSION_SECRET' }]), /LINK_SECRET/)
-  const config = {
-    name: 'dossier',
-    vars: { PUBLIC_BASE_URL: 'https://dossier.agent964.com' },
-    d1_databases: [
-      {
-        binding: 'DB',
-        database_name: 'dossier-production',
-        database_id: '72766ce3-44da-4bdd-a025-90a6ebe1e3e0',
-      },
-    ],
-    r2_buckets: [{ binding: 'OBJECTS', bucket_name: 'dossier-production' }],
-    ratelimits: [
-      {
-        name: 'STATE_RATE_LIMITER',
-        namespace_id: '1003',
-        simple: { limit: 60, period: 60 },
-      },
-    ],
-  }
-  checkConfig(config)
+  checkSecrets([
+    ...production.secrets.map((name) => ({ name })),
+    { name: 'SESSION_SECRET' },
+  ])
+  assert.deepEqual(production.secrets, [
+    'BETTER_AUTH_SECRET',
+    'HANDLE_SECRET',
+    'SUPER_ADMINS',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+  ])
+  assert.throws(
+    () =>
+      checkSecrets(
+        production.secrets
+          .filter((name) => !name.startsWith('GOOGLE_'))
+          .map((name) => ({ name })),
+      ),
+    /Missing production Worker secrets: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET$/,
+  )
+  // Today's secrets alone are not enough.
+  assert.throws(
+    () =>
+      checkSecrets(
+        ['SESSION_SECRET', 'LINK_SECRET', 'SEED_ADMIN_EMAIL'].map((name) => ({
+          name,
+        })),
+      ),
+    /BETTER_AUTH_SECRET, HANDLE_SECRET, SUPER_ADMINS/,
+  )
+})
+
+test('config: production resources pass, and each wrong one is refused by name', () => {
+  checkConfig(productionConfig())
   assert.throws(
     () =>
       checkConfig({
-        ...config,
-        vars: { ...config.vars, SEED_ADMIN_EMAIL: 'placeholder@example.com' },
+        ...productionConfig(),
+        vars: { ...productionConfig().vars, SUPER_ADMINS: 'a@example.com' },
       }),
     /overwrite Worker secrets/,
   )
-  for (const change of [
-    { name: 'dossier-dev' },
-    {
-      d1_databases: [{ ...config.d1_databases[0], database_id: 'development' }],
-    },
-    {
-      r2_buckets: [{ binding: 'OBJECTS', bucket_name: 'dossier-development' }],
-    },
-    { ratelimits: [] },
+  const base = productionConfig()
+  const without = (key, value) => ({ ...base, [key]: value })
+  for (const [config, named] of [
+    [without('name', 'dossier-next-dev'), /Worker name/],
+    [
+      without('vars', { ...base.vars, PUBLIC_ORIGIN: 'https://x.example' }),
+      /PUBLIC_ORIGIN/,
+    ],
+    [
+      without('vars', { ...base.vars, CONTENT_HOST: undefined }),
+      /CONTENT_HOST/,
+    ],
+    [
+      without('vars', {
+        ...base.vars,
+        CONTENT_HOST: '{tree}-dev.dossier-content.com',
+      }),
+      /CONTENT_HOST/,
+    ],
+    [
+      without('vars', { ...base.vars, DEPLOYMENT_NAME: 'dev' }),
+      /DEPLOYMENT_NAME/,
+    ],
+    [without('routes', [base.routes[1]]), /custom domain/],
+    [without('routes', [base.routes[0]]), /content route/],
+    [
+      without('routes', [
+        base.routes[0],
+        {
+          pattern: '*-dev.dossier-content.com/*',
+          zone_name: 'dossier-content.com',
+        },
+      ]),
+      /content route/,
+    ],
+    [
+      without('routes', [
+        base.routes[0],
+        { pattern: '*.dossier-content.com/*' },
+      ]),
+      /content route/,
+    ],
+    [
+      without('d1_databases', [
+        { ...base.d1_databases[0], database_name: 'dossier-production' },
+      ]),
+      /D1 database/,
+    ],
+    [
+      without('d1_databases', [
+        {
+          ...base.d1_databases[0],
+          database_id: '70b42e29-2b9a-434d-b2a5-920137c7fea9',
+        },
+      ]),
+      /D1 database/,
+    ],
+    [
+      without('d1_databases', [
+        { binding: 'DB', database_name: 'dossier-next-production' },
+      ]),
+      /D1 database/,
+    ],
+    [
+      without('r2_buckets', [
+        { binding: 'BLOBS', bucket_name: 'dossier-next-dev' },
+      ]),
+      /R2 bucket/,
+    ],
+    [without('durable_objects', undefined), /tree hub/],
+    [without('migrations', []), /tree hub/],
+    [without('queues', { ...base.queues, producers: [] }), /Queue producer/],
+    [
+      without('queues', {
+        ...base.queues,
+        consumers: [{ queue: 'dossier-next-dev' }],
+      }),
+      /Queue consumer/,
+    ],
+    [without('queues', undefined), /Queue producer, Queue consumer/],
+    [without('triggers', { crons: ['17 3 * * SUN'] }), /crons/],
+    [without('triggers', undefined), /crons/],
+    [
+      without('ratelimits', [
+        { name: 'PUSH_LIMITER', namespace_id: '1001', simple: {} },
+      ]),
+      /rate limiter bindings/,
+    ],
   ]) {
-    assert.throws(() => checkConfig({ ...config, ...change }), /non-production/)
+    assert.throws(
+      () => checkConfig(config),
+      /non-production Worker configuration/,
+    )
+    assert.throws(() => checkConfig(config), named)
   }
 })
 
@@ -267,7 +477,7 @@ test('migration failure stops deployment; deploy failure never reverses migratio
     assert.equal(failedMigration.calls.length, 1)
     assert.match(
       failedMigration.calls[0],
-      /dossier-production --remote --config wrangler.jsonc/,
+      /migrations apply dossier-next-production --remote --config wrangler.jsonc/,
     )
     const failedDeploy = run(0, 23)
     assert.equal(failedDeploy.status, 23)
@@ -277,7 +487,7 @@ test('migration failure stops deployment; deploy failure never reverses migratio
     // The base layer is copied into R2 after migrations and before deploy.
     assert.match(
       failedDeploy.calls[1],
-      /^bun scripts\/copy-base.ts --bucket \S+ --env production$/,
+      /^bun scripts\/copy-base.ts --bucket dossier-next-production --env production$/,
     )
     assert.match(
       failedDeploy.calls[2],

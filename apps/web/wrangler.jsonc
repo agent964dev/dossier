@@ -31,6 +31,7 @@
     {
       "binding": "DB",
       "database_name": "dossier-next-production",
+      "database_id": "e12b541d-bd5c-4325-8b9c-eab819223d54",
       "migrations_dir": "drizzle",
     },
   ],
@@ -42,8 +43,26 @@
     "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TreeHub"] }],
-  // The weekly purge: Sunday 03:17 UTC.
-  "triggers": { "crons": ["17 3 * * SUN"] },
+  // Webhooks: commits send to the Queue, and this Worker consumes it.
+  // A Queue has one consumer Worker, so each environment has its own.
+  // max_retries is above a delivery's nine attempts: the consumer decides
+  // when one has failed for good, and D1 holds every delivery's state.
+  "queues": {
+    "producers": [
+      { "binding": "WEBHOOKS", "queue": "dossier-next-production" },
+    ],
+    "consumers": [
+      {
+        "queue": "dossier-next-production",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 10,
+      },
+    ],
+  },
+  // The weekly purge (Sunday 03:17 UTC), and the webhook sweep every five
+  // minutes.
+  "triggers": { "crons": ["17 3 * * SUN", "*/5 * * * *"] },
   "env": {
     "dev": {
       "name": "dossier-next-dev",
