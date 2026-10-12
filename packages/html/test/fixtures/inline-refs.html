@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <style>
+    /* @import "commented.css"; url(commented.png) */
+    @import "base.css";
+    @import url(_theme.css) screen;
+    .hero { background: url( "hero image.png" ) no-repeat, url(st\61 r.svg); }
+    .logo { background-image: image-set("logo.png" 1x, url(logo-2x.png) 2x); }
+    .note::before { content: "url(not-a-url.png)"; color: #fff; }
+    .dot { background: url(data:image/png;base64,AAAA); }
+  </style>
+  <script type="module">
+    // import './commented.js'
+    /* import './also-commented.js' */
+    import { start } from './app.js'
+    import './side-effect.js'
+    export * from '../_shared/re-export.js'
+    import lib from 'lib'
+    const text = "import './not-an-import.js'"
+    const later = () => import('./dynamic.js')
+    console.log(import.meta.url, text, later, start, lib)
+  </script>
+  <script>import './classic.js'</script>
+</head>
+<body style="background: url(&quot;paper&amp;ink.png&quot;)">
+  <div style="mask: url('_mask.svg')">masked</div>
+  <svg><style>.a { fill: url(gradient&#46;svg#g) }</style></svg>
+</body>
+</html>

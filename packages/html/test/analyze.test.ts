@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(9)
+    expect(page.v).toBe(10)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })
@@ -749,5 +749,145 @@ describe('the base libraries a page uses', () => {
       'katex',
     ])
     expect(analyze('<b class="math-display">x</b>').libraries).toEqual([])
+  })
+})
+
+describe('what each URL is for', () => {
+  const source = fixture('uses.html')
+  const page = analyze(source)
+  const text = slicer(source)
+
+  it('marks what renders the page, what a click or a send follows, and the rest', () => {
+    expect(
+      page.urls.map((url) => [url.attr, text(url.range), url.use]),
+    ).toEqual([
+      ['href', 'site.css', 'render'],
+      ['href', 'favicon.ico', 'render'],
+      ['href', 'touch.png', 'other'],
+      ['href', 'font.woff2', 'render'],
+      ['href', 'app.js', 'render'],
+      ['href', 'page.md', 'other'],
+      ['href', 'https://example.com/page', 'other'],
+      ['src', 'photo.jpg', 'render'],
+      ['srcset', 'photo-2x.jpg', 'render'],
+      ['poster', 'poster.png', 'render'],
+      ['src', 'embed.html', 'render'],
+      ['href', 'drawing.png', 'render'],
+      ['href', 'icons.svg#star', 'render'],
+      ['href', '#local', 'render'],
+      ['href', 'svg-link.html', 'navigate'],
+      ['href', 'next.html', 'navigate'],
+      ['href', 'region.html', 'navigate'],
+      ['action', 'answers/', 'form'],
+    ])
+  })
+
+  it('reads an SVG use of another file as relative, and one of its own fragment as not', () => {
+    const uses = page.urls.filter((url) => text(url.range)?.includes('#'))
+    expect(uses.map((url) => [url.decoded, url.relative])).toEqual([
+      ['icons.svg#star', true],
+      ['#local', false],
+    ])
+  })
+})
+
+describe('URLs written inside the markup', () => {
+  const source = fixture('inline-refs.html')
+  const page = analyze(source)
+  const text = slicer(source)
+
+  it('reads url() and @import in styles, and static imports of module scripts', () => {
+    expect(
+      page.inlineRefs.map((ref) => [
+        ref.kind,
+        ref.url,
+        text(ref.range),
+        ref.relative,
+        ref.underscore,
+      ]),
+    ).toEqual([
+      ['css-import', 'base.css', 'base.css', true, false],
+      ['css-import', '_theme.css', '_theme.css', true, true],
+      ['css-url', 'hero image.png', 'hero image.png', true, false],
+      ['css-url', 'star.svg', 'st\\61 r.svg', true, false],
+      ['css-url', 'logo.png', 'logo.png', true, false],
+      ['css-url', 'logo-2x.png', 'logo-2x.png', true, false],
+      [
+        'css-url',
+        'data:image/png;base64,AAAA',
+        'data:image/png;base64,AAAA',
+        false,
+        false,
+      ],
+      ['module-import', './app.js', './app.js', true, false],
+      ['module-import', './side-effect.js', './side-effect.js', true, false],
+      [
+        'module-import',
+        '../_shared/re-export.js',
+        '../_shared/re-export.js',
+        true,
+        true,
+      ],
+      ['module-import', 'lib', 'lib', false, false],
+      ['css-url', 'paper&ink.png', 'paper&amp;ink.png', true, false],
+      ['css-url', '_mask.svg', '_mask.svg', true, true],
+      ['css-url', 'gradient.svg#g', 'gradient&#46;svg#g', true, false],
+    ])
+  })
+
+  it('skips comments, strings that are not URLs, dynamic imports and classic scripts', () => {
+    const urls = page.inlineRefs.map((ref) => ref.url)
+    for (const url of [
+      'commented.css',
+      'commented.png',
+      './commented.js',
+      './also-commented.js',
+      'not-a-url.png',
+      './not-an-import.js',
+      './dynamic.js',
+      './classic.js',
+    ]) {
+      expect(urls).not.toContain(url)
+    }
+  })
+
+  it('keeps every range on the original text with Windows line endings', () => {
+    const written = crlf(source)
+    const read = analyze(written)
+    expect(read.inlineRefs.map((ref) => slicer(written)(ref.range))).toEqual(
+      page.inlineRefs.map((ref) => text(ref.range)),
+    )
+  })
+
+  it('reads a style or module script the end of the page cut off', () => {
+    const written = '<style>a { background: url(cut.png)'
+    expect(analyze(written).inlineRefs.map((ref) => ref.url)).toEqual([
+      'cut.png',
+    ])
+    const script = "<script type=module>import a from './cut.js'"
+    expect(analyze(script).inlineRefs.map((ref) => ref.url)).toEqual([
+      './cut.js',
+    ])
+  })
+
+  it('reads re-exports and imports across lines, and not a property named import', () => {
+    const written = [
+      '<script type="module">',
+      'import {',
+      '  a,',
+      '  b as c,',
+      "} from './many.js'",
+      "export { d } from './d.js'",
+      'export const e = { import: 1 }',
+      "export default 'not-a-module.js'",
+      "const t = `${a}import './in-template.js'`",
+      "import f, * as g from './star.js'",
+      '</script>',
+    ].join('\n')
+    expect(analyze(written).inlineRefs.map((ref) => ref.url)).toEqual([
+      './many.js',
+      './d.js',
+      './star.js',
+    ])
   })
 })

@@ -13,10 +13,19 @@ import type { FieldRule } from './forms.ts'
 import { isCustomElementName } from './kit.ts'
 import { codeLanguageOf, type LibraryName } from './libraries.ts'
 import { type BodyClose, findRepairs } from './repairs.ts'
+import {
+  cssRefs,
+  decodeCharacterReferences,
+  type FoundRef,
+  type Mapped,
+  moduleImports,
+  unmapped,
+  writtenRange,
+} from './inline-refs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 9
+export const ANALYZER_VERSION: number = 10
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -49,8 +58,26 @@ export interface HeadItem {
   readonly url: string | null
   readonly range: Range
 }
+/**
+ * What a URL in an attribute is for.
+ *
+ * - render: the browser loads it to show the page: every `src`, `srcset` and
+ *   `poster` (an iframe's `src` too), a `<link>` whose rel holds the token
+ *   stylesheet, icon, preload or modulepreload, and an SVG `<image>` or
+ *   `<use>` href. Only those exact rel tokens count: `apple-touch-icon` is
+ *   fetched only when someone saves the page to a home screen, so it is
+ *   other. A fragment-only `<use href="#x">` is render but never relative,
+ *   so it names no file.
+ * - navigate: an `<a>` (HTML or SVG) or `<area>` href, followed on a click.
+ * - form: a `<form>` action, followed when the form is sent.
+ * - other: every other URL attribute, such as an alternate or canonical
+ *   link's href.
+ */
+export type UrlUse = 'render' | 'navigate' | 'form' | 'other'
+
 export interface UrlRef {
   readonly attr: 'href' | 'src' | 'srcset' | 'poster' | 'action'
+  readonly use: UrlUse
   /** As written, for rewriting the source at `range`. */
   readonly value: string
   /** With character references decoded, for rewriting. */
@@ -69,6 +96,31 @@ export interface UrlRef {
   readonly underscore: boolean
   readonly inHead: boolean
 }
+
+/**
+ * A URL the page's own markup loads without an attribute naming it:
+ * `url()` in a `<style>` element or a `style` attribute (css-url), the
+ * string or `url()` of an `@import` there (css-import), and the module a
+ * static import or re-export of an inline module script names
+ * (module-import).
+ */
+export interface InlineRef {
+  readonly kind: 'css-url' | 'css-import' | 'module-import'
+  /**
+   * As the browser requests it: character references decoded (in a style
+   * attribute, or a style inside SVG), then CSS or JavaScript escapes.
+   */
+  readonly url: string
+  /** The URL as written, inside any quotes. */
+  readonly range: Range
+  /**
+   * As for an attribute's URL; an import's bare specifier (`a.js`, `lib`)
+   * is not, as the browser resolves it only through an import map.
+   */
+  readonly relative: boolean
+  readonly underscore: boolean
+}
+
 export interface FormSummary {
   readonly line: number
   readonly id: string | null
@@ -144,6 +196,8 @@ export interface HtmlAnalysis {
   /** The languages of `pre > code.language-<lang>`, lower-cased, sorted, once each. */
   readonly codeLanguages: readonly string[]
   readonly urls: readonly UrlRef[]
+  /** In source order. */
+  readonly inlineRefs: readonly InlineRef[]
   readonly forms: readonly FormSummary[]
   /** Where parse5 had to repair the structure. */
   readonly repaired: readonly Repair[]
@@ -254,6 +308,49 @@ const relTokens = (element: Element): readonly string[] =>
     .split(/[\t\n\f\r ]+/)
     .filter((token) => token !== '')
 
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+const RENDER_RELS: ReadonlySet<string> = new Set([
+  'stylesheet',
+  'icon',
+  'preload',
+  'modulepreload',
+])
+
+const useOf = (element: Element, attr: UrlRef['attr']): UrlUse => {
+  if (attr === 'src' || attr === 'srcset' || attr === 'poster') return 'render'
+  const { namespaceURI, tagName } = element
+  if (attr === 'action') {
+    return namespaceURI === HTML_NS && tagName === 'form' ? 'form' : 'other'
+  }
+  if (namespaceURI === HTML_NS) {
+    if (tagName === 'a' || tagName === 'area') return 'navigate'
+    if (tagName === 'link') {
+      return relTokens(element).some((rel) => RENDER_RELS.has(rel))
+        ? 'render'
+        : 'other'
+    }
+  } else if (namespaceURI === SVG_NS) {
+    if (tagName === 'a') return 'navigate'
+    if (tagName === 'image' || tagName === 'use') return 'render'
+  }
+  return 'other'
+}
+
+/** An inline module script: no src, and a type of module. */
+const isInlineModule = (element: Element): boolean =>
+  element.namespaceURI === HTML_NS &&
+  element.tagName === 'script' &&
+  attrOf(element, 'src') === null &&
+  attrOf(element, 'type')?.trim().toLowerCase() === 'module'
+
+/**
+ * Bare specifiers resolve only through an import map; everything else reads
+ * as an attribute's URL does.
+ */
+const isRelativeImport = (url: string): boolean =>
+  url.startsWith('./') || url.startsWith('../')
+
 /** A meta's key: which of name, property or http-equiv it sets, and to what. */
 const metaKey = (element: Element): string | null => {
   for (const name of ['name', 'property', 'http-equiv']) {
@@ -352,6 +449,7 @@ export const analyze = (source: string): HtmlAnalysis => {
   const libraries = new Set<LibraryName>()
   const codeLanguages = new Set<string>()
   const urls: UrlRef[] = []
+  const inlineRefs: InlineRef[] = []
   const forms: FormSummary[] = []
   let slot: Range | null = null
   let title: string | null = null
@@ -379,6 +477,7 @@ export const analyze = (source: string): HtmlAnalysis => {
       )
       const raw = source.slice(value.start, value.end)
       const name = attr.name as UrlRef['attr']
+      const use = useOf(element, name)
       if (name === 'srcset') {
         // Candidates of the written value, for their ranges, paired with the
         // candidates of the decoded value, for what is requested.
@@ -393,6 +492,7 @@ export const analyze = (source: string): HtmlAnalysis => {
           if (decoded.length > 0) {
             urls.push({
               attr: name,
+              use,
               value: raw,
               decoded: attr.value,
               requests: decoded,
@@ -409,6 +509,7 @@ export const analyze = (source: string): HtmlAnalysis => {
           const plain = decoded[index] ?? url
           urls.push({
             attr: name,
+            use,
             value: url,
             decoded: plain,
             requests: [plain],
@@ -424,6 +525,7 @@ export const analyze = (source: string): HtmlAnalysis => {
       } else {
         urls.push({
           attr: name,
+          use,
           value: raw,
           decoded: attr.value,
           requests: [attr.value],
@@ -433,6 +535,61 @@ export const analyze = (source: string): HtmlAnalysis => {
           inHead: place.inHead,
         })
       }
+    }
+  }
+
+  const pushInlineRefs = (mapped: Mapped, found: readonly FoundRef[]): void => {
+    for (const ref of found) {
+      const relative =
+        ref.kind === 'module-import'
+          ? isRelativeImport(ref.url)
+          : isRelativeUrl(ref.url)
+      inlineRefs.push({
+        kind: ref.kind,
+        url: ref.url,
+        range: writtenRange(mapped, ref.start, ref.end),
+        relative,
+        underscore: relative && isUnderscoreUrl(ref.url),
+      })
+    }
+  }
+
+  /**
+   * A style attribute's CSS, a style element's, and an inline module
+   * script's imports. A style attribute, and text inside SVG, have their
+   * character references decoded first, as the parser does; a style or
+   * script element's text in HTML is read as written.
+   */
+  const addInlineRefs = (element: Element): void => {
+    const loc = element.sourceCodeLocation
+    const style = loc?.attrs?.['style']
+    if (style && attrOf(element, 'style') !== null) {
+      const value = valueRange(source, at(style.startOffset, style.endOffset))
+      const mapped = decodeCharacterReferences(
+        source.slice(value.start, value.end),
+        value.start,
+        true,
+      )
+      pushInlineRefs(mapped, cssRefs(mapped.text))
+    }
+    const { namespaceURI, tagName } = element
+    const isModule = isInlineModule(element)
+    const isStyle =
+      tagName === 'style' &&
+      (namespaceURI === HTML_NS || namespaceURI === SVG_NS)
+    if (!isModule && !isStyle) return
+    for (const child of element.childNodes) {
+      const written = child.sourceCodeLocation
+      if (child.nodeName !== '#text' || !written) continue
+      const text = source.slice(written.startOffset, written.endOffset)
+      const mapped =
+        namespaceURI === HTML_NS
+          ? unmapped(text, written.startOffset)
+          : decodeCharacterReferences(text, written.startOffset, false)
+      pushInlineRefs(
+        mapped,
+        isModule ? moduleImports(mapped.text) : cssRefs(mapped.text),
+      )
     }
   }
 
@@ -499,6 +656,7 @@ export const analyze = (source: string): HtmlAnalysis => {
       if (isHtml && isCustomElementName(name)) tags.add(name)
       if (!place.inTemplate) addLibraries(node)
       addUrls(node, place)
+      addInlineRefs(node)
       if (isHtml) {
         if (name === 'form') addForm(node)
         else if (name === 'meta' && isCharsetMeta(node)) {
@@ -682,6 +840,7 @@ export const analyze = (source: string): HtmlAnalysis => {
     libraries: [...libraries].sort(),
     codeLanguages: [...codeLanguages].sort(),
     urls,
+    inlineRefs,
     forms,
     repaired: findRepairs(parsed, source, body, bodyClose),
     seal,

@@ -6,6 +6,7 @@ export * from './kit.ts'
 export * from './libraries.ts'
 export * from './markdown.ts'
 export * from './paths.ts'
+export * from './preview.ts'
 export * from './theme.ts'
 export {
   isRelativeUrl,
