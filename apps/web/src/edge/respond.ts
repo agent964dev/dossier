@@ -121,13 +121,20 @@ export const normalizeApiError = async (
   return codeResponse(code, requestId)
 }
 
-const PLAIN_ERROR = `<!doctype html>
+/**
+ * The plain page's frame: inline styles only, so it renders without D1, the
+ * Look or any other file. `main` is trusted markup.
+ */
+export const plainPage = (
+  title: string,
+  main: string,
+): string => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>Something went wrong</title>
+<title>${title}</title>
 <style>
   html { color-scheme: dark; }
   body { margin: 0; min-height: 100dvh; display: grid; place-items: center;
@@ -142,12 +149,17 @@ const PLAIN_ERROR = `<!doctype html>
 </head>
 <body>
 <main>
-<h1>Something went wrong. Try again.</h1>
-<a href="" onclick="location.reload(); return false">Try again</a>
+${main}
 </main>
 </body>
 </html>
 `
+
+const PLAIN_ERROR = plainPage(
+  'Something went wrong',
+  `<h1>Something went wrong. Try again.</h1>
+<a href="" onclick="location.reload(); return false">Try again</a>`,
+)
 
 /** The plain error page: inline HTML, no stack trace, never cached. */
 export const plainErrorPage = (requestId: string): Response =>

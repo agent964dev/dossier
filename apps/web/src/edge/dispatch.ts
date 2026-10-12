@@ -36,6 +36,7 @@ import {
   type DeploymentConfig,
 } from '../core/index.ts'
 import { apiHandlerFor } from './api/index.ts'
+import { isLegacy, legacyResponse } from './legacy.ts'
 import {
   bearerOf,
   callerFor,
@@ -105,7 +106,8 @@ export const classify = (
   request: Request,
   host: HostMatch,
 ): RequestKind | null => {
-  const { pathname } = new URL(request.url)
+  const url = new URL(request.url)
+  const { pathname } = url
   if (under(pathname, '/_/v')) return host.kind === 'content' ? 'frame' : null
   if (under(pathname, '/_/base')) return 'base'
   if (host.kind === 'content') return null
@@ -124,9 +126,10 @@ export const classify = (
   if (under(pathname, '/_/app')) return 'static'
   if (under(pathname, '/_/fonts')) return 'fonts'
   if (under(pathname, '/_/look')) return 'look'
+  // CLI 0.2.x: its paths, and its keys anywhere outside /_/.
+  if (isLegacy(url, request.headers)) return 'legacy'
   if (under(pathname, '/_serverFn')) return 'screen-call'
   if (pathname === '/' || pathname.startsWith('/_/')) return 'screen'
-  if (under(pathname, '/api') || under(pathname, '/cli')) return 'legacy'
   return 'link'
 }
 
@@ -202,7 +205,14 @@ export const serve = async (
   if (host === null) return plainNotFound()
   const kind = classify(request, host)
   if (kind === null) {
-    return withCommonHeaders(plainNotFound(), null, [], host.kind)
+    // A content host answers anything else as a frame that is not there,
+    // with the content headers, so even its 404 runs sandboxed.
+    return withCommonHeaders(
+      host.kind === 'content' ? frameFailure(404) : plainNotFound(),
+      null,
+      [],
+      host.kind,
+    )
   }
 
   let setCookie: readonly string[] = []
@@ -306,7 +316,7 @@ export const serve = async (
       case 'look':
         return lookFile()
       case 'legacy':
-        throw dossierError('not_found')
+        return legacyResponse(request)
       case 'frame':
         return frame()
       case 'static':

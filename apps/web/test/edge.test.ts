@@ -199,9 +199,10 @@ describe('errors', () => {
     expect(invalid.status).toBe(400)
     expect((await errorBody(invalid)).error.code).toBe('invalid')
 
+    // CLI 0.2.x gets its own error shape, never the error body.
     const legacy = await SELF.fetch(`${ORIGIN}/api/documents`)
     expect(legacy.status).toBe(404)
-    expect((await errorBody(legacy)).error.code).toBe('not_found')
+    expect(await legacy.json()).toMatchObject({ ok: false, code: 'not_found' })
   })
 
   it('answers unavailable when D1 fails', async () => {
