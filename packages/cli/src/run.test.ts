@@ -133,6 +133,7 @@ describe('the agent guide', () => {
       'share',
       'ls',
       'read',
+      'export',
     ]) {
       expect(markdown).toContain(`### ${verb}\n`)
       expect(markdown).toContain(`dossier ${verb} `)
@@ -149,6 +150,9 @@ describe('the agent guide', () => {
       'dossier share [--remove] [--json] <path> [<target>] [<role>]',
     )
     expect(markdown).toContain('dossier watch [--next] [--json] <target>')
+    expect(markdown).toContain(
+      'dossier export [(-o, --output text)] [--json] <link>',
+    )
     for (const [code, meaning] of [
       [0, 'success'],
       [1, 'failure'],
@@ -179,6 +183,7 @@ describe('the agent guide', () => {
       'share',
       'ls',
       'read',
+      'export',
       'watch',
     ])
     expect(Object.keys(data.exitCodes)).toEqual([

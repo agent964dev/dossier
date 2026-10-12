@@ -1,0 +1,26 @@
+<link rel="stylesheet" href="_theme.css" />
+<style>
+  body {
+    font-family: var(--font-body);
+    margin: 0;
+    color: #1d2733;
+  }
+  .all-header {
+    background: var(--accent);
+    color: white;
+    padding: 0.75em 1.25em;
+    font-weight: 600;
+  }
+  .all-main {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 1rem 1.25rem 3rem;
+  }
+  .all-main figure img {
+    width: 288px;
+    height: auto;
+    border-radius: 6px;
+  }
+</style>
+<header class="all-header">Acme · everything in one page</header>
+<main class="all-main"><slot></slot></main>

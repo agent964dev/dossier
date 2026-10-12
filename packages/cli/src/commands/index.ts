@@ -1,3 +1,4 @@
+import { exportPage } from './export.ts'
 import { login } from './login.ts'
 import { logout } from './logout.ts'
 import { ls } from './ls.ts'
@@ -20,5 +21,6 @@ export const verbs = [
   share,
   ls,
   read,
+  exportPage,
   watch,
 ] as const

@@ -19,6 +19,7 @@ const TITLES = [
   'Agent versions',
   'Reading',
   'Sharing',
+  'Export',
 ]
 
 describe('the agent guide', () => {
@@ -172,6 +173,42 @@ describe('the agent guide', () => {
       }
       expect(markdown).toContain('### share\n')
       expect(markdown).toContain('dossier share [--remove] [--json] <path>')
+    } finally {
+      await cli.cleanup()
+    }
+  })
+
+  it('lists export after read, and says what an exported file holds', async () => {
+    const fetch = stubFetch(() => new Response(null, { status: 500 }))
+    const cli = await harness({ fetch: fetch.fetch })
+    try {
+      expect(await cli.run(['--agent-info'])).toBe(0)
+      const markdown = cli.stdout()
+      const names = guide().verbs.map((verb) => verb.name)
+      expect(names.indexOf('export')).toBe(names.indexOf('read') + 1)
+      expect(markdown).toContain('### export\n')
+      expect(markdown).toContain(
+        'dossier export [(-o, --output text)] [--json] <link>',
+      )
+      const at = markdown.indexOf('\n## Export\n')
+      expect(at).toBeGreaterThan(0)
+      const exporting = markdown.slice(at)
+      for (const phrase of [
+        'opens offline',
+        'layouts, theme and\ncomponents',
+        'images and fonts',
+        'base libraries',
+        'page client in export mode',
+        "page's form\ntargets, its comments",
+        "under the page's folder",
+        'in that\nbrowser only',
+        '50 MiB',
+        'Linked, not included:',
+        'URLs page code builds at run time are not inlined',
+        '`{ "file", "bytes", "linked" }`',
+      ]) {
+        expect(exporting).toContain(phrase)
+      }
     } finally {
       await cli.cleanup()
     }

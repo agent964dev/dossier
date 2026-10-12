@@ -6,6 +6,7 @@ import agentVersions from './guide/agent-versions.md' with { type: 'text' }
 import baseLayer from './guide/base-layer.md' with { type: 'text' }
 import components from './guide/components.md' with { type: 'text' }
 import embedding from './guide/embedding.md' with { type: 'text' }
+import exporting from './guide/export.md' with { type: 'text' }
 import forms from './guide/forms.md' with { type: 'text' }
 import kitFiles from './guide/kit-files.md' with { type: 'text' }
 import layouts from './guide/layouts.md' with { type: 'text' }
@@ -56,6 +57,7 @@ const CONVENTIONS: readonly string[] = [
   agentVersions,
   reading,
   sharing,
+  exporting,
 ]
 
 /** A convention file: its `## Title` line, then its Markdown. */
