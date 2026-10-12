@@ -283,6 +283,17 @@ describe('prefill', () => {
     expect(it.form().getAttribute('data-state')).toBe('sent')
   })
 
+  test('a late prefill keeps what the person already typed and fills the rest', async () => {
+    const it = open({ body: PERSON_FORM })
+    await flush()
+    const [read] = it.requests('read')
+    type(it, '[name=name]', 'Typed first')
+    await it.answer(read!.id, wire({ name: 'Sara', notes: 'Hello', age: 41 }))
+    expect(it.field('[name=name]').value).toBe('Typed first')
+    expect(it.field<HTMLTextAreaElement>('[name=notes]').value).toBe('Hello')
+    expect(it.field('[name=age]').value).toBe('41')
+  })
+
   test('a shared form reads its file; an entries form and a visitor read nothing', async () => {
     const shared = open({
       body: '<form data-dossier-form="2"><input name="title"></form>',

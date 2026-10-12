@@ -268,6 +268,8 @@ interface Managed {
   touched: boolean
   /** Counts changes, to tell whether any came during a send. */
   edits: number
+  /** The fields the person changed on this page, which a late prefill leaves. */
+  readonly typed: Set<string>
   /** The stored upload of each file field, kept when its input stays empty. */
   readonly uploads: Map<string, UploadRef>
   /** The send's op ID, kept until it succeeds or the answers change. */
@@ -357,6 +359,7 @@ export const startForms = (deps: {
     m: Managed,
     values: Readonly<Record<string, unknown>>,
     whole: boolean,
+    keep: ReadonlySet<string> = new Set(),
   ): void => {
     const groups = new Map<string, Control[]>()
     for (const control of controlsOf(m.form)) {
@@ -366,6 +369,7 @@ export const startForms = (deps: {
       else group.push(control)
     }
     for (const [name, group] of groups) {
+      if (keep.has(name)) continue
       const has = Object.hasOwn(values, name)
       // A prefill leaves the fields its data does not name; a draft holds
       // the whole form, so a box missing from it was unticked.
@@ -709,6 +713,9 @@ export const startForms = (deps: {
     if (ownElement(target as Element)) return
     m.touched = true
     m.edits += 1
+    if (typeof target?.name === 'string' && target.name !== '') {
+      m.typed.add(target.name)
+    }
     if (m.invalid !== null && m.invalid === target) {
       m.invalid.setCustomValidity('')
       m.invalid = null
@@ -751,7 +758,8 @@ export const startForms = (deps: {
     }
     if (!isDocWire(value)) return
     const stored = docFromWire(value, bootstrap.path)
-    if (!m.touched && isRecord(value.data)) fill(m, value.data, false)
+    // What the person already typed stays; the rest is what they sent.
+    if (isRecord(value.data)) fill(m, value.data, false, m.typed)
     if (m.state === 'sending' || m.state === 'draft') return
     report(m, sentText(value.at))
     setState(m, 'sent', { doc: stored })
@@ -789,6 +797,7 @@ export const startForms = (deps: {
       readOnly: false,
       touched: false,
       edits: 0,
+      typed: new Set(),
       uploads: new Map(),
       opId: null,
       last: null,
