@@ -8,13 +8,17 @@ import {
   People,
   SignIn,
   type AgentKeyView,
+  type DeletionPreview,
   type KeyReach,
 } from '../core/index.ts'
-import { runScreen } from './run.ts'
+import { isScreenFailure } from './failure.ts'
+import { endSessionCookie, runScreen } from './run.ts'
 
 export interface WorkspaceRowView {
   readonly name: string
   readonly role: 'admin' | 'member'
+  /** The person's teams in it, by name. */
+  readonly teams: readonly string[]
 }
 
 export interface AccountView {
@@ -36,6 +40,7 @@ export const accountView = createServerFn({ method: 'GET' }).handler(() =>
       const keys = yield* signIn.keys()
       const { person } = yield* CurrentCaller
       const memberships = yield* people.myWorkspaces()
+      const teams = yield* people.myTeams()
       const trees: string[] = []
       for (const membership of memberships) {
         for (const { tree } of yield* people
@@ -51,6 +56,7 @@ export const accountView = createServerFn({ method: 'GET' }).handler(() =>
         workspaces: memberships.map((m) => ({
           name: m.workspace.name,
           role: m.role,
+          teams: teams.get(m.workspace.name) ?? [],
         })),
         mayCreateWorkspace: yield* people.mayCreateWorkspace(),
         trees,
@@ -128,4 +134,31 @@ export const revokeKey = createServerFn({ method: 'POST' })
 export const signOutEverywhere = createServerFn({ method: 'POST' }).handler(
   () =>
     runScreen(Effect.flatMap(SignIn, (signIn) => signIn.signOutEverywhere())),
+)
+
+/** Any member; the last admin is told to hand over first. */
+export const leaveWorkspace = createServerFn({ method: 'POST' })
+  .validator((input: { readonly workspace: string }) => ({
+    workspace: String(input.workspace),
+  }))
+  .handler(({ data }) =>
+    runScreen(Effect.flatMap(People, (people) => people.leave(data))),
+  )
+
+/** What deleting the account removes, counted, or what blocks it. */
+export const deletionPreview = createServerFn({ method: 'GET' }).handler(() =>
+  runScreen<DeletionPreview>(
+    Effect.flatMap(People, (people) => people.deletionPreview()),
+  ),
+)
+
+/** Withdraws the person's answers and closes the account and this session. */
+export const deleteAccount = createServerFn({ method: 'POST' }).handler(
+  async () => {
+    const result = await runScreen(
+      Effect.flatMap(People, (people) => people.deleteAccount()),
+    )
+    if (!isScreenFailure(result)) endSessionCookie()
+    return result
+  },
 )

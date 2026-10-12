@@ -3,25 +3,33 @@ import {
   Building2,
   Check,
   Copy,
+  FileText,
   Info,
   KeyRound,
   LogOut,
+  MessageSquare,
+  Trash2,
+  TriangleAlert,
   User,
   X,
 } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 
 import { AppHeader } from '../../components/app-header'
 import { SectionLabel } from '../../components/section-label'
 import { Button } from '../../components/ui/button'
+import { Refusal, refusalOf } from '../../components/settings-parts'
 import { Input, Label, Select } from '../../components/ui/input'
 import { Modal } from '../../components/ui/modal'
 import { signOut } from '../../lib/auth-client'
-import type { AgentKeyView } from '../../core/index'
+import type { AgentKeyView, DeletionPreview } from '../../core/index'
 import {
   accountView,
   createKey,
   createWorkspace,
+  deleteAccount,
+  deletionPreview,
+  leaveWorkspace,
   revokeKey,
   signOutEverywhere,
   type WorkspaceRowView,
@@ -104,6 +112,7 @@ function AccountSettings() {
         <Workspaces
           workspaces={view.workspaces}
           mayCreate={view.mayCreateWorkspace}
+          onChange={() => router.invalidate()}
         />
 
         <AgentKeys
@@ -151,6 +160,8 @@ function AccountSettings() {
             </p>
           )}
         </section>
+
+        <DeleteAccount />
       </main>
     </div>
   )
@@ -159,11 +170,14 @@ function AccountSettings() {
 function Workspaces({
   workspaces,
   mayCreate,
+  onChange,
 }: {
   workspaces: readonly WorkspaceRowView[]
   mayCreate: boolean
+  onChange: () => Promise<void>
 }) {
   const [creating, setCreating] = useState(false)
+  const [leaving, setLeaving] = useState<string | null>(null)
   return (
     <section aria-labelledby="workspaces-label" className="flex flex-col gap-3">
       <SectionLabel id="workspaces-label" count={workspaces.length}>
@@ -174,30 +188,49 @@ function Workspaces({
       ) : (
         <ul className="divide-y divide-border/80 overflow-hidden rounded-xl border border-border bg-card">
           {workspaces.map((workspace) => (
-            <li key={workspace.name}>
+            <li
+              key={workspace.name}
+              className="flex items-center gap-3 px-3.5 py-3 transition-colors duration-200 ease-agent hover:bg-neutral-800/40"
+            >
+              <span
+                aria-hidden
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-800/70 text-neutral-300"
+              >
+                <Building2 className="size-4" />
+              </span>
               <a
                 href={`/?w=${encodeURIComponent(workspace.name)}`}
-                className="flex items-center gap-3 px-3.5 py-3 outline-none transition-colors duration-200 ease-agent hover:bg-neutral-800/40 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
+                className="min-w-0 flex-1 rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
               >
-                <span
-                  aria-hidden
-                  className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-800/70 text-neutral-300"
-                >
-                  <Building2 className="size-4" />
+                <span className="block truncate text-[0.9375rem] text-neutral-50">
+                  {workspace.name}
                 </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[0.9375rem] text-neutral-50">
-                    {workspace.name}
-                  </span>
-                  <span className="block font-mono text-xs text-neutral-500">
-                    {workspace.role === 'admin' ? 'Admin' : 'Member'}
-                  </span>
+                <span className="block font-mono text-xs text-neutral-500">
+                  {[
+                    workspace.role === 'admin' ? 'Admin' : 'Member',
+                    ...(workspace.teams.length === 0
+                      ? []
+                      : [workspace.teams.join(', ')]),
+                  ].join(' · ')}
                 </span>
               </a>
+              <Button
+                variant="outline"
+                size="xs"
+                aria-label={`Leave ${workspace.name}`}
+                onClick={() => setLeaving(workspace.name)}
+              >
+                Leave
+              </Button>
             </li>
           ))}
         </ul>
       )}
+      <LeaveDialog
+        workspace={leaving}
+        onClose={() => setLeaving(null)}
+        onLeft={onChange}
+      />
       {mayCreate ? (
         <>
           <Button
@@ -215,6 +248,76 @@ function Workspaces({
         </>
       ) : null}
     </section>
+  )
+}
+
+/** Leaving asks again; the last admin is told to hand over first. */
+function LeaveDialog({
+  workspace,
+  onClose,
+  onLeft,
+}: {
+  workspace: string | null
+  onClose: () => void
+  onLeft: () => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [refused, setRefused] = useState<{
+    readonly message: string
+    readonly lastAdmin: boolean
+  } | null>(null)
+  const close = () => {
+    setRefused(null)
+    onClose()
+  }
+  const leave = async () => {
+    if (workspace === null) return
+    setBusy(true)
+    setRefused(null)
+    const result = await leaveWorkspace({ data: { workspace } })
+    setBusy(false)
+    if (isScreenFailure(result)) {
+      setRefused({
+        message: result.error.message,
+        lastAdmin: result.error.code === 'last_admin',
+      })
+      return
+    }
+    close()
+    await onLeft()
+  }
+  return (
+    <Modal
+      open={workspace !== null}
+      onClose={close}
+      title={workspace === null ? '' : `Leave ${workspace}?`}
+      footer={
+        <>
+          <Button variant="ghost" type="button" onClick={close}>
+            Cancel
+          </Button>
+          {refused?.lastAdmin === true && workspace !== null ? (
+            <Button asChild>
+              <a href={`/_/w/${encodeURIComponent(workspace)}/settings`}>
+                Hand over admin
+              </a>
+            </Button>
+          ) : (
+            <Button
+              variant="destructive"
+              type="button"
+              disabled={busy}
+              onClick={leave}
+            >
+              <LogOut aria-hidden />
+              Leave
+            </Button>
+          )}
+        </>
+      }
+    >
+      {refused === null ? null : <Refusal message={refused.message} />}
+    </Modal>
   )
 }
 
@@ -620,5 +723,276 @@ function ReachOption({
         )}
       </span>
     </label>
+  )
+}
+
+const plural = (count: number, one: string, many: string) =>
+  `${count} ${count === 1 ? one : many}`
+
+/** "6 submissions and 2 entries"; null when there are neither. */
+export function answersText(preview: DeletionPreview): string | null {
+  const parts = [
+    ...(preview.submissions > 0
+      ? [plural(preview.submissions, 'submission', 'submissions')]
+      : []),
+    ...(preview.entries > 0
+      ? [plural(preview.entries, 'entry', 'entries')]
+      : []),
+  ]
+  return parts.length === 0 ? null : parts.join(' and ')
+}
+
+type Sheet =
+  | { readonly kind: 'preview'; readonly preview: DeletionPreview }
+  | {
+      readonly kind: 'blocked'
+      readonly blockedBy: NonNullable<DeletionPreview['blockedBy']>
+    }
+
+function DeleteAccount() {
+  const [sheet, setSheet] = useState<Sheet | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+
+  const open = async () => {
+    setBusy(true)
+    setRefused(null)
+    const preview = await deletionPreview()
+    setBusy(false)
+    if (isScreenFailure(preview)) {
+      setRefused(preview.error.message)
+      return
+    }
+    setSheet(
+      preview.blockedBy === null
+        ? { kind: 'preview', preview }
+        : { kind: 'blocked', blockedBy: preview.blockedBy },
+    )
+  }
+
+  return (
+    <section
+      aria-labelledby="delete-account-label"
+      className="flex flex-col gap-3 rounded-xl border border-border border-l-2 border-l-destructive/70 bg-card px-4 py-4"
+    >
+      <h2
+        id="delete-account-label"
+        className="text-[0.9375rem] font-semibold text-error-300"
+      >
+        Delete my answers and account
+      </h2>
+      <p className="text-sm leading-relaxed text-neutral-300">
+        Withdraws everything you wrote on this deployment, deletes the text of
+        your comments, revokes your keys, ends your sessions and removes your
+        memberships.
+      </p>
+      <Button
+        variant="destructive"
+        size="sm"
+        className="w-fit"
+        disabled={busy}
+        onClick={open}
+      >
+        Delete my answers and account
+      </Button>
+      <Refusal message={sheet === null ? refused : null} />
+      <DeletionSheet
+        sheet={sheet?.kind === 'preview' ? sheet.preview : null}
+        onClose={() => setSheet(null)}
+      />
+      <BlockedSheet
+        blockedBy={sheet?.kind === 'blocked' ? sheet.blockedBy : null}
+        onClose={() => setSheet(null)}
+      />
+    </section>
+  )
+}
+
+function SheetRow({
+  icon,
+  title,
+  detail,
+}: {
+  icon: ReactNode
+  title: string
+  detail: string
+}) {
+  return (
+    <li className="flex items-center gap-3 px-3.5 py-2.5">
+      <span
+        aria-hidden
+        className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-800/70 text-neutral-300 [&_svg]:size-4"
+      >
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[0.9375rem] text-neutral-50">{title}</span>
+        <span className="block font-mono text-xs text-neutral-400">
+          {detail}
+        </span>
+      </span>
+    </li>
+  )
+}
+
+/** What deleting removes, counted, before the person confirms. */
+function DeletionSheet({
+  sheet,
+  onClose,
+}: {
+  sheet: DeletionPreview | null
+  onClose: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [refused, setRefused] = useState<string | null>(null)
+  const close = () => {
+    setRefused(null)
+    onClose()
+  }
+  const remove = async () => {
+    setBusy(true)
+    setRefused(null)
+    const message = refusalOf(await deleteAccount())
+    if (message === null) {
+      window.location.assign('/')
+      return
+    }
+    setBusy(false)
+    setRefused(message)
+  }
+  const answers = sheet === null ? null : answersText(sheet)
+  return (
+    <Modal
+      open={sheet !== null}
+      onClose={close}
+      title="Delete my answers and account?"
+      footer={
+        <>
+          <Button variant="ghost" type="button" onClick={close}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            type="button"
+            disabled={busy}
+            onClick={remove}
+          >
+            <Trash2 aria-hidden />
+            Delete
+          </Button>
+        </>
+      }
+    >
+      {sheet === null ? null : (
+        <div className="flex flex-col gap-3">
+          <ul className="divide-y divide-border/80 rounded-xl border border-border bg-neutral-950/40">
+            {answers === null ? null : (
+              <SheetRow
+                icon={<FileText />}
+                title={answers}
+                detail="withdrawn, with every revision"
+              />
+            )}
+            {sheet.comments === 0 ? null : (
+              <SheetRow
+                icon={<MessageSquare />}
+                title={plural(sheet.comments, 'comment', 'comments')}
+                detail={'text deleted, shown as "Comment deleted"'}
+              />
+            )}
+            {sheet.keys === 0 ? null : (
+              <SheetRow
+                icon={<KeyRound />}
+                title={plural(sheet.keys, 'agent key', 'agent keys')}
+                detail="revoked"
+              />
+            )}
+            <SheetRow
+              icon={<User />}
+              title="Every session"
+              detail="ended on every device"
+            />
+            {sheet.workspaces.map((workspace) => (
+              <SheetRow
+                key={workspace}
+                icon={<Building2 />}
+                title={`Membership of ${workspace}`}
+                detail="removed"
+              />
+            ))}
+          </ul>
+          <p className="flex gap-2 text-sm text-neutral-400">
+            <Info
+              aria-hidden
+              className="mt-0.5 size-4 shrink-0 text-neutral-500"
+            />
+            Pages you pushed stay in their trees.
+          </p>
+          <Refusal message={refused} />
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+/** Refused while the person is the last admin or the only super admin. */
+function BlockedSheet({
+  blockedBy,
+  onClose,
+}: {
+  blockedBy: NonNullable<DeletionPreview['blockedBy']> | null
+  onClose: () => void
+}) {
+  return (
+    <Modal
+      open={blockedBy !== null}
+      onClose={onClose}
+      title="Delete my answers and account?"
+      footer={
+        blockedBy === null ? undefined : (
+          <>
+            <Button variant="ghost" type="button" onClick={onClose}>
+              Cancel
+            </Button>
+            {blockedBy.kind === 'last_admin' ? (
+              <Button asChild>
+                <a
+                  href={`/_/w/${encodeURIComponent(blockedBy.workspace)}/settings`}
+                >
+                  Hand over admin
+                </a>
+              </Button>
+            ) : (
+              <Button asChild>
+                <a href="/_/admin">Add super admin</a>
+              </Button>
+            )}
+          </>
+        )
+      }
+    >
+      {blockedBy === null ? null : (
+        <div
+          role="alert"
+          className="flex gap-2.5 rounded-xl border border-warning-400/30 bg-warning-400/8 px-3.5 py-3 text-[0.9375rem] leading-relaxed text-neutral-200"
+        >
+          <TriangleAlert
+            aria-hidden
+            className="mt-1 size-4 shrink-0 text-warning-300"
+          />
+          {blockedBy.kind === 'last_admin' ? (
+            <p>
+              <strong className="font-semibold text-neutral-50">
+                You&apos;re the last admin of {blockedBy.workspace}.
+              </strong>{' '}
+              Hand over admin to another member first. Then you can delete your
+              answers and account.
+            </p>
+          ) : (
+            <p>Name another super admin first.</p>
+          )}
+        </div>
+      )}
+    </Modal>
   )
 }

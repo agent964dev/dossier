@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute, Link, redirect } from '@tanstack/react-router'
 import { Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
@@ -24,6 +24,8 @@ export const Route = createFileRoute('/')({
   loader: async ({ deps }) => {
     const view = await homeView({ data: { w: deps.w } })
     if (isScreenFailure(view)) throw new Error(view.error.message)
+    // A new deployment's super admin first chooses who may create workspaces.
+    if (view.firstRun) throw redirect({ href: '/_/admin' })
     return view
   },
   head: ({ loaderData }) => ({
