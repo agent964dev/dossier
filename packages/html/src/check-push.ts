@@ -402,7 +402,7 @@ export const checkPush = (
       )
     }
 
-    const clash = clashOf(path, tree)
+    const clash = pageFolderClash(path, (at) => tree.kindAt(at) === 'page')
     if (clash !== null && !clashes.has(clash.page)) {
       clashes.add(clash.page)
       problems.push(
@@ -419,10 +419,13 @@ export const checkPush = (
   return { problems, warnings }
 }
 
-/** `a/b.html` against `a/b/index.html`, either way round. */
-const clashOf = (
+/**
+ * `a/b.html` against `a/b/index.html`, either way round: the page both
+ * would be, when `isPage` says the other one is there too.
+ */
+export const pageFolderClash = (
   path: string,
-  tree: TreeView,
+  isPage: (path: string) => boolean,
 ): {
   readonly page: string
   readonly file: string
@@ -433,11 +436,11 @@ const clashOf = (
   if (path.endsWith('/index.html')) {
     const page = path.slice(0, -'/index.html'.length)
     const file = `${page}.html`
-    return tree.kindAt(file) === 'page' ? { page, file, index: path } : null
+    return isPage(file) ? { page, file, index: path } : null
   }
   const page = path.slice(0, -'.html'.length)
   const index = `${page}/index.html`
-  return tree.kindAt(index) === 'page' ? { page, file: path, index } : null
+  return isPage(index) ? { page, file: path, index } : null
 }
 
 const encoder = new TextEncoder()

@@ -23,6 +23,7 @@ import {
 } from '@dossier/contracts'
 import {
   ANALYZER_VERSION,
+  pageFolderClash,
   rewriteForMove,
   type HtmlAnalysis,
 } from '@dossier/html'
@@ -547,6 +548,24 @@ export const makeChanges = (deps: ChangesDeps) => {
             .map((n) => n.path),
           ...revive.map((r) => r.node.path),
         ])
+        // A revived a/b.html and a live a/b/index.html would be one page,
+        // either way round.
+        for (const r of revive) {
+          if (r.node.kind !== 'file') continue
+          const pageClash = pageFolderClash(r.node.path, (p) =>
+            filesAfter.has(p),
+          )
+          if (pageClash === null) continue
+          const other =
+            pageClash.file === r.node.path ? pageClash.index : pageClash.file
+          return yield* Effect.fail(
+            dossierError(
+              'conflict',
+              `${other} is the page ${pageClash.page} now. Move it first.`,
+              'Move it with dossier mv, then restore again.',
+            ),
+          )
+        }
         const hasFile = (path: string) =>
           [...filesAfter].some((p) => isUnder(p, path) && p !== path)
         const empty = below.filter(
@@ -746,6 +765,8 @@ export const makeChanges = (deps: ChangesDeps) => {
       const located = yield* store.locate(i.from)
       if ('missing' in located) return yield* denied(located)
       const { node, tree } = located
+      // Nothing about a source is answered to someone who cannot write it.
+      const granted = yield* access.require('write', node)
       const ws = i.from.workspace
       const display = (path: string) => `${ws}/${tree.name}/${path}`
       if (node.depth === 0) {
@@ -794,7 +815,6 @@ export const makeChanges = (deps: ChangesDeps) => {
           'Move the folder that holds them.',
         )
       }
-      const granted = yield* access.require('write', node)
       // The deepest folder on the way that exists, and the ones to make. The
       // caller must write it before anything about the destination is
       // answered: then whatever is there is theirs to read.
@@ -881,6 +901,9 @@ export const makeChanges = (deps: ChangesDeps) => {
       }
       const commentsGranted =
         comments === undefined ? null : yield* access.require('write', comments)
+      const moves = (path: string) =>
+        isUnder(path, node.path) ||
+        (comments !== undefined && isUnder(path, comments.path))
       const newOf = (path: string) =>
         isUnder(path, node.path)
           ? dest + path.slice(node.path.length)
@@ -897,6 +920,28 @@ export const makeChanges = (deps: ChangesDeps) => {
               isUnder(path, commentsTo)
             ? comments.path + path.slice(commentsTo.length)
             : path
+      // a/b.html and a/b/index.html would be one page: none may come of
+      // the move, anywhere in the tree it leaves.
+      const filesAfter = new Set(
+        live
+          .filter((n) => n.kind === 'file')
+          .map((n) => (moves(n.path) ? newOf(n.path) : n.path)),
+      )
+      for (const n of live) {
+        if (n.kind !== 'file' || !moves(n.path)) continue
+        const pageClash = pageFolderClash(newOf(n.path), (p) =>
+          filesAfter.has(p),
+        )
+        if (pageClash !== null) {
+          return yield* Effect.fail(
+            dossierError(
+              'policy_rejected',
+              `${display(pageClash.file)} and ${display(pageClash.index)} would both be the page ${display(pageClash.page)}.`,
+              'Choose another name.',
+            ),
+          )
+        }
+      }
       // Relative links in authored HTML that cross the move follow it.
       const kinds = new Map(live.map((n) => [n.path, kindOf(n)]))
       const html = yield* htmlFiles(tree.id)

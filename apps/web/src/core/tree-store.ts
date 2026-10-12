@@ -1430,7 +1430,7 @@ export const TreeStoreLive: Layer.Layer<
         return held.length === 0 ? null : (node as NodeRow)
       })
 
-    const resolve = (ref: LinkRef | TreeRef, at?: AuthoredSeq) =>
+    const resolve: TreeStoreService['resolve'] = (ref, at) =>
       Effect.gen(function* () {
         let found: TreeRow | null
         if ('treeId' in ref) {
@@ -1442,9 +1442,19 @@ export const TreeStoreLive: Layer.Layer<
           if (found === null && at === undefined) {
             const moved = yield* movedTree(ref.workspace, ref.tree)
             if (moved !== null) {
+              // Answered as what the path names where the tree is now, so
+              // someone who reads only part of the tree follows it too.
+              const there: Resolved | MissingNode = yield* resolve({
+                ...ref,
+                workspace: moved.place.workspace,
+                tree: moved.place.tree,
+              })
               return {
                 kind: 'redirect',
-                node: moved.root,
+                node:
+                  'missing' in there || there.kind === 'kit'
+                    ? moved.root
+                    : there.node,
                 tree: moved.tree,
                 to: linkPathOf(ref.path, ref.folder || ref.path === ''),
                 place: moved.place,
@@ -2392,6 +2402,14 @@ export const TreeStoreLive: Layer.Layer<
               )
             }
             bases.push(everyBasis(holder.basis, person.id))
+            // What the writer holds is still live where the path was read
+            // from it: a page or folder moved since leaves no data behind
+            // at its old path.
+            stateGuards.push({
+              sql: `exists (select 1 from nodes where id = ? and path = ?
+                      and deleted_at is null)`,
+              binds: [holder.id, holder.path],
+            })
             const id = newId() as NodeId
             const segments = node.path.split('/')
             // Folders on the way, each only where nothing lives yet.
@@ -2868,16 +2886,21 @@ export const TreeStoreLive: Layer.Layer<
               },
               ...(refs === undefined
                 ? []
-                : (['replyTo', 'resolves', 'reopens'] as const).map((key) => ({
-                    sql: `${subtree}
+                : (['replyTo', 'resolves', 'reopens'] as const).map((key) => {
+                    const after = `json_set(json_value, '$.${key}',
+                      ?4 || substr(json_extract(json_value, '$.${key}'), length(?3) + 1))`
+                    // The stored size follows the longer or shorter value.
+                    return {
+                      sql: `${subtree}
                           update node_versions
-                          set json_value = json_set(json_value, '$.${key}',
-                            ?4 || substr(json_extract(json_value, '$.${key}'), length(?3) + 1))
+                          set json_value = ${after},
+                            size = length(cast(${after} as blob))
                           where node_id in (select id from sub) and json_value is not null
                             and substr(json_extract(json_value, '$.${key}'), 1, length(?3) + 1)
                               = ?3 || '/'`,
-                    binds: [t, node.id, refs.from, refs.to],
-                  }))),
+                      binds: [t, node.id, refs.from, refs.to],
+                    }
+                  })),
               {
                 // Forms that send inside what moved follow it.
                 sql: `update forms set target_path = ?2 || substr(target_path, length(?3) + 1)
@@ -2996,6 +3019,24 @@ export const TreeStoreLive: Layer.Layer<
                 binds: [to.workspace.id, name, t],
               },
             )
+            if (to.workspace.id !== was.workspaceId) {
+              // Shares with its workspace follow the tree to the new one; a
+              // node already shared with the new workspace keeps that share.
+              writes.push(
+                {
+                  sql: `update or ignore shares set target = ?1
+                        where tree_id = ?2 and target_kind = 'workspace' and target = ?3`,
+                  binds: [to.workspace.id, t, was.workspaceId],
+                },
+                {
+                  sql: `delete from shares
+                        where tree_id = ?1 and target_kind = 'workspace' and target = ?2`,
+                  binds: [t, was.workspaceId],
+                },
+              )
+              // Its versions now count in the new workspace's storage.
+              grows = true
+            }
           },
 
           blank: (comment, blanked) => {
