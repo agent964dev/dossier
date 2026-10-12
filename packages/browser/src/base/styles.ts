@@ -44,6 +44,25 @@ export const addBaseStyles = (
 }
 
 /**
+ * Adds a library's own stylesheet at `href` once per document, imported
+ * into the base layer, so page and kit CSS beat it as they beat base styles.
+ */
+export const addBaseStylesheet = (
+  document: Document,
+  tag: LibraryName,
+  href: string,
+): void => {
+  if (document.querySelector(`style[data-dossier-base="${tag}"]`) !== null) {
+    return
+  }
+  declareBaseLayer(document)
+  const style = document.createElement('style')
+  style.setAttribute('data-dossier-base', tag)
+  style.textContent = `@import url(${JSON.stringify(href)}) layer(${BASE_LAYER});`
+  ;(document.head ?? document.documentElement).appendChild(style)
+}
+
+/**
  * Whether the page shows dark at `element`: its computed `color-scheme`
  * names only dark, or names both and the viewer prefers dark.
  */
