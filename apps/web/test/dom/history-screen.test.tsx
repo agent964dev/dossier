@@ -1,3 +1,6 @@
+// The viewer's clock: three hours ahead of UTC.
+process.env.TZ = 'Asia/Baghdad'
+
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -77,7 +80,6 @@ const base = {
   to: null,
   restorable: false,
   who: 'lina',
-  date: '11 Oct',
   name: 'plan.html',
   restore: null,
 } as const
@@ -90,7 +92,8 @@ const DELETED = line({
   seq: 40 as never,
   restorable: true,
   label: 'Deleted plan.html',
-  meta: '11 Oct · lina',
+  at: '2026-10-11T09:30:00.000Z',
+  meta: 'lina',
   restore: {
     target: 'agent964/acme/plan.html',
     to: { at: Date.parse('2026-10-11T09:30:00.000Z') - 1 },
@@ -103,18 +106,19 @@ const PURGED = line({
   name: 'old.html',
   restorable: false,
   label: 'Deleted old.html',
-  meta: '1 Sept · omar',
+  at: '2026-09-01T09:30:00.000Z',
+  meta: 'omar',
 })
 const PUSH_12 = line({
   kind: 'push',
   seq: 38 as never,
   by: 'owner',
   who: 'owner',
-  date: '10 Oct',
   path: '',
   push: { number: 12 as never, message: 'First questions', files: 3 },
   label: 'Push 12 · First questions',
-  meta: '10 Oct · owner · 3 files',
+  at: '2026-10-10T09:30:00.000Z',
+  meta: 'owner · 3 files',
   restore: { target: TARGET, to: { push: 12 } },
 })
 const RESTORED = line({
@@ -124,14 +128,16 @@ const RESTORED = line({
   who: 'owner',
   to: 'push 9',
   label: 'Restored plan.html to push 9',
-  meta: '10 Oct · owner',
+  at: '2026-10-10T09:30:00.000Z',
+  meta: 'owner',
 })
 const MOVED = line({
   kind: 'move',
   seq: 36 as never,
   to: 'plans/plan.html',
   label: 'Moved plan.html to plans/plan.html',
-  meta: '10 Oct · lina',
+  at: '2026-10-10T09:30:00.000Z',
+  meta: 'lina',
 })
 const WITHDRAWN = line({
   kind: 'withdrawal',
@@ -141,7 +147,8 @@ const WITHDRAWN = line({
   path: 'answers/sara@acme.com.json',
   name: 'answers/sara@acme.com.json',
   label: 'sara@acme.com withdrew a submission',
-  meta: '9 Oct',
+  at: '2026-10-09T09:30:00.000Z',
+  meta: '',
 })
 
 const PUSH_9 = line({
@@ -152,7 +159,8 @@ const PUSH_9 = line({
   path: '',
   push: { number: 9 as never, message: 'Brief', files: 1 },
   label: 'Push 9 · Brief',
-  meta: '8 Oct · omar · 1 file',
+  at: '2026-10-08T09:30:00.000Z',
+  meta: 'omar · 1 file',
   restore: { target: TARGET, to: { push: 9 } },
 })
 
@@ -227,6 +235,22 @@ const dialog = () => {
   if (open === undefined) throw new Error('no open dialog')
   return open as unknown as Element & ParentNode
 }
+
+describe('times in the history', () => {
+  it('show each line’s day on the viewer’s clock', async () => {
+    // 23:30 UTC on 12 Oct is 02:30 on 13 Oct in Baghdad.
+    const late = line({
+      kind: 'delete',
+      seq: 41 as never,
+      at: '2026-10-12T23:30:00.000Z',
+      label: 'Deleted late.html',
+      meta: 'lina',
+    })
+    await show(view({ lines: [late] }))
+    expect(text()).toContain('13 Oct · lina')
+    expect(text()).not.toContain('12 Oct')
+  })
+})
 
 describe('the history list', () => {
   it('shows every kind of line, newest first, with its own actions', async () => {
@@ -370,7 +394,8 @@ const PUSH: PushView = {
   number: 12,
   title: 'First questions',
   label: 'Push 12 · First questions',
-  meta: '10 Oct · owner · 3 files',
+  at: '2026-10-10T09:30:00.000Z',
+  meta: 'owner · 3 files',
   files: [
     {
       path: 'plan.html',

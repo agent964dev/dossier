@@ -20,6 +20,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 
 import { AppHeader } from '../../../components/app-header'
 import { DeleteDialog, type Deleting } from '../../../components/delete-dialog'
+import { LocalTime } from '../../../components/local-time'
 import { MentionedBadge } from '../../../components/mentioned-badge'
 import { NoAccessScreen } from '../../../components/no-access'
 import { MenuButton, MenuLink, RowMenu } from '../../../components/row-menu'
@@ -88,17 +89,13 @@ function ListingRoute() {
   )
 }
 
-const DAY = new Intl.DateTimeFormat('en-GB', {
-  day: 'numeric',
-  month: 'short',
-  timeZone: 'UTC',
-})
-
-/** "push 12 · 10 Oct". */
+/** "push 12 · 10 Oct", the day on the viewer's clock. */
 const pushLabel = (push: { number: number; at: string } | null) =>
-  push === null
-    ? null
-    : `push ${push.number} · ${DAY.format(new Date(push.at))}`
+  push === null ? null : (
+    <>
+      push {push.number} · <LocalTime at={push.at} format="day" />
+    </>
+  )
 
 /** "2.1 MB". */
 export const sizeLabel = (bytes: number): string => {
@@ -134,7 +131,7 @@ function RowIcon({ children }: { children: ReactNode }) {
 }
 
 /** The two meta parts: one line on phones, two columns on wider screens. */
-function Meta({ first, second }: { first: ReactNode; second: string | null }) {
+function Meta({ first, second }: { first: ReactNode; second: ReactNode }) {
   return (
     <span className={META}>
       <span className="md:truncate">
@@ -686,9 +683,11 @@ function SeenByList({ link }: { link: string }) {
               {row.email}
             </span>
             <span className="text-xs text-neutral-400">
-              {row.withinHour
-                ? 'last opened within the hour'
-                : DAY.format(new Date(row.lastSeenAt))}
+              {row.withinHour ? (
+                'last opened within the hour'
+              ) : (
+                <LocalTime at={row.lastSeenAt} format="day" />
+              )}
             </span>
           </li>
         ))}

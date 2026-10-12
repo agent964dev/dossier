@@ -10,6 +10,7 @@ import {
 import { useEffect, useId, useState, type ReactNode } from 'react'
 
 import { AppHeader } from '../../../../../components/app-header'
+import { LocalTime } from '../../../../../components/local-time'
 import { NoAccessScreen } from '../../../../../components/no-access'
 import { Button } from '../../../../../components/ui/button'
 import { Modal } from '../../../../../components/ui/modal'
@@ -315,7 +316,7 @@ function PersonCards({
               </span>
             </span>
             <span className="shrink-0 font-mono text-xs text-neutral-400">
-              {row.when}
+              <LocalTime at={row.at} format="when" />
             </span>
           </div>
           <Values
@@ -399,7 +400,7 @@ function ResponsesTable({
                 </td>
               ))}
               <td className="px-3.5 py-3.5 font-mono text-xs whitespace-nowrap text-neutral-400">
-                {row.when} · push {row.push}
+                <LocalTime at={row.at} format="when" /> · push {row.push}
               </td>
               <td className="px-3.5 py-3">
                 {row.revisions > 1 ? (
@@ -446,7 +447,7 @@ function SharedValues({ values }: { values: NonNullable<FormView['shared']> }) {
             </span>
           </span>
           <span className="shrink-0 font-mono text-xs text-neutral-400">
-            changed by {value.by}, {value.when}
+            changed by {value.by}, <LocalTime at={value.at} format="day" />
           </span>
         </li>
       ))}
@@ -562,7 +563,8 @@ function RevisionList({ at, path }: { at: PageAt; path: string }) {
               Revision {revision.revision}
             </span>
             <span className="font-mono text-xs text-neutral-400">
-              {revision.when} · push {revision.push}
+              <LocalTime at={revision.at} format="when" /> · push{' '}
+              {revision.push}
             </span>
           </RevisionHead>
           <Values items={revision.cells} />

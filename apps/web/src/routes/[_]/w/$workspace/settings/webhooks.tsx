@@ -3,6 +3,7 @@ import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { Check, Copy, Plus, Webhook } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 
+import { LocalTime } from '../../../../../components/local-time'
 import { MenuButton, RowMenu } from '../../../../../components/row-menu'
 import {
   ConfirmDialog,
@@ -93,9 +94,11 @@ function Webhooks({ view }: { view: WebhooksView }) {
                 <span className="block text-xs text-neutral-400">
                   {row.events.map((e) => EVENT_LABELS[e]).join(', ')}
                 </span>
-                {row.status === null ? null : (
+                {row.failing === null ? null : (
                   <span className="mt-0.5 block text-xs text-error-300">
-                    {row.status}
+                    Failing since{' '}
+                    <LocalTime at={row.failing.since} format="when" /> ·{' '}
+                    {row.failing.lastError}
                   </span>
                 )}
               </div>

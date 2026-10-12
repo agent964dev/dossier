@@ -31,9 +31,7 @@ export type HistoryLine = LogLine & {
   readonly label: string
   /** The author, or the writer of a withdrawal; '' when nobody is named. */
   readonly who: string
-  /** "10 Oct". */
-  readonly date: string
-  /** "10 Oct · owner · 3 files". */
+  /** "owner · 3 files": what follows the line's day, which screens write. */
   readonly meta: string
   /** The line's path as the history's folder names it: "plan.html". */
   readonly name: string
@@ -81,7 +79,9 @@ export interface PushView {
   readonly title: string | null
   /** "Push 12 · First questions". */
   readonly label: string
-  /** "10 Oct · owner · 3 files". */
+  /** When it was committed, ISO 8601. */
+  readonly at: string
+  /** "owner · 3 files": what follows its day, which screens write. */
   readonly meta: string
   readonly files: readonly PushFileView[]
 }
@@ -93,17 +93,6 @@ export type RestoreResult = ChangeResult
 const notFound = () =>
   dossierError('not_found', 'Nothing is here, or you cannot open it.')
 
-const DAY = new Intl.DateTimeFormat('en-GB', {
-  day: 'numeric',
-  month: 'short',
-  timeZone: 'UTC',
-})
-const DAY_YEAR = new Intl.DateTimeFormat('en-GB', {
-  day: 'numeric',
-  month: 'short',
-  year: 'numeric',
-  timeZone: 'UTC',
-})
 const TIME = new Intl.DateTimeFormat('en-GB', {
   day: 'numeric',
   month: 'short',
@@ -111,15 +100,6 @@ const TIME = new Intl.DateTimeFormat('en-GB', {
   minute: '2-digit',
   timeZone: 'UTC',
 })
-
-/** "10 Oct", with the year when it is not this year's. */
-export const dayLabel = (iso: string, now = Date.now()): string => {
-  const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return iso
-  return at.getUTCFullYear() === new Date(now).getUTCFullYear()
-    ? DAY.format(at)
-    : DAY_YEAR.format(at)
-}
 
 const filesText = (count: number) => (count === 1 ? '1 file' : `${count} files`)
 
@@ -149,19 +129,18 @@ const join = (...parts: readonly string[]) =>
 
 const lineOf = (
   line: LogLine,
-  at: { readonly ref: LinkRef; readonly target: string; readonly now: number },
+  at: { readonly ref: LinkRef; readonly target: string },
 ): HistoryLine => {
   const who = line.by ?? ''
-  const date = dayLabel(line.at, at.now)
   const name = nameUnder(at.ref.path, line.path)
-  const base = { ...line, who, date, name }
+  const base = { ...line, who, name }
   switch (line.kind) {
     case 'push': {
       const push = line.push
       return {
         ...base,
         label: push === null ? 'Push' : pushLabel(push.number, push.message),
-        meta: join(date, who, push === null ? '' : filesText(push.files)),
+        meta: join(who, push === null ? '' : filesText(push.files)),
         restore:
           push === null
             ? null
@@ -172,7 +151,7 @@ const lineOf = (
       return {
         ...base,
         label: `Deleted ${name}`,
-        meta: join(date, who),
+        meta: join(who),
         // A deletion comes back as it stood the moment before it: the
         // versions created up to a millisecond earlier. A push number would
         // miss a restore or a data write made between that push and the
@@ -191,7 +170,7 @@ const lineOf = (
           line.to === null
             ? `Restored ${name}`
             : `Restored ${name} to ${pointText(line.to)}`,
-        meta: join(date, who),
+        meta: join(who),
         restore: null,
       }
     case 'move':
@@ -201,7 +180,7 @@ const lineOf = (
           line.to === null
             ? `Moved ${name}`
             : `Moved ${name} to ${nameUnder(at.ref.path, line.to)}`,
-        meta: join(date, who),
+        meta: join(who),
         restore: null,
       }
     case 'withdrawal':
@@ -209,7 +188,7 @@ const lineOf = (
       return {
         ...base,
         label: `${who === '' ? 'Someone' : who} withdrew a submission`,
-        meta: date,
+        meta: '',
         restore: null,
       }
   }
@@ -267,7 +246,6 @@ export const historyView = createServerFn({ method: 'GET' })
         const target = historyTarget(data)
         const ref = yield* refOf(target, config.origin)
         const page = yield* (yield* Files).log({ ref, cursor: data.cursor })
-        const now = Date.now()
         const segments = ref.path === '' ? [] : ref.path.split('/')
         const folderAt = (path: string) =>
           linkFor(config.origin, {
@@ -306,7 +284,7 @@ export const historyView = createServerFn({ method: 'GET' })
                 }),
           },
           target,
-          lines: page.lines.map((line) => lineOf(line, { ref, target, now })),
+          lines: page.lines.map((line) => lineOf(line, { ref, target })),
           next: page.next,
           retentionDays: page.retentionDays,
         } satisfies HistoryView
@@ -339,7 +317,8 @@ export const pushView = createServerFn({ method: 'GET' })
           number,
           title: detail.push.message,
           label: pushLabel(number, detail.push.message),
-          meta: join(dayLabel(at), detail.by, filesText(detail.files.length)),
+          at,
+          meta: join(detail.by, filesText(detail.files.length)),
           files: detail.files.map((file) => ({
             ...file,
             name: nameUnder(ref.path, file.path),

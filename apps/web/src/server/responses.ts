@@ -41,8 +41,8 @@ export interface ResponsesView {
     }[]
     readonly rows: readonly {
       readonly who: string
-      /** '12 Oct, 14:20'. */
-      readonly when: string
+      /** When it was sent, ms since the epoch; screens show the viewer's time. */
+      readonly at: number
       readonly push: number
       readonly revisions: number
       readonly cells: readonly { readonly field: string; readonly cell: Cell }[]
@@ -55,7 +55,8 @@ export interface ResponsesView {
           readonly label: string
           readonly text: string
           readonly by: string
-          readonly when: string
+          /** When it was last changed, ms since the epoch. */
+          readonly at: number
         }[]
       | null
     readonly empty: 'No responses yet.' | null
@@ -66,8 +67,8 @@ export interface ResponsesView {
 
 export interface RevisionView {
   readonly revision: number
-  /** '12 Oct, 14:20'. */
-  readonly when: string
+  /** ms since the epoch. */
+  readonly at: number
   readonly push: number
   readonly by: string
   readonly cells: readonly {
@@ -77,14 +78,6 @@ export interface RevisionView {
   }[]
 }
 
-const WHEN = new Intl.DateTimeFormat('en-GB', {
-  day: 'numeric',
-  month: 'short',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-  timeZone: 'UTC',
-})
 const DAY = new Intl.DateTimeFormat('en-GB', {
   day: 'numeric',
   month: 'short',
@@ -99,10 +92,6 @@ const DAY_YEAR = new Intl.DateTimeFormat('en-GB', {
   hour12: false,
   timeZone: 'UTC',
 })
-
-/** '12 Oct, 14:20'. */
-export const whenLabel = (at: number): string =>
-  WHEN.format(new Date(at)).replace(/ at /, ', ')
 
 const folderOf = (path: string) =>
   path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
@@ -252,7 +241,7 @@ export const responsesView = createServerFn({ method: 'GET' })
             const own = ownOf(f.form, row)
             return {
               who: row.email,
-              when: whenLabel(row.at),
+              at: row.at,
               push: row.push,
               revisions: row.revisions,
               cells: fields.map((field) => ({
@@ -273,7 +262,7 @@ export const responsesView = createServerFn({ method: 'GET' })
                       label: field.label,
                       text: cellText(cellOf(value.value, field.type, '')),
                       by: value.by,
-                      when: DAY.format(new Date(value.at)),
+                      at: value.at,
                     },
                   ]
                 })
@@ -295,7 +284,7 @@ export const responsesView = createServerFn({ method: 'GET' })
           }
           for (const value of shared ?? []) {
             md.push(
-              `- ${value.label}: ${value.text} (changed by ${value.by}, ${value.when})`,
+              `- ${value.label}: ${value.text} (changed by ${value.by}, ${DAY.format(new Date(value.at))})`,
             )
           }
           return {
@@ -362,7 +351,7 @@ export const revisionsView = createServerFn({ method: 'GET' })
         const revisions = yield* store.revisions({ ref, path: data.path })
         return revisions.map((revision): RevisionView => ({
           revision: revision.revision,
-          when: whenLabel(revision.at),
+          at: revision.at,
           push: revision.push,
           by: revision.by,
           cells: form.form.fields.map((field) => ({

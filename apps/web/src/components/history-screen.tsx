@@ -15,6 +15,7 @@ import {
 import { useId, useState, type MouseEvent, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
+import { timeText } from '../lib/times'
 import { isScreenFailure } from '../server/failure'
 import {
   historyView,
@@ -26,6 +27,7 @@ import {
   type RestoreChoice,
 } from '../server/history'
 import { Counts, DiffView } from './diff-view'
+import { LocalTime } from './local-time'
 import { Button } from './ui/button'
 import { Modal } from './ui/modal'
 
@@ -76,10 +78,12 @@ export const fileDetail = (file: PushFileView): string =>
 
 /** The sentence of a deletion's restore sheet. */
 export const deletionSentence = (line: HistoryLine): string => {
+  // Shown only once opened in the browser: the viewer's own day.
+  const day = timeText(Date.parse(line.at), 'day-or-year')
   const before =
     line.who === ''
-      ? `before it was deleted on ${line.date}`
-      : `before ${line.who} deleted it on ${line.date}`
+      ? `before it was deleted on ${day}`
+      : `before ${line.who} deleted it on ${day}`
   const from = line.push === null ? '' : `, from push ${line.push.number}`
   return `It comes back as it was ${before}${from}.`
 }
@@ -181,7 +185,10 @@ function Line({
             {line.label}
           </p>
         )}
-        <span className={META}>{line.meta}</span>
+        <span className={META}>
+          <LocalTime at={line.at} format="day-or-year" />
+          {line.meta === '' ? null : ` · ${line.meta}`}
+        </span>
       </div>
       {line.restore === null ? null : line.kind === 'delete' ? (
         <Button
@@ -519,7 +526,8 @@ export function PushDetail({
               {push.title === null ? null : (
                 <span className="lg:hidden">{push.title} · </span>
               )}
-              {push.meta}
+              <LocalTime at={push.at} format="day-or-year" />
+              {push.meta === '' ? null : ` · ${push.meta}`}
             </span>
           </p>
         </div>

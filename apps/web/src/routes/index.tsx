@@ -7,6 +7,7 @@ import {
 import { FileText, Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
+import { LocalTime } from '../components/local-time'
 import { HostName } from '../components/host-name'
 import { MentionedBadge } from '../components/mentioned-badge'
 import { PrivacyLink } from '../components/privacy-link'
@@ -135,12 +136,6 @@ function Trees({
   )
 }
 
-const DAY = new Intl.DateTimeFormat('en-GB', {
-  day: 'numeric',
-  month: 'short',
-  timeZone: 'UTC',
-})
-
 /** The tile's tone follows the row's label. */
 const TILE = {
   'waiting for your answer':
@@ -175,7 +170,7 @@ function SharedRow({ row }: { row: SharedWithMe }) {
           </span>
           <span className="font-mono text-xs break-words text-neutral-400">
             {row.place} · from {row.from} ·{' '}
-            <time dateTime={row.date}>{DAY.format(new Date(row.date))}</time>
+            <LocalTime at={row.date} format="day" />
           </span>
           {row.label === 'mentioned you' ? (
             <MentionedBadge className="mt-1" />
