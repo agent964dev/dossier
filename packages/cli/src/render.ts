@@ -127,6 +127,8 @@ export interface Output {
   readonly json: boolean
   /** Text to stdout, or one JSON value to stdout. */
   readonly result: (text: string, json: unknown) => void
+  /** The same, but the text goes out byte for byte, with no newline added. */
+  readonly exact: (text: string, json: unknown) => void
   /** Progress a person reads: stdout in text, stderr under `--json`. */
   readonly note: (text: string) => void
   /** Text to stderr, or `{ error: { code: exit, … } }` to stdout. */
@@ -154,6 +156,8 @@ export const makeOutput = (io: CliIo, json: boolean): Output => ({
     json
       ? io.stdout(line(JSON.stringify(value, null, 2)))
       : io.stdout(line(text)),
+  exact: (text, value) =>
+    json ? io.stdout(line(JSON.stringify(value, null, 2))) : io.stdout(text),
   note: (text) => (json ? io.stderr(line(text)) : io.stdout(line(text))),
   fail: (failure) => {
     if (json) {

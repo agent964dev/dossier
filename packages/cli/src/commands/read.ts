@@ -43,6 +43,13 @@ export const describeRead = (result: ReadResult): string => {
   return `${name} is ${kindOf(name)}, ${sizeText(result.size)}. Download it with dossier pull.`
 }
 
+/**
+ * The path the read endpoint takes. A folder keeps its trailing slash:
+ * `open/` names the folder even when `open.html` exists beside it.
+ */
+export const readPath = (ref: LinkRef): string =>
+  ref.folder && ref.path !== '' ? `${targetString(ref)}/` : targetString(ref)
+
 /** 'acme/pricing', the way a person names what they asked for. */
 const asked = (ref: LinkRef) =>
   ref.path === '' ? ref.tree : `${ref.tree}/${ref.path}`
@@ -62,7 +69,7 @@ export const read = Command.make(
       const { output } = yield* Cli
       const { remote, ref } = yield* resolveTarget(target)
       const result = yield* callApi(remote.deployment, remote.key, (client) =>
-        client.read.read({ urlParams: { path: targetString(ref) } }),
+        client.read.read({ urlParams: { path: readPath(ref) } }),
       ).pipe(
         Effect.catchIf(
           (error) =>
@@ -78,7 +85,10 @@ export const read = Command.make(
             ),
         ),
       )
-      output.result(describeRead(result), result)
+      // What the link returns, byte for byte; only Dossier's own sentence
+      // about a file it cannot print gets a newline.
+      if (result.text !== null) output.exact(result.text, result)
+      else output.result(describeRead(result), result)
     }),
 ).pipe(
   Command.withDescription(

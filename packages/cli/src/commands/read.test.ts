@@ -138,6 +138,48 @@ describe('dossier read', () => {
   })
 })
 
+describe('dossier read, exactly', () => {
+  it('keeps a folder’s trailing slash, so open/ never reads the page open.html', async () => {
+    const cli = await setUp(() => Response.json(EMPTY))
+
+    expect(await cli.run(['read', 'agent964/acme/open/'])).toBe(0)
+    expect(
+      await cli.run(['read', 'https://dossier.acme.com/agent964/acme/open/']),
+    ).toBe(0)
+    expect(await cli.run(['read', 'agent964/acme/open'])).toBe(0)
+    expect(requests.map((r) => r.url.searchParams.get('path'))).toEqual([
+      'agent964/acme/open/',
+      'agent964/acme/open/',
+      'agent964/acme/open',
+    ])
+  })
+
+  it('prints the agent text exactly, adding no newline', async () => {
+    const json = '{"terms":[{"term":"push"}]}'
+    const cli = await setUp(() =>
+      Response.json({
+        ...PAGE,
+        text: json,
+        type: 'application/json',
+        source: 'companion',
+        companion: 'glossary.json',
+      }),
+    )
+
+    expect(await cli.run(['read', 'agent964/acme/glossary'])).toBe(0)
+    expect(cli.stdout()).toBe(json)
+  })
+
+  it('prints a text file exactly too', async () => {
+    const cli = await setUp(() =>
+      Response.json({ ...PDF, path: 'a.csv', text: 'a,b\n1,2', size: 7 }),
+    )
+
+    expect(await cli.run(['read', 'agent964/acme/a.csv'])).toBe(0)
+    expect(cli.stdout()).toBe('a,b\n1,2')
+  })
+})
+
 describe('describeRead', () => {
   it('names a file by its kind and size', () => {
     const file = (path: string, size: number) =>
