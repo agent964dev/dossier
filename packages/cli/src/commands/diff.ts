@@ -32,12 +32,12 @@ const nameOf = (path: string) => {
 export const describeNoPatch = (response: DiffResponse): string => {
   const name = nameOf(response.path)
   if (response.binary) {
-    const what =
-      response.from === null
-        ? 'was added'
-        : response.to === null
-          ? 'was deleted'
-          : 'changed'
+    const absent = (side: string | null) => side === null || side === 'deleted'
+    const what = absent(response.from)
+      ? 'was added'
+      : absent(response.to)
+        ? 'was deleted'
+        : 'changed'
     return `${name} ${what}; it is binary or too large to show, so no diff is shown.`
   }
   const between =

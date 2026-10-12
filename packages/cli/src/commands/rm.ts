@@ -6,15 +6,16 @@ import { callApi } from '../client.ts'
 import { Cli } from '../io.ts'
 import { jsonOption } from '../render.ts'
 import { resolveTarget } from '../target.ts'
-import { newestPush, nodeName } from './log.ts'
+import { nodeName } from './log.ts'
 import { readPath } from './read.ts'
 
 const days = (count: number) => (count === 1 ? '1 day' : `${count} days`)
 
 /**
- * What deleting prints: what went, and how to bring it back. The push to
- * restore to and the retention period come from the node's history, when it
- * could be read.
+ * What deleting prints: what went, and how to bring it back. The moment just
+ * before the deletion and the retention period come from the node's history,
+ * when it could be read: restoring to that moment brings it back exactly as
+ * it was, whatever was pushed or restored since its last push.
  */
 export const describeRm = (
   response: ChangeResponse,
@@ -26,12 +27,18 @@ export const describeRm = (
   if (history === null) {
     return `${deleted} Restore it from history within the retention period.`
   }
-  const push = newestPush(history)
+  const deletion = history.lines.find(
+    (line) => line.kind === 'delete' && line.seq === response.seq,
+  )
   const within = `within ${days(history.retentionDays)}`
-  return push === null
-    ? `${deleted} Restore it from history ${within}.`
-    : `${deleted} Restore it with \`dossier restore ${name} --to ${push}\` ` +
-        `${within}.`
+  if (deletion === undefined) {
+    return `${deleted} Restore it from history ${within}.`
+  }
+  const before = new Date(Date.parse(deletion.at) - 1).toISOString()
+  return (
+    `${deleted} Restore it with \`dossier restore ${name} --to ${before}\` ` +
+    `${within}.`
+  )
 }
 
 export const rm = Command.make(

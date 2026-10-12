@@ -121,14 +121,6 @@ export const describeLog = (
   ].join('\n')
 }
 
-/** The newest push in a log page, the one to restore a deletion to. */
-export const newestPush = (response: LogResponse): number | null => {
-  for (const line of response.lines) {
-    if (line.kind === 'push' && line.push !== null) return line.push.number
-  }
-  return null
-}
-
 export const log = Command.make(
   'log',
   {

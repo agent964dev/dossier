@@ -92,7 +92,7 @@ describe('dossier rm', () => {
     expect(cli.stderr()).toBe('')
     expect(cli.stdout()).toBe(
       'Deleted agent964/acme/plan.html. Restore it with `dossier restore ' +
-        'agent964/acme/plan.html --to 12` within 30 days.\n',
+        `agent964/acme/plan.html --to ${YEAR}-10-11T09:29:59.999Z\` within 30 days.\n`,
     )
     expect(requests.map((r) => [r.method, r.url.pathname])).toEqual([
       ['POST', '/_/api/rm'],
@@ -119,11 +119,11 @@ describe('dossier rm', () => {
     expect(requests[0]?.body).toEqual({ path: 'agent964/acme/plan' })
     expect(cli.stdout()).toBe(
       'Deleted agent964/acme/plan.html. Restore it with `dossier restore ' +
-        'agent964/acme/plan.html --to 12` within 1 day.\n',
+        `agent964/acme/plan.html --to ${YEAR}-10-11T09:29:59.999Z\` within 1 day.\n`,
     )
 
     answer = change({ path: 'questions', changed: ['questions/a.html'] })
-    history = logOf({ path: 'questions', lines: [DELETED] })
+    history = logOf({ path: 'questions', lines: [PUSH_12] })
     expect(await cli.run(['rm', 'agent964/acme/questions/'])).toBe(0)
     expect(cli.stdout()).toBe(
       'Deleted agent964/acme/questions/. Restore it from history within ' +
@@ -480,7 +480,7 @@ describe('dossier diff', () => {
         'shown.\n',
     )
 
-    answer = { ...answer, from: 'push 11', to: null }
+    answer = { ...answer, from: 'push 11', to: 'deleted' }
     expect(await cli.run(['diff', 'agent964/acme/images/plan.png'])).toBe(0)
     expect(cli.stdout()).toContain('plan.png was deleted;')
 
