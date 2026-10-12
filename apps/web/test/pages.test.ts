@@ -336,6 +336,48 @@ describe('view handles', () => {
     ).toBe(1)
   })
 
+  it('replaces a live handle made under an earlier HANDLE_SECRET at the next view', async () => {
+    const w = await world()
+    const first = await atTime(view(w.owner, w.treeId, 'plan'))
+    expect(
+      htmlOf(await atTime(frame(first.handle, w.treeId, 1, 'plan'))),
+    ).toContain('Plan one')
+    // The deployment's HANDLE_SECRET is rotated while the handle is live.
+    harness.use(
+      testRuntime({
+        env: { HANDLE_SECRET: 'rotated-handle-secret-0123456789abcdef' },
+      }),
+    )
+    const after = await atTime(view(w.owner, w.treeId, 'plan'))
+    expect(after.handle).not.toBe(first.handle)
+    expect(
+      htmlOf(await atTime(frame(after.handle, w.treeId, 1, 'plan'))),
+    ).toContain('Plan one')
+    // The old handle and what it was issued are gone; one row is left.
+    expect(await atTime(frame(first.handle, w.treeId, 1, 'plan'))).toBe(
+      'refused',
+    )
+    const sessionId = (w.owner.via as { sessionId: string }).sessionId
+    expect(
+      await count(
+        'view_handles',
+        'session_id = ? and tree_id = ?',
+        sessionId,
+        w.treeId,
+      ),
+    ).toBe(1)
+    expect(
+      await count(
+        'view_handle_nodes',
+        `handle_hash not in (select hash_sha256 from view_handles)`,
+      ),
+    ).toBe(0)
+    // Renewal under the new secret keeps the new handle.
+    expect((await atTime(view(w.owner, w.treeId, 'plan'))).handle).toBe(
+      after.handle,
+    )
+  })
+
   it('drops what the old generation was issued, so a reader cannot reopen it', async () => {
     const w = await world()
     const { caller: reader } = await someone()

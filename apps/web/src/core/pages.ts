@@ -812,16 +812,23 @@ export const PagesLive: Layer.Layer<
               .bind(owner.id, tree.id)
               .first<{ hash: string; generation: number; expiresAt: number }>(),
           )
-          const live = row !== null && row.expiresAt > now
-          const generation = live ? row.generation : (row?.generation ?? 0) + 1
-          const handle = yield* Effect.promise(() =>
+          const handleOf = (generation: number) =>
             hmacSha256(
               Redacted.value(config.handleSecret),
               owner.kind === 'session'
                 ? `view:${owner.id}:${tree.id}:${generation}`
                 : `visitor:${owner.id}:${tree.id}:${generation}`,
-            ),
-          )
+            )
+          // A row made under an earlier HANDLE_SECRET can never be renewed:
+          // its hash is not this secret's. It is replaced like a lapsed one.
+          const stale =
+            row !== null &&
+            (yield* Effect.promise(async () =>
+              sha256Hex(await handleOf(row.generation)),
+            )) !== row.hash
+          const live = row !== null && row.expiresAt > now && !stale
+          const generation = live ? row.generation : (row?.generation ?? 0) + 1
+          const handle = yield* Effect.promise(() => handleOf(generation))
           const hash = yield* Effect.promise(() => sha256Hex(handle))
           const expiresAt = now + HANDLE_LIFE
           const statements: D1PreparedStatement[] = []
@@ -835,21 +842,22 @@ export const PagesLive: Layer.Layer<
             )
           } else {
             if (row !== null) {
-              // Drop only the lapsed row this read saw.
+              // Drop only the row this read saw, while it is still lapsed,
+              // or at any time when an earlier secret made it.
               statements.push(
                 DB.prepare(
                   `delete from view_handle_nodes where handle_hash = ?1
                      and exists (select 1 from view_handles
-                                 where hash_sha256 = ?1 and expires_at <= ?2)`,
-                ).bind(row.hash, now),
+                                 where hash_sha256 = ?1 and (expires_at <= ?2 or ?3))`,
+                ).bind(row.hash, now, stale ? 1 : 0),
                 DB.prepare(
                   `delete from view_handle_firsts where handle_hash = ?1
                      and exists (select 1 from view_handles
-                                 where hash_sha256 = ?1 and expires_at <= ?2)`,
-                ).bind(row.hash, now),
+                                 where hash_sha256 = ?1 and (expires_at <= ?2 or ?3))`,
+                ).bind(row.hash, now, stale ? 1 : 0),
                 DB.prepare(
-                  'delete from view_handles where hash_sha256 = ? and expires_at <= ?',
-                ).bind(row.hash, now),
+                  'delete from view_handles where hash_sha256 = ? and (expires_at <= ? or ?)',
+                ).bind(row.hash, now, stale ? 1 : 0),
               )
             }
             statements.push(
