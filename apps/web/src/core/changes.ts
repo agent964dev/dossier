@@ -1252,14 +1252,17 @@ export const makeChanges = (deps: ChangesDeps) => {
               cs.guardHead('', tree.authoredSeq as AuthoredSeq)
               // The write on the destination, as the check saw it.
               cs.holds(destination)
-              // Only a file the move makes a page has its forms replaced; a
-              // page or layout that stays one keeps the forms it has.
+              // Only a file the move makes or unmakes a page has its forms
+              // replaced; a page or layout that stays one keeps its forms.
               cs.move(
                 granted,
                 dest,
                 make,
                 undefined,
-                becoming.length > 0 ? becomingForms : undefined,
+                node.kind === 'file' &&
+                  node.path.endsWith('.html') !== dest.endsWith('.html')
+                  ? becomingForms
+                  : undefined,
               )
               if (
                 comments !== undefined &&

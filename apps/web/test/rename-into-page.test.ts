@@ -277,5 +277,9 @@ describe('a page moved', () => {
     expect(JSON.stringify(sent)).toContain(
       `team/answers/${w.writer.email}.json`,
     )
+
+    // A page renamed out of being a page has no forms left.
+    await mv(w.adminKey, w.at('team/renamed.html'), w.at('team/renamed.txt'))
+    expect(await formsOf('team/renamed.txt')).toEqual([])
   })
 })
