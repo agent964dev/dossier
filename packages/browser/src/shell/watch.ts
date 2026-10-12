@@ -24,8 +24,16 @@ export interface Watches {
   readonly remove: (port: MessagePort, sub: number) => void
   /** A page left: its subscriptions go. */
   readonly drop: (port: MessagePort) => void
-  /** The cursor a view grant gives; it only moves forward. */
-  readonly seen: (cursor: number) => void
+  /**
+   * The cursor a view grant gives. Cursors are opaque, so only the first is
+   * taken; after that the cursor is the latest `next` the events route gave.
+   */
+  readonly seen: (cursor: string) => void
+  /**
+   * A page's write, withdrawal, upload or send to this tree path was
+   * answered: a read sent before now may hold what it replaced.
+   */
+  readonly acknowledged: (path: string) => void
   readonly dispose: () => void
 }
 
@@ -50,7 +58,13 @@ export const createWatches = (deps: {
 }): Watches => {
   const { window: win, tree, api } = deps
   const subs = new Map<MessagePort, Map<number, Sub>>()
-  let cursor: number | null = null
+  let cursor: string | null = null
+  /** Counts acknowledgements, so a read knows which came after it left. */
+  let clock = 0
+  /** Each acknowledged tree path, with the clock when it was answered. */
+  const acked = new Map<string, number>()
+  /** Reads out now; with none, no read can be crossed and acked empties. */
+  let reading = 0
   let connection: { readonly close: () => void } | null = null
   /** The path set the connection was made with, joined. */
   let connected = ''
@@ -74,7 +88,19 @@ export const createWatches = (deps: {
     deps.post(sub.port, { type: 'changed', sub: sub.sub, value })
   }
 
-  /** Reads each path once and tells every subscription on it. */
+  /** A write under, at or above the path was answered after `sentAt`. */
+  const crossed = (path: string, sentAt: number): boolean => {
+    for (const [written, at] of acked) {
+      if (at > sentAt && pathsMeet(written, path)) return true
+    }
+    return false
+  }
+
+  /**
+   * Reads each path once and tells every subscription on it. An answer to a
+   * read that left before a write there was answered may predate that write,
+   * so the path is read again rather than sent back over a newer value.
+   */
   const readAll = async (targets: readonly Sub[]): Promise<void> => {
     const byPath = new Map<string, Sub[]>()
     for (const sub of targets) {
@@ -85,11 +111,21 @@ export const createWatches = (deps: {
       [...byPath].map(async ([path, list]) => {
         const started = list.map((sub) => sub.reads)
         let value: Value
-        try {
-          value = await api.read({ tree, path })
-        } catch {
-          for (const sub of list) sub.stale = true
-          return
+        for (;;) {
+          const sentAt = clock
+          reading += 1
+          let fenced: boolean
+          try {
+            value = await api.read({ tree, path })
+            fenced = crossed(path, sentAt)
+          } catch {
+            for (const sub of list) sub.stale = true
+            return
+          } finally {
+            reading -= 1
+            if (reading === 0) acked.clear()
+          }
+          if (disposed || !fenced) break
         }
         list.forEach((sub, i) => {
           if (sub.reads !== started[i]) return
@@ -110,12 +146,13 @@ export const createWatches = (deps: {
         for (;;) {
           const page = await api.events({ tree, after: cursor })
           for (const event of page.events) paths.push(event.path)
-          cursor = Math.max(cursor, page.next)
+          cursor = page.next
           if (!page.more) break
         }
       } catch {
-        // The next hint, poll or reconnect asks again from the cursor.
-        if (!everyone) return
+        // The next hint, poll or reconnect asks again from the cursor; the
+        // events already fetched still call for their reads.
+        if (!everyone && paths.length === 0) return
       }
     }
     if (disposed) return
@@ -146,11 +183,8 @@ export const createWatches = (deps: {
     }
   }
 
-  const onHint = (seq: number): void => {
-    if (disposed) return
-    // A hint the cursor has passed asks for nothing new.
-    if (seq !== 0 && cursor !== null && seq <= cursor && !fresh) return
-    void run()
+  const onHint = (): void => {
+    if (!disposed) void run()
   }
 
   const connect = (): void => {
@@ -170,8 +204,6 @@ export const createWatches = (deps: {
       tree,
       paths,
       onHint,
-      // Each source names its state when it starts: the socket on opening,
-      // polling at once. Whatever happened in between, every sub reads again.
       onState: () => {
         fresh = true
       },
@@ -216,8 +248,13 @@ export const createWatches = (deps: {
       if (!subs.delete(port)) return
       changed()
     },
-    seen: (next) => {
-      cursor = cursor === null ? next : Math.max(cursor, next)
+    seen: (first) => {
+      cursor ??= first
+    },
+    acknowledged: (path) => {
+      clock += 1
+      acked.delete(path)
+      acked.set(path, clock)
     },
     dispose: () => {
       disposed = true

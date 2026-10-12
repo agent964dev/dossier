@@ -30,7 +30,7 @@ export const grant = (
   role: ViewGrant['role'] = 'write',
   path = 'questions/index.html',
   email?: string | null,
-  events = 40,
+  events = 'c40',
 ): ViewGrant =>
   ({
     handle,
@@ -46,7 +46,7 @@ export const grant = (
 export interface FakeConnection {
   readonly tree: string
   readonly paths: readonly string[]
-  readonly onHint: (seq: number) => void
+  readonly onHint: () => void
   readonly onState: (state: 'live' | 'polling') => void
   closed: boolean
 }

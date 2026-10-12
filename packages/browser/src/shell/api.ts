@@ -62,7 +62,7 @@ const readGrant = (body: unknown): ViewGrant | null => {
     typeof body.seq !== 'number' ||
     typeof body.path !== 'string' ||
     !(body.email === null || typeof body.email === 'string') ||
-    typeof body.events !== 'number' ||
+    typeof body.events !== 'string' ||
     !ROLES.has(body.role)
   ) {
     return null
@@ -155,7 +155,7 @@ const readUploadResult = (body: unknown): UploadResultWire | null =>
 
 const isEventWire = (value: unknown): value is EventWire =>
   isRecord(value) &&
-  typeof value.seq === 'number' &&
+  typeof value.cursor === 'string' &&
   typeof value.type === 'string' &&
   typeof value.path === 'string' &&
   typeof value.at === 'string' &&
@@ -166,7 +166,7 @@ const readEvents = (body: unknown): EventsResponseWire | null =>
   isRecord(body) &&
   Array.isArray(body.events) &&
   body.events.every(isEventWire) &&
-  typeof body.next === 'number' &&
+  typeof body.next === 'string' &&
   typeof body.more === 'boolean'
     ? { events: body.events, next: body.next, more: body.more }
     : null
@@ -310,7 +310,7 @@ export const shellApi = (
       ),
     events: ({ tree, after }) =>
       call(
-        `${origin}/_/api/events?${new URLSearchParams({ tree, after: String(after) })}`,
+        `${origin}/_/api/events?${new URLSearchParams({ tree, after })}`,
         { method: 'GET' },
         (body) => known(readEvents(body)),
       ),

@@ -6,16 +6,17 @@ import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { Data, TreeStore, type Caller } from '../src/core/index.ts'
-import { exec } from './support/d1.ts'
 import { pageWith, pushForms, seqOf, type FormTree } from './support/forms.ts'
 import { harness, ORIGIN } from './support/harness.ts'
 import { keySecretFor } from './support/keys.ts'
 import { runAs, sessionFor } from './support/people.ts'
 import {
+  agent,
   failureAs,
   join,
   nodeAt,
   person,
+  pushAll,
   share,
   workspace,
 } from './support/trees.ts'
@@ -59,7 +60,7 @@ const writeAs = async (caller: Caller, path: string, page: string) => {
 
 const eventsAs = (
   caller: Caller,
-  i: { after: number | null; path?: string | null; tree?: string },
+  i: { after: string | null; path?: string | null; tree?: string },
 ) =>
   runAs(
     caller,
@@ -72,25 +73,36 @@ const eventsAs = (
     ),
   )
 
+/** The guest's cursor now, then everything they may read after it. */
+const since = async (caller: Caller, run: () => Promise<unknown>) => {
+  const start = (await eventsAs(caller, { after: null })).next
+  await run()
+  return eventsAs(caller, { after: start })
+}
+
+const guestOn = async (path: string, role: 'read' | 'respond' = 'read') => {
+  const guest = await person('guest')
+  await share(
+    tree.treeId,
+    (await nodeAt(tree.treeId, path))!.id,
+    'email',
+    guest.email.toLowerCase(),
+    role,
+    owner,
+  )
+  return { guest, caller: await sessionFor(guest) }
+}
+
 describe('the events route', () => {
-  it('returns only events the caller may read, and moves next past the rest', async () => {
-    const guest = await person('guest')
-    await share(
-      tree.treeId,
-      (await nodeAt(tree.treeId, 'open'))!.id,
-      'email',
-      guest.email.toLowerCase(),
-      'respond',
-      owner,
-    )
-    const guestBrowser = await sessionFor(guest)
-    const start = (await eventsAs(ownerBrowser, { after: null })).next
-    await writeAs(ownerBrowser, 'private/notes.json', 'private/page.html')
+  it('returns only events the caller may read, and its cursor moves past the rest', async () => {
+    const { guest, caller: guestBrowser } = await guestOn('open', 'respond')
     const own = `open/${guest.email.toLowerCase()}.json`
+    const start = (await eventsAs(guestBrowser, { after: null })).next
+    const ownerStart = (await eventsAs(ownerBrowser, { after: null })).next
+    await writeAs(ownerBrowser, 'private/notes.json', 'private/page.html')
     await writeAs(guestBrowser, own, 'open/page.html')
     await writeAs(ownerBrowser, 'private/more.json', 'private/page.html')
-
-    const all = await eventsAs(ownerBrowser, { after: start })
+    const all = await eventsAs(ownerBrowser, { after: ownerStart })
     expect(all.events.map((e) => e.path)).toEqual([
       'private/notes.json',
       own,
@@ -100,9 +112,11 @@ describe('the events route', () => {
     expect(seen.events.map((e) => [e.type, e.path, e.by])).toEqual([
       ['data_write', own, guest.email],
     ])
-    expect(seen.next).toBe(all.next)
     expect(seen.more).toBe(false)
-    // The guest cannot follow a path it cannot read.
+    // From its cursor, nothing is left to see.
+    expect((await eventsAs(guestBrowser, { after: seen.next })).events).toEqual(
+      [],
+    )
     expect(
       await failureAs(
         guestBrowser,
@@ -113,58 +127,148 @@ describe('the events route', () => {
     ).toMatchObject({ code: 'not_found' })
   })
 
-  it('filters by path: at, below or above it', async () => {
-    const start = (await eventsAs(ownerBrowser, { after: null })).next
-    await writeAs(ownerBrowser, 'open/a/x.json', 'open/page.html')
-    await writeAs(ownerBrowser, 'private/y.json', 'private/page.html')
-    const below = await eventsAs(ownerBrowser, {
-      after: start,
-      path: 'open/',
+  it('shows a reader restricted to a folder a push above it that changed something they read, and no other', async () => {
+    const { caller } = await guestOn('open')
+    const key = await agent(owner)
+    const quiet = await since(caller, async () => {
+      await pushAll(
+        key,
+        `${ws.name}/${tree.name}`,
+        { ...FILES, 'private/page.html': pageWith('<p>Two</p>', 'P') },
+        { force: true },
+      )
     })
-    expect(below.events.map((e) => e.path)).toEqual(['open/a/x.json'])
-    const exact = await eventsAs(ownerBrowser, {
-      after: start,
-      path: 'private/y.json',
+    expect(quiet.events).toEqual([])
+    const changed = await since(caller, async () => {
+      await pushAll(
+        key,
+        `${ws.name}/${tree.name}`,
+        { ...FILES, 'open/page.html': pageWith('<p>Two</p>', 'Open') },
+        { force: true },
+      )
     })
-    expect(exact.events.map((e) => e.path)).toEqual(['private/y.json'])
+    expect(changed.events.map((e) => [e.type, e.path])).toEqual([['push', '']])
+    // A path filter below the push meets it through what it changed.
+    const start = (await eventsAs(caller, { after: null })).next
+    await pushAll(
+      key,
+      `${ws.name}/${tree.name}`,
+      { ...FILES, 'open/page.html': pageWith('<p>Three</p>', 'Open') },
+      { force: true },
+    )
+    expect(
+      (await eventsAs(caller, { after: start, path: 'open/page.html' })).events
+        .length,
+    ).toBe(1)
   })
 
-  it('pages with more after 500 scanned events', async () => {
-    const paged = await pushForms(owner, ws, FILES)
-    const { next } = await runAs(
-      ownerBrowser,
-      Effect.flatMap(TreeStore, (store) =>
-        store.events({ tree: paged.treeId, after: null, path: null }),
-      ),
-    )
-    // Events beyond the first page, written straight into the table.
-    const values = Array.from(
-      { length: 520 },
-      (_, i) =>
-        `('${paged.treeId}', ${next + i + 1}, 'data_write', null, 'open/n${i}.json', '${owner.id}', null, ${Date.now()})`,
-    )
-    await exec(
-      `insert into events (tree_id, seq, type, node_id, path, actor_id, push_id, created_at)
-       values ${values.join(', ')}`,
-    )
-    await exec(
-      'update trees set event_seq = event_seq + 520 where id = ?',
-      paged.treeId,
-    )
-    const page = (after: number) =>
-      runAs(
+  it('gives cursors that tell nothing of how many events the tree holds', async () => {
+    const { caller } = await guestOn('open')
+    const a = (await eventsAs(caller, { after: null })).next
+    await writeAs(ownerBrowser, 'private/hidden.json', 'private/page.html')
+    const b = (await eventsAs(caller, { after: null })).next
+    for (const cursor of [a, b]) {
+      expect(cursor).toMatch(/^[A-Za-z0-9_-]{20,}$/)
+      expect(
+        atob(cursor.replaceAll('-', '+').replaceAll('_', '/')),
+      ).not.toMatch(/\d{2,}/)
+    }
+    // The withheld write leaves nothing to see, and no `more`.
+    expect(await eventsAs(caller, { after: a })).toMatchObject({
+      events: [],
+      more: false,
+    })
+    // A cursor is the tree's own and cannot be made up.
+    const other = await pushForms(owner, ws, FILES)
+    for (const bad of ['5', 'not-a-cursor', a.slice(0, -2) + 'AA']) {
+      expect(
+        await failureAs(
+          caller,
+          Effect.flatMap(TreeStore, (store) =>
+            store.events({ tree: tree.treeId, after: bad, path: null }),
+          ),
+        ),
+        bad,
+      ).toMatchObject({ code: 'invalid' })
+    }
+    expect(
+      await failureAs(
         ownerBrowser,
+        Effect.flatMap(TreeStore, (store) =>
+          store.events({ tree: other.treeId, after: a, path: null }),
+        ),
+      ),
+    ).toMatchObject({ code: 'invalid' })
+  })
+
+  it('filters by path: at, below or above it', async () => {
+    const result = await since(ownerBrowser, async () => {
+      await writeAs(ownerBrowser, 'open/a/x.json', 'open/page.html')
+      await writeAs(ownerBrowser, 'private/y.json', 'private/page.html')
+    })
+    expect(result.events.map((e) => e.path)).toEqual([
+      'open/a/x.json',
+      'private/y.json',
+    ])
+    const start = (await eventsAs(ownerBrowser, { after: null })).next
+    await writeAs(ownerBrowser, 'open/a/z.json', 'open/page.html')
+    await writeAs(ownerBrowser, 'private/w.json', 'private/page.html')
+    expect(
+      (
+        await eventsAs(ownerBrowser, { after: start, path: 'open/' })
+      ).events.map((e) => e.path),
+    ).toEqual(['open/a/z.json'])
+  })
+
+  it('pages real events with more, and skips a long run of withheld ones without saying so', async () => {
+    const paged = await pushForms(owner, ws, FILES)
+    const guest = await person('pager')
+    await share(
+      paged.treeId,
+      (await nodeAt(paged.treeId, 'open'))!.id,
+      'email',
+      guest.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const guestCaller = await sessionFor(guest)
+    const read = (caller: Caller, after: string | null) =>
+      runAs(
+        caller,
         Effect.flatMap(TreeStore, (store) =>
           store.events({ tree: paged.treeId, after, path: null }),
         ),
       )
-    const first = await page(next)
+    const ownerStart = (await read(ownerBrowser, null)).next
+    const guestStart = (await read(guestCaller, null)).next
+    // Real events through one change each: 520 on private/, then 3 on open/.
+    const burst = (path: string, n: number) =>
+      runAs(
+        ownerBrowser,
+        Effect.flatMap(TreeStore, (store) =>
+          store.change(paged.treeId, (cs) =>
+            Effect.sync(() => {
+              for (let i = 0; i < n; i += 1) cs.event({ type: 'share', path })
+              return {}
+            }),
+          ),
+        ),
+      )
+    await burst('private/page.html', 520)
+    await burst('open/page.html', 3)
+    const first = await read(ownerBrowser, ownerStart)
     expect(first.events).toHaveLength(500)
     expect(first.more).toBe(true)
-    expect(first.next).toBe(next + 500)
-    const second = await page(first.next)
-    expect(second.events).toHaveLength(20)
+    const second = await read(ownerBrowser, first.next)
+    expect(second.events).toHaveLength(23)
     expect(second.more).toBe(false)
+    const guestSees = await read(guestCaller, guestStart)
+    expect(guestSees.events.map((e) => e.path)).toEqual([
+      'open/page.html',
+      'open/page.html',
+      'open/page.html',
+    ])
+    expect(guestSees.more).toBe(false)
   })
 
   it('names an authored event pusher by email to members and by name to anyone else', async () => {
@@ -187,19 +291,33 @@ describe('the events route', () => {
       'read',
       owner,
     )
-    const pushEvent = async (caller: Caller) =>
-      (await eventsAs(caller, { after: 0 })).events.find(
+    const callers = {
+      outsider: await sessionFor(outsider),
+      member: await sessionFor(member),
+      owner: ownerBrowser,
+    }
+    const starts = {
+      outsider: (await eventsAs(callers.outsider, { after: null })).next,
+      member: (await eventsAs(callers.member, { after: null })).next,
+      owner: (await eventsAs(callers.owner, { after: null })).next,
+    }
+    await pushAll(
+      await agent(owner),
+      `${ws.name}/${tree.name}`,
+      { ...FILES, 'open/page.html': pageWith('<p>By name</p>', 'Open') },
+      { force: true },
+    )
+    const pushEvent = async (who: keyof typeof callers) =>
+      (await eventsAs(callers[who], { after: starts[who] })).events.find(
         (e) => e.type === 'push',
       )
-    expect(await pushEvent(await sessionFor(outsider))).toMatchObject({
-      seq: 1,
+    expect(await pushEvent('outsider')).toMatchObject({
       type: 'push',
       path: '',
       by: owner.name,
-      push: 1,
     })
-    expect((await pushEvent(await sessionFor(member)))?.by).toBe(owner.email)
-    expect((await pushEvent(ownerBrowser))?.by).toBe(owner.email)
+    expect((await pushEvent('member'))?.by).toBe(owner.email)
+    expect((await pushEvent('owner'))?.by).toBe(owner.email)
   })
 
   it('answers over HTTP by the tree name, and refuses a key that cannot read', async () => {
@@ -209,12 +327,13 @@ describe('the events route', () => {
       headers: { authorization: `Bearer ${secret}` },
     })
     expect(first.status).toBe(200)
-    const body = (await first.json()) as { next: number; events: unknown[] }
+    const body = (await first.json()) as { next: string; events: unknown[] }
     expect(body.events).toEqual([])
-    expect(body.next).toBeGreaterThan(0)
-    const after = await SELF.fetch(`${url}&after=0&path=open%2F`, {
-      headers: { authorization: `Bearer ${secret}` },
-    })
+    expect(typeof body.next).toBe('string')
+    const after = await SELF.fetch(
+      `${url}&after=${encodeURIComponent(body.next)}&path=open%2F`,
+      { headers: { authorization: `Bearer ${secret}` } },
+    )
     expect(after.status).toBe(200)
     const stranger = await keySecretFor(await person('stranger'))
     const refused = await SELF.fetch(`${url}&path=nope%2F`, {

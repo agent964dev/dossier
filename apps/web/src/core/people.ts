@@ -25,6 +25,7 @@ import {
 } from './access.ts'
 import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
+import { ChangeFeed, type CloseSockets } from './change-feed.ts'
 import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
 import { Data } from './data.ts'
@@ -218,15 +219,27 @@ export interface PeopleService {
     readonly workspace: string
     readonly userId: PersonId
     readonly role: WorkspaceRole
-  }) => Effect.Effect<void, AdminFail | Fail<'last_admin'>, CurrentCaller>
+  }) => Effect.Effect<
+    void,
+    AdminFail | Fail<'last_admin'>,
+    CurrentCaller | Background
+  >
   readonly removeMember: (i: {
     readonly workspace: string
     readonly userId: PersonId
-  }) => Effect.Effect<void, AdminFail | Fail<'last_admin'>, CurrentCaller>
+  }) => Effect.Effect<
+    void,
+    AdminFail | Fail<'last_admin'>,
+    CurrentCaller | Background
+  >
   /** Any member. */
   readonly leave: (i: {
     readonly workspace: string
-  }) => Effect.Effect<void, AdminFail | Fail<'last_admin'>, CurrentCaller>
+  }) => Effect.Effect<
+    void,
+    AdminFail | Fail<'last_admin'>,
+    CurrentCaller | Background
+  >
 
   // Teams, for the workspace's admins.
   readonly teams: (
@@ -275,13 +288,17 @@ export interface PeopleService {
     readonly workspace: string
     readonly teamId: TeamId
     readonly userId: PersonId
-  }) => Effect.Effect<void, AdminFail, CurrentCaller>
+  }) => Effect.Effect<void, AdminFail, CurrentCaller | Background>
   readonly moveToTeam: (i: {
     readonly workspace: string
     readonly from: TeamId
     readonly to: TeamId
     readonly userId: PersonId
-  }) => Effect.Effect<void, AdminFail | Fail<'invalid'>, CurrentCaller>
+  }) => Effect.Effect<
+    void,
+    AdminFail | Fail<'invalid'>,
+    CurrentCaller | Background
+  >
 
   // The workspace.
   readonly workspaceSettings: (
@@ -294,7 +311,11 @@ export interface PeopleService {
   readonly deleteWorkspace: (i: {
     readonly workspace: string
     readonly confirm: string
-  }) => Effect.Effect<void, AdminFail | Fail<'invalid'>, CurrentCaller>
+  }) => Effect.Effect<
+    void,
+    AdminFail | Fail<'invalid'>,
+    CurrentCaller | Background
+  >
 
   // The person.
   readonly deletionPreview: () => Effect.Effect<
@@ -354,7 +375,7 @@ export interface PeopleService {
   ) => Effect.Effect<void, AdminFail | Fail<'last_admin'>, CurrentCaller>
   readonly suspendWorkspace: (
     id: WorkspaceId,
-  ) => Effect.Effect<void, AdminFail, CurrentCaller>
+  ) => Effect.Effect<void, AdminFail, CurrentCaller | Background>
   readonly liftSuspension: (
     id: WorkspaceId,
   ) => Effect.Effect<void, AdminFail, CurrentCaller>
@@ -448,7 +469,7 @@ const CREATIONS: ReadonlySet<string> = new Set([
 export const PeopleLive: Layer.Layer<
   People,
   never,
-  Bindings | Access | TreeStore | Settings | Data | Config
+  Bindings | Access | TreeStore | Settings | Data | Config | ChangeFeed
 > = Layer.effect(
   People,
   Effect.gen(function* () {
@@ -457,6 +478,10 @@ export const PeopleLive: Layer.Layer<
     const store = yield* TreeStore
     const settings = yield* Settings
     const data = yield* Data
+    const feed = yield* ChangeFeed
+    /** Someone's access in a workspace changed: their sockets there close. */
+    const closeIn = (workspaceId: WorkspaceId, close: CloseSockets) =>
+      feed.invalidate({ scope: { workspace: workspaceId }, close })
     const config = yield* Config
     const database = db(bindings)
     const DB = bindings.DB
@@ -1201,6 +1226,7 @@ export const PeopleLive: Layer.Layer<
             'update workspace_members set role = ? where workspace_id = ? and user_id = ?',
           ).bind(role, ctx.workspace.id, i.userId),
         ])
+        yield* closeIn(ctx.workspace.id, { people: [i.userId] })
       })
 
     const removeMember: PeopleService['removeMember'] = (i) =>
@@ -1208,6 +1234,7 @@ export const PeopleLive: Layer.Layer<
         const ctx = yield* adminOf(i.workspace)
         yield* memberOf(ctx.workspace, i.userId)
         yield* adminGuarded(ctx, leaving(ctx.workspace, i.userId))
+        yield* closeIn(ctx.workspace.id, { people: [i.userId] })
       })
 
     const leave: PeopleService['leave'] = (i) =>
@@ -1219,6 +1246,7 @@ export const PeopleLive: Layer.Layer<
         }
         yield* memberOf(workspace, me.id)
         yield* guarded(workspace, leaving(workspace, me.id))
+        yield* closeIn(workspace.id, { people: [me.id] })
       })
 
     // Teams.
@@ -1525,6 +1553,7 @@ export const PeopleLive: Layer.Layer<
             'delete from team_members where team_id = ? and user_id = ?',
           ).bind(found.id, i.userId),
         ])
+        yield* closeIn(ctx.workspace.id, { people: [i.userId] })
       })
 
     const moveToTeam: PeopleService['moveToTeam'] = (i) =>
@@ -1548,6 +1577,7 @@ export const PeopleLive: Layer.Layer<
         if ((results[2]?.results.length ?? 0) === 0) {
           return yield* Effect.fail(notMember(workspace))
         }
+        yield* closeIn(workspace.id, { people: [i.userId] })
       })
 
     // The workspace.
@@ -1579,6 +1609,7 @@ export const PeopleLive: Layer.Layer<
             'update workspaces set deleted_at = ? where id = ? and deleted_at is null',
           ).bind(at, workspace.id),
         ])
+        yield* closeIn(workspace.id, { all: true })
       })
 
     // The person.
@@ -1666,6 +1697,19 @@ export const PeopleLive: Layer.Layer<
         // Each step finishes what an interrupted earlier press left. The
         // closing batch holds only while nothing of theirs lives, so an
         // answer sent meanwhile is withdrawn on the next round.
+        // The trees whose sockets may be theirs, read while their places
+        // still say so.
+        const theirTrees = (yield* all<{ id: TreeId }>(
+          DB.prepare(
+            `select t.id from trees t join workspace_members m
+               on m.workspace_id = t.workspace_id and m.user_id = ?1
+             union select s.tree_id from shares s
+               where s.target_kind = 'email' and s.target = lower(?2)
+             union select s.tree_id from shares s join team_members tm
+               on s.target_kind = 'team' and s.target = tm.team_id
+               where tm.user_id = ?1`,
+          ).bind(me.id, me.email),
+        )).map((row) => row.id)
         const totals = { submissions: 0, entries: 0, uploads: 0 }
         for (let tried = 1; ; tried += 1) {
           const withdrawn = yield* data.withdrawMine()
@@ -1759,7 +1803,12 @@ export const PeopleLive: Layer.Layer<
                       : Effect.fail(unavailable(error)),
             ),
           )
-          if (outcome === 'closed') return
+          if (outcome === 'closed') {
+            return yield* feed.invalidate({
+              scope: { trees: theirTrees },
+              close: { people: [me.id] },
+            })
+          }
           if (outcome === 'blocked') {
             const now = yield* blockerOf(me.id)
             return yield* Effect.fail(
@@ -2019,7 +2068,7 @@ export const PeopleLive: Layer.Layer<
           `update workspaces set suspended_at = coalesce(suspended_at, ?)
            where id = ? and deleted_at is null`,
         ).bind(at, id),
-      )
+      ).pipe(Effect.zipLeft(closeIn(id, { all: true })))
 
     const liftSuspension: PeopleService['liftSuspension'] = (id) =>
       mark(() =>

@@ -461,6 +461,106 @@ describe('watch', () => {
   })
 })
 
+describe('a page that goes away', () => {
+  test('unwatches everything on pagehide, and watches again when shown from the cache', async () => {
+    const it = open()
+    it.dossier.watch('board.json', () => {})
+    it.dossier.watch('answers/', () => {})
+    const stopped = it.dossier.watch('../plan.json', () => {})
+    stopped()
+    await flush()
+    it.page.win.dispatchEvent(new it.page.win.Event('pagehide'))
+    await flush()
+    expect(it.requests('unwatch').map((r) => r.sub)).toEqual([3, 1, 2])
+    // A plain show changes nothing; one from the back-forward cache watches again.
+    it.page.win.dispatchEvent(new it.page.win.Event('pageshow'))
+    await flush()
+    expect(it.requests('watch')).toHaveLength(3)
+    const shown = Object.assign(new it.page.win.Event('pageshow'), {
+      persisted: true,
+    })
+    it.page.win.dispatchEvent(shown)
+    await flush()
+    expect(
+      it
+        .requests('watch')
+        .slice(3)
+        .map((r) => [r.sub, r.path]),
+    ).toEqual([
+      [1, '/questions/board.json'],
+      [2, '/questions/answers/'],
+    ])
+  })
+})
+
+describe('reads that cross a write', () => {
+  test('a read sent before a write’s ack never rolls the write back', async () => {
+    const it = open()
+    const file: unknown[] = []
+    it.dossier.watch('board.json', (value) => file.push((value as Doc)?.data))
+    await flush()
+    await it.changed(1, wire('questions/board.json', { a: 1 }))
+    // The read leaves first; the peer answers it only after the write's ack.
+    const reading = it.dossier.read('board.json')
+    await flush()
+    const writing = it.dossier.write('board.json', { b: 2 })
+    await flush()
+    const [read] = it.requests('read')
+    const [write] = it.requests('write')
+    await it.answer(write!.id, wire('questions/board.json', { a: 1, b: 2 }))
+    await expect(writing).resolves.toMatchObject({ data: { a: 1, b: 2 } })
+    await it.answer(read!.id, wire('questions/board.json', { a: 1 }))
+    await expect(reading).resolves.toMatchObject({ data: { a: 1, b: 2 } })
+    expect(file).toEqual([{ a: 1 }, { a: 1, b: 2 }])
+    // A later write builds on the acknowledged value, not the late read.
+    void it.dossier.write('board.json', { c: 3 })
+    expect(file.at(-1)).toEqual({ a: 1, b: 2, c: 3 })
+  })
+
+  test('a folder read sent before a write’s ack keeps the written file', async () => {
+    const it = open()
+    const reading = it.dossier.read('/')
+    await flush()
+    const writing = it.dossier.write('board.json', { b: 2 })
+    await flush()
+    const [read] = it.requests('read')
+    const [write] = it.requests('write')
+    await it.answer(write!.id, wire('questions/board.json', { b: 2 }))
+    await writing
+    // The late list predates the write: the file is missing from it.
+    await it.answer(read!.id, [wire('plan.json', { p: 1 })])
+    const docs = (await reading) as Doc[]
+    expect(docs.map((doc) => [doc.path, doc.data])).toEqual([
+      ['../plan.json', { p: 1 }],
+      ['board.json', { b: 2 }],
+    ])
+    // And a read of the file now answered by the peer is taken as it is.
+    const again = it.dossier.read('board.json')
+    await flush()
+    await it.answer(
+      it.requests('read').at(-1)!.id,
+      wire('questions/board.json', { b: 2, x: 1 }),
+    )
+    await expect(again).resolves.toMatchObject({ data: { b: 2, x: 1 } })
+  })
+
+  test('a read sent after the ack is taken as it is', async () => {
+    const it = open()
+    const writing = it.dossier.write('board.json', { b: 2 })
+    await flush()
+    await it.answer(
+      it.requests('write')[0]!.id,
+      wire('questions/board.json', { b: 2 }),
+    )
+    await writing
+    const reading = it.dossier.read('board.json')
+    await flush()
+    // Someone withdrew it since.
+    await it.answer(it.requests('read')[0]!.id, null)
+    await expect(reading).resolves.toBeNull()
+  })
+})
+
 describe('errors', () => {
   test('each of the ten codes reaches page code as a DossierError with fix and path', async () => {
     const it = open()

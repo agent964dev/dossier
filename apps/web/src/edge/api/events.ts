@@ -13,12 +13,7 @@ export const EventsLive = HttpApiBuilder.group(
       Effect.flatMap(TreeStore, (store) =>
         store.events({
           tree: urlParams.tree,
-          after:
-            urlParams.after === undefined ||
-            !Number.isSafeInteger(urlParams.after) ||
-            urlParams.after < 0
-              ? null
-              : urlParams.after,
+          after: urlParams.after ?? null,
           path: urlParams.path ?? null,
         }),
       ),

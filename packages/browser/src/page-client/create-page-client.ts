@@ -179,6 +179,13 @@ export const createPageClient = (deps: {
       }),
   })
 
+  // A page leaving says so, since its port gives the shell no sign; one
+  // shown again from the back-forward cache watches again.
+  win.addEventListener('pagehide', () => data.leave())
+  win.addEventListener('pageshow', (event) => {
+    if ((event as PageTransitionEvent).persisted === true) data.back()
+  })
+
   port.addEventListener('message', (event) => {
     const message: unknown = event.data
     if (!isShellToPage(message)) return

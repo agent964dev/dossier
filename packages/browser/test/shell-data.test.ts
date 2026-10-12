@@ -163,7 +163,7 @@ describe('the watch manager', () => {
     it.shell.dispose()
   })
 
-  test('fetches events from the cursor after a hint and reads each affected sub once', async () => {
+  test('fetches events from the opaque cursor after a hint and reads each affected sub once', async () => {
     const it = await started()
     await it.ask(it.top, { op: 'watch', sub: 1, path: 'answers/' })
     await it.ask(it.top, { op: 'watch', sub: 2, path: 'answers/' })
@@ -171,8 +171,8 @@ describe('the watch manager', () => {
     await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
     const [connection] = it.changes.connections
     it.read.mockClear()
-    const event = (seq: number, path: string) => ({
-      seq,
+    const event = (cursor: string, path: string) => ({
+      cursor,
       type: 'submission',
       path,
       at: '2026-10-12T10:00:00.000Z',
@@ -181,25 +181,25 @@ describe('the watch manager', () => {
     })
     it.events.mockResolvedValueOnce({
       events: [
-        event(41, 'questions/answers/omar@acme.com.json'),
-        event(42, 'questions/answers/lena@acme.com.json'),
+        event('k9', 'questions/answers/omar@acme.com.json'),
+        event('b2', 'questions/answers/lena@acme.com.json'),
       ],
-      next: 42,
+      next: 'b2',
       more: true,
     })
     it.events.mockResolvedValueOnce({
-      events: [event(44, 'questions/answers/omar@acme.com.json')],
-      next: 45,
+      events: [event('a7', 'questions/answers/omar@acme.com.json')],
+      next: 'a7',
       more: false,
     })
     const docs = [wire('questions/answers/omar@acme.com.json', 1)]
     it.read.mockResolvedValue(docs)
-    connection!.onHint(44)
+    connection!.onHint()
     await flush()
-    // The grant's cursor first, then each page's next.
+    // The grant's cursor first, then each page's next, compared with nothing.
     expect(it.events.mock.calls.map(([i]) => i)).toEqual([
-      { tree: 't1', after: 40 },
-      { tree: 't1', after: 42 },
+      { tree: 't1', after: 'c40' },
+      { tree: 't1', after: 'b2' },
     ])
     // One read for the folder both subs watch; plan.json is not touched.
     expect(it.read.mock.calls).toEqual([
@@ -211,20 +211,24 @@ describe('the watch manager', () => {
     ])
     expect(it.changed(it.nested)).toHaveLength(1)
 
-    // A hint the cursor has passed asks for nothing.
-    connection!.onHint(45)
+    // A hint with nothing new reads nothing and keeps the cursor.
+    connection!.onHint()
     await flush()
-    expect(it.events).toHaveBeenCalledTimes(2)
+    expect(it.events.mock.calls.at(-1)![0]).toEqual({ tree: 't1', after: 'a7' })
+    expect(it.read).toHaveBeenCalledTimes(1)
     // A push of a folder above the file reaches it.
     it.events.mockResolvedValueOnce({
-      events: [event(46, '')],
-      next: 46,
+      events: [event('z1', '')],
+      next: 'z1',
       more: false,
     })
-    connection!.onHint(46)
+    connection!.onHint()
     await flush()
-    expect(it.events.mock.calls.at(-1)![0]).toEqual({ tree: 't1', after: 45 })
+    expect(it.events.mock.calls.at(-1)![0]).toEqual({ tree: 't1', after: 'a7' })
     expect(it.read).toHaveBeenCalledTimes(3)
+    connection!.onHint()
+    await flush()
+    expect(it.events.mock.calls.at(-1)![0]).toEqual({ tree: 't1', after: 'z1' })
     it.shell.dispose()
   })
 
@@ -236,10 +240,10 @@ describe('the watch manager', () => {
     const [connection] = it.changes.connections
     it.read.mockClear()
     connection!.onState('live')
-    connection!.onHint(0)
+    connection!.onHint()
     await flush()
     expect(it.events.mock.calls.map(([i]) => i)).toEqual([
-      { tree: 't1', after: 40 },
+      { tree: 't1', after: 'c40' },
     ])
     expect(it.read.mock.calls.map(([i]) => i.path).sort()).toEqual([
       'plan.json',
@@ -250,10 +254,172 @@ describe('the watch manager', () => {
 
     // A poll after that reads only what changed: nothing here.
     it.read.mockClear()
-    connection!.onHint(0)
+    connection!.onHint()
     await flush()
     expect(it.events).toHaveBeenCalledTimes(2)
     expect(it.read).not.toHaveBeenCalled()
+    it.shell.dispose()
+  })
+})
+
+describe('a nested page that goes away', () => {
+  test('a new hello from the same frame drops the old page’s watches', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const top = it.page()
+    it.hello({ source: top })
+    const frame = { parent: top }
+    const first = it.hello({ source: frame, nested: true, path: '/plan.html' })
+    await flush()
+    first.page.postMessage({
+      type: 'request',
+      id: 1,
+      op: 'watch',
+      sub: 1,
+      path: 'plan.json',
+    })
+    await flush()
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
+    expect(live(it.changes.connections).map((c) => c.paths)).toEqual([
+      ['plan.json'],
+    ])
+    // The frame navigated: its next page says hello from the same window.
+    const second = it.hello({
+      source: frame,
+      nested: true,
+      path: '/notes.html',
+    })
+    await flush()
+    expect(first.shell.closed).toBe(true)
+    expect(second.shell.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
+    expect(live(it.changes.connections)).toEqual([])
+    it.shell.dispose()
+  })
+
+  test('a port that reports it closed drops its watches', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const top = it.page()
+    it.hello({ source: top })
+    const nested = it.hello({
+      source: { parent: top },
+      nested: true,
+      path: '/plan.html',
+    })
+    await flush()
+    nested.page.postMessage({
+      type: 'request',
+      id: 1,
+      op: 'watch',
+      sub: 1,
+      path: 'plan.json',
+    })
+    await flush()
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
+    expect(live(it.changes.connections)).toHaveLength(1)
+    nested.shell.dispatchEvent(new Event('close'))
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
+    expect(live(it.changes.connections)).toEqual([])
+    it.shell.dispose()
+  })
+})
+
+describe('reads that cross a write', () => {
+  /** A read the test answers when it chooses. */
+  const deferred = <T>() => {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((done) => {
+      resolve = done
+    })
+    return { promise, resolve }
+  }
+
+  test('a watch read sent before a write’s ack is read again, never sent stale', async () => {
+    const it = await started()
+    it.read.mockResolvedValueOnce(wire('questions/board.json', { a: 1 }))
+    await it.ask(it.top, { op: 'watch', sub: 1, path: 'board.json' })
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
+    const [connection] = it.changes.connections
+    const late = deferred<DocWire>()
+    it.read.mockReturnValueOnce(late.promise)
+    it.read.mockResolvedValueOnce(wire('questions/board.json', { a: 1, b: 2 }))
+    it.events.mockResolvedValueOnce({
+      events: [
+        {
+          cursor: 'e1',
+          type: 'data_write',
+          path: 'questions/board.json',
+          at: '2026-10-12T10:00:00.000Z',
+          by: 'omar@acme.com',
+          push: null,
+        },
+      ],
+      next: 'e1',
+      more: false,
+    })
+    connection!.onHint()
+    await flush()
+    expect(it.read).toHaveBeenCalledTimes(2)
+    // The page's write is answered while that read is out.
+    it.write.mockResolvedValueOnce(wire('questions/board.json', { a: 1, b: 2 }))
+    const id = await it.ask(it.top, {
+      op: 'write',
+      path: 'board.json',
+      patch: { b: 2 },
+      replace: false,
+      opId: 'w',
+      seq: 7,
+    })
+    await flush()
+    expect(it.results(it.top).at(-1)).toMatchObject({ id, ok: true })
+    late.resolve(wire('questions/board.json', { a: 1 }))
+    await flush()
+    // The stale value never reaches the page; a fresh read does.
+    expect(it.read).toHaveBeenCalledTimes(3)
+    const after = it.top.inbox.slice(
+      it.top.inbox.findIndex(
+        (m) => (m as { type: string; id?: number }).id === id,
+      ),
+    )
+    expect(
+      after.filter((m) => (m as { type: string }).type === 'changed'),
+    ).toEqual([
+      {
+        type: 'changed',
+        sub: 1,
+        value: wire('questions/board.json', { a: 1, b: 2 }),
+      },
+    ])
+    it.shell.dispose()
+  })
+
+  test('a folder watch read is fenced by a write below it', async () => {
+    const it = await started()
+    it.read.mockResolvedValueOnce([])
+    await it.ask(it.top, { op: 'watch', sub: 1, path: 'ideas/' })
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY)
+    const [connection] = it.changes.connections
+    const late = deferred<DocWire[]>()
+    it.read.mockReturnValueOnce(late.promise)
+    const entry = wire('questions/ideas/sara@acme.com/1.json', { idea: 'x' })
+    it.read.mockResolvedValueOnce([entry])
+    connection!.onState('live')
+    connection!.onHint()
+    await flush()
+    it.write.mockResolvedValueOnce(entry)
+    await it.ask(it.top, {
+      op: 'write',
+      path: 'ideas/~/',
+      patch: { idea: 'x' },
+      replace: false,
+      opId: 'w',
+      seq: 7,
+    })
+    await flush()
+    late.resolve([])
+    await flush()
+    expect(it.changed(it.top).map((m) => m.value)).toEqual([[], [entry]])
     it.shell.dispose()
   })
 })
@@ -592,7 +758,7 @@ const recorder = () => {
     input: {
       tree: 't1',
       paths: ['questions/answers/', 'plan.json'],
-      onHint: (seq: number) => log.push(`hint ${seq}`),
+      onHint: () => log.push('hint'),
       onState: (state: 'live' | 'polling') => log.push(state),
     },
   }
@@ -606,9 +772,9 @@ describe('change sources', () => {
   test('polling hints at once and every 10 seconds until closed', async () => {
     const { log, input } = recorder()
     const connection = pollingChanges(socketWindow()).connect(input)
-    expect(log).toEqual(['polling', 'hint 0'])
+    expect(log).toEqual(['polling', 'hint'])
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL * 2)
-    expect(log).toEqual(['polling', 'hint 0', 'hint 0', 'hint 0'])
+    expect(log).toEqual(['polling', 'hint', 'hint', 'hint'])
     connection.close()
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL * 2)
     expect(log).toHaveLength(4)
@@ -634,13 +800,13 @@ describe('change sources', () => {
     ])
     const [first] = FakeSocket.made
     first!.open()
-    expect(log).toEqual(['live', 'hint 0'])
-    first!.message(
-      JSON.stringify({ type: 'changed', tree: 't1', seq: 5, sub: 1 }),
-    )
+    expect(log).toEqual(['live', 'hint'])
+    // A hint names the tree and the sub, and no sequence.
+    first!.message(JSON.stringify({ type: 'changed', tree: 't1', sub: 1 }))
     first!.message('pong')
     first!.message('nonsense')
-    expect(log).toEqual(['live', 'hint 0', 'hint 5'])
+    first!.message(JSON.stringify({ type: 'other', tree: 't1' }))
+    expect(log).toEqual(['live', 'hint', 'hint'])
     await vi.advanceTimersByTimeAsync(PING_INTERVAL)
     expect(first!.sent).toEqual(['ping'])
 
@@ -664,7 +830,7 @@ describe('change sources', () => {
 
     FakeSocket.made[3]!.open()
     expect(fallback.closed).toBe(1)
-    expect(log.slice(-2)).toEqual(['live', 'hint 0'])
+    expect(log.slice(-2)).toEqual(['live', 'hint'])
 
     connection.close()
     expect(FakeSocket.made[3]!.closed).toBe(true)
@@ -747,7 +913,7 @@ describe('shellApi write and events', () => {
     const body = {
       events: [
         {
-          seq: 41,
+          cursor: 'q1',
           type: 'submission',
           path: 'answers/sara@acme.com.json',
           at: '2026-10-12T10:00:00.000Z',
@@ -755,21 +921,24 @@ describe('shellApi write and events', () => {
           push: null,
         },
       ],
-      next: 41,
+      next: 'q1',
       more: false,
     }
     const fetch = answer(200, body)
     await expect(
-      shellApi(fetch, 'https://main.test').events({ tree: 't1', after: 40 }),
+      shellApi(fetch, 'https://main.test').events({
+        tree: 't1',
+        after: 'p+0/9=',
+      }),
     ).resolves.toEqual(body)
     expect(fetch.spy.mock.calls[0]![0]).toBe(
-      'https://main.test/_/api/events?tree=t1&after=40',
+      'https://main.test/_/api/events?tree=t1&after=p%2B0%2F9%3D',
     )
     const odd = await shellApi(
       answer(200, { events: 'x' }),
       'https://main.test',
     )
-      .events({ tree: 't1', after: 40 })
+      .events({ tree: 't1', after: 'q1' })
       .catch((e: unknown) => e)
     expect(odd).toMatchObject({ code: 'unavailable' })
   })
@@ -782,7 +951,7 @@ describe('shellApi write and events', () => {
       role: 'read',
       path: 'questions/index.html',
       email: 'sara@acme.com',
-      events: 40,
+      events: 'v1.opaque',
     }
     await expect(
       shellApi(answer(200, grant), 'https://main.test').view({

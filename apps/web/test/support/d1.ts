@@ -192,3 +192,47 @@ export const beforeRead = (
     },
   })
 }
+
+/**
+ * A database that runs `after` once, right after the first `all()` of a
+ * statement whose SQL matches returns: a change between two reads.
+ */
+export const afterRead = (
+  database: D1Database,
+  matches: (sql: string) => boolean,
+  after: () => Promise<unknown>,
+): D1Database => {
+  let armed = true
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === 'bind') {
+          return (...values: unknown[]) => wrap(target.bind(...values))
+        }
+        if (property === 'all') {
+          return async () => {
+            const result = await target.all()
+            if (armed) {
+              armed = false
+              await after()
+            }
+            return result
+          }
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => {
+          const statement = target.prepare(query)
+          return matches(query) ? wrap(statement) : statement
+        }
+      }
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}

@@ -4,7 +4,6 @@ import {
   isNodeName,
   MAX_DEPTH,
   type AuthoredSeq,
-  type EventSeq,
   type DossierError,
   type ErrorCode,
   type LinkRef,
@@ -43,6 +42,7 @@ import { Access, type RoleSet } from './access.ts'
 import { makeReader, type AgentServed } from './agent-version.ts'
 import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
+import { sealCursor } from './cursors.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { Config } from './config.ts'
 import { Files } from './files.ts'
@@ -846,7 +846,9 @@ export const PagesLive: Layer.Layer<
               path: resolved.node.path,
               email: person.email,
               // Read before the handle was issued, so no later event is missed.
-              events: tree.eventSeq as EventSeq,
+              events: yield* Effect.promise(() =>
+                sealCursor(bindings.HANDLE_SECRET, tree.id, tree.eventSeq),
+              ),
             } satisfies ViewGrant
           }
           console.error('The tree kept moving while a view was issued', {

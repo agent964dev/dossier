@@ -12,7 +12,6 @@ import {
   AgentKeyId,
   AgentKeySecret,
   AuthoredSeq,
-  EventSeq,
   NodeId,
   OpId,
   PushId,
@@ -245,8 +244,11 @@ export const ViewGrantSchema = Schema.Struct({
   path: Schema.String,
   /** Whom the grant is for: the shell refuses to go on as anyone else. */
   email: Schema.NullOr(Schema.String),
-  /** The tree's event sequence when the view was granted: the first cursor. */
-  events: EventSeq,
+  /**
+   * The events cursor as of the grant: opaque, so it says nothing about how
+   * many events the tree holds. The shell's first `after`.
+   */
+  events: Schema.String,
 })
 export type ViewGrant = typeof ViewGrantSchema.Type
 
@@ -476,7 +478,8 @@ export type WritePayload = typeof WritePayload.Type
 
 /** One event as the events route gives it to the caller. */
 export const EventWire = Schema.Struct({
-  seq: EventSeq,
+  /** Opaque: the cursor that resumes after this event. */
+  cursor: Schema.String,
   type: EventTypeSchema,
   /** Inside the tree. */
   path: Schema.String,
@@ -494,8 +497,8 @@ export type EventWire = typeof EventWire.Type
 
 export const EventsResponse = Schema.Struct({
   events: Schema.Array(EventWire),
-  /** The last event scanned: the cursor of the next request. */
-  next: EventSeq,
+  /** Opaque: the `after` of the next request. */
+  next: Schema.String,
   /** More events follow `next`. */
   more: Schema.Boolean,
 })
@@ -509,7 +512,8 @@ export class EventsGroup extends HttpApiGroup.make('events')
         Schema.Struct({
           /** A tree ID, or '<workspace>/<tree>'. */
           tree: Schema.String,
-          after: Schema.optional(Schema.NumberFromString),
+          /** A cursor this route or a view gave; none gives the cursor now. */
+          after: Schema.optional(Schema.String),
           /** Only events at, below or above this tree path. */
           path: Schema.optional(Schema.String),
         }),
@@ -517,7 +521,12 @@ export class EventsGroup extends HttpApiGroup.make('events')
       .addSuccess(EventsResponse),
   ) {}
 
-/** The path of the watch upgrade; outside the HttpApi. */
+/**
+ * The path of the watch upgrade; outside the HttpApi. Each hint is the text
+ * `{"type":"changed","tree":"<tree id>","sub":<n>}`: no sequence, path or
+ * actor, sent only for a change the socket's caller may read. `ping` is
+ * answered `pong`.
+ */
 export const WATCH_PATH = '/_/api/watch'
 
 export class DataGroup extends HttpApiGroup.make('data')

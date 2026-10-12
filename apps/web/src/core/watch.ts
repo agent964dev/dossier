@@ -1,7 +1,15 @@
-import { dossierError, type DossierError } from '@dossier/contracts'
+import {
+  dossierError,
+  type DossierError,
+  type TreeId,
+} from '@dossier/contracts'
 import { Context, Effect, Layer } from 'effect'
 
-import { WATCH_HEADER, type WatchHeader } from '../hub/tree-hub.ts'
+import {
+  SOCKET_HEADER,
+  WATCH_HEADER,
+  type WatchHeader,
+} from '../hub/tree-hub.ts'
 import { Access } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
@@ -14,7 +22,10 @@ export interface WatchService {
   /**
    * Checks who may follow which paths of a tree and hands the socket to the
    * tree's hub. A path the caller cannot read is left out; with none left
-   * the upgrade is refused. The answer is the hub's own 101 response.
+   * the upgrade is refused. The hub holds the socket closed to hints until
+   * access is checked once more, so a revocation landing meanwhile either
+   * fails that check or closes the socket it finds. The answer is the hub's
+   * own 101 response.
    */
   readonly accept: (i: {
     readonly request: Request
@@ -40,13 +51,30 @@ export const WatchLive: Layer.Layer<
     const store = yield* TreeStore
     const access = yield* Access
 
+    /** The asked paths the caller may read now, as `[sub, tree path]`. */
+    const readablePaths = (treeId: TreeId, asked: readonly string[]) =>
+      Effect.gen(function* () {
+        const out: (readonly [number, string])[] = []
+        for (const [sub, path] of asked.entries()) {
+          const node = yield* store.nearest(treeId, path)
+          if (node === null) continue
+          const reads = yield* access
+            .require('read', node)
+            .pipe(Effect.isSuccess)
+          if (reads) out.push([sub, path.replace(/^\/+/, '')])
+        }
+        return out
+      })
+
     const accept: WatchService['accept'] = ({ request, tree, paths }) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         const person = caller.person
+        const via = caller.via.kind
         if (
-          person === null ||
-          (caller.via.kind !== 'browser' && caller.via.kind !== 'agent')
+          via !== 'browser' &&
+          via !== 'agent' &&
+          !(via === 'visitor' && person === null)
         ) {
           return yield* Effect.fail(
             dossierError(
@@ -56,30 +84,30 @@ export const WatchLive: Layer.Layer<
             ),
           )
         }
-        const notFound = dossierError(
-          'not_found',
-          'Nothing is here, or you cannot open it.',
-          null,
-          tree,
-        )
+        // A visitor is asked to sign in, a person is told nothing is here.
+        const refused =
+          person === null
+            ? dossierError(
+                'sign_in_required',
+                'Sign in to follow changes here.',
+                'Sign in with Google.',
+              )
+            : dossierError(
+                'not_found',
+                'Nothing is here, or you cannot open it.',
+                null,
+                tree,
+              )
         const found = yield* store.treeNamed(tree)
-        if (found === null) return yield* Effect.fail(notFound)
+        if (found === null) return yield* Effect.fail(refused)
         const treeId = found.tree.id
-        const readable: (readonly [number, string])[] = []
         // No path follows the whole tree.
         const asked = paths.length === 0 ? [''] : paths.slice(0, WATCH_PATHS)
-        for (const [sub, path] of asked.entries()) {
-          const node = yield* store.nearest(treeId, path)
-          if (node === null) continue
-          const reads = yield* access
-            .require('read', node)
-            .pipe(Effect.isSuccess)
-          if (reads) readable.push([sub, path.replace(/^\/+/, '')])
-        }
-        if (readable.length === 0) return yield* Effect.fail(notFound)
+        const readable = yield* readablePaths(treeId, asked)
+        if (readable.length === 0) return yield* Effect.fail(refused)
         const header: WatchHeader = {
           tree: treeId,
-          person: person.id,
+          person: person?.id ?? null,
           session: caller.via.kind === 'browser' ? caller.via.sessionId : null,
           key: caller.via.kind === 'agent' ? caller.via.keyId : null,
           paths: readable,
@@ -99,17 +127,36 @@ export const WatchLive: Layer.Layer<
           if (value !== null) headers.set(name, value)
         }
         const hub = env.TREE_HUB.get(env.TREE_HUB.idFromName(treeId))
-        return yield* Effect.tryPromise({
-          try: () =>
-            hub.fetch(new Request(request.url, { method: 'GET', headers })),
-          catch: (error) => {
-            console.error('A tree hub refused a watch', {
-              tree: treeId,
-              error: String(error),
-            })
-            return dossierError('unavailable')
-          },
-        })
+        const call = <A>(run: () => Promise<A>) =>
+          Effect.tryPromise({
+            try: run,
+            catch: (error) => {
+              console.error('A tree hub refused a watch', {
+                tree: treeId,
+                error: String(error),
+              })
+              return dossierError('unavailable')
+            },
+          })
+        const held = yield* call(() =>
+          hub.fetch(new Request(request.url, { method: 'GET', headers })),
+        )
+        const id = held.headers.get(SOCKET_HEADER)
+        if (held.status !== 101 || held.webSocket === null || id === null) {
+          return held
+        }
+        // Checked again with the socket held: a revocation that committed
+        // after the first check is seen here, and one that commits later
+        // closes the socket the hub already holds.
+        const again = yield* readablePaths(treeId, asked)
+        const same =
+          again.length === readable.length &&
+          again.every(([sub], n) => readable[n]?.[0] === sub)
+        if (!same || !(yield* call(() => hub.admit(id)))) {
+          yield* call(() => hub.drop([id]))
+          return yield* Effect.fail(refused)
+        }
+        return new Response(null, { status: 101, webSocket: held.webSocket })
       })
 
     return { accept } satisfies WatchService

@@ -8,7 +8,7 @@ import {
   PROTOCOL_HEADER,
   WATCH_PATH,
 } from '@dossier/contracts'
-import { Effect, Queue } from 'effect'
+import { Chunk, Effect, Queue } from 'effect'
 
 import { callApi } from './client.ts'
 import { Cli, type CliIo, sleep, VERSION } from './io.ts'
@@ -55,28 +55,23 @@ export const watchUrl = (origin: URL, ref: LinkRef): string => {
 
 type Signal =
   | { readonly kind: 'open' }
-  | { readonly kind: 'hint'; readonly seq: number }
+  | { readonly kind: 'hint' }
   | { readonly kind: 'closed' }
 
-/** A hint from the deployment: `{ type: 'changed', tree, seq, sub }`. */
-const hintSeq = (data: unknown): number | null => {
-  if (typeof data !== 'string' || data === 'pong') return null
+/** A hint from the deployment: `{ type: 'changed', tree, sub }`. */
+const isHint = (data: unknown): boolean => {
+  if (typeof data !== 'string' || data === 'pong') return false
   try {
     const value: unknown = JSON.parse(data)
-    if (
+    return (
       typeof value === 'object' &&
       value !== null &&
       'type' in value &&
-      value.type === 'changed' &&
-      'seq' in value &&
-      typeof value.seq === 'number'
-    ) {
-      return value.seq
-    }
+      value.type === 'changed'
+    )
   } catch {
-    // Not a hint.
+    return false
   }
-  return null
 }
 
 /** How a live connection ended. */
@@ -106,7 +101,7 @@ export const watchEvents = (i: {
     const path = watchedPath(i.ref)
     const asked = path === null ? i.ref.tree : `${i.ref.tree}/${path}`
 
-    const fetchEvents = (after: number | undefined) =>
+    const fetchEvents = (after: string | undefined) =>
       callApi(deployment, key, (client) =>
         client.events.events({
           urlParams: {
@@ -131,8 +126,9 @@ export const watchEvents = (i: {
         ),
       )
 
+    // Cursors are opaque: each request resumes from the latest `next`.
     const first: EventsResponse = yield* fetchEvents(undefined)
-    let cursor: number = first.next
+    let cursor = first.next
 
     /** Every event after the cursor; true once `next` has its event. */
     const drain = Effect.gen(function* () {
@@ -142,9 +138,8 @@ export const watchEvents = (i: {
           i.onEvent(event)
           if (i.next) return true
         }
-        const moved = page.next > cursor
-        cursor = Math.max(cursor, page.next)
-        if (!page.more || !moved) return false
+        cursor = page.next
+        if (!page.more) return false
       }
     })
 
@@ -187,8 +182,7 @@ export const watchEvents = (i: {
                 signals.unsafeOffer({ kind: 'open' })
               })
               opened.addEventListener('message', (event) => {
-                const seq = hintSeq(event.data)
-                if (seq !== null) signals.unsafeOffer({ kind: 'hint', seq })
+                if (isHint(event.data)) signals.unsafeOffer({ kind: 'hint' })
               })
               opened.addEventListener('error', () => {
                 signals.unsafeOffer({ kind: 'closed' })
@@ -231,8 +225,13 @@ export const watchEvents = (i: {
               )
               // Events between the first call and the connection opening.
               if (yield* drain) return 'done'
-            } else if (signal.seq > cursor && (yield* drain)) {
-              return 'done'
+            } else {
+              // One fetch covers every hint already waiting.
+              const waiting = yield* Queue.takeAll(signals)
+              if (yield* drain) return 'done'
+              if (Chunk.some(waiting, (s) => s.kind === 'closed')) {
+                return opened ? 'opened' : 'failed'
+              }
             }
           }
         }),

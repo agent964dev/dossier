@@ -5,8 +5,12 @@ export interface ChangeSource {
   readonly connect: (i: {
     readonly tree: string
     readonly paths: readonly string[]
-    /** 0 asks for a fetch after (re)connecting, and on each poll. */
-    readonly onHint: (seq: number) => void
+    /** Something may have changed: fetch the events after the cursor. */
+    readonly onHint: () => void
+    /**
+     * A source starts: the socket opened, or polling took over. Whatever
+     * happened in between, the next fetch reads every subscription again.
+     */
     readonly onState: (state: 'live' | 'polling') => void
   }) => { readonly close: () => void }
 }
@@ -36,8 +40,8 @@ export const pollingChanges = (
 ): ChangeSource => ({
   connect: ({ onHint, onState }) => {
     onState('polling')
-    onHint(0)
-    const timer = window.setInterval(() => onHint(0), intervalMs)
+    onHint()
+    const timer = window.setInterval(() => onHint(), intervalMs)
     return { close: () => window.clearInterval(timer) }
   },
 })
@@ -56,22 +60,19 @@ export const watchUrl = (
   return url.href
 }
 
-const hintOf = (data: unknown): number | null => {
-  if (typeof data !== 'string' || data === 'pong') return null
+/** A hint names the tree and the subscription, and nothing more. */
+const isHint = (data: unknown): boolean => {
+  if (typeof data !== 'string' || data === 'pong') return false
   try {
     const message: unknown = JSON.parse(data)
-    if (
+    return (
       typeof message === 'object' &&
       message !== null &&
-      (message as { type?: unknown }).type === 'changed' &&
-      Number.isInteger((message as { seq?: unknown }).seq)
-    ) {
-      return (message as { seq: number }).seq
-    }
+      (message as { type?: unknown }).type === 'changed'
+    )
   } catch {
-    // Not a hint.
+    return false
   }
-  return null
 }
 
 /**
@@ -125,7 +126,7 @@ export const webSocketChanges = (
         polling?.close()
         polling = null
         input.onState('live')
-        input.onHint(0)
+        input.onHint()
         ping = window.setInterval(() => {
           try {
             next.send('ping')
@@ -136,8 +137,7 @@ export const webSocketChanges = (
       })
       next.addEventListener('message', (event: MessageEvent) => {
         if (closed || socket !== next) return
-        const seq = hintOf(event.data)
-        if (seq !== null) input.onHint(seq)
+        if (isHint(event.data)) input.onHint()
       })
       next.addEventListener('error', () => lost(next))
       next.addEventListener('close', () => lost(next))

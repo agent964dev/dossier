@@ -13,7 +13,6 @@ import { PING_MS } from '../watch.ts'
 const ENV = { DOSSIER_DEPLOYMENT: 'dossier.acme.com', DOSSIER_KEY: 'dsk_one' }
 
 const SUBMISSION = {
-  seq: 8,
   type: 'submission',
   path: 'questions/answers/sara@acme.com.json',
   at: '2026-10-12T14:20:31.000Z',
@@ -22,7 +21,6 @@ const SUBMISSION = {
 } as const
 
 const PUSH = {
-  seq: 9,
   type: 'push',
   path: 'questions/index.html',
   at: '2026-10-12T14:25:02.000Z',
@@ -40,12 +38,20 @@ type Event = typeof SUBMISSION | typeof PUSH
 let log: string[] = []
 
 /**
- * The events route: without `after` it answers the tree's current sequence;
- * with it, the events after it. `answer` lets a test refuse a call.
+ * The cursor of a position in the tree's events, as opaque as the
+ * deployment's: no count can be read from it, and none sorts after another.
+ */
+const cursorAt = (position: number): string =>
+  `c_${(((position + 3) * 2654435761) % 4294967296).toString(36)}`
+
+/**
+ * The events route: without `after` it answers the cursor now; with it, at
+ * most `pageSize` events after that cursor, each with its own cursor, and
+ * `more` when others follow. `answer` lets a test refuse a call.
  */
 const eventsRoute = (feed: {
   readonly events: Event[]
-  readonly start: number
+  readonly pageSize?: number
   answer?: (call: number) => Response | null
 }) => {
   let calls = 0
@@ -59,11 +65,27 @@ const eventsRoute = (feed: {
     if (refused !== null) return refused
     const after = request.url.searchParams.get('after')
     if (after === null) {
-      return Response.json({ events: [], next: feed.start, more: false })
+      return Response.json({
+        events: [],
+        next: cursorAt(feed.events.length),
+        more: false,
+      })
     }
-    const events = feed.events.filter((e) => e.seq > Number(after))
-    const next = Math.max(Number(after), ...events.map((e) => e.seq))
-    return Response.json({ events, next, more: false })
+    const from = feed.events.findIndex((_, at) => cursorAt(at) === after)
+    const start =
+      from >= 0 ? from : cursorAt(feed.events.length) === after ? -2 : -1
+    if (start === -1) return errorResponse('invalid', 'Not a cursor.')
+    const begin = start === -2 ? feed.events.length : start
+    const page = feed.events.slice(begin, begin + (feed.pageSize ?? 500))
+    const end = begin + page.length
+    return Response.json({
+      events: page.map((event, i) => ({
+        ...event,
+        cursor: cursorAt(begin + i + 1),
+      })),
+      next: cursorAt(end),
+      more: end < feed.events.length,
+    })
   }
 }
 
@@ -92,10 +114,10 @@ const fakeSockets = (behaviour: 'wait' | 'refuse') => {
     open() {
       this.dispatchEvent(new Event('open'))
     }
-    hint(seq: number) {
+    hint() {
       this.dispatchEvent(
         new MessageEvent('message', {
-          data: JSON.stringify({ type: 'changed', tree: 'tre1', seq, sub: 0 }),
+          data: JSON.stringify({ type: 'changed', tree: 'tre1', sub: 0 }),
         }),
       )
     }
@@ -165,7 +187,7 @@ afterEach(async () => {
 
 describe('dossier watch', () => {
   it('sends the key only in the Authorization header, and exits 0 after the first event with --next', async () => {
-    const feed = { events: [] as Event[], start: 7 }
+    const feed = { events: [] as Event[] }
     const sockets = fakeSockets('wait')
     const cli = await setUp({
       route: eventsRoute(feed),
@@ -192,15 +214,15 @@ describe('dossier watch', () => {
     socket.open()
     await vi.waitFor(() => expect(requests).toHaveLength(2))
     feed.events.push(SUBMISSION, PUSH)
-    socket.hint(9)
+    socket.hint()
 
     expect(await exit).toBe(0)
     expect(cli.stdout()).toBe(`${SUBMISSION_LINE}\n`)
     expect(socket.closed).toBe(true)
     expect(requests.map((r) => r.url.search)).toEqual([
       '?tree=agent964%2Flive&path=questions%2Fanswers%2F',
-      '?tree=agent964%2Flive&after=7&path=questions%2Fanswers%2F',
-      '?tree=agent964%2Flive&after=7&path=questions%2Fanswers%2F',
+      `?tree=agent964%2Flive&after=${cursorAt(0)}&path=questions%2Fanswers%2F`,
+      `?tree=agent964%2Flive&after=${cursorAt(0)}&path=questions%2Fanswers%2F`,
     ])
     for (const request of requests) {
       expect(request.url.href).not.toContain('dsk_one')
@@ -209,7 +231,7 @@ describe('dossier watch', () => {
   })
 
   it('prints one line per event until Ctrl-C, then exits 0', async () => {
-    const feed = { events: [] as Event[], start: 7 }
+    const feed = { events: [] as Event[] }
     const sockets = fakeSockets('wait')
     const cli = await setUp({
       route: eventsRoute(feed),
@@ -225,12 +247,12 @@ describe('dossier watch', () => {
     socket.open()
     await vi.waitFor(() => expect(requests).toHaveLength(2))
     feed.events.push(SUBMISSION)
-    socket.hint(8)
+    socket.hint()
     await vi.waitFor(() => expect(cli.stdout()).toBe(`${SUBMISSION_LINE}\n`))
     feed.events.push(PUSH)
-    socket.hint(9)
-    // A hint at or before the cursor fetches nothing.
-    socket.hint(9)
+    socket.hint()
+    // Hints that arrive together fetch once.
+    socket.hint()
     await vi.waitFor(() =>
       expect(cli.stdout()).toBe(`${SUBMISSION_LINE}\n${PUSH_LINE}\n`),
     )
@@ -243,7 +265,7 @@ describe('dossier watch', () => {
   })
 
   it('prints one JSON object per line with its link with --json', async () => {
-    const feed = { events: [] as Event[], start: 7 }
+    const feed = { events: [] as Event[] }
     const sockets = fakeSockets('wait')
     const cli = await setUp({
       route: eventsRoute(feed),
@@ -254,7 +276,7 @@ describe('dossier watch', () => {
     await vi.waitFor(() => expect(sockets.made).toHaveLength(1))
     sockets.made[0]!.open()
     feed.events.push(SUBMISSION, PUSH)
-    sockets.made[0]!.hint(9)
+    sockets.made[0]!.hint()
     await vi.waitFor(() =>
       expect(cli.stdout().split('\n').filter(Boolean)).toHaveLength(2),
     )
@@ -266,15 +288,52 @@ describe('dossier watch', () => {
     expect(lines.map((text) => JSON.parse(text))).toEqual([
       {
         ...SUBMISSION,
+        cursor: cursorAt(1),
         link: 'https://dossier.acme.com/agent964/live/questions/answers/sara%40acme.com.json',
       },
-      { ...PUSH, link: 'https://dossier.acme.com/agent964/live/questions/' },
+      {
+        ...PUSH,
+        cursor: cursorAt(2),
+        link: 'https://dossier.acme.com/agent964/live/questions/',
+      },
     ])
     expect(cli.stderr()).toBe('')
   })
 
+  it('fetches again while more follow, each time after the latest next', async () => {
+    const feed = { events: [] as Event[], pageSize: 1 }
+    const sockets = fakeSockets('wait')
+    const cli = await setUp({
+      route: eventsRoute(feed),
+      webSocket: sockets.WebSocket,
+    })
+
+    const exit = cli.run(['watch', 'agent964/live'])
+    await vi.waitFor(() => expect(sockets.made).toHaveLength(1))
+    const socket = sockets.made[0]!
+    socket.open()
+    await vi.waitFor(() => expect(requests).toHaveLength(2))
+    feed.events.push(SUBMISSION, PUSH)
+    socket.hint()
+    await vi.waitFor(() =>
+      expect(cli.stdout()).toBe(`${SUBMISSION_LINE}\n${PUSH_LINE}\n`),
+    )
+    socket.hint()
+    await vi.waitFor(() => expect(requests).toHaveLength(5))
+    stopWatch?.()
+    expect(await exit).toBe(0)
+    expect(cli.stdout()).toBe(`${SUBMISSION_LINE}\n${PUSH_LINE}\n`)
+    expect(requests.map((r) => r.url.searchParams.get('after'))).toEqual([
+      null,
+      cursorAt(0),
+      cursorAt(0),
+      cursorAt(1),
+      cursorAt(2),
+    ])
+  })
+
   it('pings an open connection every 30 seconds', async () => {
-    const feed = { events: [] as Event[], start: 7 }
+    const feed = { events: [] as Event[] }
     const sockets = fakeSockets('wait')
     const time = clock()
     const cli = await setUp({
@@ -298,7 +357,7 @@ describe('dossier watch', () => {
   })
 
   it('fetches what it missed when an open connection drops, then opens another', async () => {
-    const feed = { events: [] as Event[], start: 7 }
+    const feed = { events: [] as Event[] }
     const sockets = fakeSockets('wait')
     const cli = await setUp({
       route: eventsRoute(feed),
@@ -328,7 +387,6 @@ describe('dossier watch', () => {
   it('falls back to polling every 10 seconds when the socket fails, trying it again with backoff', async () => {
     const feed = {
       events: [] as Event[],
-      start: 7,
       answer: (call: number) => {
         if (call === 9) feed.events.push(SUBMISSION)
         return null
@@ -371,7 +429,6 @@ describe('dossier watch', () => {
   it('polls every 10 seconds where this Node has no WebSocket', async () => {
     const feed = {
       events: [] as Event[],
-      start: 7,
       answer: (call: number) => {
         if (call === 3) feed.events.push(SUBMISSION)
         return null
@@ -393,7 +450,6 @@ describe('dossier watch', () => {
   it('exits 3 when the upgrade answers 404, learning it from the events route', async () => {
     const feed = {
       events: [] as Event[],
-      start: 7,
       answer: (call: number) =>
         call === 1
           ? null

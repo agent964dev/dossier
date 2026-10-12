@@ -37,8 +37,11 @@ export interface ViewGrant {
   readonly path: string
   /** Whom the grant is for; null for a visitor. */
   readonly email: string | null
-  /** The tree's event sequence when the view was granted: the first cursor. */
-  readonly events: number
+  /**
+   * The events cursor as of the grant, the shell's first `after`. Opaque:
+   * the shell only hands it back.
+   */
+  readonly events: string
 }
 
 /** The body of a send, as the API takes it. */
@@ -106,7 +109,8 @@ export interface WritePayloadWire {
 
 /** One event the caller may read. */
 export interface EventWire {
-  readonly seq: number
+  /** Opaque: the cursor that resumes after this event. */
+  readonly cursor: string
   readonly type: string
   /** Inside the tree. */
   readonly path: string
@@ -118,8 +122,8 @@ export interface EventWire {
 
 export interface EventsResponseWire {
   readonly events: readonly EventWire[]
-  /** The last event scanned: the cursor of the next request. */
-  readonly next: number
+  /** Opaque: the `after` of the next request. */
+  readonly next: string
   /** More events follow `next`. */
   readonly more: boolean
 }
@@ -158,7 +162,8 @@ export interface ShellApi {
   /** The events after `after` that the caller may read. */
   readonly events: (i: {
     readonly tree: string
-    readonly after: number
+    /** A cursor a view or this route gave, handed back as it came. */
+    readonly after: string
   }) => Promise<EventsResponseWire>
 }
 
@@ -344,13 +349,31 @@ export const createShell = (
     (email ?? '').toLowerCase() === (shownTo() ?? '').toLowerCase()
   const tree = boot.tree.id
 
+  /**
+   * The port of the page each nested frame holds now, by the frame's window,
+   * which stays the same object when the frame navigates.
+   */
+  let nestedPorts = new WeakMap<object, MessagePort>()
+
   const closePorts = (): void => {
     for (const port of ports.keys()) {
       watches.drop(port)
       port.close()
     }
     ports.clear()
+    nestedPorts = new WeakMap()
   }
+
+  /** A page is gone: its port closes and its watches go. */
+  const release = (port: MessagePort): void => {
+    watches.drop(port)
+    ports.delete(port)
+    port.close()
+  }
+
+  /** The tree path a send was stored at, for the watches' read fence. */
+  const sentPath = (send: SendRequest, result: SendResultWire): string =>
+    result.doc?.path ?? send.form.target
 
   /** The store answers, or nothing: a store that fails keeps nothing. */
   const quietly = async <T>(
@@ -633,6 +656,7 @@ export const createShell = (
     }
     try {
       const result = await deliver(page, send, shownTo())
+      watches.acknowledged(sentPath(send, result))
       await sent(page, send.form)
       answer(port, id, { value: result })
     } catch (error) {
@@ -661,6 +685,7 @@ export const createShell = (
         const form = formKey(send.form)
         try {
           const value = await deliver(page, send, send.by)
+          watches.acknowledged(sentPath(send, value))
           await replayed(page, send)
           tell(page, {
             type: 'resumed',
@@ -783,7 +808,10 @@ export const createShell = (
           request.id,
           pageCall(() =>
             api.withdraw({ tree, path, opId: request.opId, as: shownTo() }),
-          ).then(() => null),
+          ).then(() => {
+            watches.acknowledged(path)
+            return null
+          }),
         )
         return
       }
@@ -804,7 +832,10 @@ export const createShell = (
               seq: request.seq,
               as: shownTo(),
             }),
-          ),
+          ).then((stored) => {
+            watches.acknowledged(stored.path)
+            return stored
+          }),
         )
         return
       }
@@ -828,6 +859,9 @@ export const createShell = (
               as: shownTo(),
               body: file,
             })
+          }).then((stored) => {
+            watches.acknowledged(stored.path)
+            return stored
           }),
         )
         return
@@ -1003,6 +1037,12 @@ export const createShell = (
       welcome(port, page, shown)
       return
     }
+    // The frame's earlier page, if any, is gone: a closed port gives no
+    // event in every browser, so its watches go now.
+    const source = event.source as object
+    const before = nestedPorts.get(source)
+    if (before !== undefined) release(before)
+    nestedPorts.set(source, port)
     // A nested page says which page it is; the deployment confirms it for
     // this person before it gets drafts or asks anything: sends, reads,
     // writes, uploads and watches all wait for a listening port.
@@ -1033,6 +1073,8 @@ export const createShell = (
     port.addEventListener('message', (message) =>
       onPageMessage(message.data, port, page, navigation),
     )
+    // Where the browser reports a closed port, its watches go at once.
+    port.addEventListener('close', () => release(port))
     port.start()
     ports.set(port, page)
     void pageState(page).then((state) => {

@@ -14,6 +14,7 @@ export {
   type ChangeFeedService,
   type CloseSockets,
   type Committed,
+  type InvalidationScope,
 } from './change-feed.ts'
 export { Watch, WATCH_PATHS, type WatchService } from './watch.ts'
 export { Config, type DeploymentConfig } from './config.ts'

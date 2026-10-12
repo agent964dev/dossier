@@ -129,6 +129,9 @@ export const classify = (
   return 'link'
 }
 
+/** API writes that need no one signed in: the CLI's device login. */
+const ANONYMOUS_WRITES: ReadonlySet<string> = new Set(['/_/api/device/token'])
+
 /** Kinds whose failure is shown as a document rather than an error body. */
 const isDocumentKind = (kind: RequestKind) =>
   kind === 'screen' || kind === 'link'
@@ -265,6 +268,19 @@ export const serve = async (
       case 'api-write': {
         checkProtocol()
         const who = await caller()
+        // A write by no one is refused before its body is read, so an
+        // anonymous caller learns nothing from how a payload is checked.
+        if (
+          kind === 'api-write' &&
+          who.person === null &&
+          !ANONYMOUS_WRITES.has(url.pathname)
+        ) {
+          throw dossierError(
+            'sign_in_required',
+            'Sign in first.',
+            'Sign in with Google, or send an agent key.',
+          )
+        }
         const handler = await apiHandlerFor(runtime)
         return normalizeApiError(
           await handler(request, who, background),

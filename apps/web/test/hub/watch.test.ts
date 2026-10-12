@@ -127,13 +127,6 @@ const write = async (caller: Caller, path: string, page: string) => {
   )
 }
 
-const treeSeq = async () =>
-  (
-    await env.DB.prepare('select event_seq from trees where id = ?')
-      .bind(tree.treeId)
-      .first<{ event_seq: number }>()
-  )?.event_seq ?? 0
-
 describe('a watch upgrade', () => {
   it('is refused without the main host Origin or a valid key', async () => {
     const bare = await upgradeAs(guestBrowser, ['open/'], {})
@@ -177,7 +170,6 @@ describe('a watch upgrade', () => {
     expect(hint).toEqual({
       type: 'changed',
       tree: tree.treeId,
-      seq: await treeSeq(),
       sub: 1,
     })
     // Nothing came for the private write before it.

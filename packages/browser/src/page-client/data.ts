@@ -52,6 +52,10 @@ export interface PageData {
   readonly upload: (file: File | Blob) => Promise<Uploaded>
   /** Takes the shell's `changed` messages. */
   readonly changed: (message: Changed) => void
+  /** The page is going away: the shell stops watching for it. */
+  readonly leave: () => void
+  /** The page is back from the back-forward cache: watch again. */
+  readonly back: () => void
 }
 
 /** What page code can do about each code, when the answer names nothing. */
@@ -143,6 +147,20 @@ export const createPageData = (deps: {
   const files = new Map<string, FileState>()
   const watchers = new Map<number, Watcher>()
   let nextSub = 1
+  /** Counts answered writes, so a read knows which came after it left. */
+  let clock = 0
+  /** Each file's last answered write or withdrawal, by the clock. */
+  const acked = new Map<string, number>()
+  const acknowledge = (path: string): void => {
+    clock += 1
+    acked.set(path, clock)
+  }
+  /**
+   * A write to the file was answered after a read of it left, so the read's
+   * answer may predate it and must not replace what that write stored.
+   */
+  const fenced = (path: string, sentAt: number): boolean =>
+    (acked.get(path) ?? 0) > sentAt
 
   /** A page error with a fix and a path even when the answer names none. */
   const pageError = (fields: ErrorFields, input: string): DossierError => {
@@ -275,18 +293,24 @@ export const createPageData = (deps: {
     state.local = recompute(state)
   }
 
-  /** A folder's files, from the stored list with pending writes shown. */
+  /**
+   * A folder's files, from the stored list with pending writes shown. Files
+   * written since the list was asked for (at `sentAt`) keep what the write
+   * stored, whether the list holds them or not.
+   */
   const folderFiles = (
     folder: string,
     wires: readonly DocWire[],
+    sentAt = clock,
   ): { readonly path: string; readonly doc: Doc }[] => {
     const out = new Map<string, Doc | null>()
     for (const wire of wires) {
-      confirm(wire.path, wire)
+      if (!fenced(wire.path, sentAt)) confirm(wire.path, wire)
       out.set(wire.path, shown(wire.path))
     }
     for (const [path, state] of files) {
-      if (pending(state) && path.startsWith(folder)) out.set(path, shown(path))
+      if (!path.startsWith(folder)) continue
+      if (pending(state) || fenced(path, sentAt)) out.set(path, shown(path))
     }
     return [...out]
       .filter((entry): entry is [string, Doc] => entry[1] !== null)
@@ -349,6 +373,7 @@ export const createPageData = (deps: {
             each.reject(pageError(UNAVAILABLE, each.input))
           }
         } else {
+          acknowledge(path)
           confirm(path, value)
           const doc = docFromWire(value, page)
           for (const each of batch.calls) each.resolve(doc)
@@ -383,6 +408,7 @@ export const createPageData = (deps: {
           only!.reject(pageError(UNAVAILABLE, only!.input))
           return
         }
+        acknowledge(value.path)
         confirm(value.path, value)
         only!.resolve(docFromWire(value, page))
         notify(value.path)
@@ -446,19 +472,20 @@ export const createPageData = (deps: {
   const read: PageData['read'] = (input) =>
     gate(async () => {
       const path = target(input, 'read')
+      const sentAt = clock
       let value: unknown
       try {
         value = await requests.request({ op: 'read', path: `/${path}` })
       } catch (error) {
         const result = outcome(error, 'read', input)
         if (result.kind === 'error') throw result.error
-        return isFolder(path) ? [] : null
+        value = isFolder(path) ? [] : null
       }
       if (isFolder(path)) {
         const wires = Array.isArray(value) ? value.filter(isDocWire) : []
-        return folderFiles(path, wires).map((file) => file.doc)
+        return folderFiles(path, wires, sentAt).map((file) => file.doc)
       }
-      confirm(path, isDocWire(value) ? value : null)
+      if (!fenced(path, sentAt)) confirm(path, isDocWire(value) ? value : null)
       return shown(path)
     })
 
@@ -476,6 +503,7 @@ export const createPageData = (deps: {
         if (result.kind === 'error') throw result.error
       }
       if (isFolder(path)) return
+      acknowledge(path)
       confirm(path, null)
       notify(path)
     })
@@ -578,5 +606,19 @@ export const createPageData = (deps: {
     call(() => watcher.onChange(doc))
   }
 
-  return { read, watch, write, withdraw, upload, changed }
+  const leave: PageData['leave'] = () => {
+    for (const sub of watchers.keys()) {
+      requests.request({ op: 'unwatch', sub }).catch(() => {})
+    }
+  }
+
+  const back: PageData['back'] = () => {
+    for (const [sub, watcher] of watchers) {
+      requests
+        .request({ op: 'watch', sub, path: `/${watcher.path}` })
+        .catch(() => {})
+    }
+  }
+
+  return { read, watch, write, withdraw, upload, changed, leave, back }
 }

@@ -39,6 +39,8 @@ import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { ChangeFeed, type CloseSockets, type Committed } from './change-feed.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
+import { openCursor, sealCursor } from './cursors.ts'
+import { visibleEvents } from './event-visibility.ts'
 import { newId, newTreeId } from './ids.ts'
 import { bytesText, Limits } from './limits.ts'
 import {
@@ -436,11 +438,12 @@ export interface TreeStoreService {
    */
   readonly events: (i: {
     readonly tree: string
-    readonly after: number | null
+    /** A cursor this route or a view gave; null for the cursor now. */
+    readonly after: string | null
     readonly path: string | null
   }) => Effect.Effect<
     EventsResponse,
-    DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
+    DossierError<'not_found' | 'sign_in_required' | 'invalid' | 'unavailable'>,
     CurrentCaller
   >
 }
@@ -481,6 +484,8 @@ interface Statement {
 
 /** At most this many events a page of the events route. */
 const EVENTS_PAGE = 500
+/** Pages of events one request scans at most, looking for visible ones. */
+const EVENTS_SCAN_PAGES = 4
 
 /** Event types written by people's data, which always name the writer. */
 const DATA_EVENTS: ReadonlySet<string> = new Set([
@@ -2338,75 +2343,112 @@ export const TreeStoreLive: Layer.Layer<
           )
           if (any.length === 0) return yield* deny(t.id)
         }
+        const secret = bindings.HANDLE_SECRET
         if (i.after === null) {
           return {
             events: [],
-            next: t.eventSeq as EventSeq,
+            next: yield* Effect.promise(() =>
+              sealCursor(secret, t.id, t.eventSeq),
+            ),
             more: false,
           } satisfies EventsResponse
+        }
+        const afterText = i.after
+        const after = yield* Effect.promise(() =>
+          openCursor(secret, t.id, afterText),
+        )
+        if (after === null) {
+          return yield* Effect.fail(
+            dossierError(
+              'invalid',
+              'This cursor is not one this tree gave.',
+              'Start again without after.',
+            ),
+          )
         }
         const e = schema.events
         const member = sql`exists (select 1 from workspace_members m
           where m.workspace_id = ${t.workspaceId} and m.user_id = ${caller.person?.id ?? ''})`
-        const rows = yield* read(() =>
-          database
-            .select({
-              seq: e.seq,
-              type: e.type,
-              path: e.path,
-              at: e.createdAt,
-              actorId: e.actorId,
-              nodeId: e.nodeId,
-              push: schema.pushes.number,
-              email: schema.user.email,
-              name: schema.user.name,
-              member: sql<number>`${member}`,
-              visible: sql<number | null>`case when ${schema.nodes.id} is null
-                then null when ${readable.where} then 1 else 0 end`,
+        const out: (EventsResponse['events'][number] & { seq: number })[] = []
+        let scanned: number = after
+        let more = false
+        // Scans on past what the caller may not see, so neither `more` nor
+        // a short page tells of withheld events, up to a bound per request.
+        for (let pages = 0; pages < EVENTS_SCAN_PAGES; pages += 1) {
+          const from = scanned
+          const rows = yield* read(() =>
+            database
+              .select({
+                seq: e.seq,
+                type: e.type,
+                path: e.path,
+                at: e.createdAt,
+                actorId: e.actorId,
+                nodeId: e.nodeId,
+                pushId: e.pushId,
+                push: schema.pushes.number,
+                email: schema.user.email,
+                name: schema.user.name,
+                member: sql<number>`${member}`,
+              })
+              .from(e)
+              .leftJoin(schema.pushes, eq(schema.pushes.id, e.pushId))
+              .leftJoin(schema.user, eq(schema.user.id, e.actorId))
+              .where(and(eq(e.treeId, t.id), sql`${e.seq} > ${from}`))
+              .orderBy(e.seq)
+              .limit(EVENTS_PAGE)
+              .all(),
+          )
+          if (rows.length === 0) break
+          const visible = yield* visibleEvents(DB, access, t.id, rows)
+          let full = false
+          for (const row of rows) {
+            scanned = row.seq
+            const paths = visible.get(row.seq)
+            if (paths === undefined) continue
+            if (i.path !== null && !paths.some((p) => pathsMeet(p, i.path!))) {
+              continue
+            }
+            const named =
+              DATA_EVENTS.has(row.type) ||
+              row.member === 1 ||
+              (caller.person !== null && caller.person.id === row.actorId)
+            out.push({
+              seq: row.seq,
+              cursor: '',
+              type: row.type as EventType,
+              path: row.path,
+              at: new Date(row.at).toISOString(),
+              by:
+                row.actorId === null
+                  ? null
+                  : ((named ? row.email : row.name) ?? null),
+              push: (row.push ?? null) as PushNumber | null,
             })
-            .from(e)
-            .leftJoin(schema.nodes, eq(schema.nodes.id, e.nodeId))
-            .leftJoin(schema.pushes, eq(schema.pushes.id, e.pushId))
-            .leftJoin(schema.user, eq(schema.user.id, e.actorId))
-            .where(and(eq(e.treeId, t.id), sql`${e.seq} > ${i.after}`))
-            .orderBy(e.seq)
-            .limit(EVENTS_PAGE)
-            .all(),
-        )
-        const out: EventsResponse['events'][number][] = []
-        for (const row of rows) {
-          let visible = row.visible === 1
-          if (row.visible === null) {
-            // No node: the folder the path lies in decides.
-            const folder = yield* nearest(t.id, parentPath(row.path))
-            visible =
-              folder !== null &&
-              (yield* access.require('read', folder).pipe(Effect.isSuccess)) ===
-                true
+            if (out.length === EVENTS_PAGE) {
+              full = true
+              break
+            }
           }
-          if (!visible) continue
-          if (i.path !== null && !pathsMeet(row.path, i.path)) continue
-          const named =
-            DATA_EVENTS.has(row.type) ||
-            row.member === 1 ||
-            (caller.person !== null && caller.person.id === row.actorId)
-          out.push({
-            seq: row.seq as EventSeq,
-            type: row.type as EventType,
-            path: row.path,
-            at: new Date(row.at).toISOString(),
-            by:
-              row.actorId === null
-                ? null
-                : ((named ? row.email : row.name) ?? null),
-            push: (row.push ?? null) as PushNumber | null,
-          })
+          if (full) {
+            more = scanned < t.eventSeq || rows.at(-1)!.seq > scanned
+            break
+          }
+          if (rows.length < EVENTS_PAGE) break
+          more = pages === EVENTS_SCAN_PAGES - 1
         }
-        const last = rows.at(-1)
+        const sealed = yield* Effect.promise(() =>
+          Promise.all(
+            out.map(async ({ seq, ...event }) => ({
+              ...event,
+              cursor: await sealCursor(secret, t.id, seq),
+            })),
+          ),
+        )
         return {
-          events: out,
-          next: (last?.seq ?? i.after) as EventSeq,
-          more: rows.length === EVENTS_PAGE,
+          events: sealed,
+          next: yield* Effect.promise(() => sealCursor(secret, t.id, scanned)),
+          more,
         } satisfies EventsResponse
       })
 

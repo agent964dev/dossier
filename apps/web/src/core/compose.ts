@@ -59,7 +59,8 @@ export const makeLayer = (
   const base = overrides.base ?? BaseLayerLive.pipe(Layer.provide(bindings))
   const settings = SettingsLive.pipe(Layer.provideMerge(config))
   const feed =
-    overrides.changeFeed ?? ChangeFeedLive.pipe(Layer.provide(bindings))
+    overrides.changeFeed ??
+    ChangeFeedLive.pipe(Layer.provide(AccessLive), Layer.provide(bindings))
   const trees = TreeStoreLive.pipe(
     Layer.provideMerge(feed),
     Layer.provideMerge(AccessLive),

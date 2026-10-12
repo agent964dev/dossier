@@ -200,16 +200,58 @@ describe('the data endpoints', () => {
       purpose: 'read',
     })
     expect(start.status).toBe(200)
-    const { next } = (await start.json()) as { next: number }
+    const { next } = (await start.json()) as { next: string }
+    await browser.fetch('/_/api/data/write', {
+      method: 'POST',
+      purpose: 'write',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        tree: tree.treeId,
+        page: 'questions/index.html',
+        path: 'events-check.json',
+        patch: { a: 1 },
+        replace: false,
+        opId: crypto.randomUUID(),
+        seq: 1,
+      }),
+    })
     const since = await browser.fetch(
-      `/_/api/events?tree=${tree.treeId}&after=${next - 1}`,
+      `/_/api/events?tree=${tree.treeId}&after=${encodeURIComponent(next)}`,
       { purpose: 'read' },
     )
     expect(since.status).toBe(200)
     expect(await since.json()).toMatchObject({
-      events: [{ seq: next }],
-      next,
+      events: [{ type: 'data_write', path: 'events-check.json' }],
       more: false,
     })
+  })
+
+  it('asks an anonymous caller to sign in before it reads the body of a write', async () => {
+    for (const path of [
+      '/_/api/data/write',
+      '/_/api/data/send',
+      '/_/api/data/withdraw',
+      '/_/api/pushes',
+    ]) {
+      const response = await new Browser().fetch(path, {
+        method: 'POST',
+        purpose: 'none',
+        headers: {
+          origin: 'https://abcdefghij0123456789.content.test',
+          'sec-fetch-site': 'cross-site',
+          'sec-fetch-mode': 'cors',
+        },
+      })
+      expect(response.status, path).toBe(401)
+      expect(await response.json(), path).toMatchObject({
+        error: { code: 'sign_in_required' },
+      })
+    }
+    // The CLI's device login is a write that needs no one signed in.
+    const device = await new Browser().fetch('/_/api/device/token', {
+      method: 'POST',
+      purpose: 'none',
+    })
+    expect(device.status).toBe(400)
   })
 })

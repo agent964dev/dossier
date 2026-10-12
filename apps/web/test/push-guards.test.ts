@@ -14,7 +14,7 @@ import {
   type Membership,
   type StageResult,
 } from '../src/core/index.ts'
-import { beforeBatch, exec, rows } from './support/d1.ts'
+import { afterRead, beforeBatch, exec, rows } from './support/d1.ts'
 import { harness, testRuntime } from './support/harness.ts'
 import { runAs } from './support/people.ts'
 import {
@@ -476,46 +476,6 @@ const stageAndCommitFailure = async (
  * returns, `after` runs before the reader sees its rows: a change that lands
  * between two reads of one commit.
  */
-const afterRead = (
-  database: D1Database,
-  matches: (sql: string) => boolean,
-  after: () => Promise<unknown>,
-): D1Database => {
-  let armed = true
-  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
-    new Proxy(statement, {
-      get(target, property) {
-        if (property === 'bind') {
-          return (...values: unknown[]) => wrap(target.bind(...values))
-        }
-        if (property === 'all') {
-          return async () => {
-            const result = await target.all()
-            if (armed) {
-              armed = false
-              await after()
-            }
-            return result
-          }
-        }
-        const value = Reflect.get(target, property, target) as unknown
-        return typeof value === 'function' ? value.bind(target) : value
-      },
-    })
-  return new Proxy(database, {
-    get(target, property) {
-      if (property === 'prepare') {
-        return (query: string) => {
-          const statement = target.prepare(query)
-          return matches(query) ? wrap(statement) : statement
-        }
-      }
-      const value = Reflect.get(target, property, target) as unknown
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-}
-
 describe('the second look at a push', () => {
   it('names no page the caller cannot open when the whole tree refuses a push', async () => {
     const { ws, key, creator } = await setUp()
