@@ -633,6 +633,23 @@ export class SharesGroup extends HttpApiGroup.make('shares')
       .addSuccess(SharesResponse),
   ) {}
 
+/** The tree paths an export linked instead of inlining, as JSON, percent-encoded. */
+export const EXPORT_LINKED_HEADER = 'Dossier-Export-Linked'
+
+export class ExportGroup extends HttpApiGroup.make('export')
+  // Streamed text/html as an attachment, Cache-Control: no-store, with
+  // Dossier-Export-Linked. not_found | sign_in_required | too_large
+  .add(
+    HttpApiEndpoint.get('export', '/export')
+      .setUrlParams(
+        Schema.Struct({
+          /** A link on this deployment, or '<workspace>/<tree>/<path>'. */
+          link: Schema.String,
+        }),
+      )
+      .addSuccess(HttpApiSchema.Uint8Array()),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -644,5 +661,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(DataGroup)
   .add(EventsGroup)
   .add(SharesGroup)
+  .add(ExportGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

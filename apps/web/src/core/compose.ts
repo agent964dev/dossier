@@ -79,7 +79,7 @@ export const makeLayer = (
     PushLive.pipe(Layer.provide(shares)),
     shares,
     LookSettingsLive.pipe(Layer.provide(people)),
-    PagesLive.pipe(Layer.provideMerge(FilesLive)),
+    PagesLive.pipe(Layer.provideMerge(FilesLive), Layer.provide(DataLive)),
     DataLive,
     WatchLive,
   ).pipe(Layer.provideMerge(auth))

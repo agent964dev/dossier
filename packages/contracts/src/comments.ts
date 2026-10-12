@@ -1,10 +1,13 @@
-// How comments are stored and read back. Plain TypeScript with no imports,
-// so the base component, a replacement component in a kit, the Worker and
-// the CLI read the same shapes.
+// How comments are stored and read back. Plain TypeScript with no run-time
+// imports, so the base component, a replacement component in a kit, the
+// Worker, an exported page and the CLI read the same shapes and assemble
+// threads the same way.
 //
 // A page's comments live beside it in a data folder named after it
 // (`plan.html` keeps them in `plan.comments/`). Every writer has their own
 // folder there, and each comment, resolve or reopen is one entry in it.
+
+import type { DocWire } from './api.ts'
 
 /** One comment, as its entry holds it. */
 export interface CommentEntry {
@@ -115,6 +118,115 @@ export const isThreadMark = (value: unknown): value is ThreadMark =>
   Object.keys(value).length === 1 &&
   (typeof (value as { resolves?: unknown }).resolves === 'string' ||
     typeof (value as { reopens?: unknown }).reopens === 'string')
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** One file of a comments folder, as assembling reads it. */
+export interface CommentFile {
+  /** From the page's folder: 'plan.comments/sara@acme.com/….json'. */
+  readonly path: string
+  /** Inside the tree. */
+  readonly treePath: string
+  /** The writer's email. */
+  readonly by: string
+  /** When the entry was first written, ms. */
+  readonly at: number
+  readonly push: DocWire['push']
+  /** Its versions: more than one once revised. */
+  readonly revision: number
+  readonly value: unknown
+}
+
+export const isCommentValue = (value: unknown): value is CommentEntry =>
+  isObject(value) && typeof value.text === 'string'
+
+const docOf = (file: CommentFile, entry: CommentEntry): CommentDoc => ({
+  text: entry.text,
+  anchor: typeof entry.anchor === 'string' ? entry.anchor : null,
+  label: typeof entry.label === 'string' ? entry.label : null,
+  pin:
+    isObject(entry.pin) &&
+    typeof entry.pin.x === 'number' &&
+    typeof entry.pin.y === 'number'
+      ? { x: entry.pin.x, y: entry.pin.y }
+      : null,
+  replyTo: typeof entry.replyTo === 'string' ? entry.replyTo : null,
+  stance: typeof entry.stance === 'string' ? entry.stance : null,
+  mentions: Array.isArray(entry.mentions)
+    ? entry.mentions.filter((m): m is string => typeof m === 'string')
+    : [],
+  path: file.path,
+  by: file.by,
+  at: new Date(file.at).toISOString(),
+  push: file.push,
+  edited: file.revision > 1 && entry.text !== '',
+  deleted: entry.text === '',
+})
+
+const byTime = (a: CommentFile, b: CommentFile) =>
+  a.at - b.at || a.path.localeCompare(b.path)
+
+/** A thread as a read gives it: the root's tree path, the Thread as data. */
+export type ThreadWire = DocWire & { readonly data: Thread }
+
+/**
+ * The threads of a comments folder: one Doc per root comment, by its time,
+ * with its replies oldest first and the newest resolve or reopen deciding
+ * whether it is resolved. The Doc's path is the root's tree path.
+ */
+export const assembleThreads = (
+  files: readonly CommentFile[],
+): readonly ThreadWire[] => {
+  const sorted = [...files].sort(byTime)
+  const roots = sorted.filter(
+    (f) => isCommentValue(f.value) && f.value.replyTo === null,
+  )
+  const replies = new Map<string, CommentDoc[]>()
+  const marks = new Map<string, { file: CommentFile; resolves: boolean }>()
+  for (const file of sorted) {
+    const value = file.value
+    if (isCommentValue(value)) {
+      if (typeof value.replyTo !== 'string') continue
+      const list = replies.get(value.replyTo) ?? []
+      list.push(docOf(file, value))
+      replies.set(value.replyTo, list)
+    } else if (isObject(value)) {
+      const root =
+        typeof value.resolves === 'string'
+          ? value.resolves
+          : typeof value.reopens === 'string'
+            ? value.reopens
+            : null
+      // Sorted oldest first, so the last one seen is the newest.
+      if (root !== null) {
+        marks.set(root, { file, resolves: typeof value.resolves === 'string' })
+      }
+    }
+  }
+  return roots.map((file) => {
+    const mark = marks.get(file.path)
+    const resolved = mark?.resolves === true
+    const thread: Thread = {
+      root: docOf(file, file.value as CommentEntry),
+      replies: replies.get(file.path) ?? [],
+      resolved,
+      resolvedBy: resolved ? mark!.file.by : null,
+      resolvedAt: resolved ? new Date(mark!.file.at).toISOString() : null,
+    }
+    return {
+      path: file.treePath,
+      data: thread,
+      by: file.by,
+      at: new Date(file.at).toISOString(),
+      push: file.push,
+    } satisfies ThreadWire
+  })
+}
+
+/** 'a/plan.comments' → 'plan.comments': the folder from its page's folder. */
+export const fromPageFolder = (folder: string): string =>
+  folder.slice(folder.lastIndexOf('/') + 1)
 
 const MONTHS = [
   'Jan',

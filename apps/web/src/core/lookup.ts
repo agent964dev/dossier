@@ -7,8 +7,11 @@ import type { AuthoredSeq, Sha256, TreeId } from '@dossier/contracts'
 import {
   analyze,
   ANALYZER_VERSION,
+  analyzeJs,
+  JS_ANALYZER_VERSION,
   tagOf,
   type HtmlAnalysis,
+  type JsAnalysis,
 } from '@dossier/html'
 import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import { Clock, Effect } from 'effect'
@@ -191,6 +194,43 @@ export const analysisOf = (sha256: Sha256) =>
          values (?, 'html', ?, ?, ?) on conflict do nothing`,
       )
         .bind(sha256, ANALYZER_VERSION, JSON.stringify(result), at)
+        .run(),
+    )
+    return result
+  })
+
+/**
+ * The imports of a JavaScript module's blob, as stored for this analyzer, or
+ * read from its bytes and stored. Null when the bytes are missing.
+ */
+export const jsAnalysisOf = (sha256: Sha256) =>
+  Effect.gen(function* () {
+    const { DB, BLOBS } = yield* Bindings
+    const read = <A>(run: () => Promise<A>) =>
+      Effect.tryPromise(run).pipe(
+        Effect.tapError((error) =>
+          Effect.logError('A module analysis read failed', error),
+        ),
+        Effect.orDie,
+      )
+    const stored = yield* read(() =>
+      DB.prepare(
+        `select json from analyses where sha256 = ? and analyzer = 'js' and version = ?`,
+      )
+        .bind(sha256, JS_ANALYZER_VERSION)
+        .first<{ json: string }>(),
+    )
+    if (stored !== null) return JSON.parse(stored.json) as JsAnalysis
+    const object = yield* read(() => BLOBS.get(`blobs/${sha256}`))
+    if (object === null) return null
+    const result = analyzeJs(yield* read(() => object.text()))
+    const at = yield* Clock.currentTimeMillis
+    yield* read(() =>
+      DB.prepare(
+        `insert into analyses (sha256, analyzer, version, json, created_at)
+         values (?, 'js', ?, ?, ?) on conflict do nothing`,
+      )
+        .bind(sha256, JS_ANALYZER_VERSION, JSON.stringify(result), at)
         .run(),
     )
     return result

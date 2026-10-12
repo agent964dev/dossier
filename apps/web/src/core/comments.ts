@@ -1,17 +1,18 @@
 // The comment rules Data applies in a page's comments folder: what a write
-// may hold, how threads come back assembled from the folder's files, and
-// what a deleted comment keeps. Internal to Data and the agent reader.
+// may hold, which files a read assembles into threads (with assembleThreads
+// from @dossier/contracts, which an exported page uses too), and what a
+// deleted comment keeps. Internal to Data and the agent reader.
 import {
+  assembleThreads,
+  fromPageFolder,
   COMMENT_LABEL_MAX,
   COMMENT_MENTIONS_MAX,
   COMMENT_STANCE_MAX,
   COMMENT_TEXT_MAX,
   dossierError,
-  type CommentDoc,
   type CommentEntry,
-  type DocWire,
+  type CommentFile,
   type PushNumber,
-  type Thread,
   type ThreadMark,
   type TreeId,
 } from '@dossier/contracts'
@@ -252,111 +253,6 @@ export const blankOf = (entry: CommentEntry): CommentEntry => ({
   text: '',
   mentions: [],
 })
-
-/** One file of a comments folder, as assembling reads it. */
-export interface CommentFile {
-  /** From the page's folder: 'plan.comments/sara@acme.com/….json'. */
-  readonly path: string
-  /** Inside the tree. */
-  readonly treePath: string
-  /** The writer's email. */
-  readonly by: string
-  /** When the entry was first written, ms. */
-  readonly at: number
-  readonly push: PushNumber
-  /** Its versions: more than one once revised. */
-  readonly revision: number
-  readonly value: unknown
-}
-
-export const isCommentValue = (value: unknown): value is CommentEntry =>
-  isObject(value) && typeof value.text === 'string'
-
-const docOf = (file: CommentFile, entry: CommentEntry): CommentDoc => ({
-  text: entry.text,
-  anchor: typeof entry.anchor === 'string' ? entry.anchor : null,
-  label: typeof entry.label === 'string' ? entry.label : null,
-  pin:
-    isObject(entry.pin) &&
-    typeof entry.pin.x === 'number' &&
-    typeof entry.pin.y === 'number'
-      ? { x: entry.pin.x, y: entry.pin.y }
-      : null,
-  replyTo: typeof entry.replyTo === 'string' ? entry.replyTo : null,
-  stance: typeof entry.stance === 'string' ? entry.stance : null,
-  mentions: Array.isArray(entry.mentions)
-    ? entry.mentions.filter((m): m is string => typeof m === 'string')
-    : [],
-  path: file.path,
-  by: file.by,
-  at: new Date(file.at).toISOString(),
-  push: file.push,
-  edited: file.revision > 1 && entry.text !== '',
-  deleted: entry.text === '',
-})
-
-const byTime = (a: CommentFile, b: CommentFile) =>
-  a.at - b.at || a.path.localeCompare(b.path)
-
-/**
- * The threads of a comments folder: one Doc per root comment, by its time,
- * with its replies oldest first and the newest resolve or reopen deciding
- * whether it is resolved. The Doc's path is the root's tree path.
- */
-export type ThreadWire = DocWire & { readonly data: Thread }
-
-export const assembleThreads = (
-  files: readonly CommentFile[],
-): readonly ThreadWire[] => {
-  const sorted = [...files].sort(byTime)
-  const roots = sorted.filter(
-    (f) => isCommentValue(f.value) && f.value.replyTo === null,
-  )
-  const replies = new Map<string, CommentDoc[]>()
-  const marks = new Map<string, { file: CommentFile; resolves: boolean }>()
-  for (const file of sorted) {
-    const value = file.value
-    if (isCommentValue(value)) {
-      if (typeof value.replyTo !== 'string') continue
-      const list = replies.get(value.replyTo) ?? []
-      list.push(docOf(file, value))
-      replies.set(value.replyTo, list)
-    } else if (isObject(value)) {
-      const root =
-        typeof value.resolves === 'string'
-          ? value.resolves
-          : typeof value.reopens === 'string'
-            ? value.reopens
-            : null
-      // Sorted oldest first, so the last one seen is the newest.
-      if (root !== null) {
-        marks.set(root, { file, resolves: typeof value.resolves === 'string' })
-      }
-    }
-  }
-  return roots.map((file) => {
-    const mark = marks.get(file.path)
-    const resolved = mark?.resolves === true
-    const thread: Thread = {
-      root: docOf(file, file.value as CommentEntry),
-      replies: replies.get(file.path) ?? [],
-      resolved,
-      resolvedBy: resolved ? mark!.file.by : null,
-      resolvedAt: resolved ? new Date(mark!.file.at).toISOString() : null,
-    }
-    return {
-      path: file.treePath,
-      data: thread,
-      by: file.by,
-      at: new Date(file.at).toISOString(),
-      push: file.push,
-    } satisfies ThreadWire
-  })
-}
-
-/** 'a/plan.comments' → 'plan.comments': the folder from its page's folder. */
-export const fromPageFolder = (folder: string): string =>
-  folder.slice(folder.lastIndexOf('/') + 1)
 
 /**
  * The live files of a comments folder, with their writers, read by

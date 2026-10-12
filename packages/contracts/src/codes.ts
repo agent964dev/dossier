@@ -74,7 +74,11 @@ export const ERRORS = {
     message: 'Not sent. Your answers are kept on this device. Try again.',
   },
   /** Page client only, in an exported page. */
-  not_in_export: { status: null, exit: 1 },
+  not_in_export: {
+    status: null,
+    exit: 1,
+    message: 'A page downloaded as one file cannot do this.',
+  },
 } as const satisfies Record<
   string,
   { status: number | null; exit: ExitCode; message?: string }

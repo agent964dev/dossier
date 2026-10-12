@@ -384,6 +384,22 @@ describe('<dossier-diff>', () => {
     expect(diff.querySelector('.dossier-diff-code')!.childElementCount).toBe(0)
   })
 
+  test('in a page downloaded as one file, names each side by the name its data: URL keeps', async () => {
+    sizing()
+    const dataUrl = (name: string, text: string) =>
+      `data:text/markdown;name=${encodeURIComponent(name)};base64,${btoa(text)}`
+    const diff = place(
+      `<dossier-diff before="${dataUrl('v1/plan.md', PLAN_V1)}" after="${dataUrl('plan.md', PLAN)}" lang="text"></dossier-diff>`,
+    )
+    await loaded(diff)
+    expect(diff.querySelector('.dossier-diff-files')!.textContent).toBe(
+      'v1/plan.md → plan.md',
+    )
+    expect(
+      diff.querySelector('.dossier-diff-code')!.getAttribute('aria-label'),
+    ).toBe('Changes in v1/plan.md → plan.md')
+  }, 20_000)
+
   test('shows the size message for a side past 1 MiB', async () => {
     sizing()
     const diff = diffPage('before="v1/plan.md" after="big.md"')

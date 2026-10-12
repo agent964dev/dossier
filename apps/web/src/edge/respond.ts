@@ -1,4 +1,5 @@
 import {
+  EXPORT_LINKED_HEADER,
   defaultMessage,
   isErrorCode,
   PROTOCOL,
@@ -455,9 +456,32 @@ export const frameResponse = (served: Served): Response => {
     }
     case 'shell':
     case 'listing':
+    case 'export':
       return frameFailure(404)
   }
 }
+
+/** A plain ASCII name for a header's `filename`, beside its exact `filename*`. */
+const asciiName = (name: string): string =>
+  name.replace(/[^A-Za-z0-9._-]/g, '_')
+
+/**
+ * A page as one file: always a download, made for this person now, so never
+ * stored. It runs nothing on this host: the browser saves it.
+ */
+export const exportHeaders = (served: {
+  readonly linked: readonly string[]
+  readonly filename: string
+}): Record<string, string> => ({
+  'content-type': 'text/html; charset=utf-8',
+  'content-disposition': `attachment; filename="${asciiName(served.filename)}"; filename*=UTF-8''${encodeURIComponent(served.filename)}`,
+  'cache-control': NO_STORE,
+  'x-content-type-options': 'nosniff',
+  'content-security-policy': 'sandbox',
+  [EXPORT_LINKED_HEADER.toLowerCase()]: encodeURIComponent(
+    JSON.stringify(served.linked),
+  ),
+})
 
 /**
  * An older base-layer version's file from R2, with the headers

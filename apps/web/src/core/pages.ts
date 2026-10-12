@@ -49,6 +49,8 @@ import { Bindings } from './bindings.ts'
 import { sealCursor } from './cursors.ts'
 import { CurrentCaller, visitor, type Caller } from './caller.ts'
 import { Config } from './config.ts'
+import { Data } from './data.ts'
+import { makeExporter, type ExportServed } from './export-page.ts'
 import { Files } from './files.ts'
 import { hmacSha256, sha256Hex } from './ids.ts'
 import { composedLayouts, kitAt, kitMap, type LayoutLink } from './lookup.ts'
@@ -98,6 +100,8 @@ export type Served =
   | { readonly kind: 'unsatisfiable'; readonly size: number }
   /** An agent's answer on the main host: the agent version, or a download. */
   | AgentServed
+  /** A page downloaded as one file. */
+  | ExportServed
 
 export interface SeenByRow {
   readonly email: string
@@ -174,6 +178,19 @@ export interface PagesService {
   ) => Effect.Effect<
     ReadResult,
     DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
+    CurrentCaller
+  >
+  /**
+   * A page as one file that works offline, made for the caller now: never
+   * cached, and holding only what they may read.
+   */
+  readonly export: (i: {
+    readonly ref: LinkRef
+  }) => Effect.Effect<
+    ExportServed,
+    DossierError<
+      'not_found' | 'sign_in_required' | 'too_large' | 'unavailable'
+    >,
     CurrentCaller
   >
   /** The edge's frame rule: null for an unknown, expired or other tree's handle. */
@@ -351,7 +368,7 @@ const formsOf = (
 export const PagesLive: Layer.Layer<
   Pages,
   never,
-  TreeStore | Access | Bindings | Config | BaseLayer | PageCache | Files
+  TreeStore | Access | Bindings | Config | BaseLayer | PageCache | Files | Data
 > = Layer.effect(
   Pages,
   Effect.gen(function* () {
@@ -363,6 +380,7 @@ export const PagesLive: Layer.Layer<
     const base = yield* BaseLayer
     const cache = yield* PageCache
     const files = yield* Files
+    const dataService = yield* Data
     const context = yield* Effect.context<Bindings | BaseLayer>()
 
     const query = <A>(run: () => Promise<A>) =>
@@ -1631,12 +1649,110 @@ export const PagesLive: Layer.Layer<
         } satisfies Caller
       })
 
+    const exporter = makeExporter({
+      store,
+      access,
+      data: dataService,
+      bindings,
+      context,
+      origin: config.origin,
+      contentHost: config.contentHost,
+      treeRefOf,
+      kitChoice,
+      read: reader.read,
+    })
+
+    const exportPage: PagesService['export'] = ({ ref }) =>
+      askedAs(
+        ref.path,
+        Effect.gen(function* () {
+          const caller = yield* CurrentCaller
+          // An export holds what its person may read; nobody signed in has
+          // nothing to hold it for.
+          if (caller.person === null) {
+            return yield* Effect.fail(
+              dossierError(
+                'sign_in_required',
+                'Sign in to download this page.',
+                'Sign in with Google, or send an agent key.',
+                ref.path,
+              ),
+            )
+          }
+          let resolved: Resolved | MissingNode = yield* store.resolve(ref)
+          if (!('missing' in resolved) && resolved.kind === 'redirect') {
+            yield* asDenied(access.require('read', resolved.node))
+            const next = treeRefOf(resolved.tree.id, resolved.to)
+            resolved =
+              next === null
+                ? { missing: true, treeId: resolved.tree.id, path: ref.path }
+                : yield* store.resolve(next)
+          }
+          if ('missing' in resolved) return yield* denied(resolved)
+          if (resolved.kind === 'kit') {
+            if ((yield* kitChoice(resolved, 'read')) === null) {
+              return yield* denied({
+                missing: true,
+                treeId: resolved.tree.id,
+                path: ref.path,
+              })
+            }
+            return yield* Effect.fail(notFound(ref.path))
+          }
+          const granted = yield* asDenied(access.require('read', resolved.node))
+          // Only a page exports; a folder without index.html or a file does not.
+          if (resolved.kind !== 'page') {
+            return yield* Effect.fail(notFound(ref.path))
+          }
+          const page = resolved
+          const treeId = page.tree.id
+          const seq = page.tree.authoredSeq as AuthoredSeq
+          const roles = yield* access.roleOn(page.node)
+          const parts = yield* composedAt(page, treeId, seq)
+          const found = yield* store.treeById(treeId)
+          if (parts === null || found === null) {
+            return yield* Effect.fail(notFound(ref.path))
+          }
+          const tree = {
+            id: found.tree.id,
+            workspace: found.workspace.name,
+            name: found.tree.name,
+          }
+          // The frame's composition of the page, cached for everyone alike.
+          const html = yield* composedPage({
+            key: {
+              host: new URL(contentOrigin(config.contentHost, treeId)).host,
+              treeId,
+              seq,
+              path: page.node.path,
+              composer: `${COMPOSER_VERSION}.${ANALYZER_VERSION}`,
+              base: base.version,
+            },
+            tree,
+            node: page.node,
+            version: page.version,
+            analysis: parts.analysis!,
+            chain: parts.chain,
+            linkPath: page.linkPath,
+          })
+          return yield* exporter.exportPage({
+            ref,
+            tree,
+            page,
+            granted,
+            role: highest(roles),
+            html,
+          })
+        }),
+      )
+
     return {
       open,
       view,
       frame,
       seenBy,
       read: reader.read,
+      export: exportPage,
       handleCaller,
     } satisfies PagesService
   }),

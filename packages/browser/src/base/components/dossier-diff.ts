@@ -17,6 +17,7 @@ import {
 import { toHtml } from 'hast-util-to-html'
 
 import { scopeCss } from '../css-scope.ts'
+import { baseOfModule, nameInDataUrl } from '../export-url.ts'
 import {
   getHighlighter,
   theme,
@@ -28,7 +29,10 @@ import {
 import { addBaseStyles } from '../styles.ts'
 
 export interface DossierDiffAttributes {
-  /** URLs relative to the page. */
+  /**
+   * URLs relative to the page. In a page downloaded as one file, data: URLs
+   * whose `name` parameter keeps the file's name.
+   */
   readonly before?: string
   readonly after?: string
   /** A unified diff file. */
@@ -258,27 +262,31 @@ export class DossierDiff extends HTMLElement {
     }
     this.#say('Loading diff…')
     const url = (href: string) => new URL(href, base).href
+    // A data: URL of an exported page shows the name of the file it holds.
+    const named = (href: string) => nameInDataUrl(href) ?? href
     let diffs: FileDiffMetadata[]
     let label: string
     try {
       if (src !== null) {
-        const text = await load(win, src, url(src))
+        const text = await load(win, named(src), url(src))
         diffs = parsePatchFiles(text).flatMap((patch) => patch.files)
         if (lang !== undefined) {
           diffs = diffs.map((diff) => ({ ...diff, lang }) as FileDiffMetadata)
         }
-        label = src
+        label = named(src)
       } else {
         const [old, now] = await Promise.all([
-          before === null ? null : load(win, before, url(before)),
-          after === null ? null : load(win, after, url(after)),
+          before === null ? null : load(win, named(before), url(before)),
+          after === null ? null : load(win, named(after), url(after)),
         ])
         const file = (name: string | null, contents: string | null) =>
           name === null || contents === null
             ? null
             : ({ name, contents, ...(lang ? { lang } : {}) } as never)
-        diffs = [parseDiffFromFile(file(before, old), file(after, now))]
-        label = [before, after].filter((n) => n !== null).join(' → ')
+        const oldName = before === null ? null : named(before)
+        const newName = after === null ? null : named(after)
+        diffs = [parseDiffFromFile(file(oldName, old), file(newName, now))]
+        label = [oldName, newName].filter((n) => n !== null).join(' → ')
       }
     } catch (error) {
       if (generation !== this.#generation) return
@@ -306,8 +314,7 @@ export class DossierDiff extends HTMLElement {
     this.#split = split
     const generation = this.#generation
     const doc = this.ownerDocument
-    const base = new URL('..', import.meta.url).href.replace(/\/$/, '')
-    useGrammarBase(base)
+    useGrammarBase(baseOfModule(import.meta.url))
     useTheme()
     await getHighlighter()
     let html = ''

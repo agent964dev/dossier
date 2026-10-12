@@ -20,6 +20,35 @@ const SCRIPTS = [
 
 const standIn = (name: string) => `// the test build's stand-in ${name}\n`
 
+/**
+ * Stand-ins of the files an export inlines: the single-file builds, a
+ * grammar and KaTeX's stylesheet with its fonts inline. Export builds are
+ * never components, so the kit map is as without them.
+ */
+const EXPORT_FILES: Record<string, { type: string; text: string }> = {
+  ...Object.fromEntries(
+    [
+      'lib/mermaid.export.js',
+      'lib/shiki.export.js',
+      'lib/katex.export.js',
+      '_components/dossier-diff.export.js',
+      '_components/dossier-copy.export.js',
+      '_components/dossier-comments.export.js',
+    ].map((name) => [
+      name,
+      { type: 'text/javascript; charset=utf-8', text: standIn(name) },
+    ]),
+  ),
+  'lib/shiki-grammars/typescript.json': {
+    type: 'application/json',
+    text: '[{"name":"typescript"}]\n',
+  },
+  'lib/katex.export.css': {
+    type: 'text/css; charset=utf-8',
+    text: '.katex { font: 1em KaTeX_Main } /* fonts inline */\n',
+  },
+}
+
 /** The test build's libraries.json, over the stand-in scripts. */
 const TEST_LIBRARIES = {
   libraries: {
@@ -71,6 +100,12 @@ const testManifest = () => ({
         { type: 'text/javascript; charset=utf-8', size: standIn(name).length },
       ]),
     ),
+    ...Object.fromEntries(
+      Object.entries(EXPORT_FILES).map(([name, file]) => [
+        name,
+        { type: file.type, size: file.text.length },
+      ]),
+    ),
     '_layout.html': {
       type: 'text/html; charset=utf-8',
       size: statSync(BASE_LAYOUT).size,
@@ -98,6 +133,11 @@ const testAssets = (): string => {
     const file = path.join(directory, '_/base/test', name)
     mkdirSync(path.dirname(file), { recursive: true })
     writeFileSync(file, standIn(name))
+  }
+  for (const [name, { text }] of Object.entries(EXPORT_FILES)) {
+    const file = path.join(directory, '_/base/test', name)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, text)
   }
   copyFileSync(BASE_LAYOUT, path.join(directory, '_/base/test/_layout.html'))
   return directory

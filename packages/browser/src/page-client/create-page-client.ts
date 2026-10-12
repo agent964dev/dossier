@@ -5,6 +5,7 @@ import {
   readTopBoot,
   type Doc,
   type DraftValues,
+  type ExportData,
   type Json,
   type JsonObject,
   type Me,
@@ -87,33 +88,45 @@ export const WELCOME_TIMEOUT = 10_000
 /** The page client behind `window.dossier`. */
 export const createPageClient = (deps: {
   readonly bootstrap: PageBootstrap
+  /** The shell's port, or the export host in a page downloaded as one file. */
   readonly port: HostPort
   readonly window: Window
   readonly submits?: SubmitSource
   /** Called once the forms controller starts. */
   readonly onForms?: (forms: FormsController) => void
+  /** In a page downloaded as one file: its exporter, and when it was exported. */
+  readonly exported?: Pick<ExportData, 'me' | 'at'>
 }): Dossier => {
   const { bootstrap, port, window: win } = deps
+  // A page downloaded as one file answers from the file and this browser.
+  const exported = bootstrap.export === true
   // Components start loading before any author script runs.
-  startKit({ window: win, kit: bootstrap.kit, used: bootstrap.used })
+  startKit({
+    window: win,
+    kit: bootstrap.kit,
+    used: bootstrap.used,
+    exported,
+  })
   const embedded = win.parent !== win.top
-  const alone = win.top === win
+  // An exported page opened on its own still has its export host.
+  const alone = win.top === win && !exported
 
   // The shell sets the top page's boot data. A nested page's name is set by
-  // the page around it, so it is cleared but never believed.
+  // the page around it, so it is cleared but never believed. An exported
+  // page leaves the name to the page's own scripts.
   const name = win.name
   let boot = null
-  if (name.startsWith(WINDOW_NAME_PREFIX)) {
+  if (!exported && name.startsWith(WINDOW_NAME_PREFIX)) {
     win.name = ''
     if (!embedded) boot = readTopBoot(name)
   }
 
-  let me: Me | null = boot?.me ?? null
+  let me: Me | null = boot?.me ?? deps.exported?.me ?? null
   let welcomed = (): void => {}
   let timer: number | undefined
-  let isReady = boot !== null || alone
+  let isReady = boot !== null || alone || exported
   const ready =
-    boot !== null || alone
+    boot !== null || alone || exported
       ? Promise.resolve()
       : new Promise<void>((resolve, reject) => {
           welcomed = () => {
@@ -152,6 +165,7 @@ export const createPageClient = (deps: {
         drafts,
         resume,
         requests,
+        exportedAt: exported ? (deps.exported?.at ?? '') : null,
       })
       requests.onResumed(controller.resumed)
       deps.submits?.connect(controller.submitted)
@@ -205,13 +219,15 @@ export const createPageClient = (deps: {
   port.start()
   if (boot !== null) beginForms(boot.drafts, boot.resume)
 
-  if (!embedded && !alone) trackLocation({ window: win, bootstrap, port })
+  if (!embedded && !alone && !exported) {
+    trackLocation({ window: win, bootstrap, port })
+  }
 
   const page = Object.freeze({
     path: bootstrap.path,
     push: bootstrap.push,
     embedded,
-    exported: false,
+    exported,
   })
   return Object.freeze({
     get me() {

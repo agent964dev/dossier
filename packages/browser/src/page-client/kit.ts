@@ -1,6 +1,8 @@
 // The component loader: imports the kit's components before author scripts
 // run, and keeps each kit tag hidden until it is defined, for at most three
-// seconds. Tags outside the kit are never touched.
+// seconds. Tags outside the kit are never touched. In a page downloaded as
+// one file, each kit value is a bare module name the file's import map
+// resolves, so it is imported exactly as written.
 import { addedNodes } from './watch.ts'
 
 /** The longest a kit tag stays hidden while its component loads. */
@@ -13,10 +15,15 @@ export interface KitLoader {
 
 export const startKit = (deps: {
   readonly window: Window
-  /** Tag → component URL, relative to the page or root-relative. */
+  /**
+   * Tag → component URL, relative to the page or root-relative; in an
+   * exported page, a bare module name.
+   */
   readonly kit: Readonly<Record<string, string>>
   /** The kit tags the composed page uses: imported at once. */
   readonly used: readonly string[]
+  /** The page was downloaded as one file. */
+  readonly exported?: boolean
   /** Loads a module; the browser's own import() unless a test passes one. */
   readonly load?: (url: string) => Promise<unknown>
 }): KitLoader => {
@@ -49,7 +56,10 @@ export const startKit = (deps: {
     if (imported.size === tags.size) unsubscribe?.()
     hidden.add(tag)
     render()
-    const url = new URL(kit[tag] ?? '', win.location.href).href
+    const value = kit[tag] ?? ''
+    // A bare name stays bare, for the import map; as a URL it would name a
+    // file beside the exported page.
+    const url = deps.exported ? value : new URL(value, win.location.href).href
     win.setTimeout(() => show(tag), HIDE_LIMIT)
     win.customElements.whenDefined(tag).then(
       () => show(tag),

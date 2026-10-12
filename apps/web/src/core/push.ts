@@ -43,6 +43,7 @@ import { CurrentCaller, type Caller } from './caller.ts'
 import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
+import { jsAnalysisOf } from './lookup.ts'
 import { pageNeedsOf, type PageNeed, type PageNeedRow } from './page-needs.ts'
 import { Shares } from './shares.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
@@ -342,7 +343,8 @@ export const PushLive: Layer.Layer<
     const baseLayer = yield* BaseLayer
     const limits = yield* Limits
     const config = yield* Config
-    const { DB, BLOBS } = yield* Bindings
+    const bindings = yield* Bindings
+    const { DB, BLOBS } = bindings
 
     const query = <A>(run: () => Promise<A>) =>
       Effect.tryPromise({
@@ -978,6 +980,12 @@ export const PushLive: Layer.Layer<
         }).pipe(Effect.tapError(() => store.dropHold(holder, i.sha256)))
         if (listed.results.some((f) => isPageFile(f.path))) {
           yield* store.analysis(i.sha256)
+        }
+        // A module's imports, which exporting a page follows.
+        if (listed.results.some((f) => /\.m?js$/i.test(f.path))) {
+          yield* jsAnalysisOf(i.sha256).pipe(
+            Effect.provideService(Bindings, bindings),
+          )
         }
         // A page's generated agent version is made as it arrives; a failure
         // here only means the first read makes it.

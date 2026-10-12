@@ -361,6 +361,11 @@ function Listing({ view }: { view: ListingView }) {
                     </div>
                     <RowMenu label={`More for ${page.title}`}>
                       <MenuLink href={page.link}>Open</MenuLink>
+                      {page.download === null ? null : (
+                        <MenuLink href={page.download} download>
+                          Download as one file
+                        </MenuLink>
+                      )}
                       {page.responses === null ? null : (
                         <MenuLink href={page.responses.link}>
                           Responses

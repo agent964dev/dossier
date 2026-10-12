@@ -3,7 +3,10 @@
 // TreeStore change with its operation ID, so a retry never stores twice.
 import {
   commentsFolderIn,
+  commentsFolderOf,
   dossierError,
+  fromPageFolder,
+  isCommentValue,
   isNodeName,
   pageOfCommentsFolder,
   MAX_DEPTH,
@@ -48,8 +51,6 @@ import { CurrentCaller } from './caller.ts'
 import {
   blankOf,
   commentFiles,
-  fromPageFolder,
-  isCommentValue,
   parseCommentRevision,
   parseCommentWrite,
   readThreads,
@@ -315,6 +316,32 @@ export interface DataService {
       'not_found' | 'sign_in_required' | 'forbidden' | 'unavailable'
     >,
     CurrentCaller
+  >
+  /**
+   * The data a page exported as one file carries: the data files the
+   * caller may read now among the page's form targets (tree paths: folders
+   * end in '/'), its comments folder (each entry its own file, with when it
+   * was first written and its revisions, which assembling threads needs),
+   * and the data files in the page's own folder and below. too_large past a
+   * folder read's caps.
+   */
+  readonly snapshotFor: (
+    page: Granted<'read'>,
+    targets: readonly string[],
+  ) => Effect.Effect<
+    ExportSnapshot,
+    DossierError<'too_large' | 'unavailable'>,
+    CurrentCaller
+  >
+}
+
+/** What Data.snapshotFor gives an export. */
+export interface ExportSnapshot {
+  /** Tree paths, as a data read gives them. */
+  readonly files: readonly DocWire[]
+  /** Each comment entry among them: first written, and its versions. */
+  readonly comments: Readonly<
+    Record<string, { readonly created: string; readonly revision: number }>
   >
 }
 
@@ -2513,6 +2540,97 @@ export const DataLive: Layer.Layer<
         push: doc.push,
       }))
 
+    const snapshotFor: DataService['snapshotFor'] = (page, targets) =>
+      Effect.gen(function* () {
+        const readable = yield* access.readable(page.treeId)
+        const folder = page.path.includes('/')
+          ? page.path.slice(0, page.path.lastIndexOf('/'))
+          : ''
+        const comments = commentsFolderOf(page.path).slice(0, -1)
+        // Under the page's folder, at or under each folder target, or a
+        // file target itself.
+        const under = (prefix: string) =>
+          prefix === ''
+            ? sql`1`
+            : sql`substr(nodes.path, 1, length(${prefix}) + 1) = ${`${prefix}/`}`
+        const places = [
+          under(folder),
+          ...targets.map((target) =>
+            target.endsWith('/')
+              ? under(target.slice(0, -1))
+              : sql`nodes.path = ${target}`,
+          ),
+        ]
+        const rows = yield* query(() =>
+          db(bindings).all<{
+            path: string
+            createdAt: number
+            json: string | null
+            blob: string | null
+            size: number | null
+            versionAt: number
+            revision: number
+            push: number | null
+            author: string | null
+            owner: string | null
+          }>(
+            sql`select nodes.path, nodes.created_at as createdAt,
+                  v.json_value as json, v.blob_sha256 as blob, v.size,
+                  v.created_at as versionAt, v.revision,
+                  v.seen_push_number as push, a.email as author,
+                  o.email as owner
+                from nodes join node_versions v on v.id = nodes.current_version_id
+                  left join "user" a on a.id = v.author_id
+                  left join "user" o on o.id = nodes.owner_id
+                where nodes.tree_id = ${page.treeId} and nodes.deleted_at is null
+                  and nodes.kind = 'file' and nodes.origin = 'data'
+                  and v.state = 'live'
+                  and (${sql.join(places, sql` or `)})
+                  and ${readable.where}
+                order by nodes.path`,
+          ),
+        )
+        const bytes = rows.reduce(
+          (sum, row) => sum + (row.blob === null ? (row.size ?? 0) : 0),
+          0,
+        )
+        if (rows.length > READ_FOLDER_FILES || bytes > READ_FOLDER_BYTES) {
+          return yield* Effect.fail(
+            dossierError(
+              'too_large',
+              `This page's data holds ${rows.length.toLocaleString('en-US')} files and ${sizeText(bytes)}; an export takes at most ${READ_FOLDER_FILES.toLocaleString('en-US')} files and ${sizeText(READ_FOLDER_BYTES)}.`,
+              'Open the page in Dossier instead.',
+              page.path,
+            ),
+          )
+        }
+        const files: DocWire[] = []
+        const kept: Record<
+          string,
+          { readonly created: string; readonly revision: number }
+        > = {}
+        for (const row of rows) {
+          const comment = commentsFolderIn(row.path) === comments
+          // A comment is its writer's, even once someone else blanked it.
+          const by = comment ? (row.owner ?? row.author) : row.author
+          if (by === null) continue
+          files.push({
+            path: row.path,
+            data: row.blob === null ? parseJson(row.json) : null,
+            by,
+            at: new Date(row.versionAt).toISOString(),
+            push: (row.push ?? 0) as PushNumber,
+          })
+          if (comment) {
+            kept[row.path] = {
+              created: new Date(row.createdAt).toISOString(),
+              revision: row.revision,
+            }
+          }
+        }
+        return { files, comments: kept }
+      })
+
     const read: DataService['read'] = (i) =>
       Effect.gen(function* () {
         const folder = i.path === '' || i.path.endsWith('/')
@@ -3099,6 +3217,7 @@ export const DataLive: Layer.Layer<
       pageForms,
       responses,
       revisions,
+      snapshotFor,
     } satisfies DataService
   }),
 )

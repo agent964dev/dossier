@@ -1,10 +1,17 @@
 // The client.js entry, a classic script that runs before any author script.
-import type { Hello, PageBootstrap } from '@dossier/contracts/bridge'
+import type {
+  ExportData,
+  Hello,
+  PageBootstrap,
+} from '@dossier/contracts/bridge'
+import { EXPORT_BASE } from '../base/export-url.ts'
 import {
   createPageClient,
   type Dossier,
+  type HostPort,
   type SubmitSource,
 } from './create-page-client.ts'
+import { createExportHost, type ExportStorage } from './export-host.ts'
 import { formInfoOf, type FormsController } from './forms.ts'
 import {
   libraryUrl,
@@ -17,14 +24,19 @@ import { addedNodes } from './watch.ts'
 
 /**
  * Starts the library loader once the document is parsed, so it never renders
- * markup the parser is still adding, then for every node added later.
+ * markup the parser is still adding, then for every node added later. In a
+ * page downloaded as one file, libraries are bare names under the export
+ * prefix, which the file's import map resolves.
  */
 export const installLibraries = (
   window: Window,
   bootstrap: PageBootstrap,
 ): LibraryLoader => {
   const doc = window.document
-  const base = `/_/base/${encodeURIComponent(bootstrap.base)}`
+  const base =
+    bootstrap.export === true
+      ? EXPORT_BASE
+      : `/_/base/${encodeURIComponent(bootstrap.base)}`
   const reported = new Set<string>()
   const loader = startLibraries({
     base,
@@ -186,6 +198,15 @@ export interface Installed {
   readonly forms: () => FormsController | null
 }
 
+/** The browser's storage for this file, or null where it refuses it. */
+const localStorageOf = (window: Window): ExportStorage | null => {
+  try {
+    return window.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
 /** Installs the page client and `window.dossier` in a composed page. */
 export const install = (window: Window): Installed => {
   const doc = window.document
@@ -200,23 +221,47 @@ export const install = (window: Window): Installed => {
     window,
     (form) => formInfoOf(bootstrap, form) !== null,
   )
-  const { MessageChannel } = window as Window & typeof globalThis
-  const { port1, port2 } = new MessageChannel()
+  // A page downloaded as one file talks to its export host, never Dossier.
+  let data: ExportData | null = null
+  let port: HostPort
+  let shellPort: MessagePort | null = null
+  if (bootstrap.export === true) {
+    data = JSON.parse(
+      doc.getElementById('dossier-export')?.textContent ?? 'null',
+    ) as ExportData
+    port = createExportHost({
+      data,
+      bootstrap,
+      storage: localStorageOf(window),
+      now: () => new Date(),
+    })
+  } else {
+    const { MessageChannel } = window as Window & typeof globalThis
+    const channel = new MessageChannel()
+    port = channel.port1
+    shellPort = channel.port2
+  }
   let forms: FormsController | null = null
   const dossier = createPageClient({
     bootstrap,
-    port: port1,
+    port,
     window,
     submits,
     onForms: (controller) => {
       forms = controller
     },
+    ...(data === null ? {} : { exported: { me: data.me, at: data.at } }),
   })
   installLibraries(window, bootstrap)
 
   const handle = framePath(window.location.pathname)?.handle
   const top = window.top
-  if (top !== null && top !== window && handle !== undefined) {
+  if (
+    shellPort !== null &&
+    top !== null &&
+    top !== window &&
+    handle !== undefined
+  ) {
     const hello: Hello = {
       dossier: 'hello',
       v: 1,
@@ -224,7 +269,7 @@ export const install = (window: Window): Installed => {
       path: bootstrap.path,
       nested: embedded,
     }
-    top.postMessage(hello, bootstrap.origin, [port2])
+    top.postMessage(hello, bootstrap.origin, [shellPort])
   }
 
   Object.defineProperty(window, 'dossier', {

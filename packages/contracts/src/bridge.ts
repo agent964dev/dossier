@@ -283,6 +283,38 @@ export interface PageBootstrap {
   readonly used: readonly string[]
   /** The forms Dossier manages, by their data-dossier-form number. */
   readonly forms: readonly FormInfo[]
+  /**
+   * Present only in a page downloaded as one file: the page client answers
+   * from the file and this browser, and never reaches Dossier. The kit then
+   * names bare module names, which the file's import map resolves.
+   */
+  readonly export?: true
+}
+
+/** JSON in an exported page, in `#dossier-export`. */
+export interface ExportData {
+  readonly v: 1
+  /** When the page was exported, ISO 8601. */
+  readonly at: string
+  /** The page's canonical link. */
+  readonly link: string
+  /** The exporter, with their role on the page. */
+  readonly me: Me | null
+  /**
+   * The data files the exporter could read when exporting, with tree paths:
+   * the page's form targets, its comments (one file per entry, assembled
+   * into threads by the page) and the data under the page's folder.
+   */
+  readonly files: readonly DocWire[]
+  /**
+   * For each comment entry among `files`, by tree path: when it was first
+   * written (ISO 8601) and how many versions it has, which a thread shows.
+   */
+  readonly comments: Readonly<
+    Record<string, { readonly created: string; readonly revision: number }>
+  >
+  /** Canonical links kept instead of inlined. */
+  readonly linked: readonly string[]
 }
 
 /** The codes page code's calls reject with. */

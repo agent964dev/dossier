@@ -50,6 +50,8 @@ export interface ListingView {
     readonly responses: { readonly count: number; readonly link: string } | null
     /** A mention of the viewer waits unseen on the page. */
     readonly mentioned: boolean
+    /** The page as one file that works offline; null for a visitor. */
+    readonly download: string | null
   }[]
   readonly folders: readonly {
     readonly name: string
@@ -143,6 +145,10 @@ export const listingModel = (data: {
         const answered = forms.get(e.node.id)?.people ?? null
         const page = folder ? `${e.node.path}/index.html` : e.node.path
         return {
+          download:
+            me === null
+              ? null
+              : `/_/api/export?link=${encodeURIComponent(link)}`,
           mentioned: mentionedOnPage(mentions, e.node.treeId, page),
           title: e.title ?? e.name,
           path: folder ? `${e.name}/` : e.name,

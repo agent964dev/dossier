@@ -13,6 +13,8 @@ import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
 
 import type { BaseGrammar } from '@dossier/contracts/base'
 
+import { baseFileUrl } from '../export-url.ts'
+
 /** Language or alias → its grammar file; written in by the build. */
 declare const __SHIKI_GRAMMARS__: Readonly<Record<string, BaseGrammar>>
 
@@ -88,10 +90,21 @@ let grammarBase: string | null = null
 
 /**
  * Where grammar files are fetched from: '/_/base/<version>' on the page's
- * own host. The first caller sets it; the base layer has one version.
+ * own host, or the export prefix in a page downloaded as one file, whose
+ * import map names each grammar file. The first caller sets it; the base
+ * layer has one version.
  */
 export const useGrammarBase = (base: string): void => {
   grammarBase ??= base
+}
+
+/** A base file's response; a name an exported page's import map lacks fails. */
+const fetchBaseFile = (base: string, path: string): Promise<Response> => {
+  try {
+    return fetch(baseFileUrl(base, path))
+  } catch (error) {
+    return Promise.reject(error)
+  }
 }
 
 const files = new Map<string, Promise<LanguageRegistration[] | null>>()
@@ -114,7 +127,7 @@ export const loadGrammarFile = (
   let file = files.get(grammar.file)
   if (file === undefined) {
     const url = `${grammarBase ?? ''}/${grammar.file}`
-    file = fetch(url)
+    file = fetchBaseFile(grammarBase ?? '', grammar.file)
       .then(async (response) => {
         if (!response.ok) throw new Error(`${response.status}`)
         return (await response.json()) as LanguageRegistration[]

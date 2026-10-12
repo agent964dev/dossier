@@ -17,6 +17,7 @@ import {
   type UploadRef,
 } from '@dossier/contracts/bridge'
 import type { DossierStateDetail, FormState } from './create-page-client.ts'
+import { EXPORT_SAVED_TEXT } from './export-host.ts'
 import type { Requests, Resumed } from './requests.ts'
 
 /** After the last input, how long until the shell keeps the draft. */
@@ -332,8 +333,21 @@ export const startForms = (deps: {
   readonly drafts: Readonly<Record<string, DraftValues>>
   readonly resume: readonly string[]
   readonly requests: Requests
+  /**
+   * In a page downloaded as one file, when it was exported (ISO 8601): what
+   * a form sends is kept in this browser, and stored values newer than the
+   * export were saved here.
+   */
+  readonly exportedAt?: string | null
 }): FormsController => {
   const { bootstrap, requests } = deps
+  const exported = typeof deps.exportedAt === 'string'
+  const exportedAt = Date.parse(deps.exportedAt ?? '')
+  /** What the status line says of a value stored at `at`. */
+  const storedText = (at: string): string =>
+    exported && !(Date.parse(at) <= exportedAt)
+      ? EXPORT_SAVED_TEXT
+      : sentText(at)
   const win = deps.window as Window & typeof globalThis
   const doc = win.document
   const managed: Managed[] = []
@@ -672,7 +686,11 @@ export const startForms = (deps: {
     }
     report(
       m,
-      autosave ? TEXT.saved : sentText(wire?.at ?? new Date().toISOString()),
+      exported
+        ? EXPORT_SAVED_TEXT
+        : autosave
+          ? TEXT.saved
+          : sentText(wire?.at ?? new Date().toISOString()),
     )
     setState(m, 'sent', { doc: stored }, true)
     if (changedSince) setState(m, 'draft')
@@ -879,7 +897,7 @@ export const startForms = (deps: {
     // What the person already typed stays; the rest is what they sent.
     if (isRecord(value.data)) fill(m, value.data, false, m.typed)
     if (m.state === 'sending' || m.state === 'draft') return
-    report(m, sentText(value.at))
+    report(m, storedText(value.at))
     setState(m, 'sent', { doc: stored })
   }
 
