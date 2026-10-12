@@ -14,6 +14,10 @@
     },
   ],
   "observability": { "enabled": true },
+  // A request waits on D1 several times one after another, so the Worker
+  // runs near its database: Smart Placement moves it there once it has seen
+  // enough traffic, and keeps it near the visitor otherwise.
+  "placement": { "mode": "smart" },
   "assets": {
     "binding": "ASSETS",
     "run_worker_first": ["/_/app/*", "/_/base/*"],
@@ -69,6 +73,9 @@
     "dev": {
       "name": "dossier-next-dev",
       "workers_dev": true,
+      // Dev's traffic comes from too few places for Smart Placement to
+      // decide, so it names the region of dev's D1 primary (Milan).
+      "placement": { "region": "aws:eu-south-1" },
       "preview_urls": false,
       "routes": [
         {
