@@ -84,10 +84,14 @@ describe('independent Phase 11 history probes', () => {
     const result: any = await call(await agent(guest), 4, (f) =>
       f.log({ ref: ref(`${c.name}/current/`), cursor: null }),
     )
-    void JSON.stringify(result)
     expect(JSON.stringify(result)).not.toContain(
       `${b.name}/private-acquisition`,
     )
+    // Its writer, who reads every place it went, sees each.
+    const theirs: any = await call(writer, 4, (f) =>
+      f.log({ ref: ref(`${c.name}/current/`), cursor: null }),
+    )
+    expect(JSON.stringify(theirs)).toContain(`${b.name}/private-acquisition`)
   })
   it('does not disclose deleted private content through a newly shared replacement folder diff', async () => {
     const owner = await person('folder-owner')
@@ -125,8 +129,14 @@ describe('independent Phase 11 history probes', () => {
       { headers: { authorization: `Bearer ${secret}` } },
     )
     const wire = await response.json()
-    void (response.status, JSON.stringify(wire))
     expect(JSON.stringify(wire)).not.toContain(
+      'CONFIDENTIAL acquisition valuation 90000000',
+    )
+    const mine = await SELF.fetch(
+      `${ORIGIN}/_/api/diff?path=${encodeURIComponent(`${target}/area/`)}&from=1&to=2`,
+      { headers: { authorization: `Bearer ${await keySecretFor(owner)}` } },
+    )
+    expect(await mine.text()).toContain(
       'CONFIDENTIAL acquisition valuation 90000000',
     )
   })
@@ -194,8 +204,11 @@ describe('independent Phase 11 history probes', () => {
     const result: any = await call(await agent(guest), 3, (f) =>
       f.log({ ref: r('plan.txt'), cursor: null }),
     )
-    void JSON.stringify(result)
     expect(JSON.stringify(result)).not.toContain('Lay off Alice on Friday')
+    const mine: any = await call(writer, 3, (f) =>
+      f.log({ ref: r('plan.txt'), cursor: null }),
+    )
+    expect(JSON.stringify(mine)).toContain('Lay off Alice on Friday')
   })
   it('redacts a private intermediate destination after the node returns to shared', async () => {
     const t = await setup()
@@ -221,8 +234,11 @@ describe('independent Phase 11 history probes', () => {
     const result: any = await call(t.guest, 4, (f) =>
       f.log({ ref: t.r('shared/'), cursor: null }),
     )
-    void JSON.stringify(result)
     expect(JSON.stringify(result)).not.toContain('private/layoffs.txt')
+    const mine: any = await call(t.writer, 4, (f) =>
+      f.log({ ref: t.r('shared/'), cursor: null }),
+    )
+    expect(JSON.stringify(mine)).toContain('private/layoffs.txt')
   })
 
   it('redacts an inbound file original private path in push detail', async () => {
@@ -257,8 +273,14 @@ describe('independent Phase 11 history probes', () => {
       { headers: { authorization: `Bearer ${secret}` } },
     )
     const wire = await response.json()
-    void (response.status, JSON.stringify(wire))
     expect(JSON.stringify(wire)).not.toContain('private/acquisition-target.txt')
+    const mine: any = await call(t.writer, 3, (f) =>
+      f.pushDetail({
+        ref: t.r('shared/target.txt'),
+        number: 1 as PushNumber,
+      }),
+    )
+    expect(JSON.stringify(mine)).toContain('private/acquisition-target.txt')
   })
 
   it('does not count a moved-out file in a folder push detail that the caller cannot read now', async () => {

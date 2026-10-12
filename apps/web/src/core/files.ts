@@ -516,6 +516,19 @@ export const FilesLive: Layer.Layer<
         })
         const can = yield* historyAccess(located)
         const here = `${ref.workspace}/${located.tree.name}`
+        // A place the tree went is seen by an admin of that workspace, who
+        // read every tree in it while the tree was there.
+        const adminAt = (place: string) =>
+          Effect.gen(function* () {
+            if (!can.whole) return false
+            const name = place.slice(0, place.indexOf('/'))
+            const workspace = yield* store.workspace(name)
+            if (workspace === null) return false
+            const membership = yield* Effect.option(access.member(workspace))
+            return (
+              membership._tag === 'Some' && membership.value.role === 'admin'
+            )
+          }).pipe(Effect.orElseSucceed(() => false))
         const lines: LogLine[] = []
         for (const [n, line] of page.lines.entries()) {
           const meta = page.meta[n]!
@@ -540,11 +553,13 @@ export const FilesLive: Layer.Layer<
             continue
           }
           if (!(yield* can.sees(line.path))) continue
-          // A destination shows only where the caller sees it: a tree's
-          // only as the place it is now.
+          // A destination shows only where the caller sees it: a tree's as
+          // the place it is now, or a workspace the caller runs.
           if (line.kind === 'move' && line.to !== null) {
             const shown =
-              line.path === '' ? line.to === here : yield* can.sees(line.to)
+              line.path === ''
+                ? line.to === here || (yield* adminAt(line.to))
+                : yield* can.sees(line.to)
             lines.push(shown ? line : { ...line, to: null })
             continue
           }
