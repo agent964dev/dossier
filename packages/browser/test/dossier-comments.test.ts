@@ -799,6 +799,40 @@ describe('<dossier-comments>', () => {
     })
   })
 
+  test('keeps a pin placed while an earlier comment on the same element is still sending', async () => {
+    const element = await mount('<img id="mockup" title="Mockup" alt="">')
+    const form = mainComposer(element)
+    const select = q<HTMLSelectElement>(form, 'select')
+    select.value = 'mockup'
+    select.dispatchEvent(new Event('change'))
+    let finish: (() => void) | null = null
+    const write = fake.write.bind(fake)
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path: string, patch: JsonObject) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }) as never,
+    )
+    const area = q<HTMLTextAreaElement>(form, 'textarea')
+    type(area, 'First, on the mockup.')
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    // While it goes, a pin is placed for the next comment.
+    byKey(form, 'pin-button:main')!.click()
+    key(document.activeElement!, 'Enter')
+    expect(byKey(form, 'remove-pin:main')!.closest('[hidden]')).toBeNull()
+    finish!()
+    await settle()
+    expect(byKey(form, 'remove-pin:main')!.closest('[hidden]')).toBeNull()
+    type(area, 'Second, pinned.')
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[1]!.patch).toMatchObject({
+      anchor: 'mockup',
+      pin: { x: 0.5, y: 0.5 },
+    })
+  })
+
   test('places a pin where the image is tapped', async () => {
     const element = await mount('<img id="shot" alt="">')
     const image = document.getElementById('shot')!

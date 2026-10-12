@@ -1278,8 +1278,9 @@ export class DossierComments extends HTMLElement {
     if (!this.#check(text, mentions, composer, status)) return
     const element = anchorElement(this.ownerDocument, parts.on.value || null)
     const anchor = element === null ? null : element.id
-    const pin =
-      anchor !== null && this.#pin?.anchor === anchor ? this.#pin.pin : null
+    const placed =
+      anchor !== null && this.#pin?.anchor === anchor ? this.#pin : null
+    const pin = placed?.pin ?? null
     const entry: CommentEntry = {
       text,
       anchor,
@@ -1302,7 +1303,8 @@ export class DossierComments extends HTMLElement {
         // What was typed since the send stays.
         if (composer.text.trim() === text) composer.text = ''
         this.#keepDraft()
-        if (this.#pin !== null && this.#pin.anchor === anchor) this.#pin = null
+        // Only the pin this comment took: one placed since stays.
+        if (placed !== null && this.#pin === placed) this.#pin = null
         this.#render()
       },
     })
