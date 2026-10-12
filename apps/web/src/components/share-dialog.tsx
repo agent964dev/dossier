@@ -141,22 +141,7 @@ const ANYONE_NAMES: Record<Role, string> = {
   respond: 'Read and respond',
 }
 
-const RANK: Record<Role, number> = { read: 1, respond: 2, write: 3 }
-
-/** The strongest share for a target kind among those from folders above. */
-const floorOf = (
-  inherited: readonly DialogShare[],
-  kind: 'workspace' | 'anyone',
-): DialogShare | null =>
-  inherited
-    .filter((share) => share.target.kind === kind)
-    .reduce<DialogShare | null>(
-      (best, share) =>
-        best === null || RANK[share.role] > RANK[best.role] ? share : best,
-      null,
-    )
-
-/** "Read · from acme/": where a row's floor comes from. */
+/** "Read · from acme/": where an inherited share comes from. */
 function FromLine({ role, from }: { role: string; from: string | null }) {
   return (
     <span className="font-mono text-xs break-words text-neutral-400">
@@ -244,27 +229,14 @@ function ShareBody({
   const shown = (key: string, role: Role | null): Choice =>
     choiceOf(pending?.key === key ? pending.role : role)
 
-  // A share from a folder above is a floor the node's own share cannot go
-  // under; its row is the editable one, so it is not listed again.
-  const workspaceFloor = floorOf(view.inherited, 'workspace')
-  const anyoneFloor = floorOf(view.inherited, 'anyone')
-  const inherited = view.inherited.filter(
-    (share) =>
-      share.target.kind !== 'workspace' && share.target.kind !== 'anyone',
-  )
-  /** The node's own role, or null when the choice is what the floor gives. */
-  const ownRole = (choice: string, floor: DialogShare | null) => {
-    const role = roleOf(choice)
-    return floor !== null && role === floor.role ? null : role
-  }
+  // Shares from folders above are listed on their own, never edited here:
+  // the rows below set only this node's own shares, whatever is inherited
+  // (respond does not include read, and a data folder's own public share
+  // is not the same as one above it).
+  const inherited = view.inherited
 
-  const workspace = shown(
-    'workspace',
-    view.workspaceRole ?? workspaceFloor?.role ?? null,
-  )
-  const anyone: Choice = confirming
-    ? 'write'
-    : shown('anyone', view.anyoneRole ?? anyoneFloor?.role ?? null)
+  const workspace = shown('workspace', view.workspaceRole)
+  const anyone: Choice = confirming ? 'write' : shown('anyone', view.anyoneRole)
   const name = view.title.replace(/^Share /, '')
 
   useEffect(() => {
@@ -283,7 +255,7 @@ function ShareBody({
       return
     }
     setConfirming(false)
-    void change({ kind: 'anyone' }, ownRole(choice, anyoneFloor), 'anyone')
+    void change({ kind: 'anyone' }, role, 'anyone')
   }
 
   const settle = async (confirmed: boolean) => {
@@ -354,24 +326,15 @@ function ShareBody({
             }
             name={`Everyone in ${view.workspace}`}
             wrap
-            detail={
-              workspaceFloor === null ? undefined : (
-                <FromLine
-                  role={ROLE_NAMES[workspaceFloor.role]}
-                  from={workspaceFloor.from}
-                />
-              )
-            }
             control={
               <RoleSelect
                 label={`Role of everyone in ${view.workspace}`}
                 value={workspace}
                 options={[NO_ACCESS, ...PEOPLE_ROLES]}
-                floor={workspaceFloor?.role ?? null}
                 onChange={(choice) =>
                   void change(
                     { kind: 'workspace' },
-                    ownRole(choice, workspaceFloor),
+                    roleOf(choice),
                     'workspace',
                   )
                 }
@@ -396,21 +359,12 @@ function ShareBody({
                   }
                 : undefined
             }
-            detail={
-              anyoneFloor === null ? undefined : (
-                <FromLine
-                  role={ANYONE_NAMES[anyoneFloor.role]}
-                  from={anyoneFloor.from}
-                />
-              )
-            }
             control={
               <RoleSelect
                 ref={anyoneRef}
                 label="Role of anyone with the link"
                 value={anyone}
                 options={ANYONE_ROLES}
-                floor={anyoneFloor?.role ?? null}
                 on={anyone !== ''}
                 onChange={chooseAnyone}
               />
@@ -753,7 +707,16 @@ function InheritedRow({ share }: { share: DialogShare }) {
         )
       }
       name={share.label}
-      detail={<FromLine role={ROLE_NAMES[share.role]} from={share.from} />}
+      detail={
+        <FromLine
+          role={
+            (share.target.kind === 'anyone' ? ANYONE_NAMES : ROLE_NAMES)[
+              share.role
+            ]
+          }
+          from={share.from}
+        />
+      }
       control={null}
     />
   )
@@ -765,14 +728,11 @@ function RoleSelect({
   options,
   onChange,
   on = false,
-  floor = null,
   ref,
 }: {
   label: string
   value: Choice
   options: readonly (readonly [Choice, string])[]
-  /** A role from a folder above: choices under it are disabled. */
-  floor?: Role | null
   onChange: (choice: string) => void
   /** The cyan look of a choice that opens the node widely. */
   on?: boolean
@@ -791,13 +751,7 @@ function RoleSelect({
       )}
     >
       {options.map(([choice, text]) => (
-        <option
-          key={choice}
-          value={choice}
-          disabled={
-            floor !== null && (choice === '' || RANK[choice] < RANK[floor])
-          }
-        >
+        <option key={choice} value={choice}>
           {text}
         </option>
       ))}
