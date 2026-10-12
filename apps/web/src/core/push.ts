@@ -35,7 +35,7 @@ import { Clock, Context, Data, Effect, Layer, Random } from 'effect'
 
 import { db, schema } from '../db/client.ts'
 
-import type { Background } from './background.ts'
+import { Background } from './background.ts'
 import { Access, type Granted } from './access.ts'
 import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
@@ -144,7 +144,7 @@ export interface PushService {
       | 'blob_reclaiming'
       | 'unavailable'
     >,
-    CurrentCaller
+    CurrentCaller | Background
   >
   readonly commit: (
     pushId: PushId,
@@ -1011,7 +1011,7 @@ export const PushLive: Layer.Layer<
         const derived = derivedOf(i.sha256, needs, i.size, text)
         const at = yield* Clock.currentTimeMillis
         const markdown = derived.markdown
-        // A page's generated agent version is stored as it arrives; a
+        // A page's generated agent version is stored after the answer; a
         // failure here only means the first read makes it.
         const stored =
           markdown === null
@@ -1033,23 +1033,18 @@ export const PushLive: Layer.Layer<
                 ),
                 Effect.asVoid,
               )
-        yield* Effect.all(
-          [
-            stored,
-            store.confirmHold(
-              holder,
-              i.sha256,
-              i.size,
-              derived.analyses.map((row) =>
-                DB.prepare(
-                  `insert into analyses (sha256, analyzer, version, json, created_at)
-                   values (?, ?, ?, ?, ?) on conflict do nothing`,
-                ).bind(i.sha256, row.analyzer, row.version, row.json, at),
-              ),
-            ),
-          ],
-          { concurrency: 'unbounded', discard: true },
+        yield* store.confirmHold(
+          holder,
+          i.sha256,
+          i.size,
+          derived.analyses.map((row) =>
+            DB.prepare(
+              `insert into analyses (sha256, analyzer, version, json, created_at)
+               values (?, ?, ?, ?, ?) on conflict do nothing`,
+            ).bind(i.sha256, row.analyzer, row.version, row.json, at),
+          ),
         )
+        yield* (yield* Background).run(stored)
       })
 
     /**

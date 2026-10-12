@@ -53,20 +53,46 @@ const manifest = async (files: Record<string, string>) =>
     })),
   )
 
+/**
+ * The most round trips each request may wait for one after another. Before
+ * independent reads went out together, these were 9 to 28.
+ */
+const MOST_STEPS: Readonly<Record<string, number>> = {
+  stage: 11,
+  upload: 10,
+  commit: 15,
+  shell: 6,
+  view: 7,
+  'frame document': 7,
+  'kit file': 6,
+}
+
 describe('round trips', () => {
-  it('reports a push and a visitor’s page load', async () => {
+  it('stay few on a push and a visitor’s page load', async () => {
     const owner = await person('owner')
     const ws = await workspace(owner)
     const secret = await keySecretFor(owner)
-    const counter = tripCounting(env.DB, env.BLOBS)
+    // The Queue's webhook delivery runs beside the requests after a commit.
+    const counter = tripCounting(env.DB, env.BLOBS, (sql) =>
+      /e\.tree_id as treeId, e\.seq as seq|workspace_id as workspaceId, url/.test(
+        sql,
+      ),
+    )
     harness.use(testRuntime({ env: counter.env }))
     const report: string[] = []
     const measure = async <A>(name: string, body: () => Promise<A>) => {
       counter.reset()
       const result = await body()
+      const trips = tripReport(counter)
       report.push(
-        `## ${name}: ${counter.trips().length} trips in ${counter.steps()} steps\n${tripReport(counter)}`,
+        `## ${name}: ${counter.trips().length} trips in ${counter.steps()} steps\n${trips}`,
       )
+      const kind = Object.keys(MOST_STEPS).find((k) => name.startsWith(k))
+      if (kind !== undefined) {
+        expect(counter.steps(), `${name}\n${trips}`).toBeLessThanOrEqual(
+          MOST_STEPS[kind]!,
+        )
+      }
       return result
     }
 
@@ -170,6 +196,7 @@ describe('round trips', () => {
     await measure('shell (returning visitor)', () =>
       visitor.fetch(`/${ws.name}/acme/`),
     )
+    // Shown with --silent=false, for a look at each request's trips.
     console.log(report.join('\n\n'))
   })
 })

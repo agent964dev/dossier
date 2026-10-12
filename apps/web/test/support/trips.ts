@@ -29,7 +29,12 @@ const BUCKET_CALLS = new Set([
 
 const firstLine = (sql: string) => sql.trim().split('\n')[0]!.slice(0, 120)
 
-export const tripCounting = (db: D1Database, blobs: R2Bucket): TripCounter => {
+export const tripCounting = (
+  db: D1Database,
+  blobs: R2Bucket,
+  /** Statements of other work sharing the bindings, left uncounted. */
+  ignore: (sql: string) => boolean = () => false,
+): TripCounter => {
   let trips: Trip[] = []
   let finished = 0
   let steps = 0
@@ -60,7 +65,8 @@ export const tripCounting = (db: D1Database, blobs: R2Bucket): TripCounter => {
         const value = Reflect.get(target, property, target) as unknown
         if (
           STATEMENT_CALLS.has(String(property)) &&
-          typeof value === 'function'
+          typeof value === 'function' &&
+          !ignore(sql)
         ) {
           return (...args: unknown[]) =>
             timed('d1', firstLine(sql), () =>
