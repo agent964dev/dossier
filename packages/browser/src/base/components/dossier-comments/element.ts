@@ -78,7 +78,7 @@ export const TEXT = {
   cancelPin: 'Cancel pin',
   removePin: 'Remove pin',
   visitor:
-    'Commenting asks you to sign in first. What you write is kept and sent after.',
+    'Commenting asks you to sign in first. What you write is kept for you to send after.',
   signingIn: 'Taking you to sign in…',
   signInToComment: 'Sign in to comment.',
   saving: 'Saving…',
@@ -103,9 +103,15 @@ export const keptKey = (pagePath: string): string => `${TAG}:${pagePath}`
 
 /**
  * Where the new comment's unsent text waits in sessionStorage, so a send
- * that failed, or a reload, never loses what was typed.
+ * that failed, or a reload, never loses what was typed: one per person,
+ * and one for visitors, so nobody finds another's text.
  */
-export const draftKey = (pagePath: string): string => `${TAG}-draft:${pagePath}`
+export const draftKey = (pagePath: string, viewer: string | null): string =>
+  `${TAG}-draft:${viewer === null ? 'visitor' : `person:${viewer.toLowerCase()}`}:${pagePath}`
+
+/** What a person who signs in reads beside a comment kept before it. */
+export const claimText = (email: string): string =>
+  `Signed in as ${email}. Your comment is back here: send it when it is right.`
 
 type Win = Window & typeof globalThis
 
@@ -280,9 +286,6 @@ export class DossierComments extends HTMLElement {
       parts.status.say(TEXT.notInDossier)
       return
     }
-    if (parts.composer.text === '') {
-      parts.composer.text = this.#draft()
-    }
     this.#stopWatch?.()
     this.#stopWatch = dossier.watch(this.#folder(), (value) => {
       if (session === this.#session) this.#fromWatch(value)
@@ -291,8 +294,10 @@ export class DossierComments extends HTMLElement {
       () => {
         if (session !== this.#session) return
         this.#ready = true
+        // Who is viewing is known now: their own unsent text comes back.
+        if (parts.composer.text === '') parts.composer.text = this.#draft()
         this.#render()
-        this.#sendKept()
+        this.#claimKept()
       },
       () => {
         if (session === this.#session) parts.status.say(TEXT.unavailable)
@@ -1532,6 +1537,10 @@ export class DossierComments extends HTMLElement {
         keptKey(dossier.page.path),
         JSON.stringify(entryJson(entry)),
       )
+      // The text now waits as the kept comment, never also as a draft.
+      if (entry.replyTo === null) {
+        this.#storage()?.removeItem(draftKey(dossier.page.path, null))
+      }
     } catch {
       // Storage is full or refused: sign-in still goes on.
     }
@@ -1551,15 +1560,16 @@ export class DossierComments extends HTMLElement {
     link.remove()
   }
 
-  /** The new comment's unsent text, kept as it is typed. */
+  /** The new comment's unsent text, kept as it is typed, for this viewer. */
   #keepDraft(): void {
     const text = this.#parts?.composer.text ?? ''
     const dossier = this.#dossier
-    if (dossier === null) return
+    // Before the viewer is known, text could land under someone else.
+    if (dossier === null || !this.#ready) return
+    const key = draftKey(dossier.page.path, this.#me()?.email ?? null)
     try {
-      if (text.trim() === '') {
-        this.#storage()?.removeItem(draftKey(dossier.page.path))
-      } else this.#storage()?.setItem(draftKey(dossier.page.path), text)
+      if (text.trim() === '') this.#storage()?.removeItem(key)
+      else this.#storage()?.setItem(key, text)
     } catch {
       // Storage is full or refused: the text stays in the composer.
     }
@@ -1569,7 +1579,11 @@ export class DossierComments extends HTMLElement {
     const dossier = this.#dossier
     if (dossier === null) return ''
     try {
-      return this.#storage()?.getItem(draftKey(dossier.page.path)) ?? ''
+      return (
+        this.#storage()?.getItem(
+          draftKey(dossier.page.path, this.#me()?.email ?? null),
+        ) ?? ''
+      )
     } catch {
       return ''
     }
@@ -1594,51 +1608,42 @@ export class DossierComments extends HTMLElement {
     }
   }
 
-  /** Back from sign-in: the kept comment goes, once. */
-  #sendKept(): void {
-    if (this.#me() === null || this.#dossier === null) return
+  /**
+   * Back from sign-in: the comment kept before it returns to its composer,
+   * once, for whoever signed in to send themselves. It never goes on its
+   * own, since the person signing in may not be the one who wrote it.
+   */
+  #claimKept(): void {
+    const me = this.#me()
+    if (me === null || this.#dossier === null) return
     const entry = this.#takeKept()
     if (entry === null) return
     const parts = this.#parts!
-    const run = () => this.#dossier!.write(this.#folder(), entryJson(entry))
     const root = entry.replyTo
-    if (root === null) {
-      this.#send({
-        status: parts.status,
-        composer: parts.composer,
-        again: () => this.#submitMain(),
-        run,
-        failed: () => {
-          // Back in the composer, so nothing typed is lost.
-          parts.composer.text = entry.text
-          this.#keepDraft()
-          this.#render()
-          const element = anchorElement(this.ownerDocument, entry.anchor)
-          parts.on.value = element === null ? '' : element.id
-          this.#pin =
-            element !== null && entry.pin !== null
-              ? { anchor: element.id, pin: entry.pin }
-              : null
-          this.#render()
-        },
-      })
+    if (root === null || this.#thread(root) === null) {
+      parts.composer.text = entry.text
+      const element = anchorElement(this.ownerDocument, entry.anchor)
+      this.#render()
+      parts.on.value = element === null ? '' : element.id
+      this.#pin =
+        element !== null && entry.pin !== null
+          ? { anchor: element.id, pin: entry.pin }
+          : null
+      this.#keepDraft()
+      this.#render()
+      parts.status.say(claimText(me.email))
+      parts.composer.textarea.focus({ preventScroll: true })
       return
     }
+    const composer = this.#openReply(root)
+    composer.text = entry.text
     const ui = this.#ui(root)
-    this.#send({
-      status: ui.status,
-      composer: null,
-      again: () => this.#submitReply(root),
-      run,
-      failed: () => {
-        const composer = this.#openReply(root)
-        composer.text = entry.text
-        if (ui.stance !== null && entry.stance !== null) {
-          ui.stance.value = entry.stance
-        }
-        this.#render()
-      },
-    })
+    this.#render()
+    if (ui.stance !== null && entry.stance !== null) {
+      ui.stance.value = entry.stance
+    }
+    ui.status.say(claimText(me.email))
+    composer.focus()
   }
 }
 

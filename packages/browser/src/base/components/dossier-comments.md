@@ -20,7 +20,9 @@ threads first. A thread whose element is no longer in the page shows under
 "On an earlier version". Resolved threads fold away until "Show resolved" is
 pressed. Each anchored element carries `data-dossier-comments` with its count
 of open threads, so page CSS can mark it. A visitor who comments is asked to
-sign in, and the comment is sent once they are back. People who may only
+sign in; back on the page, the comment waits in its composer for them to
+send. Unsent text is kept on the device for each person, and for visitors
+apart. People who may only
 read see every thread and no way to write.
 
 The element fires a bubbling `dossier:state` event with

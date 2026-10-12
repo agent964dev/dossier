@@ -10,6 +10,7 @@ import {
 } from '@dossier/contracts/bridge'
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
+  claimText,
   keptKey,
   MARK,
   TEXT,
@@ -696,7 +697,7 @@ describe('<dossier-comments>', () => {
     expect(statusOf(element)).toBe(TEXT.signingIn)
   })
 
-  test('sends the kept comment once after sign-in, and not again on a second connect', async () => {
+  test('gives a kept comment back to whoever signs in, to send it themselves, once', async () => {
     const kept = {
       text: 'Hello from outside',
       anchor: null,
@@ -708,43 +709,88 @@ describe('<dossier-comments>', () => {
     }
     sessionStorage.setItem(keptKey(PAGE), JSON.stringify(kept))
     const element = await mount()
-    expect(peer.sends()).toEqual([{ op: 'write', path: FOLDER, patch: kept }])
+    // Nothing goes as this person until they say so.
+    expect(peer.sends()).toEqual([])
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    expect(area.value).toBe('Hello from outside')
+    expect(statusOf(element)).toBe(claimText(SARA.email))
     expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
-    expect(statusOf(element)).toBe(TEXT.saved)
+    q<HTMLButtonElement>(mainComposer(element), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()).toEqual([{ op: 'write', path: FOLDER, patch: kept }])
     element.remove()
     document.body.append(element)
     await settle()
     expect(peer.sends()).toHaveLength(1)
+    expect(area.value).toBe('')
   })
 
-  test('puts a kept comment back in the composer when its send fails', async () => {
+  test('gives a kept reply back in its thread’s composer', async () => {
+    const root = comment(LEE, 'Price?')
+    peer.threads = [thread(root)]
     sessionStorage.setItem(
       keptKey(PAGE),
       JSON.stringify({
-        text: 'Lost?',
+        text: 'Per truck.',
         anchor: null,
         label: null,
         pin: null,
-        replyTo: null,
+        replyTo: root.path,
         stance: null,
         mentions: [],
       }),
     )
-    peer.failures.push(
-      new DossierError({
-        code: 'offline',
-        message: 'x',
-        fix: null,
-        path: null,
-      }),
-    )
     const element = await mount()
-    expect(peer.sends()).toHaveLength(1)
+    expect(peer.sends()).toEqual([])
+    const form = q<HTMLFormElement>(
+      threadOf(element, root.path),
+      '.dossier-comments-composer',
+    )
+    expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Per truck.')
+  })
+
+  test('keeps each person’s unsent text apart, and a visitor’s apart from both', async () => {
+    let element = await mount()
+    type(
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea'),
+      'Sara’s draft',
+    )
+    element.remove()
+    // Someone else signs in in the same tab.
+    peer.me = { email: 'bob@acme.com', name: 'Bob', role: 'respond' }
+    element = await mount()
+    const text = () =>
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea').value
+    expect(text()).toBe('')
+    element.remove()
+    peer.me = null
+    element = await mount()
+    expect(text()).toBe('')
+    element.remove()
+    peer.me = SARA
+    element = await mount()
+    expect(text()).toBe('Sara’s draft')
+  })
+
+  test('drops a visitor’s unsent text once it is kept for sign-in', async () => {
+    peer.me = null
+    let element = await mount(
+      `<script type="application/json" id="dossier-bootstrap">${JSON.stringify(BOOT)}</script>`,
+    )
+    type(
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea'),
+      'Asked once.',
+    )
+    q<HTMLButtonElement>(mainComposer(element), 'button[type="submit"]').click()
+    await settle()
+    expect(sessionStorage.getItem(keptKey(PAGE))).not.toBeNull()
+    element.remove()
+    // Back as a visitor: the kept comment waits, but no draft holds it too.
+    sessionStorage.removeItem(keptKey(PAGE))
+    element = await mount()
     expect(
       q<HTMLTextAreaElement>(mainComposer(element), 'textarea').value,
-    ).toBe('Lost?')
-    expect(statusOf(element)).toBe(TEXT.offline)
-    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+    ).toBe('')
   })
 
   test('turns a point into pin fractions and back', () => {
