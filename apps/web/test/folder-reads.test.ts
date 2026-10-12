@@ -108,6 +108,24 @@ describe('the kit folder', () => {
       expect(opened.kind).toBe('listing')
     }
   })
+
+  it('lists its files to write holders, as ls does, and nothing to anyone else', async () => {
+    const listingAs = (caller: Caller) =>
+      runAs(
+        caller,
+        listingModel({
+          workspace: tree.ws.name,
+          tree: tree.name,
+          path: '_components',
+        }),
+      )
+    const owners = await listingAs(ownerBrowser)
+    expect(owners.files.map((f) => f.name)).toEqual(['pv-badge.js'])
+    expect(owners.empty).toBeNull()
+    const respondents = await listingAs(respondent)
+    expect(respondents.files).toEqual([])
+    expect(respondents.empty).toEqual({ text: 'Nothing here yet.', hint: null })
+  })
 })
 
 describe('the listing of an answers folder', () => {

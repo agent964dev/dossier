@@ -114,6 +114,8 @@ const typeOf = (entry: Entry): string => {
     : subtype.toUpperCase()
 }
 
+const segmentsOf = (path: string) => (path === '' ? [] : path.split('/'))
+
 const notFound = () =>
   dossierError('not_found', 'Nothing is here, or you cannot open it.')
 
@@ -183,8 +185,15 @@ export const listingModel = (data: {
                 },
         }
       })
+    // Inside a `_` folder its files are the kit's: write holders see them
+    // listed, as ls lists them. Elsewhere the kit has its own row.
+    const inKit = segmentsOf(ref.path).some((s) => s.startsWith('_'))
+    const listed = (e: Entry, kind: 'folder' | 'file') =>
+      inKit &&
+      e.kind === 'kit' &&
+      (e.node.kind === 'folder') === (kind === 'folder')
     const folders = entries
-      .filter((e) => e.kind === 'folder')
+      .filter((e) => e.kind === 'folder' || listed(e, 'folder'))
       .map((e) => ({
         name: e.name,
         link: at(e.path, 'folder'),
@@ -193,7 +202,7 @@ export const listingModel = (data: {
         push: stamp(e.push),
       }))
     const files = entries
-      .filter((e) => e.kind === 'attachment')
+      .filter((e) => e.kind === 'attachment' || listed(e, 'file'))
       .map((e) => ({
         name: e.name,
         link: at(e.path, 'file'),
@@ -203,7 +212,7 @@ export const listingModel = (data: {
         size: e.size ?? 0,
         push: stamp(e.push),
       }))
-    const segments = ref.path === '' ? [] : ref.path.split('/')
+    const segments = segmentsOf(ref.path)
     const crumbs = [
       // A visitor has no workspace home to go to.
       ...(me === null
