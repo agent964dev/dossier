@@ -10,6 +10,7 @@ const TITLES = [
   'Layouts',
   'Themes',
   'Components',
+  'Base layer',
   'Embedding',
   'Agent versions',
   'Reading',

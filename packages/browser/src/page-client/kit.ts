@@ -1,6 +1,7 @@
 // The component loader: imports the kit's components before author scripts
 // run, and keeps each kit tag hidden until it is defined, for at most three
 // seconds. Tags outside the kit are never touched.
+import { addedNodes } from './watch.ts'
 
 /** The longest a kit tag stays hidden while its component loads. */
 export const HIDE_LIMIT = 3000
@@ -39,13 +40,13 @@ export const startKit = (deps: {
     if (hidden.delete(tag)) render()
   }
 
-  let observer: MutationObserver | null = null
+  let unsubscribe: (() => void) | null = null
 
   const importTag = (tag: string): void => {
     if (imported.has(tag) || !tags.has(tag)) return
     imported.add(tag)
     // Nothing left to watch for once every kit tag is imported.
-    if (imported.size === tags.size) observer?.disconnect()
+    if (imported.size === tags.size) unsubscribe?.()
     hidden.add(tag)
     render()
     const url = new URL(kit[tag] ?? '', win.location.href).href
@@ -73,14 +74,8 @@ export const startKit = (deps: {
     }
   }
   if (tags.size > imported.size) {
-    const watching = new win.MutationObserver((records) => {
-      for (const record of records) {
-        for (const node of record.addedNodes) scan(node)
-      }
-    })
-    watching.observe(doc, { childList: true, subtree: true })
-    observer = watching
+    unsubscribe = addedNodes(win).subscribe(scan)
   }
 
-  return { stop: () => observer?.disconnect() }
+  return { stop: () => unsubscribe?.() }
 }

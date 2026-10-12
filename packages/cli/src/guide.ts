@@ -3,6 +3,7 @@ import type { ExitCode } from '@dossier/contracts'
 
 import { verbs } from './commands/index.ts'
 import agentVersions from './guide/agent-versions.md' with { type: 'text' }
+import baseLayer from './guide/base-layer.md' with { type: 'text' }
 import components from './guide/components.md' with { type: 'text' }
 import embedding from './guide/embedding.md' with { type: 'text' }
 import kitFiles from './guide/kit-files.md' with { type: 'text' }
@@ -43,6 +44,7 @@ const CONVENTIONS: readonly string[] = [
   layouts,
   themes,
   components,
+  baseLayer,
   embedding,
   agentVersions,
   reading,
