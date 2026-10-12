@@ -616,14 +616,14 @@ describe('validateSend', () => {
 })
 
 describe('disabled controls and date steps', () => {
-  const schemaOf = (html: string) => {
+  const schemaFrom = (html: string) => {
     const [form] = analyze(html).forms
     if (form === undefined) throw new Error('no form')
     return formSchema(form)
   }
 
   it('never requires a disabled control, one in a disabled fieldset included', () => {
-    const schema = schemaOf(`<form action="a/">
+    const schema = schemaFrom(`<form action="a/">
       <input name="kept" required>
       <input name="off" required disabled>
       <fieldset disabled><legend><input name="inLegend" required></legend>
@@ -663,68 +663,68 @@ describe('disabled controls and date steps', () => {
   })
 
   it('checks date and time steps as the browser does', () => {
-    const one = (input: string, value: string) =>
+    const stepped = (input: string, text: string) =>
       validateSend(
-        schemaOf(`<form action="a/">${input}</form>`),
-        [['d', value]],
+        schemaFrom(`<form action="a/">${input}</form>`),
+        [['d', text]],
         null,
       )
     // A time's default step is a minute.
-    expect(one('<input type="time" name="d">', '09:15')).toMatchObject({
+    expect(stepped('<input type="time" name="d">', '09:15')).toMatchObject({
       ok: true,
     })
-    expect(one('<input type="time" name="d">', '09:15:30')).toMatchObject({
+    expect(stepped('<input type="time" name="d">', '09:15:30')).toMatchObject({
       ok: false,
     })
     expect(
-      one('<input type="time" name="d" step="1">', '09:15:30'),
+      stepped('<input type="time" name="d" step="1">', '09:15:30'),
     ).toMatchObject({ ok: true })
     expect(
-      one('<input type="time" name="d" step="900">', '09:15'),
+      stepped('<input type="time" name="d" step="900">', '09:15'),
     ).toMatchObject({ ok: true })
     expect(
-      one('<input type="time" name="d" step="900">', '09:20'),
+      stepped('<input type="time" name="d" step="900">', '09:20'),
     ).toMatchObject({ ok: false })
     expect(
-      one('<input type="time" name="d" step="any">', '09:20:07'),
+      stepped('<input type="time" name="d" step="any">', '09:20:07'),
     ).toMatchObject({ ok: true })
     // Dates step in days from min, or from 1970-01-01.
     expect(
-      one(
+      stepped(
         '<input type="date" name="d" step="7" min="2026-10-05">',
         '2026-10-19',
       ),
     ).toMatchObject({ ok: true })
     expect(
-      one(
+      stepped(
         '<input type="date" name="d" step="7" min="2026-10-05">',
         '2026-10-20',
       ),
     ).toMatchObject({ ok: false })
     expect(
-      one('<input type="date" name="d" step="2">', '1970-01-03'),
+      stepped('<input type="date" name="d" step="2">', '1970-01-03'),
     ).toMatchObject({ ok: true })
     expect(
-      one('<input type="date" name="d" step="2">', '1970-01-02'),
+      stepped('<input type="date" name="d" step="2">', '1970-01-02'),
     ).toMatchObject({ ok: false })
     // Months and weeks in their own units, datetimes in seconds.
     expect(
-      one('<input type="month" name="d" step="3" min="2026-01">', '2026-07'),
+      stepped('<input type="month" name="d" step="3" min="2026-01">', '2026-07'),
     ).toMatchObject({ ok: true })
     expect(
-      one('<input type="month" name="d" step="3" min="2026-01">', '2026-08'),
+      stepped('<input type="month" name="d" step="3" min="2026-01">', '2026-08'),
     ).toMatchObject({ ok: false })
     expect(
-      one('<input type="week" name="d" step="2" min="2026-W01">', '2026-W05'),
+      stepped('<input type="week" name="d" step="2" min="2026-W01">', '2026-W05'),
     ).toMatchObject({ ok: true })
     expect(
-      one('<input type="week" name="d" step="2" min="2026-W01">', '2026-W04'),
+      stepped('<input type="week" name="d" step="2" min="2026-W01">', '2026-W04'),
     ).toMatchObject({ ok: false })
     expect(
-      one('<input type="datetime-local" name="d">', '2026-10-12T09:15'),
+      stepped('<input type="datetime-local" name="d">', '2026-10-12T09:15'),
     ).toMatchObject({ ok: true })
     expect(
-      one('<input type="datetime-local" name="d">', '2026-10-12T09:15:01'),
+      stepped('<input type="datetime-local" name="d">', '2026-10-12T09:15:01'),
     ).toMatchObject({ ok: false })
   })
 })
