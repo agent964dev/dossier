@@ -181,6 +181,14 @@ const sameEntries = (
     return value === other
   })
 
+/** Draft values as one text whatever their keys' order. */
+const canonical = (values: Readonly<Record<string, unknown>>): string =>
+  JSON.stringify(
+    Object.keys(values)
+      .sort()
+      .map((key) => [key, values[key]]),
+  )
+
 const isDocWire = (value: unknown): value is DocWire =>
   isRecord(value) &&
   typeof value.path === 'string' &&
@@ -302,6 +310,10 @@ interface Managed {
   } | null
   /** A send of this page load succeeded: older stored values never replace it. */
   settled: boolean
+  /** This page load sent the form itself: older kept sends never decide it. */
+  attempted: boolean
+  /** The kept draft has been put in the form, or will never be. */
+  restored: boolean
   inflight: boolean
   queued: {
     readonly autosave: boolean
@@ -508,6 +520,7 @@ export const startForms = (deps: {
   ): void => {
     if (m.closed || m.readOnly) return
     win.clearTimeout(m.saveTimer)
+    m.attempted = true
     if (m.inflight) {
       m.queued = { autosave: options.autosave, submitter: options.submitter }
       return
@@ -538,7 +551,7 @@ export const startForms = (deps: {
     requests.request({ op: 'send', send: request }).then(
       (value) => {
         m.inflight = false
-        succeeded(m, value, options.autosave, edits)
+        succeeded(m, value, options.autosave, edits, filesOf(request))
         next(m)
       },
       (error: unknown) => {
@@ -601,7 +614,19 @@ export const startForms = (deps: {
     for (const name of m.uploads.keys()) keepUploads(m, name, [])
   }
 
-  const rememberUploads = (m: Managed, data: unknown): void => {
+  /** The files an attempt sent, to tell them from ones chosen since. */
+  const filesOf = (request: SendRequest): ReadonlySet<unknown> =>
+    new Set(
+      request.entries
+        .map(([, value]) => value)
+        .filter((value) => typeof value === 'object' && !isUploadRef(value)),
+    )
+
+  const rememberUploads = (
+    m: Managed,
+    data: unknown,
+    sentFiles: ReadonlySet<unknown>,
+  ): void => {
     if (!isRecord(data)) return
     for (const control of controlsOf(m.form)) {
       const input = control as HTMLInputElement
@@ -610,7 +635,11 @@ export const startForms = (deps: {
       if (refs.length === 0) continue
       // The files are stored: later sends keep them without uploading again.
       keepUploads(m, input.name, refs)
-      input.value = ''
+      // A file chosen since the send stays chosen.
+      const chosen = [...(input.files ?? [])]
+      if (chosen.length > 0 && chosen.every((file) => sentFiles.has(file))) {
+        input.value = ''
+      }
     }
   }
 
@@ -619,6 +648,7 @@ export const startForms = (deps: {
     value: unknown,
     autosave: boolean,
     edits: number,
+    sentFiles: ReadonlySet<unknown> = new Set(),
   ): void => {
     m.last = null
     m.settled = true
@@ -634,7 +664,7 @@ export const startForms = (deps: {
     } else if (wire !== null) {
       // The form shows what was stored, unless the person changed it since.
       if (!changedSince && isRecord(wire.data)) fill(m, wire.data, false)
-      rememberUploads(m, wire.data)
+      rememberUploads(m, wire.data, sentFiles)
     }
     if (!changedSince) {
       win.clearTimeout(m.draftTimer)
@@ -854,6 +884,7 @@ export const startForms = (deps: {
   }
 
   const restoreDraft = (m: Managed): void => {
+    m.restored = true
     const draft = deps.drafts[m.key]
     if (draft === undefined || m.closed || m.readOnly || m.touched) return
     if (m.settled) return
@@ -890,6 +921,8 @@ export const startForms = (deps: {
       uploads: new Map(),
       last: null,
       settled: false,
+      attempted: false,
+      restored: false,
       inflight: false,
       queued: null,
       invalid: null,
@@ -968,6 +1001,8 @@ export const startForms = (deps: {
 
   return {
     submitted: (form, submitter, how) => {
+      // A marked form added since the last scan is taken in now.
+      if (recordOf(form) === undefined) manage(form)
       const m = recordOf(form)
       if (m === undefined || m.closed || m.readOnly) return
       if (how === 'event') {
@@ -985,8 +1020,24 @@ export const startForms = (deps: {
       for (const m of managed) {
         if (m.key !== notice.form) continue
         if (notice.ok) {
-          // A kept send holds the answers as they were when it was made: on
-          // this page, the last attempt's; from before, none of this page's.
+          // A kept send is older than any attempt this page load made.
+          if (m.attempted) continue
+          if (notice.sent !== undefined) {
+            // The answers the form holds now, or the draft about to be put
+            // in it: when they are not what the kept send held, they are
+            // newer, and they stay with their draft.
+            const pending = deps.drafts[m.key]
+            const now =
+              !m.restored && !m.touched && pending !== undefined
+                ? pending
+                : draftValues(m.form)
+            if (canonical(now) !== canonical(notice.sent)) {
+              setState(m, 'draft')
+              continue
+            }
+            succeeded(m, notice.value, false, m.edits)
+            continue
+          }
           succeeded(m, notice.value, false, m.last?.edits ?? 0)
           continue
         }

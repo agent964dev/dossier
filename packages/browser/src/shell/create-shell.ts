@@ -472,8 +472,34 @@ export const createShell = (
     }
   }
 
+  /**
+   * The sends of one form go one after another, kept ones and live ones
+   * alike, so a newer answer always lands after an older one.
+   */
+  const lanes = new Map<string, Promise<unknown>>()
+  const inLane = <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const before = lanes.get(key) ?? Promise.resolve()
+    const run = before.then(work, work)
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    lanes.set(key, settled)
+    void settled.then(() => {
+      if (lanes.get(key) === settled) lanes.delete(key)
+    })
+    return run
+  }
+
   /** Uploads the send's files, then sends it with the stored uploads. */
-  const deliver = async (
+  const deliver = (
+    page: string,
+    send: SendRequest,
+    as: string | null,
+  ): Promise<SendResultWire> =>
+    inLane(`${page}|${formKey(send.form)}`, () => deliverNow(page, send, as))
+
+  const deliverNow = async (
     page: string,
     send: SendRequest,
     as: string | null,
@@ -527,8 +553,8 @@ export const createShell = (
     })
   }
 
-  /** A send's text values as a draft holds them, to tell whether they match. */
-  const asDraft = (send: SendRequest): string => {
+  /** A send's text values as a draft holds them. */
+  const draftOf = (send: SendRequest): DraftValues => {
     const out: Record<string, string | string[]> = {}
     for (const [name, value] of send.entries) {
       if (typeof value !== 'string') continue
@@ -540,8 +566,11 @@ export const createShell = (
             ? [...before, value]
             : [before, value]
     }
-    return canonical(out)
+    return out
   }
+
+  /** A send's text values as a draft holds them, to tell whether they match. */
+  const asDraft = (send: SendRequest): string => canonical(draftOf(send))
 
   /**
    * After a kept send succeeds with no page to ask: the form's draft goes
@@ -633,7 +662,13 @@ export const createShell = (
         try {
           const value = await deliver(page, send, send.by)
           await replayed(page, send)
-          tell(page, { type: 'resumed', form, ok: true, value })
+          tell(page, {
+            type: 'resumed',
+            form,
+            ok: true,
+            value,
+            sent: draftOf(send),
+          })
         } catch (error) {
           if (codeOf(error) === 'sign_in_required') {
             // Its person is not the one signed in now, or no one is: the

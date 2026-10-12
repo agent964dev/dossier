@@ -745,12 +745,14 @@ describe('shell drafts and sends', () => {
         form: KEY_A,
         ok: true,
         value: { doc: null, replayed: false },
+        sent: { name: 'Sara' },
       },
       {
         type: 'resumed',
         form: KEY_B,
         ok: true,
         value: { doc: null, replayed: false },
+        sent: { name: 'Sara' },
       },
     ])
     expect(store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
@@ -792,6 +794,7 @@ describe('shell drafts and sends', () => {
       form: KEY_A,
       ok: true,
       value: { doc: null, replayed: false },
+      sent: { name: 'Sara' },
     })
     expect(it.store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
     expect(it.store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({})
@@ -1461,6 +1464,44 @@ describe('an upload whose bytes are being cleaned up', () => {
       'op-1:cv:0',
     ])
     expect(page.inbox.at(-1)).toMatchObject({ type: 'result', ok: true })
+    it.shell.dispose()
+  })
+})
+
+describe('kept sends against newer ones', () => {
+  test('a replayed send tells the page what it held', async () => {
+    const store = memoryStore()
+    await store.savePending('t1', PAGE, pendingSend('op-a', 'sara@acme.com'))
+    const it = openShell({ store })
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    expect(page.inbox.at(-1)).toMatchObject({
+      type: 'resumed',
+      form: KEY_A,
+      ok: true,
+      sent: { name: 'Sara' },
+    })
+    it.shell.dispose()
+  })
+
+  test('a live send of a form waits for that form’s replay, so the newer one lands last', async () => {
+    const store = memoryStore()
+    await store.savePending('t1', PAGE, pendingSend('op-a', 'sara@acme.com'))
+    const it = openShell({ store })
+    await it.shell.start()
+    let finishA: (value: { doc: null; replayed: boolean }) => void = () => {}
+    it.send.mockImplementationOnce(
+      () => new Promise((resolve) => (finishA = resolve)),
+    )
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    page.postMessage(request(1, { entries: [['name', 'C']], opId: 'op-c' }))
+    await flush()
+    expect(it.send.mock.calls.map(([p]) => p.opId)).toEqual(['op-a'])
+    finishA({ doc: null, replayed: false })
+    await flush()
+    expect(it.send.mock.calls.map(([p]) => p.opId)).toEqual(['op-a', 'op-c'])
     it.shell.dispose()
   })
 })

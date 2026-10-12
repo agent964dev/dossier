@@ -1008,3 +1008,88 @@ describe('review fixes', () => {
     expect(it.requests('read')).toHaveLength(1)
   })
 })
+
+describe('second review fixes', () => {
+  const ack = (data: unknown) => ({
+    doc: wire(data, '2026-10-12T14:30:00'),
+    replayed: true,
+  })
+
+  test('after a reload, a kept send acknowledged later never replaces a newer draft', async () => {
+    const key = formKey(PERSON)
+    const it = open({
+      body: PERSON_FORM,
+      drafts: { [key]: { name: 'B, typed after A was kept' } },
+      resume: [key],
+    })
+    await flush()
+    it.page.shell.tell({
+      type: 'resumed',
+      form: key,
+      ok: true,
+      value: ack({ name: 'A' }),
+      sent: { name: 'A' },
+    })
+    await flush()
+    await it.answer(it.requests('read')[0]!.id, wire({ name: 'A' }))
+    await flush()
+    expect(it.field('[name=name]').value).toBe('B, typed after A was kept')
+    expect(
+      it.drafts().some((d) => (d as { values: unknown }).values === null),
+    ).toBe(false)
+    expect(it.form().getAttribute('data-state')).toBe('draft')
+  })
+
+  test('a kept send acknowledged while a newer attempt is in flight leaves the form alone', async () => {
+    const key = formKey(PERSON)
+    const it = await openEmpty({ resume: [key] })
+    type(it, '[name=name]', 'C')
+    await submit(it)
+    it.page.shell.tell({
+      type: 'resumed',
+      form: key,
+      ok: true,
+      value: ack({ name: 'A' }),
+      sent: { name: 'A' },
+    })
+    await flush()
+    expect(it.field('[name=name]').value).toBe('C')
+    expect(it.form().getAttribute('data-state')).toBe('sending')
+    expect(
+      it.drafts().some((d) => (d as { values: unknown }).values === null),
+    ).toBe(false)
+  })
+
+  test('an acknowledgement keeps a file chosen while its send was in flight', async () => {
+    const it = await openEmpty()
+    type(it, '[name=name]', 'Sara')
+    const input = it.field('[name=cv]')
+    const first = new it.page.win.File(['one'], 'one.pdf', {
+      type: 'application/pdf',
+    })
+    ;(input as unknown as { files: unknown }).files = [first]
+    await submit(it)
+    const second = new it.page.win.File(['two'], 'two.pdf', {
+      type: 'application/pdf',
+    })
+    ;(input as unknown as { files: unknown }).files = [second]
+    const cv = { file: 'files/one.pdf', name: 'one.pdf', size: 3, type: 'x' }
+    await it.answer(it.requests('send')[0]!.id, ack({ name: 'Sara', cv }))
+    expect((input as HTMLInputElement).files?.[0]).toBe(second)
+  })
+
+  test('a marked form submitted before it is set up is sent all the same', async () => {
+    const it = open({ body: '<div id="here"></div>' })
+    await flush()
+    // A form the controller has not seen yet: the browser reports added
+    // nodes only after the task that added them, and a submit can come first.
+    const holder = it.doc.createElement('div')
+    holder.innerHTML = PERSON_FORM
+    const form = holder.querySelector('form') as HTMLFormElement
+    ;(form.querySelector('[name=name]') as HTMLInputElement).value = 'Now'
+    it.installed.forms()!.submitted(form, null, 'method')
+    await flush()
+    expect(sendsOf(it)).toHaveLength(1)
+    expect(sendsOf(it)[0]!.entries).toContainEqual(['name', 'Now'])
+  })
+})

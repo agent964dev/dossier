@@ -389,6 +389,11 @@ export type ShellToPage =
       readonly form: string
       readonly ok: true
       readonly value: unknown
+      /**
+       * The text values the kept send held, so a page that has newer
+       * answers or drafts never takes the acknowledgement for them.
+       */
+      readonly sent?: DraftValues
     }
   | {
       readonly type: 'resumed'
