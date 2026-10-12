@@ -890,15 +890,17 @@ const basisHolds = (basis: Basis, personId: string): Statement => {
   }
 }
 
-/** Every basis that gave an action still holds, with its role. */
-const everyBasis = (bases: readonly Basis[], personId: string): Statement => {
-  if (bases.length === 0) return { sql: '0', binds: [] }
-  const parts = bases.map((b) => basisHolds(b, personId))
-  return {
-    sql: parts.map((p) => `(${p.sql})`).join(' and '),
-    binds: parts.flatMap((p) => p.binds),
-  }
-}
+/**
+ * Every basis that gave an action still holds, with its role: one
+ * condition per basis, all of which the batch checks (guardRows).
+ */
+const everyBasis = (
+  bases: readonly Basis[],
+  personId: string,
+): readonly Statement[] =>
+  bases.length === 0
+    ? [{ sql: '0', binds: [] }]
+    : bases.map((b) => basisHolds(b, personId))
 
 /** Only a person's browser or a key that reaches everything and writes. */
 const createsTrees = (caller: Caller): Statement =>
@@ -917,6 +919,52 @@ const allOf = (parts: readonly Statement[]): Statement =>
         sql: parts.map((p) => `(${p.sql})`).join(' and '),
         binds: parts.flatMap((p) => p.binds),
       }
+
+/** What one guard statement holds at most, well within D1's limits. */
+const GUARD_BINDS = 90
+const GUARD_TERMS = 24
+const GUARD_BYTES = 60_000
+
+/**
+ * Conditions that must all hold, as guard rows of one reason: each
+ * condition once, however many grants of the change repeat it, split into
+ * statements within D1's limits on bound values, size and expression depth.
+ * Every row must pass, so the batch still needs every condition.
+ */
+const guardRows = (
+  prefix: string,
+  reason: Parameters<typeof guardRow>[1],
+  parts: readonly Statement[],
+): Statement[] => {
+  const seen = new Set<string>()
+  const chunks: Statement[][] = []
+  let current: Statement[] = []
+  let binds = 0
+  let size = 0
+  for (const part of parts) {
+    const key = `${part.sql}\u0000${JSON.stringify(part.binds)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (
+      current.length > 0 &&
+      (current.length >= GUARD_TERMS ||
+        binds + part.binds.length > GUARD_BINDS ||
+        size + part.sql.length > GUARD_BYTES)
+    ) {
+      chunks.push(current)
+      current = []
+      binds = 0
+      size = 0
+    }
+    current.push(part)
+    binds += part.binds.length
+    size += part.sql.length
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks.map((chunk, i) =>
+    guardRow(`${prefix}${i}`, reason, allOf(chunk)),
+  )
+}
 
 /** A guard row; its CHECK constraint fails the batch when `ok` is not 1. */
 const guardRow = (
@@ -2195,7 +2243,7 @@ export const TreeStoreLive: Layer.Layer<
           t: TreeId,
           node: Granted<'write' | 'delete-data' | 'withdraw-own'>,
         ) => {
-          bases.push(everyBasis(node.basis, person.id))
+          bases.push(...everyBasis(node.basis, person.id))
           stateGuards.push({
             sql: `exists (select 1 from nodes where id = ? and path = ?
                     and deleted_at is null)`,
@@ -2306,7 +2354,7 @@ export const TreeStoreLive: Layer.Layer<
               },
             )
             bases.push(
-              everyBasis([member.basis], person.id),
+              ...everyBasis([member.basis], person.id),
               createsTrees(caller),
             )
             return makeHandle(rootId)
@@ -2318,7 +2366,7 @@ export const TreeStoreLive: Layer.Layer<
             authored += 1
             pushCount += 1
             if (!isHandle(target)) {
-              bases.push(everyBasis(target.basis, person.id))
+              bases.push(...everyBasis(target.basis, person.id))
               stateGuards.push({
                 sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
                 binds: [target.id],
@@ -2380,7 +2428,7 @@ export const TreeStoreLive: Layer.Layer<
 
           grant: (on, share) => {
             const t = tid()
-            if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
+            if (!isHandle(on)) bases.push(...everyBasis(on.basis, person.id))
             const node = nodeIdSql(on, t)
             // The node is still there, as Access saw it.
             if (!isHandle(on)) {
@@ -2449,7 +2497,7 @@ export const TreeStoreLive: Layer.Layer<
           },
 
           revoke: (on, shareId) => {
-            bases.push(everyBasis(on.basis, person.id))
+            bases.push(...everyBasis(on.basis, person.id))
             writes.push(
               {
                 // Read before the row goes: whose sockets to close.
@@ -2480,7 +2528,7 @@ export const TreeStoreLive: Layer.Layer<
           },
 
           revokeTarget: (on, target) => {
-            bases.push(everyBasis(on.basis, person.id))
+            bases.push(...everyBasis(on.basis, person.id))
             stateGuards.push({
               sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
               binds: [on.id],
@@ -2528,7 +2576,7 @@ export const TreeStoreLive: Layer.Layer<
                 'a page grant creates only in its comments folder',
               )
             }
-            bases.push(everyBasis(holder.basis, person.id))
+            bases.push(...everyBasis(holder.basis, person.id))
             // What the writer holds is still live where the path was read
             // from it: a page or folder moved since leaves no data behind
             // at its old path.
@@ -2593,7 +2641,7 @@ export const TreeStoreLive: Layer.Layer<
             grows = true
             const nodeId = isHandle(target) ? handleId(target) : target.id
             if (!isHandle(target)) {
-              bases.push(everyBasis(target.basis, person.id))
+              bases.push(...everyBasis(target.basis, person.id))
               stateGuards.push(liveDataFile(nodeId))
             }
             const versionId = newId() as VersionId
@@ -2673,7 +2721,7 @@ export const TreeStoreLive: Layer.Layer<
             grows = true
             const nodeId = isHandle(target) ? handleId(target) : target.id
             if (!isHandle(target)) {
-              bases.push(everyBasis(target.basis, person.id))
+              bases.push(...everyBasis(target.basis, person.id))
               stateGuards.push(liveDataFile(nodeId))
             }
             const current = `(select v.json_value from nodes n
@@ -2732,7 +2780,7 @@ export const TreeStoreLive: Layer.Layer<
               deletedWrites(t, node)
               return
             }
-            bases.push(everyBasis(node.basis, person.id))
+            bases.push(...everyBasis(node.basis, person.id))
             if (node.kind === 'folder') {
               // A writer's own folder goes once nothing lives in it, after
               // the files of this change.
@@ -2784,7 +2832,7 @@ export const TreeStoreLive: Layer.Layer<
 
           restore: (node, made) => {
             const t = tid()
-            bases.push(everyBasis(node.basis, person.id))
+            bases.push(...everyBasis(node.basis, person.id))
             // What it brings back is stored again, history included.
             if (made.revive.length > 0) grows = true
             if (
@@ -2980,7 +3028,7 @@ export const TreeStoreLive: Layer.Layer<
           move: (node, to, folders, refs, pageForms) => {
             const t = tid()
             authoredTouched = true
-            bases.push(everyBasis(node.basis, person.id))
+            bases.push(...everyBasis(node.basis, person.id))
             // Still live where Access saw it.
             stateGuards.push({
               sql: `exists (select 1 from nodes where id = ? and path = ?
@@ -3106,7 +3154,7 @@ export const TreeStoreLive: Layer.Layer<
             const t = tid()
             grows = true
             authoredTouched = true
-            bases.push(everyBasis(file.basis, person.id))
+            bases.push(...everyBasis(file.basis, person.id))
             stateGuards.push({
               sql: `exists (select 1 from nodes where id = ? and deleted_at is null
                       and current_version_id = ?)`,
@@ -3184,8 +3232,8 @@ export const TreeStoreLive: Layer.Layer<
             // A composed page holds its tree's names: a new sequence keeps
             // the cache from serving the old ones.
             authoredTouched = true
-            bases.push(everyBasis(root.basis, person.id))
-            bases.push(everyBasis([to.basis], person.id))
+            bases.push(...everyBasis(root.basis, person.id))
+            bases.push(...everyBasis([to.basis], person.id))
             writes.push(
               {
                 sql: `insert into tree_aliases (workspace_name, tree_name, tree_id, created_at)
@@ -3223,7 +3271,7 @@ export const TreeStoreLive: Layer.Layer<
 
           blank: (comment, blanked) => {
             const t = tid()
-            bases.push(everyBasis(comment.basis, person.id))
+            bases.push(...everyBasis(comment.basis, person.id))
             stateGuards.push(liveDataFile(comment.id))
             const versionId = newId() as VersionId
             const text = JSON.stringify(blanked)
@@ -3266,7 +3314,7 @@ export const TreeStoreLive: Layer.Layer<
           },
 
           mention: (page, m) => {
-            bases.push(everyBasis(page.basis, person.id))
+            bases.push(...everyBasis(page.basis, person.id))
             // The read rule is large: each check is a statement of its own.
             mentionGuards.push(m.reads)
             events.push({ type: 'mention', path: m.path, node: m.comment })
@@ -3281,7 +3329,7 @@ export const TreeStoreLive: Layer.Layer<
           },
 
           holds: (granted) => {
-            bases.push(everyBasis(granted.basis, person.id))
+            bases.push(...everyBasis(granted.basis, person.id))
           },
 
           guardCommentText: (comment) => {
@@ -3483,17 +3531,12 @@ export const TreeStoreLive: Layer.Layer<
           // Each guard row has its own id, so a change may hold several of
           // one kind; they all share the change's prefix.
           ...heads.map((g, i) => guardRow(`${guardId}:head${i}`, 'head', g)),
-          guardRow(
-            `${guardId}:basis`,
-            'basis',
-            allOf([callerLive(caller, now), ...bases]),
-          ),
-          ...(blobGuards.length === 0
-            ? []
-            : [guardRow(`${guardId}:blob`, 'blob', allOf(blobGuards))]),
-          ...(stateGuards.length === 0
-            ? []
-            : [guardRow(`${guardId}:state`, 'state', allOf(stateGuards))]),
+          ...guardRows(`${guardId}:basis`, 'basis', [
+            callerLive(caller, now),
+            ...bases,
+          ]),
+          ...guardRows(`${guardId}:blob`, 'blob', blobGuards),
+          ...guardRows(`${guardId}:state`, 'state', stateGuards),
           ...mentionGuards.map((g, i) =>
             guardRow(`${guardId}:mention${i}`, 'state', g),
           ),
@@ -3512,9 +3555,7 @@ export const TreeStoreLive: Layer.Layer<
           },
           ...writes,
           ...searchWrites,
-          ...(outcomes.length === 0
-            ? []
-            : [guardRow(`${guardId}:after`, 'state', allOf(outcomes))]),
+          ...guardRows(`${guardId}:after`, 'state', outcomes),
           // Every version stored counts, history included, across the
           // workspace's trees, as it stands with this change's writes.
           ...(grows
