@@ -507,6 +507,7 @@ release instead of being created.
     "pattern": "*.dossier-content.com/*",
     "zone_name": "dossier-content.com"
   },
+  "customDomain": "dossier.agent964.com",
   "deployment": "dossier.agent964.com",
   "protocol": 1,
   "secrets": [
@@ -516,7 +517,10 @@ release instead of being created.
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET"
   ],
-  "d1": { "name": "dossier-next-production", "id": "<the database's id>" },
+  "d1": {
+    "name": "dossier-next-production",
+    "id": "e12b541d-bd5c-4325-8b9c-eab819223d54"
+  },
   "r2": "dossier-next-production",
   "queue": "dossier-next-production",
   "hub": { "binding": "TREE_HUB", "class": "TreeHub" },
@@ -525,7 +529,7 @@ release instead of being created.
 ```
 
 - `config` refuses a built configuration unless it names the Worker, the
-  origin, `CONTENT_HOST`, the custom domain, the content route with its zone,
+  origin, `CONTENT_HOST`, `DEPLOYMENT_NAME`, the custom domain, the content route with its zone,
   the D1 database by name and id, the bucket, the tree hub class, the Queue's
   producer and consumer and both crons, has no rate limiter bindings, and no
   secret name among its variables.
