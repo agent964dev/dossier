@@ -1,4 +1,6 @@
 import {
+  commentsFolderIn,
+  pageOfCommentsFolder,
   dossierError,
   type DossierError,
   type TreeId,
@@ -56,7 +58,20 @@ export const WatchLive: Layer.Layer<
       Effect.gen(function* () {
         const out: (readonly [number, string])[] = []
         for (const [sub, path] of asked.entries()) {
-          const node = yield* store.nearest(treeId, path)
+          let node = yield* store.nearest(treeId, path)
+          // Whoever reads a page reads its comments, the folder made by the
+          // first comment or not yet.
+          const comments = commentsFolderIn(path)
+          if (
+            comments !== null &&
+            (node === null || node.path.length < comments.length)
+          ) {
+            const page = yield* store.nearest(
+              treeId,
+              pageOfCommentsFolder(comments)!,
+            )
+            if (page?.path === pageOfCommentsFolder(comments)) node = page
+          }
           if (node === null) continue
           const reads = yield* access
             .require('read', node)
