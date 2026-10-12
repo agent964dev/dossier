@@ -1140,8 +1140,10 @@ export const PagesLive: Layer.Layer<
 
     /**
      * Whether the frame's handle may have the agent version of a page or
-     * folder: a page it reads now and may open at the sequence (layouts do
-     * not change its text), a folder that still exists and that it reads now.
+     * folder: a page it reads now and may open at the sequence together with
+     * every layout composed into it then, as the page itself would be (the
+     * layouts' forms feed its pointer), or a folder that still exists and
+     * that it reads now.
      */
     const agentOpens = (
       handleHash: string,
@@ -1157,8 +1159,14 @@ export const PagesLive: Layer.Layer<
         }
         const roles = yield* access.roleOn(target.node)
         if (!readsWith(roles, target.node)) return false
+        const parts = yield* composedAt(target, target.tree.id, seq)
+        if (parts === null) return false
         return yield* opensAt(handleHash, seq, [
           { node: target.node, version: target.version },
+          ...parts.chain.map((link) => ({
+            node: link.node,
+            version: link.version,
+          })),
         ])
       })
 

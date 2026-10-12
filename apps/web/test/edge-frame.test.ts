@@ -14,6 +14,7 @@ import {
   nodeAt,
   pushAll,
   share,
+  treeOf,
   workspace,
 } from './support/trees.ts'
 import { everything } from './support/keys.ts'
@@ -550,6 +551,75 @@ describe('the frame route for agents', () => {
     // Without the Accept header the frame still answers the page.
     const html = await frame(late, `/_/v/${lateHandle}/2/notes`, {}, host)
     expect(html.headers.get('content-type')).toBe('text/html; charset=utf-8')
+  })
+
+  it('answers a page’s text at an old sequence only when the page and every layout composed into it then may be opened', async () => {
+    const caller = await callerOf(owner)
+    const key = await agent(caller.person!)
+    const target = `${ws.name}/agentlayout`
+    const layout = (folder: string) =>
+      `<header>Site</header><slot></slot>` +
+      `<form action="${folder}/" method="post"><input name="a"></form>`
+    const page = '<title>Page</title><h1>Page</h1><p>Unchanged</p>'
+    const id = committed(
+      await pushAll(key, target, {
+        '_layout.html': layout('private-old-answers'),
+        'page.html': page,
+      }),
+    ).treeId
+    const at = `${id}.content.test`
+    const seqNow = async () =>
+      (await treeOf(ws.name, 'agentlayout'))!.authored_seq
+    const first = await seqNow()
+    const ownerHandle = await handleOf(owner, 'page', id)
+    // The layout is replaced; the page is not.
+    committed(
+      await pushAll(
+        key,
+        target,
+        { '_layout.html': layout('new-answers'), 'page.html': page },
+        { force: true },
+      ),
+    )
+    const second = await seqNow()
+    expect(second).toBeGreaterThan(first)
+    const late = await signedIn(fresh())
+    await share(
+      id,
+      (await nodeAt(id, ''))!.id,
+      'email',
+      (await callerOf(late)).person!.email,
+      'read',
+      caller.person!,
+    )
+    const lateHandle = await handleOf(late, 'page', id)
+    const old = (
+      browser: Browser,
+      handle: string,
+      init: RequestInit = MARKDOWN,
+    ) => frame(browser, `/_/v/${handle}/${first}/page`, init, at)
+
+    // The page as HTML at the old sequence would compose the old layout,
+    // which this handle may not open: 404, and the agent version alike.
+    expect((await old(late, lateHandle, {})).status).toBe(404)
+    const refused = await old(late, lateHandle)
+    expect(refused.status).toBe(404)
+    expect(await refused.text()).not.toContain('private-old-answers')
+    // The current sequence answers, with the current layout's pointer.
+    const now = await frame(
+      late,
+      `/_/v/${lateHandle}/${second}/page`,
+      MARKDOWN,
+      at,
+    )
+    expect(now.status).toBe(200)
+    expect(await now.text()).toContain('Data: new-answers/ (0 files)')
+    // A write holder opens the old sequence, with the old layout's pointer.
+    const written = await old(owner, ownerHandle)
+    expect(written.status).toBe(200)
+    expect(await written.text()).toContain(
+      'Data: private-old-answers/ (0 files)',
+    )
   })
 
   it('answers a folder’s text now, a data folder’s files, and redirects as the frame does', async () => {
