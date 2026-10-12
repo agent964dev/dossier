@@ -714,3 +714,94 @@ describe('races around a share', () => {
     ).toBe(0)
   })
 })
+
+describe('what a share change rechecks in its batch', () => {
+  it('shares with a team only while the sharer is still in its workspace', async () => {
+    const w = await world()
+    const writer = await person('writer')
+    await join(w.ws, writer)
+    await share(
+      w.treeId,
+      await w.node('questions'),
+      'email',
+      writer.email,
+      'write',
+      w.admin,
+    )
+    await team(w.ws, 'Design', [])
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => /insert into shares/i.test(sql),
+            async () => {
+              await exec(
+                'delete from workspace_members where workspace_id = ? and user_id = ?',
+                w.ws.id,
+                writer.id,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const failed = await failureAs(
+      await agent(writer),
+      Effect.flatMap(Shares, (shares) =>
+        shares.set({
+          ref: ref(`${w.ws.name}/acme/questions/`),
+          target: { kind: 'team', team: 'Design' },
+          role: 'read',
+        }),
+      ),
+    )
+    harness.reset()
+    expect(failed.code).toBe('conflict')
+    expect(
+      await count('shares', "tree_id = ? and target_kind = 'team'", w.treeId),
+    ).toBe(0)
+  })
+
+  it('answers conflict when the node goes before the batch, and shares nothing on it', async () => {
+    const w = await world()
+    const questions = await w.node('questions')
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => /insert into shares/i.test(sql),
+            async () => {
+              await exec(
+                'update nodes set deleted_at = ? where id = ?',
+                Date.now(),
+                questions,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const failed = await failureAs(
+      w.adminAgent,
+      Effect.flatMap(Shares, (shares) =>
+        shares.set({
+          ref: ref(`${w.ws.name}/acme/questions/`),
+          target: { kind: 'email', email: w.sara.email },
+          role: 'read',
+        }),
+      ),
+    )
+    harness.reset()
+    expect(failed.code).toBe('conflict')
+    expect(
+      await count(
+        'shares',
+        'node_id = ? and target = ?',
+        questions,
+        w.sara.email.toLowerCase(),
+      ),
+    ).toBe(0)
+  })
+})

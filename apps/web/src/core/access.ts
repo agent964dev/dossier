@@ -275,6 +275,9 @@ interface PageShare {
   readonly targets: readonly {
     readonly path: string
     readonly kind: 'folder' | 'json'
+    /** The pusher of the form read there, or held respond there. */
+    readonly reads: boolean
+    readonly responds: boolean
   }[]
 }
 
@@ -486,9 +489,12 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           const grant = grantOf(caller, facts, row)
           if (grant === null) continue
           const targets = yield* query(() =>
-            db({ DB }).all<{ target: string; kind: string }>(
-              pageTargetsSql(treeId, row.pagePath),
-            ),
+            db({ DB }).all<{
+              target: string
+              kind: string
+              reads: number
+              responds: number
+            }>(pageTargetsSql(treeId, row.pagePath)),
           )
           found.push({
             grant,
@@ -496,6 +502,8 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             targets: targets.map((t) => ({
               path: t.target.replace(/\/$/, ''),
               kind: t.kind === 'json' ? 'json' : 'folder',
+              reads: t.reads === 1,
+              responds: t.responds === 1,
             })),
           })
         }
@@ -513,19 +521,27 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
     ): Grant[] =>
       node.origin !== 'data'
         ? []
-        : shares
-            .filter(({ targets }) =>
-              targets.some((t) =>
-                t.kind === 'folder'
+        : shares.flatMap(({ grant, targets }): Grant[] => {
+            const respond = grant.role === 'respond'
+            // Only what the pusher of the form held there: read to read,
+            // respond to answer.
+            const holds = targets.some(
+              (t) =>
+                (respond ? t.responds : t.reads) &&
+                (t.kind === 'folder'
                   ? isUnder(node.path, t.path)
-                  : node.path === t.path,
-              ),
+                  : node.path === t.path),
             )
-            .map(({ grant }) => ({
-              ...grant,
-              role: grant.role === 'respond' ? 'respond' : 'read',
-              onData: false,
-            }))
+            return holds
+              ? [
+                  {
+                    ...grant,
+                    role: respond ? 'respond' : 'read',
+                    onData: false,
+                  },
+                ]
+              : []
+          })
 
     /**
      * The caller's grants on a node, counting only grants at or below order
@@ -586,12 +602,25 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         // What page shares carry follows the pages as they are now, so it
         // never counts toward what was readable at an earlier grant order.
         if (node.origin === 'data' && asOf === null) {
-          grants.push(
-            ...throughPages(
-              node,
-              yield* pageSharesOf(caller, facts, node.treeId, asOf),
-            ),
-          )
+          // Only where the share's creator reads the node through a grant.
+          for (const grant of throughPages(
+            node,
+            yield* pageSharesOf(caller, facts, node.treeId, asOf),
+          )) {
+            if (grant.basis.kind !== 'share') continue
+            const held = yield* query(() =>
+              db({ DB }).all<{ one: number }>(
+                tight`select 1 as one from shares s
+                  join "user" cu on cu.id = s.created_by
+                  join nodes x on x.id = ${node.id}
+                  ${creatorJoins(facts.workspaceId, 'x', grant.role === 'respond' ? 'respond' : 'read')}
+                  where s.id = ${grant.basis.kind === 'share' ? grant.basis.shareId : ''}
+                    and ${creatorHolds}
+                  limit 1`,
+              ),
+            )
+            if (held.length > 0) grants.push(grant)
+          }
         }
         if (facts.memberRole === 'admin' && caller.person !== null) {
           grants.push({
@@ -605,11 +634,11 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
             },
           })
         }
-        // Whatever their role, people may read and withdraw what they wrote.
+        // Whatever their role, people may read and withdraw what they wrote;
+        // a withdrawn node stays theirs to read, as the list check says.
         const owns =
           caller.person !== null &&
           node.origin === 'data' &&
-          node.deletedAt === null &&
           node.ownerId === caller.person.id
         return { grants, owns, facts }
       })
@@ -639,6 +668,10 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (isMissing(node)) return yield* denied(caller, node.path)
+        // Only a live node is withdrawn.
+        if (action === 'withdraw-own' && node.deletedAt !== null) {
+          return yield* denied(caller, node.path)
+        }
         const { grants, owns, facts } = yield* grantsOn(node)
         if (facts !== null && facts.state !== 'live') {
           // People withdraw what they wrote wherever it sits, so deleting
@@ -1042,13 +1075,61 @@ const reachesCaller = (
  * A share `s` reaching the caller on a live page `p`, and what the page
  * carries as `pn` (page_needs) of the kinds given.
  */
-const pageCarries = (kinds: SQL): SQL =>
+const pageCarries = (kinds: SQL, folders: boolean): SQL =>
   tight`from shares s
-    join nodes p on p.id = s.node_id and p.deleted_at is null and p.kind = 'file'
-      and p.origin = 'authored' and p.underscore_from is null
-      and substr(p.path, -5) = '.html'
-    join page_needs pn on pn.tree_id = s.tree_id and pn.page_path = p.path
-      and pn.kind ${kinds}`
+    join nodes p on p.id = s.node_id and p.deleted_at is null
+      and ((p.kind = 'file' and p.origin = 'authored' and p.underscore_from is null
+        and substr(p.path, -5) = '.html')${folders ? tight` or p.kind = 'folder'` : tight``})
+    join page_needs pn on pn.tree_id = s.tree_id and pn.kind ${kinds}
+      and (pn.page_path = p.path${
+        folders
+          ? tight` or (p.kind = 'folder' and ${underColumn(tight`pn.page_path`, tight`p.path`)})`
+          : tight``
+      })
+    join nodes pg on pg.tree_id = s.tree_id and pg.path = pn.page_path
+      and pg.deleted_at is null
+    join "user" cu on cu.id = s.created_by`
+
+/**
+ * Joins that find the share creator's (`cu`) own grant on the node `as`: an
+ * admin place in the workspace (`cad`), or a share on it or a folder above
+ * whose target is the creator (`cs2` on `ca`), read by the rules a grant
+ * reads by. Joins rather than a nested rule, so SQLite's depth stays low.
+ */
+export const creatorJoins = (
+  workspaceId: string,
+  as: string,
+  role: 'read' | 'respond' = 'read',
+): SQL => {
+  const W = lit(workspaceId)
+  const N = sql.raw(as)
+  // To answer: respond or write there; to read: the rules a grant reads by.
+  const rules =
+    role === 'respond'
+      ? tight`and cs2.role in ('respond', 'write')`
+      : tight`and (cs2.role <> 'respond' or ${N}.origin = 'authored')
+      and (cs2.target_kind <> 'anyone' or ${N}.origin = 'authored'
+        or ca.origin = 'data')`
+  return tight`left join workspace_members cad on cad.workspace_id = ${W}
+      and cad.user_id = cu.id and cad.role = 'admin'
+    left join nodes ca on ca.tree_id = ${N}.tree_id and ca.deleted_at is null
+      and ${underColumn(tight`${N}.path`, tight`ca.path`)}
+    left join shares cs2 on cs2.node_id = ca.id
+      and (cs2.target_kind = 'anyone'
+        or (cs2.target_kind = 'email' and cs2.target = lower(cu.email))
+        or (cs2.target_kind = 'workspace' and cs2.target = ${W}
+          and exists (select 1 from workspace_members cm
+            where cm.workspace_id = ${W} and cm.user_id = cu.id))
+        or (cs2.target_kind = 'team' and cs2.target in (select ctm.team_id
+          from team_members ctm join teams ctt on ctt.id = ctm.team_id
+            join workspace_members cw on cw.workspace_id = ctt.workspace_id
+              and cw.user_id = ctm.user_id
+          where ctt.workspace_id = ${W} and ctm.user_id = cu.id)))
+      ${rules}`
+}
+
+/** The creator holds a grant on the node, by `creatorJoins`. */
+export const creatorHolds = tight`(cad.user_id is not null or cs2.id is not null)`
 
 /**
  * The authored node `as` that a shared page renders with, then what more
@@ -1062,12 +1143,15 @@ const neededArm = (
   arm: { readonly as: string; readonly joins: SQL; readonly select: SQL },
 ): SQL => {
   const N = sql.raw(arm.as)
-  return tight`select ${arm.select} ${pageCarries(tight`= 'render'`)}
+  // A folder's share carries what the pages in it render with too.
+  return tight`select ${arm.select} ${pageCarries(tight`= 'render'`, true)}
     join nodes ${N} on ${N}.tree_id = s.tree_id and ${N}.path = pn.need_path
       and ${N}.deleted_at is null and ${N}.origin = 'authored'
+    ${creatorJoins(workspaceId, arm.as)}
     ${arm.joins}
     where s.tree_id = ${lit(treeId)} and ${reachesCaller(workspaceId, f, asOf)}
-      and ${N}.id <> p.id and ${f.within(tight`${N}.path`)}`
+      and ${N}.path <> pn.page_path and ${f.within(tight`${N}.path`)}
+      and ${creatorHolds}`
 }
 
 /**
@@ -1111,29 +1195,37 @@ const carriedArms = (
         and ${underColumn(tight`r.path`, tight`k.underscore_from`)}`,
       select: tight`k.id`,
     }),
-    tight`select x.id ${pageCarries(tight`in ('folder', 'json')`)}
+    tight`select x.id ${pageCarries(tight`in ('folder', 'json')`, false)}
       join nodes x on x.tree_id = s.tree_id and x.origin = 'data'
         and ((pn.kind = 'folder' and ${underColumn(tight`x.path`, tight`pn.need_path`)})
           or (pn.kind = 'json' and x.path = pn.need_path))
+      ${creatorJoins(workspaceId, 'x')}
       where s.tree_id = ${T} and ${caller} and s.role <> 'respond'
-        and s.target_kind <> 'anyone' and ${f.within(tight`x.path`)}`,
-    tight`select x.id ${pageCarries(tight`= 'json'`)}
+        and s.target_kind <> 'anyone' and ${f.within(tight`x.path`)}
+        and pn.reads = 1 and ${creatorHolds}`,
+    tight`select x.id ${pageCarries(tight`= 'json'`, false)}
       join nodes x on x.tree_id = s.tree_id and x.path = pn.need_path
         and x.origin = 'data' and x.kind = 'file' and x.owner_id is null
+      ${creatorJoins(workspaceId, 'x')}
       where s.tree_id = ${T} and ${caller} and s.role = 'respond'
-        and s.target_kind <> 'anyone' and ${f.within(tight`x.path`)}`,
+        and s.target_kind <> 'anyone' and ${f.within(tight`x.path`)}
+        and pn.reads = 1 and ${creatorHolds}`,
     tight`select x.id from shares s join nodes a on a.id = s.node_id
+      join "user" cu on cu.id = s.created_by
       join forms fm on fm.tree_id = s.tree_id and fm.kind = 'shared'
       join nodes h on h.id = fm.host_node_id and h.current_version_id = fm.host_version_id
         and h.deleted_at is null
       join nodes x on x.tree_id = s.tree_id and x.path = fm.target_path
         and x.origin = 'data' and x.kind = 'file' and x.owner_id is null
+      ${creatorJoins(workspaceId, 'x')}
       where s.tree_id = ${T} and a.deleted_at is null and a.kind = 'folder'
         and s.role = 'respond' and s.target_kind <> 'anyone' and ${caller}
+        and ${underColumn(tight`x.path`, tight`a.path`)}
         and (${underColumn(tight`h.path`, tight`a.path`)}
           or (h.name = '_layout.html'
             and ${underColumn(tight`a.path`, tight`h.underscore_from`)}))
-        and ${f.within(tight`x.path`)}`,
+        and ${f.within(tight`x.path`)}
+        and ${creatorHolds}`,
     // Comments on a page the caller reads through a grant: as an admin, or
     // a share on it or a folder above (a page is authored: every role reads
     // it), or through what a page share carries.
@@ -1173,7 +1265,7 @@ export const carriedOn =
  * rule reads them: for the derived grants on people's data there.
  */
 export const pageTargetsSql = (treeId: TreeId, pagePath: string): SQL =>
-  tight`select need_path as target, kind from page_needs
+  tight`select need_path as target, kind, reads, responds from page_needs
     where tree_id = ${treeId} and page_path = ${pagePath} and kind in ('folder', 'json')`
 
 /**

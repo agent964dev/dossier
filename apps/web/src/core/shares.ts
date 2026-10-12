@@ -363,6 +363,27 @@ export const SharesLive: Layer.Layer<
             const wanted = target.team.trim().toLowerCase()
             const team = teams.find((t) => t.name.toLowerCase() === wanted)
             if (team === undefined) {
+              const person = (yield* CurrentCaller).person
+              const member =
+                person === null
+                  ? null
+                  : yield* query(() =>
+                      DB.prepare(
+                        'select 1 as one from workspace_members where workspace_id = ? and user_id = ?',
+                      )
+                        .bind(workspace.id, person.id)
+                        .first(),
+                    )
+              if (member === null) {
+                return yield* Effect.fail(
+                  dossierError(
+                    'invalid',
+                    `Only members of ${workspace.name} share with its teams.`,
+                    'Share with people by email, or ask a member to share with the team.',
+                    'target',
+                  ),
+                )
+              }
               return yield* Effect.fail(
                 dossierError(
                   'invalid',

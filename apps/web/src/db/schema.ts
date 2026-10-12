@@ -958,6 +958,13 @@ export const pageNeeds = sqliteTable(
     needPath: text('need_path').notNull(),
     /** 'render', or 'folder' and 'json' for a form's target. */
     kind: text('kind').notNull(),
+    /**
+     * The pusher of the HTML file naming it read it when it was pushed:
+     * people's data by a real grant or as its writer. Render rows always.
+     */
+    reads: integer('reads', { mode: 'boolean' }).notNull(),
+    /** That pusher held respond or write there. */
+    responds: integer('responds', { mode: 'boolean' }).notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.treeId, t.pagePath, t.needPath, t.kind] }),

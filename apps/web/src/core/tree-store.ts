@@ -43,7 +43,7 @@ import { openCursor, sealCursor } from './cursors.ts'
 import { callerRefOf, callersCte, visibleEventSql } from './event-visibility.ts'
 import { newId, newTreeId } from './ids.ts'
 import { bytesText, Limits } from './limits.ts'
-import type { PageNeed } from './page-needs.ts'
+import type { PageNeedRow } from './page-needs.ts'
 import {
   analysisOf,
   lookupUnderscore,
@@ -314,7 +314,11 @@ export interface ChangeSet {
   /** The forms the push staged, for the versions it leaves current. */
   readonly putForms: (pushId: PushId) => void
   /** What every page of the tree carries now, replacing what was there. */
-  readonly putPageNeeds: (needs: readonly PageNeed[]) => void
+  readonly putPageNeeds: (
+    needs: readonly PageNeedRow[],
+    /** Takes from what a shared page carried: close every socket. */
+    narrowed?: boolean,
+  ) => void
   /** Required: a change with no event never commits. */
   readonly event: (e: NewEvent) => void
 }
@@ -1816,12 +1820,22 @@ export const TreeStoreLive: Layer.Layer<
             const t = tid()
             if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
             const node = nodeIdSql(on, t)
-            // A team deleted since the share was asked for gets nothing.
+            // The node is still there, as Access saw it.
+            if (!isHandle(on)) {
+              stateGuards.push({
+                sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
+                binds: [on.id],
+              })
+            }
+            // A team deleted since the share was asked for gets nothing, and
+            // only a member of its workspace shares with it.
             if (share.targetKind === 'team') {
               stateGuards.push({
                 sql: `exists (select 1 from teams tt join trees tr on tr.workspace_id = tt.workspace_id
+                        join workspace_members wm on wm.workspace_id = tt.workspace_id
+                          and wm.user_id = ?
                         where tt.id = ? and tr.id = ?)`,
-                binds: [share.target, t],
+                binds: [person.id, share.target, t],
               })
             }
             writes.push(
@@ -1905,6 +1919,10 @@ export const TreeStoreLive: Layer.Layer<
 
           revokeTarget: (on, target) => {
             bases.push(everyBasis(on.basis, person.id))
+            stateGuards.push({
+              sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
+              binds: [on.id],
+            })
             writes.push(
               {
                 // Read before the row goes: whose sockets to close.
@@ -2227,19 +2245,30 @@ export const TreeStoreLive: Layer.Layer<
             })
           },
 
-          putPageNeeds: (needs) => {
+          putPageNeeds: (needs, narrowed = false) => {
             const t = tid()
+            if (narrowed) closing.push({ all: true })
             writes.push({
               sql: 'delete from page_needs where tree_id = ?',
               binds: [t],
             })
             for (let at = 0; at < needs.length; at += 200) {
               writes.push({
-                sql: `insert into page_needs (tree_id, page_path, need_path, kind)
+                sql: `insert into page_needs (tree_id, page_path, need_path, kind, reads, responds)
                       select ?, json_extract(j.value, '$.page'), json_extract(j.value, '$.need'),
-                        json_extract(j.value, '$.kind')
+                        json_extract(j.value, '$.kind'), json_extract(j.value, '$.reads'),
+                        json_extract(j.value, '$.responds')
                       from json_each(?) j where true on conflict do nothing`,
-                binds: [t, JSON.stringify(needs.slice(at, at + 200))],
+                binds: [
+                  t,
+                  JSON.stringify(
+                    needs.slice(at, at + 200).map((n) => ({
+                      ...n,
+                      reads: n.reads ? 1 : 0,
+                      responds: n.responds ? 1 : 0,
+                    })),
+                  ),
+                ],
               })
             }
           },

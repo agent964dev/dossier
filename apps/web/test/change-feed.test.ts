@@ -250,6 +250,49 @@ describe('the change feed', () => {
     })
   })
 
+  it('closes every socket when a push takes from what a shared page carried', async () => {
+    await recording(async (published) => {
+      const key = await agent(owner)
+      const files = {
+        'plan.html': pageWith('<p>Plan</p><img src="chart.svg">', 'Plan'),
+        'chart.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+      }
+      const pushed = await pushAll(key, `${ws.name}/narrows`, files)
+      const treeId = (pushed as { treeId: TreeId }).treeId
+      const guest = await person('reader')
+      await share(
+        treeId,
+        (await nodeAt(treeId, 'plan.html'))!.id,
+        'email',
+        guest.email.toLowerCase(),
+        'read',
+        owner,
+      )
+      // The same page again, and one more beside it: nothing narrows.
+      await pushAll(
+        key,
+        `${ws.name}/narrows`,
+        {
+          ...files,
+          'notes.html': pageWith('<p>Notes</p>', 'Notes'),
+        },
+        { force: true },
+      )
+      expect(published().at(-1)?.close).toBeNull()
+      // The page no longer shows the chart, so its share no longer reads it.
+      await pushAll(
+        key,
+        `${ws.name}/narrows`,
+        {
+          ...files,
+          'plan.html': pageWith('<p>Plan</p>', 'Plan'),
+        },
+        { force: true },
+      )
+      expect(published().at(-1)?.close).toEqual({ all: true })
+    })
+  })
+
   it('publishes nothing for a change its guard refuses', async () => {
     await recording(async (published) => {
       const tree = await pushForms(owner, ws, FILES)

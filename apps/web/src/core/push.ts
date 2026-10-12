@@ -4,9 +4,11 @@ import {
   type AuthoredSeq,
   type DossierError,
   type LinkRef,
+  type PersonId,
   type PushId,
   type PushNumber,
   type Sha256,
+  type SessionId,
   type ShareSpec,
   type TreeId,
 } from '@dossier/contracts'
@@ -28,17 +30,20 @@ import {
   type PushWarning,
   type TreeView,
 } from '@dossier/html'
+import { sql } from 'drizzle-orm'
 import { Clock, Context, Data, Effect, Layer, Random } from 'effect'
+
+import { db, schema } from '../db/client.ts'
 
 import type { Background } from './background.ts'
 import { Access, type Granted } from './access.ts'
 import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
-import { CurrentCaller } from './caller.ts'
+import { CurrentCaller, type Caller } from './caller.ts'
 import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
-import { pageNeedsOf } from './page-needs.ts'
+import { pageNeedsOf, type PageNeed, type PageNeedRow } from './page-needs.ts'
 import { Shares } from './shares.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
 import { blobKey, TreeStore, type NewShare } from './tree-store.ts'
@@ -1011,7 +1016,7 @@ export const PushLive: Layer.Layer<
             ? []
             : (yield* query(() =>
                 DB.prepare(
-                  `select n.path, v.blob_sha256 as sha256, a.json
+                  `select n.path, v.blob_sha256 as sha256, a.json, v.author_id as author
                    from nodes n join node_versions v on v.id = n.current_version_id
                    left join analyses a on a.sha256 = v.blob_sha256
                      and a.analyzer = 'html' and a.version = ?3
@@ -1022,9 +1027,18 @@ export const PushLive: Layer.Layer<
                        or substr(n.path, 1, length(?2) + 1) = ?2 || '/')`,
                 )
                   .bind(tree.id, push.path, ANALYZER)
-                  .all<{ path: string; sha256: Sha256; json: string | null }>(),
+                  .all<{
+                    path: string
+                    sha256: Sha256
+                    json: string | null
+                    author: string
+                  }>(),
               )).results
-        const pages: (PushFile & { readonly sha256: Sha256 })[] = []
+        const pages: (PushFile & {
+          readonly sha256: Sha256
+          /** Who pushed the version; null for this push. */
+          readonly author: string | null
+        })[] = []
         for (const row of [...manifestRows, ...outside]) {
           if (!isPageFile(row.path)) continue
           const analysis =
@@ -1032,10 +1046,119 @@ export const PushLive: Layer.Layer<
               ? yield* store.analysis(row.sha256)
               : (JSON.parse(row.json) as HtmlAnalysis)
           if (analysis !== null) {
-            pages.push({ path: row.path, analysis, sha256: row.sha256 })
+            pages.push({
+              path: row.path,
+              analysis,
+              sha256: row.sha256,
+              author: 'author' in row ? (row.author as string) : null,
+            })
           }
         }
         return pages
+      })
+
+    /**
+     * What the person who pushed each HTML file held at a path it names, as
+     * the tree stands before this push: read (people's data only by a real
+     * grant or as its writer) and respond. This push's caller also reads
+     * what it pushes. A new tree is its creator's.
+     */
+    const heldByAuthors = (
+      tree: TreeRow | null,
+      pages: readonly {
+        readonly path: string
+        readonly author: string | null
+      }[],
+      manifest: ReadonlyMap<string, unknown>,
+    ) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const pushed = new Set<string>()
+        for (const path of manifest.keys()) {
+          for (const at of ancestorPaths(path)) if (at !== '') pushed.add(at)
+        }
+        const callers = new Map<string | null, Caller | null>([[null, caller]])
+        for (const author of new Set(pages.map((p) => p.author))) {
+          if (author === null || callers.has(author)) continue
+          const person = yield* query(() =>
+            DB.prepare('select id, email, name, image from "user" where id = ?')
+              .bind(author)
+              .first<{
+                id: PersonId
+                email: string
+                name: string
+                image: string | null
+              }>(),
+          )
+          callers.set(
+            author,
+            person === null
+              ? null
+              : {
+                  person,
+                  via: { kind: 'browser', sessionId: '' as SessionId },
+                  requestId: caller.requestId,
+                },
+          )
+        }
+        const readableSets = new Map<string | null, ReadonlySet<string>>()
+        const readableTo = (author: string | null, who: Caller) =>
+          Effect.gen(function* () {
+            const kept = readableSets.get(author)
+            if (kept !== undefined) return kept
+            const found = new Set<string>(author === null ? pushed : [])
+            if (tree !== null) {
+              const readable = yield* access.readable(tree.id as TreeId)
+              const rows = yield* query(() =>
+                db({ DB })
+                  .select({ path: schema.nodes.path })
+                  .from(schema.nodes)
+                  .where(
+                    sql`${schema.nodes.treeId} = ${tree.id} and ${schema.nodes.deletedAt} is null and ${readable.where}`,
+                  )
+                  .all(),
+              )
+              for (const row of rows) found.add(row.path)
+            }
+            readableSets.set(author, found)
+            return found
+          }).pipe(Effect.provideService(CurrentCaller, who))
+        const held = new Map<string, { reads: boolean; responds: boolean }>()
+        const authorOf = new Map(pages.map((p) => [p.path, p.author]))
+        return (host: string, need: string, kind: PageNeed['kind']) =>
+          Effect.gen(function* () {
+            const author = authorOf.get(host) ?? null
+            const who = callers.get(author) ?? null
+            if (who === null) return { reads: false, responds: false }
+            if (kind === 'render') {
+              const reads = (yield* readableTo(author, who)).has(need)
+              return { reads, responds: false }
+            }
+            // A new tree is wholly its creator's.
+            if (tree === null) return { reads: true, responds: true }
+            const key = `${author}\u0000${need}`
+            const kept = held.get(key)
+            if (kept !== undefined) return kept
+            const node = yield* store
+              .nearest(tree.id as TreeId, need)
+              .pipe(Effect.orDie)
+            let found = { reads: false, responds: false }
+            if (node !== null) {
+              const roles = yield* access
+                .roleOn(node)
+                .pipe(Effect.provideService(CurrentCaller, who))
+              found = {
+                // Through grants, or as the file's own writer: never
+                // because a form names it.
+                reads:
+                  roles.privateCaps.has('read') ||
+                  (node.path === need && roles.owns),
+                responds: roles.caps.has('respond'),
+              }
+            }
+            held.set(key, found)
+            return found
+          })
       })
 
     /** One try at committing; `Retry` when another push moved the tree. */
@@ -1214,7 +1337,59 @@ export const PushLive: Layer.Layer<
         }
 
         // What every page carries after this push, for page shares.
-        const needs = pageNeedsOf(pages, (p) => kinds.get(p) ?? null)
+        // A page carries only what the people behind it held there.
+        const heldBy = yield* heldByAuthors(tree, pages, manifest)
+        const kept = new Map<string, PageNeedRow>()
+        for (const need of pageNeedsOf(pages, (p) => kinds.get(p) ?? null)) {
+          const held = yield* heldBy(need.host, need.need, need.kind)
+          if (!held.reads && !held.responds) continue
+          const key = `${need.page}\u0000${need.need}\u0000${need.kind}`
+          const before = kept.get(key)
+          kept.set(key, {
+            page: need.page,
+            need: need.need,
+            kind: need.kind,
+            reads: held.reads || (before?.reads ?? false),
+            responds: held.responds || (before?.responds ?? false),
+          })
+        }
+        const needs = [...kept.values()]
+        // A push that takes from what a shared page carried closes the
+        // sockets that may have watched it; the head guard below keeps
+        // these rows the ones the change replaces.
+        const narrowed =
+          tree === null
+            ? false
+            : yield* query(() =>
+                DB.prepare(
+                  `select o.page_path as page, o.need_path as need, o.kind,
+                     o.reads, o.responds
+                   from page_needs o
+                   where o.tree_id = ? and exists (select 1 from shares s
+                     where s.tree_id = o.tree_id)`,
+                )
+                  .bind(tree.id)
+                  .all<{
+                    page: string
+                    need: string
+                    kind: string
+                    reads: number
+                    responds: number
+                  }>(),
+              ).pipe(
+                Effect.map((rows) =>
+                  rows.results.some((old) => {
+                    const now = kept.get(
+                      `${old.page}\u0000${old.need}\u0000${old.kind}`,
+                    )
+                    return (
+                      now === undefined ||
+                      (old.reads === 1 && !now.reads) ||
+                      (old.responds === 1 && !now.responds)
+                    )
+                  }),
+                ),
+              )
 
         const baseSeq = push.base_seq ?? 0
         if (tree !== null && push.force === 0) {
@@ -1270,7 +1445,7 @@ export const PushLive: Layer.Layer<
                 pushId,
               )
               cs.putForms(pushId)
-              cs.putPageNeeds(needs)
+              cs.putPageNeeds(needs, narrowed)
               // A failed commit grants nothing: the shares are in its batch.
               for (const share of shares) cs.grant(folder, share)
               if (shares.length > 0) {

@@ -586,18 +586,20 @@ const plantTree = async (
         `insert into analyses (sha256, analyzer, version, json, created_at)
          values (?, 'html', ?, ?, ?)`,
       ).bind(sha, ANALYZER_VERSION, JSON.stringify(analyze(page.html)), now),
-      // What the page carries, as a push records it.
+      // What the page carries, as a push by its author (an admin, who holds
+      // all of it) records it.
       ...[
-        ...page.needs.map((need) => ({ need, kind: 'render' })),
+        ...page.needs.map((need) => ({ need, kind: 'render', responds: 0 })),
         ...page.targets.map((t) => ({
           need: t.path,
           kind: t.kind === 'shared' ? 'json' : 'folder',
+          responds: 1,
         })),
-      ].map(({ need, kind }) =>
+      ].map(({ need, kind, responds }) =>
         env.DB.prepare(
-          `insert into page_needs (tree_id, page_path, need_path, kind)
-           values (?, ?, ?, ?) on conflict do nothing`,
-        ).bind(treeId, path, need, kind),
+          `insert into page_needs (tree_id, page_path, need_path, kind, reads, responds)
+           values (?, ?, ?, ?, 1, ?) on conflict do nothing`,
+        ).bind(treeId, path, need, kind, responds),
       ),
       ...page.targets.map((target) =>
         env.DB.prepare(
@@ -708,6 +710,22 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
       PAGES[pathAt(given.at)] !== undefined &&
       live(pathAt(given.at)),
   )
+  /**
+   * The live pages whose rendering a share reaching the caller carries: a
+   * page shared itself, or every page in a shared folder.
+   */
+  const renderedThrough = (path: string): boolean =>
+    planted.some((given) => {
+      const on = pathAt(given.at)
+      if (!matches(given.kind) || !live(on)) return false
+      return Object.keys(PAGES).some(
+        (page) =>
+          live(page) &&
+          page !== path &&
+          (page === on || (!isFilePath(on) && isUnder(page, on))) &&
+          PAGES[page]!.needs.includes(path),
+      )
+    })
   const inTargets = (path: string, page: string) =>
     PAGES[page]!.targets.some((t) =>
       t.kind === 'shared' ? path === t.path : isUnder(path, t.path),
@@ -719,18 +737,17 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
    */
   const throughPages = (path: string): boolean =>
     inScope(path) &&
-    pageShares.some((given) => {
-      const page = pathAt(given.at)
-      if (page === path) return false
-      if (origin(path) === 'authored') {
-        return PAGES[page]!.needs.includes(path)
-      }
-      return (
-        given.role !== 'respond' &&
-        given.kind !== 'anyone' &&
-        inTargets(path, page)
-      )
-    })
+    ((origin(path) === 'authored' && renderedThrough(path)) ||
+      pageShares.some((given) => {
+        const page = pathAt(given.at)
+        if (page === path) return false
+        if (origin(path) === 'authored') return false
+        return (
+          given.role !== 'respond' &&
+          given.kind !== 'anyone' &&
+          inTargets(path, page)
+        )
+      }))
   /**
    * A shared file nobody owns that a form in the caller's private respond
    * reach writes to: a page shared to respond on, or a page in a folder

@@ -93,6 +93,17 @@ export interface PageNeed {
   readonly need: string
   /** render: a file or folder; folder or json: where a form writes. */
   readonly kind: 'render' | 'folder' | 'json'
+  /** The HTML file naming it: the page, or a layout composed into it. */
+  readonly host: string
+}
+
+/** One row of `page_needs`: what the page carries, and what was held there. */
+export interface PageNeedRow {
+  readonly page: string
+  readonly need: string
+  readonly kind: PageNeed['kind']
+  readonly reads: boolean
+  readonly responds: boolean
 }
 
 const parentOf = (path: string): string =>
@@ -115,7 +126,10 @@ export const pageNeedsOf = (
   const byPath = new Map(files.map((f) => [f.path, f]))
   const out = new Map<string, PageNeed>()
   const add = (need: PageNeed) =>
-    out.set(`${need.page}\u0000${need.need}\u0000${need.kind}`, need)
+    out.set(
+      `${need.page}\u0000${need.need}\u0000${need.kind}\u0000${need.host}`,
+      need,
+    )
   // A folder is the folder and the page it shows, never the rest of it.
   const folderNeeds = (folder: string): readonly string[] =>
     kindAt(joinPath(folder, 'index.html')) === 'page'
@@ -151,19 +165,26 @@ export const pageNeedsOf = (
     // composed; what its inline styles and scripts name is read from the
     // page's folder.
     const rendered = [
-      ...renderPathsOf(page.analysis, parentOf(page.path)),
-      ...chain.flatMap((layout) => [
-        ...renderPathsOf(layout.analysis, parentOf(layout.path)).filter(
-          (r) => !r.inline,
-        ),
-        ...renderPathsOf(layout.analysis, parentOf(page.path)).filter(
-          (r) => r.inline,
-        ),
-      ]),
+      ...renderPathsOf(page.analysis, parentOf(page.path)).map((r) => ({
+        ...r,
+        host: page.path,
+      })),
+      ...chain.flatMap((layout) =>
+        [
+          ...renderPathsOf(layout.analysis, parentOf(layout.path)).filter(
+            (r) => !r.inline,
+          ),
+          ...renderPathsOf(layout.analysis, parentOf(page.path)).filter(
+            (r) => r.inline,
+          ),
+        ].map((r) => ({ ...r, host: layout.path })),
+      ),
     ]
     for (const r of rendered) {
       for (const need of resolve(r.path)) {
-        if (need !== page.path) add({ page: page.path, need, kind: 'render' })
+        if (need !== page.path) {
+          add({ page: page.path, need, kind: 'render', host: r.host })
+        }
       }
     }
     for (const host of [page, ...chain]) {
@@ -175,6 +196,7 @@ export const pageNeedsOf = (
           page: page.path,
           need: target.target,
           kind: target.kind === 'folder' ? 'folder' : 'json',
+          host: host.path,
         })
       }
     }

@@ -29,9 +29,17 @@ import {
   type FieldType,
   type UploadValue,
 } from '@dossier/html'
+import { sql } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
 
-import { Access, type Granted } from './access.ts'
+import { db } from '../db/client.ts'
+import {
+  Access,
+  creatorHolds,
+  creatorJoins,
+  underColumn,
+  type Granted,
+} from './access.ts'
 import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
@@ -576,6 +584,60 @@ export const DataLive: Layer.Layer<
       })
 
     /**
+     * Whether a form of a page may write at a path for someone who answers
+     * through that page: they respond at the closest node there themselves,
+     * or hold the page by their place in the workspace, or hold it by a
+     * share whose creator responds there now, on a page whose last push
+     * recorded that its author responded there then.
+     */
+    const formReaches = (
+      tree: TreeRow,
+      page: NodeRow,
+      granted: Granted<'respond'>,
+      path: string,
+    ) =>
+      Effect.gen(function* () {
+        const near = yield* store.nearest(tree.id, path)
+        if (near === null) return false
+        if (yield* access.require('respond', near).pipe(Effect.isSuccess)) {
+          return true
+        }
+        if (
+          granted.basis.some((b) => b.kind === 'admin' || b.kind === 'member')
+        ) {
+          return true
+        }
+        const shareIds = granted.basis.flatMap((b) =>
+          b.kind === 'share' ? [b.shareId] : [],
+        )
+        if (shareIds.length === 0) return false
+        const rows = yield* query(() =>
+          db({ DB }).all<{ one: number }>(
+            sql`select 1 as one from shares s
+              join "user" cu on cu.id = s.created_by
+              join page_needs pn on pn.tree_id = s.tree_id
+                and pn.page_path = ${page.path} and pn.responds = 1
+                and ((pn.kind = 'folder' and ${underColumn(sql`${path}`, sql`pn.need_path`)})
+                  or (pn.kind = 'json' and (pn.need_path = ${path}
+                    or ${underColumn(sql`${path}`, sql`substr(pn.need_path, 1, length(pn.need_path) - 5) || '.files'`)})))
+              join nodes x on x.id = ${near.id}
+              ${creatorJoins(tree.workspaceId, 'x', 'respond')}
+              where s.id in (select value from json_each(${JSON.stringify(shareIds)}))
+                and ${creatorHolds}
+              limit 1`,
+          ),
+        )
+        return rows.length > 0
+      })
+
+    const formOutOfReach = () =>
+      dossierError(
+        'forbidden',
+        'This form sends answers somewhere its page cannot carry them, so it cannot be sent.',
+        'Ask whoever made the page to point the form at a place they answer in.',
+      )
+
+    /**
      * The checks every send and upload makes: the page at the sequence the
      * person saw, respond on it, the form in its composition then and now,
      * and the form open in both.
@@ -617,6 +679,16 @@ export const DataLive: Layer.Layer<
           i.form,
         )
         if (currentRow === null) return yield* Effect.fail(formChanged())
+        if (
+          !(yield* formReaches(
+            tree,
+            seen.node,
+            page,
+            bare(currentRow.targetPath),
+          ))
+        ) {
+          return yield* Effect.fail(formOutOfReach())
+        }
         const at = yield* Clock.currentTimeMillis
         if (isClosed(seenRow, at))
           return yield* Effect.fail(closedError(seenRow))
@@ -1768,6 +1840,11 @@ export const DataLive: Layer.Layer<
                 return yield* Effect.fail(onFolder.left)
               }
               under = yield* access.require('respond', page.node)
+              // The page carries the write only where its push and its
+              // share's creator both answer there.
+              if (!(yield* formReaches(tree, page.node, under, path))) {
+                return yield* Effect.fail(onFolder.left)
+              }
               pageForms = held
             }
           }
