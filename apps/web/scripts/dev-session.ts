@@ -4,7 +4,10 @@
 // is never part of the Worker's build.
 //
 //   bun apps/web/scripts/dev-session.ts --email someone@example.com
-//     [--name "Someone"] [--super-admin] [--remote]
+//     [--name "Someone"] [--image https://lh3.googleusercontent.com/…]
+//     [--super-admin] [--remote]
+//
+// --name and --image also replace those of a person already there.
 
 import { execFileSync } from 'node:child_process'
 import { randomBytes, createHash } from 'node:crypto'
@@ -23,6 +26,7 @@ const { values } = parseArgs({
   options: {
     email: { type: 'string' },
     name: { type: 'string' },
+    image: { type: 'string' },
     'super-admin': { type: 'boolean', default: false },
     remote: { type: 'boolean', default: false },
   },
@@ -39,6 +43,8 @@ if (!/^[^\s@'"]+@[^\s@'"]+\.[^\s@'"]+$/.test(email)) {
   fail('give --email with a plain address')
 }
 const name = (values.name ?? email.split('@')[0] ?? email).replaceAll("'", '')
+const image = values.image ?? null
+if (image !== null && !URL.canParse(image)) fail('give --image as a URL')
 
 /** The Better Auth secret of the chosen target, from its gitignored file. */
 const readSecret = (file: string): string => {
@@ -82,10 +88,15 @@ const subject = `dev-session-${createHash('sha256').update(email).digest('hex').
 const accountRowId = alphanumeric(32)
 const googleAccount = `(select id from account where provider_id = 'google' and account_id = ${quote(subject)})`
 
+const replaced = [
+  ...(values.name === undefined ? [] : [', name = excluded.name']),
+  ...(image === null ? [] : [', image = excluded.image']),
+].join('')
+
 const statements = [
-  `insert into "user" (id, name, email, email_verified, created_at, updated_at)
-     values (${quote(userId)}, ${quote(name)}, ${quote(email)}, 1, ${now}, ${now})
-     on conflict(email) do update set updated_at = excluded.updated_at`,
+  `insert into "user" (id, name, email, image, email_verified, created_at, updated_at)
+     values (${quote(userId)}, ${quote(name)}, ${quote(email)}, ${image === null ? 'null' : quote(image)}, 1, ${now}, ${now})
+     on conflict(email) do update set updated_at = excluded.updated_at${replaced}`,
   `insert into people (user_id, email_authority, first_sign_in_at, last_sign_in_at)
      values (${person}, 'none', ${now}, ${now})
      on conflict(user_id) do update set last_sign_in_at = excluded.last_sign_in_at`,

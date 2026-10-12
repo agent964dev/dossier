@@ -16,6 +16,7 @@ import {
 import { useState, type FormEvent, type ReactNode } from 'react'
 
 import { AppHeader } from '../../components/app-header'
+import { Avatar } from '../../components/avatar'
 import { DeploymentSettings } from '../../components/deployment-settings'
 import { SectionLabel } from '../../components/section-label'
 import { Button } from '../../components/ui/button'
@@ -101,9 +102,17 @@ function AccountSettings() {
           <h1 className="font-clash text-[1.875rem] font-semibold tracking-[-0.03em] text-neutral-50">
             Account
           </h1>
-          <p className="flex items-center gap-2 text-[0.9375rem] text-neutral-300">
-            <User aria-hidden className="size-4 text-neutral-500" />
+          <p className="flex items-center gap-2.5 text-[0.9375rem] text-neutral-300">
+            <Avatar person={view} className="size-8 rounded-lg text-sm" />
             <span className="min-w-0 break-words">
+              {view.name.trim() === '' ? null : (
+                <>
+                  <span className="font-medium text-neutral-50">
+                    {view.name.trim()}
+                  </span>{' '}
+                  ·{' '}
+                </>
+              )}
               <span className="break-all">{view.email}</span> · signed in with
               Google
             </span>

@@ -24,6 +24,8 @@ export interface WorkspaceRowView {
 export interface AccountView {
   readonly email: string
   readonly name: string
+  /** The address of their Google profile picture, or null. */
+  readonly image: string | null
   readonly keys: readonly AgentKeyView[]
   readonly workspaces: readonly WorkspaceRowView[]
   /** Whether "Create workspace" is offered. */
@@ -54,6 +56,7 @@ export const accountView = createServerFn({ method: 'GET' }).handler(() =>
       return {
         email: person?.email ?? '',
         name: person?.name ?? '',
+        image: person?.image ?? null,
         keys,
         workspaces: memberships.map((m) => ({
           name: m.workspace.name,

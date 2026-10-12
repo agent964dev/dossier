@@ -3,6 +3,7 @@ import { Search } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { Route as Root } from '../routes/__root'
+import { Avatar, shownName, type SignedInPerson } from './avatar'
 
 /** The deployment's name and logo, as the Look sets them. */
 export interface HeaderBrand {
@@ -28,8 +29,14 @@ export function AppHeader({
   label?: string
   brand?: HeaderBrand
 }) {
-  const saved = Root.useLoaderData() as HeaderBrand | undefined
+  const saved = Root.useLoaderData() as
+    | (HeaderBrand & { readonly signedIn: SignedInPerson | null })
+    | undefined
   const { name, logo } = brand ?? saved ?? { name: 'Dossier', logo: null }
+  // The screen says whether the chip shows; the root knows the person's name
+  // and photo, used only while it is the same person.
+  const signedIn = saved?.signedIn ?? null
+  const person = signedIn?.email === email ? signedIn : null
   return (
     <header className="px-3 pt-3 sm:px-6 sm:pt-5">
       <div className="chrome-glass mx-auto flex h-12 max-w-3xl items-center justify-between gap-3 rounded-xl px-3.5">
@@ -71,7 +78,10 @@ export function AppHeader({
             >
               <Search aria-hidden className="size-4" />
             </Link>
-            <Account email={email} narrow={beside !== undefined} />
+            <Account
+              person={person ?? { email, name: '', image: null }}
+              narrow={beside !== undefined}
+            />
           </div>
         )}
       </div>
@@ -80,28 +90,31 @@ export function AppHeader({
 }
 
 /**
- * The account chip: the person's initial and email, to account settings.
- * Beside another control, phones show the initial alone.
+ * The account chip, to account settings: the person's Google photo and name,
+ * else the initial and the email. Beside another control, phones show the
+ * photo or initial alone.
  */
-function Account({ email, narrow }: { email: string; narrow: boolean }) {
+function Account({
+  person,
+  narrow,
+}: {
+  person: SignedInPerson
+  narrow: boolean
+}) {
+  const named = person.name.trim() !== ''
   return (
     // Named by what it shows, so people who speak to their device can say
-    // it: the email, after words only screen readers read.
+    // it: the name or email, after words only screen readers read.
     <Link
       to="/_/settings"
       className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-900/60 py-1 pr-2.5 pl-1 text-neutral-200 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50 ${narrow ? 'max-sm:pr-1' : ''}`}
     >
-      <span
-        aria-hidden
-        className="flex size-6 shrink-0 items-center justify-center rounded-md bg-neutral-700 text-xs font-semibold uppercase text-neutral-100"
-      >
-        {email.charAt(0)}
-      </span>
+      <Avatar person={person} className="size-6 rounded-md text-xs" />
       <span className="sr-only">Account settings, </span>
       <span
-        className={`truncate font-mono text-xs ${narrow ? 'max-sm:sr-only' : ''}`}
+        className={`truncate ${named ? 'text-[0.8125rem] font-medium' : 'font-mono text-xs'} ${narrow ? 'max-sm:sr-only' : ''}`}
       >
-        {email}
+        {shownName(person)}
       </span>
     </Link>
   )

@@ -6,14 +6,25 @@ import {
   createRootRoute,
 } from '@tanstack/react-router'
 
+import type { SignedInPerson } from '../components/avatar'
 import { PlainError } from '../components/plain-error'
 import { currentLookVersion, type CurrentLook } from '../server/look'
+import { signedInPerson } from '../server/signed-in'
 import '../styles/app.css'
 
 export const Route = createRootRoute({
   // The Look changes only when a super admin saves it, and the Look screen
-  // loads a new document after a save, so a loaded document keeps this.
-  loader: (): Promise<CurrentLook> => currentLookVersion(),
+  // loads a new document after a save, so a loaded document keeps this. So
+  // does who is signed in: signing in or out loads a new document.
+  loader: async (): Promise<
+    CurrentLook & { readonly signedIn: SignedInPerson | null }
+  > => {
+    const [look, signedIn] = await Promise.all([
+      currentLookVersion(),
+      signedInPerson(),
+    ])
+    return { ...look, signedIn }
+  },
   staleTime: Number.POSITIVE_INFINITY,
   head: ({ loaderData }) => ({
     meta: [
