@@ -3279,7 +3279,8 @@ export const TreeStoreLive: Layer.Layer<
                   // at most 100.
                   sql: `insert into search_docs (node_id, tree_id, version_id,
                           companion_node_id, companion_version_id, title, path,
-                          search_title, search_path, search_body, search_companion)
+                          search_title, search_path, search_body, search_companion,
+                          fallback_node_id, fallback_version_id, search_fallback)
                         select n.id, n.tree_id, v.id, cv.node_id, cv.id,
                           coalesce(json_extract(pa.json, '$.title'),
                             json_extract(j.value, '$.fallbackTitle')),
@@ -3288,7 +3289,9 @@ export const TreeStoreLive: Layer.Layer<
                             json_extract(j.value, '$.fallbackTitleSearch')),
                           json_extract(j.value, '$.pathSearch'),
                           json_extract(pa.json, '$.body'),
-                          coalesce(json_extract(ca.json, '$.body'), '')
+                          coalesce(json_extract(ca.json, '$.body'), ''),
+                          fv.node_id, fv.id,
+                          coalesce(json_extract(fa.json, '$.body'), '')
                         from json_each(?2) j
                         join nodes n on n.tree_id = ?1
                           and n.path = json_extract(j.value, '$.path')
@@ -3306,6 +3309,14 @@ export const TreeStoreLive: Layer.Layer<
                           and cv.state = 'live'
                         left join analyses ca on ca.sha256 = cv.blob_sha256
                           and ca.analyzer = 'search-text' and ca.version = ?3
+                        left join nodes fn on fn.tree_id = ?1
+                          and fn.path = json_extract(j.value, '$.fallback')
+                          and fn.deleted_at is null and fn.origin = 'authored'
+                          and fn.kind = 'file'
+                        left join node_versions fv on fv.id = fn.current_version_id
+                          and fv.state = 'live'
+                        left join analyses fa on fa.sha256 = fv.blob_sha256
+                          and fa.analyzer = 'search-text' and fa.version = ?3
                         where coalesce(json_extract(j.value, '$.drop'), 0) = 0`,
                   binds: [t, chunk, SEARCH_TEXT_VERSION],
                 },

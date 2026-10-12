@@ -159,6 +159,7 @@ describe('search entries', () => {
         fallbackTitle: 'plan.html',
         fallbackTitleSearch: 'plan.html',
         companion: 'plan.md',
+        fallback: null,
       },
     ])
     expect(
@@ -167,6 +168,24 @@ describe('search entries', () => {
       expect.objectContaining({
         path: 'glossary.html',
         companion: 'glossary.json',
+      }),
+    ])
+  })
+
+  it('keeps both companions when the page names one and has a same-name Markdown file too', () => {
+    const both: typeof kinds = { ...kinds, 'glossary.md': 'file' }
+    expect(
+      searchEntries({
+        changed: ['glossary.md'],
+        removed: [],
+        pages,
+        kindAt: (path) => both[path] ?? null,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        path: 'glossary.html',
+        companion: 'glossary.json',
+        fallback: 'glossary.md',
       }),
     ])
   })

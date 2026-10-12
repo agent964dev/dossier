@@ -15,6 +15,11 @@ export type SearchEntry =
       readonly fallbackTitleSearch: string
       /** The companion indexed with the page, if any. */
       readonly companion: string | null
+      /**
+       * The same-name `.md` when the page's alternate link names another
+       * companion: what a caller who cannot read that one is served.
+       */
+      readonly fallback: string | null
     }
   | { readonly path: string; readonly drop: true }
 
@@ -72,10 +77,13 @@ export const searchEntries = (i: {
     if (!touched.has(page.path) && !candidates.some((c) => touched.has(c))) {
       continue
     }
-    const companion =
-      candidates.find(
-        (path) => i.kindAt(path) === 'file' && !hasKitSegment(path),
-      ) ?? null
+    // Both candidates that exist: the agent version takes the first one
+    // the caller reads, so search keeps both and reads them per caller.
+    const found = candidates.filter(
+      (path) => i.kindAt(path) === 'file' && !hasKitSegment(path),
+    )
+    const companion = found[0] ?? null
+    const fallback = found[1] ?? null
     const name = page.path.slice(page.path.lastIndexOf('/') + 1)
     out.push({
       path: page.path,
@@ -83,6 +91,7 @@ export const searchEntries = (i: {
       fallbackTitle: name,
       fallbackTitleSearch: normalizeSearchText(name),
       companion,
+      fallback,
     })
   }
   const dropped = new Set<string>()

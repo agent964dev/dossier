@@ -1093,6 +1093,38 @@ export const makeChanges = (deps: ChangesDeps) => {
         const moved = live
           .filter((n) => n.kind === 'file' && isUnder(n.path, node.path))
           .map((n) => n.path)
+        // Kinds as the new paths make them: a file renamed to `.html` is a
+        // page now, and a page renamed to `.txt` is not.
+        const searchKinds = new Map(kindsAfter)
+        for (const n of live) {
+          const after = newOf(n.path)
+          if (after !== n.path) {
+            searchKinds.set(after, kindOf({ ...n, path: after }))
+          }
+        }
+        // Files that a rename makes pages: their analyses, as HTML.
+        const becoming: { path: string; alternate: string | null }[] = []
+        for (const n of live) {
+          const after = newOf(n.path)
+          if (
+            n.kind !== 'file' ||
+            n.origin !== 'authored' ||
+            n.path.endsWith('.html') ||
+            !after.endsWith('.html')
+          ) {
+            continue
+          }
+          const row = yield* query(() =>
+            DB.prepare(
+              'select blob_sha256 as sha from node_versions where id = ?',
+            )
+              .bind(n.currentVersionId)
+              .first<{ sha: Sha256 | null }>(),
+          )
+          const analysis =
+            row?.sha == null ? null : yield* store.analysis(row.sha)
+          becoming.push({ path: after, alternate: analysis?.alternate ?? null })
+        }
         const search = yield* indexing({
           treeId: tree.id,
           changed: [
@@ -1100,11 +1132,14 @@ export const makeChanges = (deps: ChangesDeps) => {
             ...rewrites.map((r) => newOf(r.file.node.path)),
           ],
           removed: moved,
-          pages: files.map((f) => ({
-            path: f.path,
-            alternate: f.analysis.alternate,
-          })),
-          kindAt: (p) => kindsAfter.get(p) ?? null,
+          pages: [
+            ...files.map((f) => ({
+              path: f.path,
+              alternate: f.analysis.alternate,
+            })),
+            ...becoming,
+          ],
+          kindAt: (p) => searchKinds.get(p) ?? null,
           shaAt: new Map(
             rewrites.map((r) => [
               newOf(r.file.node.path),

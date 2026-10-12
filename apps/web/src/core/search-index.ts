@@ -116,6 +116,9 @@ export const indexEntries = (i: {
       if (entry.companion !== null) {
         wanted.push({ path: entry.companion, kind: 'text' })
       }
+      if (entry.fallback !== null) {
+        wanted.push({ path: entry.fallback, kind: 'text' })
+      }
     }
     const known = i.shaAt ?? new Map<string, Sha256 | null>()
     const was = i.wasAt ?? ((path: string) => path)

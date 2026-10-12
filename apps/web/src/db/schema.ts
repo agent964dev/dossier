@@ -1163,6 +1163,13 @@ export const searchDocs = sqliteTable(
     searchBody: text('search_body').notNull(),
     /** The companion's text, '' when there is none. */
     searchCompanion: text('search_companion').notNull(),
+    /**
+     * The same-name `.md` when the page also names another companion: the
+     * agent version a caller who cannot read the named one gets instead.
+     */
+    fallbackNodeId: text('fallback_node_id'),
+    fallbackVersionId: text('fallback_version_id'),
+    searchFallback: text('search_fallback').notNull().default(''),
   },
   (t) => [
     index('search_docs_tree_idx').on(t.treeId),

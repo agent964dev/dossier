@@ -131,12 +131,19 @@ interface TreeRowOf {
 /** A page a statement found, with how it was found. */
 interface Found {
   readonly node: NodeRow
+  /** The path and version the index row was read at. */
+  readonly path: string
+  readonly version: string
   readonly title: string
-  readonly rank: number
+  /** Where the words matched: see tierOf. */
+  readonly tier: number
   readonly snippet: string | null
-  /** Found through the page's companion: its read is checked too. */
-  readonly companion: NodeId | null
+  /** Found with this companion's words: its read is checked too. */
+  readonly companion: { readonly id: NodeId; readonly version: string } | null
 }
+
+/** Code-point order: the same for every caller and locale. */
+const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
 const dialect = new SQLiteSyncDialect()
 const compiled = (query: SQL) => dialect.sqlToQuery(query)
@@ -209,56 +216,94 @@ export const SearchLive: Layer.Layer<
             and nodes.kind = 'file' and nodes.underscore_from is null
             and substr(nodes.path, -5) = '.html'`
 
+    /**
+     * Where the words matched, from the page's own title, path and text
+     * alone: 0 all in the title, 1 in the title and path, 2 in the page,
+     * 3 only with its companion. Results are ordered by it and then by
+     * place, never by statistics of other documents, so nothing the caller
+     * cannot read moves what they see.
+     */
+    const tierOf = (words: readonly string[]) => {
+      const all = (column: SQL) =>
+        sql.join(
+          words.map((word) => sql`instr(lower(${column}), ${word}) > 0`),
+          sql` and `,
+        )
+      return sql`case when ${all(sql`sdoc.search_title`)} then 0
+          when ${all(sql`sdoc.search_title || ' ' || sdoc.search_path`)} then 1
+          when ${all(sql`sdoc.search_title || ' ' || sdoc.search_body`)} then 2
+          else 3 end`
+    }
+
+    /** What every page statement selects: the row as indexed, and where. */
+    const found = (words: readonly string[], extra: SQL, own = false) =>
+      sql`nodes.*, sdoc.title as found_title, sdoc.path as found_path,
+            sdoc.version_id as found_version,
+            snippet(search_pages, 2, ${MARK_OPEN}, ${MARK_CLOSE}, '…', 16) as found_snippet,
+            ${own ? sql`min(${tierOf(words)}, 2)` : tierOf(words)} as found_tier${extra}`
+
+    const fromIndex = sql`from search_pages
+          join search_docs sdoc on sdoc.id = search_pages.rowid
+          join nodes on nodes.id = sdoc.node_id
+          join trees stree on stree.id = sdoc.tree_id and stree.deleted_at is null
+          join workspaces sws on sws.id = stree.workspace_id
+            and sws.deleted_at is null and sws.suspended_at is null`
+
+    /** The companion `column` names is live as indexed and read by the rule. */
+    const readsCompanion = (column: 'companion' | 'fallback', where: SQL) =>
+      sql`exists (select 1 from nodes
+              where nodes.id = sdoc.${sql.raw(`${column}_node_id`)}
+                and nodes.deleted_at is null
+                and nodes.current_version_id = sdoc.${sql.raw(`${column}_version_id`)}
+                and (${where}))`
+
     /** Pages whose own title, path or text holds every term. */
     const pagesStatement = (
       treeId: TreeId,
       where: SQL,
       match: string,
+      words: readonly string[],
       limit: number,
     ) =>
-      sql`select nodes.*, sdoc.title as found_title,
-            snippet(search_pages, 2, ${MARK_OPEN}, ${MARK_CLOSE}, '…', 16) as found_snippet,
-            bm25(search_pages, 10.0, 5.0, 1.0, 0.0) as found_rank
-          from search_pages
-          join search_docs sdoc on sdoc.id = search_pages.rowid
-          join nodes on nodes.id = sdoc.node_id
-          join trees stree on stree.id = sdoc.tree_id and stree.deleted_at is null
-          join workspaces sws on sws.id = stree.workspace_id
-            and sws.deleted_at is null and sws.suspended_at is null
+      sql`select ${found(words, sql``, true)}
+          ${fromIndex}
           where search_pages match ${match} and sdoc.tree_id = ${treeId}
             and ${indexedPage}
             and (${where})
-          order by found_rank, nodes.path limit ${limit}`
+          order by found_tier, nodes.path limit ${limit}`
 
     /**
-     * Pages where every term is in the page or its companion, for a
-     * caller who reads the companion as it was indexed.
+     * Pages where every term is in the page or the companion its agent
+     * version gives this caller: the named companion when they read it,
+     * else the same-name `.md` when they read that.
      */
     const companionStatement = (
+      column: 'companion' | 'fallback',
       treeId: TreeId,
       where: SQL,
       match: string,
+      words: readonly string[],
       limit: number,
     ) =>
-      sql`select nodes.*, sdoc.title as found_title,
-            snippet(search_pages, -1, ${MARK_OPEN}, ${MARK_CLOSE}, '…', 16) as found_snippet,
-            bm25(search_pages, 10.0, 5.0, 1.0, 1.0) as found_rank,
-            sdoc.companion_node_id as found_companion
-          from search_pages
-          join search_docs sdoc on sdoc.id = search_pages.rowid
-          join nodes on nodes.id = sdoc.node_id
-          join trees stree on stree.id = sdoc.tree_id and stree.deleted_at is null
-          join workspaces sws on sws.id = stree.workspace_id
-            and sws.deleted_at is null and sws.suspended_at is null
+      sql`select ${found(
+        words,
+        sql`, snippet(search_pages, ${column === 'companion' ? 3 : 4}, ${MARK_OPEN}, ${MARK_CLOSE}, '…', 16) as found_companion_snippet,
+            sdoc.${sql.raw(`${column}_node_id`)} as found_companion,
+            sdoc.${sql.raw(`${column}_version_id`)} as found_companion_version`,
+      )}
+          ${fromIndex}
           where search_pages match ${match} and sdoc.tree_id = ${treeId}
             and ${indexedPage}
             and (${where})
-            and sdoc.companion_node_id is not null
-            and exists (select 1 from nodes
-              where nodes.id = sdoc.companion_node_id and nodes.deleted_at is null
-                and nodes.current_version_id = sdoc.companion_version_id
-                and (${where}))
-          order by found_rank, nodes.path limit ${limit}`
+            and sdoc.${sql.raw(`${column}_node_id`)} is not null
+            and ${readsCompanion(column, where)}
+            ${
+              column === 'fallback'
+                ? sql`and (sdoc.companion_node_id is null
+                    or not ${readsCompanion('companion', where)})`
+                : sql``
+            }
+          order by found_tier, nodes.path limit ${limit}`
 
     /** Folders and attachments whose name starts with the query. */
     const namesStatement = (
@@ -285,6 +330,30 @@ export const SearchLive: Layer.Layer<
             and (${where})
           order by nodes.kind = 'file', nodes.name collate nocase, nodes.path
           limit ${limit}`
+    }
+
+    /** Statements in batches of BATCH, a few batches at a time. */
+    const batched = (
+      queries: readonly { readonly sql: string; readonly params: unknown[] }[],
+    ) => {
+      const chunks: (typeof queries)[] = []
+      for (let at = 0; at < queries.length; at += BATCH) {
+        chunks.push(queries.slice(at, at + BATCH))
+      }
+      return Effect.map(
+        Effect.forEach(
+          chunks,
+          (chunk) =>
+            read(() =>
+              DB.batch(chunk.map((q) => DB.prepare(q.sql).bind(...q.params))),
+            ),
+          { concurrency: 4 },
+        ),
+        (results) =>
+          results
+            .flat()
+            .map((r) => (r.results ?? []) as Record<string, unknown>[]),
+      )
     }
 
     const query: SearchService['query'] = (i) =>
@@ -352,17 +421,19 @@ export const SearchLive: Layer.Layer<
           { concurrency: 8 },
         )
         const content = i.mode === 'content'
+        // The words as the tier compares them with the stored text.
+        const lowered = words
+          .filter((word) => /[\p{L}\p{N}]/u.test(word))
+          .map((word) => word.toLowerCase())
         const pageMatch = matchOf(
           content
             ? ['search_title', 'search_body']
             : ['search_title', 'search_path'],
           terms,
         )
-        const companionMatch = matchOf(
-          ['search_title', 'search_body', 'search_companion'],
-          terms,
-        )
-        type Kind = 'pages' | 'companion' | 'names'
+        const withMatch = (column: 'search_companion' | 'search_fallback') =>
+          matchOf(['search_title', 'search_body', column], terms)
+        type Kind = 'pages' | 'companion' | 'fallback' | 'names'
         const statements: {
           readonly kind: Kind
           readonly tree: TreeRowOf
@@ -372,16 +443,27 @@ export const SearchLive: Layer.Layer<
           statements.push({
             kind: 'pages',
             tree,
-            query: compiled(pagesStatement(tree.id, where, pageMatch, limit)),
+            query: compiled(
+              pagesStatement(tree.id, where, pageMatch, lowered, limit),
+            ),
           })
           if (content) {
-            statements.push({
-              kind: 'companion',
-              tree,
-              query: compiled(
-                companionStatement(tree.id, where, companionMatch, limit),
-              ),
-            })
+            for (const column of ['companion', 'fallback'] as const) {
+              statements.push({
+                kind: column,
+                tree,
+                query: compiled(
+                  companionStatement(
+                    column,
+                    tree.id,
+                    where,
+                    withMatch(`search_${column}`),
+                    lowered,
+                    limit,
+                  ),
+                ),
+              })
+            }
           } else {
             statements.push({
               kind: 'names',
@@ -390,106 +472,160 @@ export const SearchLive: Layer.Layer<
             })
           }
         }
-        const chunks: (typeof statements)[] = []
-        for (let at = 0; at < statements.length; at += BATCH) {
-          chunks.push(statements.slice(at, at + BATCH))
-        }
-        const answers = (yield* Effect.forEach(
-          chunks,
-          (chunk) =>
-            Effect.map(
-              read(() =>
-                DB.batch(
-                  chunk.map((s) =>
-                    DB.prepare(s.query.sql).bind(...s.query.params),
-                  ),
-                ),
-              ),
-              (results) =>
-                results.map(
-                  (result) =>
-                    (result.results ?? []) as Record<string, unknown>[],
-                ),
-            ),
-          { concurrency: 4 },
-        )).flat()
+        const answers = yield* batched(statements.map((s) => s.query))
 
-        // Pages by rank, each once at its better rank; then folders, then
-        // attachments, by name.
+        // Every way each page was found; folders and attachments by name.
         const pages = new Map<string, { tree: TreeRowOf; found: Found[] }>()
-        const folders: { tree: TreeRowOf; node: NodeRow }[] = []
-        const files: { tree: TreeRowOf; node: NodeRow }[] = []
+        const names: {
+          tree: TreeRowOf
+          node: NodeRow
+          kind: 'folder' | 'attachment'
+        }[] = []
         statements.forEach((statement, n) => {
           for (const row of answers[n] ?? []) {
             const node = nodeOfRaw(row)
             if (statement.kind === 'names') {
-              ;(node.kind === 'folder' ? folders : files).push({
+              names.push({
                 tree: statement.tree,
                 node,
+                kind: node.kind === 'folder' ? 'folder' : 'attachment',
               })
               continue
             }
-            const found: Found = {
+            const own =
+              typeof row.found_snippet === 'string' ? row.found_snippet : null
+            const other =
+              typeof row.found_companion_snippet === 'string'
+                ? row.found_companion_snippet
+                : null
+            const entry: Found = {
               node,
+              path: String(row.found_path),
+              version: String(row.found_version),
               title: String(row.found_title ?? node.name),
-              rank: Number(row.found_rank ?? 0),
+              tier: Number(row.found_tier ?? 3),
+              // The page's own words when they hold a match, else the
+              // companion's, which this caller reads.
               snippet:
-                typeof row.found_snippet === 'string'
-                  ? row.found_snippet
-                  : null,
+                own !== null && own.includes(MARK_OPEN) ? own : (other ?? own),
               companion:
-                statement.kind === 'companion'
-                  ? (row.found_companion as NodeId)
-                  : null,
+                statement.kind === 'pages'
+                  ? null
+                  : {
+                      id: row.found_companion as NodeId,
+                      version: String(row.found_companion_version),
+                    },
             }
             const kept = pages.get(node.id)
             if (kept === undefined) {
-              pages.set(node.id, { tree: statement.tree, found: [found] })
-            } else kept.found.push(found)
+              pages.set(node.id, { tree: statement.tree, found: [entry] })
+            } else kept.found.push(entry)
           }
         })
-        const byName = (a: { node: NodeRow }, b: { node: NodeRow }): number =>
-          a.node.name.localeCompare(b.node.name, undefined, {
-            sensitivity: 'base',
-          }) || a.node.path.localeCompare(b.node.path)
-        const ranked = [...pages.values()]
-          .map((page) => ({
-            ...page,
-            found: page.found.sort((a, b) => a.rank - b.rank),
-          }))
-          .sort(
-            (a, b) =>
-              a.found[0]!.rank - b.found[0]!.rank ||
-              a.found[0]!.node.path.localeCompare(b.found[0]!.node.path),
+
+        // Each candidate checked again now, against the rule as it stands:
+        // still live at the path and version found, the companion too, or
+        // it is dropped before anything is counted or paged.
+        const byTree = new Map<TreeId, { tree: TreeRowOf; ids: Set<string> }>()
+        const want = (tree: TreeRowOf, id: string) => {
+          const entry = byTree.get(tree.id) ?? { tree, ids: new Set() }
+          entry.ids.add(id)
+          byTree.set(tree.id, entry)
+        }
+        for (const { tree, found: list } of pages.values()) {
+          for (const f of list) {
+            want(tree, f.node.id)
+            if (f.companion !== null) want(tree, f.companion.id)
+          }
+        }
+        for (const { tree, node } of names) want(tree, node.id)
+        const checks = yield* Effect.forEach(
+          [...byTree.values()],
+          ({ tree, ids }) =>
+            Effect.map(access.readable(tree.id), (r) =>
+              compiled(sql`select nodes.* from nodes
+                where nodes.id in (select value from json_each(${JSON.stringify([...ids])}))
+                  and nodes.tree_id = ${tree.id} and nodes.deleted_at is null
+                  and (${r.where})`),
+            ),
+          { concurrency: 8 },
+        )
+        const fresh = new Map<string, NodeRow>()
+        for (const rows of yield* batched(checks)) {
+          for (const row of rows) {
+            const node = nodeOfRaw(row)
+            fresh.set(node.id, node)
+          }
+        }
+        const holds = (f: Found) => {
+          const page = fresh.get(f.node.id)
+          if (
+            page === undefined ||
+            page.path !== f.path ||
+            page.currentVersionId !== f.version
+          ) {
+            return false
+          }
+          if (f.companion === null) return true
+          return (
+            fresh.get(f.companion.id)?.currentVersionId === f.companion.version
           )
+        }
+
         type Candidate =
-          | { kind: 'page'; tree: TreeRowOf; found: Found[] }
+          | {
+              kind: 'page'
+              tree: TreeRowOf
+              node: NodeRow
+              found: Found
+            }
           | { kind: 'folder' | 'attachment'; tree: TreeRowOf; node: NodeRow }
+        const place = (c: { tree: TreeRowOf; node: NodeRow }) =>
+          `${c.tree.workspace}/${c.tree.name}/${c.node.path}`
+        const pageCandidates: Candidate[] = []
+        for (const { tree, found: list } of pages.values()) {
+          const best = list
+            .filter(holds)
+            .sort(
+              (a, b) => a.tier - b.tier || (a.companion === null ? -1 : 1),
+            )[0]
+          if (best === undefined) continue
+          pageCandidates.push({
+            kind: 'page',
+            tree,
+            node: fresh.get(best.node.id)!,
+            found: best,
+          })
+        }
+        const tierOf_ = (c: Candidate) => (c.kind === 'page' ? c.found.tier : 9)
+        pageCandidates.sort(
+          (a, b) => tierOf_(a) - tierOf_(b) || compare(place(a), place(b)),
+        )
+        const byName = (a: { node: NodeRow }, b: { node: NodeRow }) =>
+          compare(a.node.name.toLowerCase(), b.node.name.toLowerCase()) ||
+          compare(a.node.path, b.node.path)
+        const nameCandidates = (kind: 'folder' | 'attachment') =>
+          names
+            .filter((n) => n.kind === kind)
+            .flatMap((n): Candidate[] => {
+              const now = fresh.get(n.node.id)
+              return now === undefined || now.path !== n.node.path
+                ? []
+                : [{ kind, tree: n.tree, node: now }]
+            })
+            .sort(byName)
         const all: Candidate[] = [
-          ...ranked.map((p) => ({ kind: 'page' as const, ...p })),
-          ...folders
-            .sort(byName)
-            .map((f) => ({ kind: 'folder' as const, ...f })),
-          ...files
-            .sort(byName)
-            .map((f) => ({ kind: 'attachment' as const, ...f })),
+          ...pageCandidates,
+          ...nameCandidates('folder'),
+          ...nameCandidates('attachment'),
         ]
         const window = all.slice(i.offset, i.offset + SEARCH_PAGE_SIZE)
         const more =
           all.length > i.offset + SEARCH_PAGE_SIZE &&
           i.offset + SEARCH_PAGE_SIZE <= SEARCH_MAX_OFFSET
 
-        const readsNode = (node: NodeRow) =>
+        const reads = (node: NodeRow) =>
           access.require('read', node).pipe(Effect.isSuccess)
-        const readsId = (id: NodeId) =>
-          Effect.gen(function* () {
-            const row = yield* read(() =>
-              DB.prepare('select * from nodes where id = ?')
-                .bind(id)
-                .first<Record<string, unknown>>(),
-            )
-            return row !== null && (yield* readsNode(nodeOfRaw(row)))
-          })
         const link = (
           tree: TreeRowOf,
           node: NodeRow,
@@ -502,12 +638,12 @@ export const SearchLive: Layer.Layer<
             kind,
           })
 
-        // Every result is one the point check grants: listing, point
-        // checks and search agree.
+        // And each one shown passes the point check: listing, point checks
+        // and search agree.
         const results: SearchResult[] = []
         for (const candidate of window) {
+          if (!(yield* reads(candidate.node))) continue
           if (candidate.kind !== 'page') {
-            if (!(yield* readsNode(candidate.node))) continue
             results.push({
               kind: candidate.kind,
               node: candidate.node,
@@ -523,24 +659,19 @@ export const SearchLive: Layer.Layer<
             })
             continue
           }
-          const page = candidate.found[0]!.node
-          if (!(yield* readsNode(page))) continue
-          let chosen: Found | null = null
-          for (const found of candidate.found) {
-            if (found.companion === null || (yield* readsId(found.companion))) {
-              chosen = found
-              break
-            }
+          const companion = candidate.found.companion
+          if (companion !== null) {
+            const node = fresh.get(companion.id)
+            if (node === undefined || !(yield* reads(node))) continue
           }
-          if (chosen === null) continue
           results.push({
             kind: 'page',
-            node: page,
-            title: chosen.title,
+            node: candidate.node,
+            title: candidate.found.title,
             workspace: candidate.tree.workspace,
             tree: candidate.tree.name,
-            link: link(candidate.tree, page, 'page'),
-            snippet: content ? snippetParts(chosen.snippet) : null,
+            link: link(candidate.tree, candidate.node, 'page'),
+            snippet: content ? snippetParts(candidate.found.snippet) : null,
           })
         }
         return {
