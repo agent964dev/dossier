@@ -45,6 +45,7 @@
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
     "auth": "1.7.7",
+    "axe-core": "4.14.0",
     "drizzle-kit": "0.31.10",
     "happy-dom": "20.14.6",
     "standardwebhooks": "1.1.1",

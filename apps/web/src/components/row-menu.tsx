@@ -63,18 +63,18 @@ export function MenuButton({
 }
 
 /**
- * The ⋯ menu at the end of a listing row; with `trigger`, a menu that names
- * its current choice, such as "Member ▾".
+ * The ⋯ menu at the end of a listing row, named by `label`; or, with
+ * `trigger`, a menu that shows its text, such as "Member ▾", and is named by
+ * that text first and then `about` (whose row it is), so its name always
+ * holds what people see on it.
  */
-export function RowMenu({
-  label,
-  children,
-  trigger,
-}: {
-  label: string
-  children: ReactNode
-  trigger?: ReactNode
-}) {
+export function RowMenu(
+  props: { readonly children: ReactNode } & (
+    | { readonly label: string; readonly trigger?: undefined }
+    | { readonly trigger: string; readonly about: string }
+  ),
+) {
+  const { children } = props
   const ref = useRef<HTMLDetailsElement>(null)
 
   useEffect(() => {
@@ -105,19 +105,19 @@ export function RowMenu({
 
   return (
     <details ref={ref} className="relative shrink-0">
-      {trigger === undefined ? (
+      {props.trigger === undefined ? (
         <summary
-          aria-label={label}
+          aria-label={props.label}
           className="flex size-8 cursor-pointer list-none items-center justify-center rounded-lg text-neutral-400 outline-none transition-colors duration-200 ease-agent hover:bg-neutral-800/70 hover:text-neutral-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden"
         >
           <Ellipsis aria-hidden className="size-4" />
         </summary>
       ) : (
         <summary
-          aria-label={label}
+          aria-label={`${props.trigger}, ${props.about}`}
           className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-border bg-input py-1 pr-2 pl-3 text-sm text-neutral-100 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden"
         >
-          {trigger}
+          {props.trigger}
           <ChevronDown aria-hidden className="size-3.5 text-neutral-500" />
         </summary>
       )}

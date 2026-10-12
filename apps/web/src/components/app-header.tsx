@@ -85,9 +85,10 @@ export function AppHeader({
  */
 function Account({ email, narrow }: { email: string; narrow: boolean }) {
   return (
+    // Named by what it shows, so people who speak to their device can say
+    // it: the email, after words only screen readers read.
     <Link
       to="/_/settings"
-      aria-label={`Account settings for ${email}`}
       className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-900/60 py-1 pr-2.5 pl-1 text-neutral-200 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50 ${narrow ? 'max-sm:pr-1' : ''}`}
     >
       <span
@@ -96,6 +97,7 @@ function Account({ email, narrow }: { email: string; narrow: boolean }) {
       >
         {email.charAt(0)}
       </span>
+      <span className="sr-only">Account settings, </span>
       <span
         className={`truncate font-mono text-xs ${narrow ? 'max-sm:sr-only' : ''}`}
       >

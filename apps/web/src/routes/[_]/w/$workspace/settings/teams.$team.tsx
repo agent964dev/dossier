@@ -108,7 +108,7 @@ function Team({ view }: { view: TeamView }) {
                       </span>
                     )}
                   </span>
-                  <RowMenu label={`Move ${who} to`} trigger="Move to">
+                  <RowMenu trigger="Move to" about={who}>
                     {destinations.map((other) => (
                       <MenuButton
                         key={other.id}

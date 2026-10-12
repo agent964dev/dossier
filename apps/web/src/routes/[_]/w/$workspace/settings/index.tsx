@@ -113,8 +113,8 @@ function Members({ view }: { view: MembersView }) {
               </div>
               <span className="flex shrink-0 sm:w-44">
                 <RowMenu
-                  label={`Role of ${who}: ${roleName(member.role)}`}
                   trigger={roleName(member.role)}
+                  about={`role of ${who}`}
                 >
                   <MenuButton
                     chosen={member.role === 'admin'}
