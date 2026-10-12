@@ -148,7 +148,9 @@ export const listingView = createServerFn({ method: 'GET' })
         const entries = listing.entries
         const granted = yield* (yield* Access).require('read', listing.folder)
         const forms = yield* (yield* Data).pageForms(granted)
-        const mentions = yield* unseenMentions((yield* Bindings).DB, me)
+        // A visitor has no mentions.
+        const mentions =
+          me === null ? [] : yield* unseenMentions((yield* Bindings).DB, me)
         const pages = entries
           .filter((e) => e.kind === 'page')
           .map((e) => {

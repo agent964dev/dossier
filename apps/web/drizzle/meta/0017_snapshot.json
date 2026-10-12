@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ddcd8373-3b0e-4899-af55-1c8ed3eb638c",
-  "prevId": "1d9637d9-9098-4776-922e-a1d0ea0bdc4b",
+  "id": "31c82eb8-5d04-4809-9898-7ecf9a5d123a",
+  "prevId": "70fe9da0-245c-4ccf-905f-ed20904b57c7",
   "tables": {
     "account": {
       "name": "account",
@@ -1830,6 +1830,20 @@
         "kind": {
           "name": "kind",
           "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reads": {
+          "name": "reads",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "responds": {
+          "name": "responds",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
