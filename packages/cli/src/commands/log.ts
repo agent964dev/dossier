@@ -91,7 +91,7 @@ export const logLine = (line: LogLine, thisYear: number): string => {
       ].join('  ')
     case 'move':
       return [
-        `moved ${line.path}${line.to === null ? '' : ` to ${line.to}`}`,
+        `moved ${line.path === '' ? 'the tree' : line.path}${line.to === null ? '' : ` to ${line.to}`}`,
         when,
         who(line),
       ].join('  ')
