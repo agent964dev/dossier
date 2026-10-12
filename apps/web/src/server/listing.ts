@@ -9,9 +9,9 @@ import {
   Pages,
   People,
   type Entry,
-  type KitItem,
   type SeenByRow,
 } from '../core/index.ts'
+import { kitNames } from './kit-row.ts'
 import { runScreen, type ScreenFailure } from './run.ts'
 
 export type { SeenByRow } from '../core/index.ts'
@@ -110,21 +110,6 @@ const sharingLine = (
   const first = others[0] ?? 'a team'
   if (count === 1) return `Shared with ${first}`
   return `Shared with ${first} and ${count - 1} ${count === 2 ? 'other' : 'others'}`
-}
-
-/**
- * The names a kit row shows: each `_` file or folder of the tree, by its
- * first name ('_components/' for a component), closest first, once each.
- */
-const kitNames = (items: readonly KitItem[]): string[] => {
-  const names: string[] = []
-  for (const item of items) {
-    if (item.from === null) continue
-    const slash = item.path.indexOf('/')
-    const name = slash < 0 ? item.path : `${item.path.slice(0, slash)}/`
-    if (!names.includes(name)) names.push(name)
-  }
-  return names
 }
 
 const notFound = () =>

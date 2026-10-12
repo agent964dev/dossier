@@ -1033,8 +1033,9 @@ export const TreeStoreLive: Layer.Layer<
               ...entry,
               push: latest,
               title: index?.title ?? null,
+              // `_` files are the kit, never pages.
               pages: inside.filter(
-                (e) => e.node.kind === 'file' && e.name.endsWith('.html'),
+                (e) => e.node.kind === 'file' && e.kind === 'page',
               ).length,
             }
           })

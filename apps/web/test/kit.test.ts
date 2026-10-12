@@ -15,6 +15,7 @@ import {
   type Served,
   type StageResult,
 } from '../src/core/index.ts'
+import { kitNames } from '../src/server/kit-row.ts'
 import { signedIn } from './support/browser.ts'
 import { kitRuntime } from './support/base.ts'
 import { harness } from './support/harness.ts'
@@ -471,5 +472,38 @@ describe('a sequence never issued to the handle', () => {
     expect(
       htmlOf(await frame(three.handle, w.treeId, w.seq, 'plan')),
     ).toContain('<p>Plan</p>')
+  })
+})
+
+describe('the kit row', () => {
+  it('names the layout, the theme, then the rest, closest folder first, and folders count no `_` file as a page', async () => {
+    const w = await world()
+    const kitAtGuides = await runAs(
+      w.owner,
+      Effect.flatMap(Files, (files) =>
+        files.kit({
+          workspace: w.ws.name,
+          tree: 'kit',
+          path: 'guides',
+          folder: true,
+        }),
+      ),
+    )
+    expect(kitNames(kitAtGuides.items)).toEqual([
+      '_layout.html',
+      '_theme.css',
+      '_components/',
+    ])
+    const root = await runAs(
+      w.owner,
+      Effect.flatMap(Files, (files) =>
+        files.ls({
+          ref: { workspace: w.ws.name, tree: 'kit', path: '', folder: true },
+          depth: 'one',
+        }),
+      ),
+    )
+    const mockups = root.entries.find((e) => e.path === 'mockups')
+    expect(mockups?.pages).toBe(1)
   })
 })
