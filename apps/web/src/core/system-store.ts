@@ -204,6 +204,8 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
       // An upload still writing its bytes keeps its hold for a while after
       // its push expires, so the bytes are never reclaimed under it; the
       // holds of pushes that expired earlier go once that while is over.
+      // Each attempt renews its hold's time, verified before or not, so the
+      // while counts from the last one.
       const settled = now - UPLOAD_GRACE_MS
       const earlier = {
         sql: `delete from blob_holds where holder_kind = 'push'
@@ -229,7 +231,7 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
         {
           sql: `${EXPIRED_PUSHES} delete from blob_holds
                 where holder_kind = 'push' and holder_id in (select id from doomed)
-                  and (verified = 1 or created_at <= ?3)`,
+                  and created_at <= ?3`,
           binds,
         },
         ...['push_files', 'push_folders', 'push_forms'].map((table) => ({

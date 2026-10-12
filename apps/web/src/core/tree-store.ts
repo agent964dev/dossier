@@ -1737,7 +1737,7 @@ export const TreeStoreLive: Layer.Layer<
                  select ?, ?, ?, 0, ? where exists
                    (select 1 from blobs where sha256 = ? and state = 'live')
                  on conflict (holder_kind, holder_id, sha256) do update
-                   set verified = 0, created_at = excluded.created_at`,
+                   set created_at = excluded.created_at`,
             ).bind(holder.kind, holder.id, sha256, at, sha256),
             DB.prepare(
               'select state, generation from blobs where sha256 = ?',
