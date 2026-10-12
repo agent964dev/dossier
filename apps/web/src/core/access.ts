@@ -65,6 +65,12 @@ export type Basis =
       readonly nodeId: NodeId
       readonly userId: PersonId
     }
+  /**
+   * Read on what a page share carries, on a shared file a respondent's form
+   * writes, or on a page's comments: from the one read rule, never a basis
+   * for a change.
+   */
+  | { readonly kind: 'carried' }
   /** The place in a team that a team share reaches, beside the share's own. */
   | {
       readonly kind: 'team-member'
@@ -103,6 +109,11 @@ export interface RoleSet {
   readonly basis: readonly Basis[]
   /** The caller wrote this data node: it is theirs to read and withdraw. */
   readonly owns: boolean
+  /**
+   * The caller reads this node, by every rule but the `_` reach: grants,
+   * ownership, and what page shares, forms and comments carry.
+   */
+  readonly reads: boolean
 }
 
 declare const granted: unique symbol
@@ -227,21 +238,48 @@ const basisFor = (
     : shared
 }
 
+/** A grant through an anyone share, directly or through a page's forms. */
+const isPublic = (g: Grant): boolean =>
+  g.basis.kind === 'share' && g.basis.targetKind === 'anyone'
+
 const roleSetOf = (grants: readonly Grant[], owns: boolean): RoleSet => ({
   roles: new Set(grants.map((g) => g.role)),
   caps: capabilitiesOf(grants.map((g) => g.role)),
   privateCaps: capabilitiesOf(
-    grants
-      .filter(
-        (g) =>
-          g.onData ||
-          !(g.basis.kind === 'share' && g.basis.targetKind === 'anyone'),
-      )
-      .map((g) => g.role),
+    grants.filter((g) => g.onData || !isPublic(g)).map((g) => g.role),
   ),
   basis: grants.flatMap(basesOf),
   owns,
+  reads: false,
 })
+
+/** Whether these roles read a node of this origin, before what is carried. */
+const readsBy = (roles: RoleSet, origin: string): boolean =>
+  origin === 'data'
+    ? roles.privateCaps.has('read') || roles.owns
+    : roles.caps.has('read') || roles.caps.has('read-authored')
+
+interface ShareRow {
+  readonly id: ShareId
+  readonly targetKind: 'email' | 'team' | 'workspace' | 'anyone'
+  readonly target: string
+  readonly role: Role
+  /** The share sits on a data node. */
+  readonly onData: number
+}
+
+/** A share on a page that reaches the caller, with where its forms write. */
+interface PageShare {
+  readonly grant: Grant
+  readonly pageId: NodeId
+  readonly targets: readonly {
+    readonly path: string
+    readonly kind: 'folder' | 'json'
+  }[]
+}
+
+const isUnder = (path: string, prefix: string): boolean =>
+  prefix === '' || path === prefix || path.startsWith(`${prefix}/`)
 
 const signInRequired = (path: string | null) =>
   dossierError(
@@ -343,6 +381,129 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         ),
       )
 
+    /** The grant a share gives the caller, or null when it does not reach them. */
+    const grantOf = (
+      caller: Caller,
+      facts: TreeFacts,
+      share: ShareRow,
+    ): Grant | null => {
+      const email = caller.person?.email.toLowerCase() ?? null
+      // A team belongs to one workspace: its shares reach its members only
+      // in the trees of that workspace.
+      const team =
+        share.targetKind === 'team' &&
+        facts.memberRole !== null &&
+        caller.person !== null &&
+        facts.teams.includes(share.target as TeamId)
+      const matches =
+        share.targetKind === 'anyone' ||
+        (share.targetKind === 'email' && share.target === email) ||
+        (share.targetKind === 'workspace' &&
+          share.target === facts.workspaceId &&
+          facts.memberRole !== null) ||
+        team
+      if (!matches) return null
+      return {
+        role: share.role,
+        onData: share.onData === 1,
+        basis: {
+          kind: 'share',
+          shareId: share.id,
+          role: share.role,
+          targetKind: share.targetKind,
+        },
+        also:
+          team && caller.person !== null
+            ? {
+                kind: 'team-member',
+                teamId: share.target as TeamId,
+                workspaceId: facts.workspaceId,
+                userId: caller.person.id,
+              }
+            : null,
+      }
+    }
+
+    /**
+     * The shares on pages of the tree that reach the caller, each with the
+     * targets of the forms composed into its page now. A tree without page
+     * shares costs this one query.
+     */
+    const pageSharesOf = (
+      caller: Caller,
+      facts: TreeFacts,
+      treeId: TreeId,
+      asOf: number | null,
+    ) =>
+      Effect.gen(function* () {
+        const rows = yield* query(() =>
+          DB.prepare(
+            `select s.id, s.target_kind as targetKind, s.target, s.role, 0 as onData,
+               n.id as pageId
+             from shares s join nodes n on n.id = s.node_id
+             where s.tree_id = ? and n.deleted_at is null and n.kind = 'file'
+               and n.origin = 'authored' and n.underscore_from is null
+               and substr(n.path, -5) = '.html'
+               and (? is null or s.grant_order <= ?)`,
+          )
+            .bind(treeId, asOf, asOf)
+            .all<ShareRow & { pageId: NodeId }>(),
+        )
+        const found: PageShare[] = []
+        for (const row of rows.results) {
+          const grant = grantOf(caller, facts, row)
+          if (grant === null) continue
+          const targets: { target: string; kind: string }[] = []
+          for (const page of [1, 0] as const) {
+            const c = composing(page)
+            targets.push(
+              ...(yield* query(() =>
+                db({ DB }).all<{ target: string; kind: string }>(
+                  sql`select distinct fm.target_path as target, fm.kind as kind
+                    from nodes p ${c.from}
+                    join forms fm on fm.host_version_id = hv.id
+                    where p.id = ${row.pageId} and ${c.where}`,
+                ),
+              )),
+            )
+          }
+          found.push({
+            grant,
+            pageId: row.pageId,
+            targets: targets.map((t) => ({
+              path: t.target.replace(/\/$/, ''),
+              kind: t.kind === 'shared' ? 'json' : 'folder',
+            })),
+          })
+        }
+        return found
+      })
+
+    /**
+     * What page shares give on people's data in their form targets: read
+     * from read or write on the page, respond from respond. A grant through
+     * an anyone share stays public, so it never reads people's data.
+     */
+    const throughPages = (
+      node: NodeRow,
+      shares: readonly PageShare[],
+    ): Grant[] =>
+      node.origin !== 'data'
+        ? []
+        : shares
+            .filter(({ targets }) =>
+              targets.some((t) =>
+                t.kind === 'folder'
+                  ? isUnder(node.path, t.path)
+                  : node.path === t.path,
+              ),
+            )
+            .map(({ grant }) => ({
+              ...grant,
+              role: grant.role === 'respond' ? 'respond' : 'read',
+              onData: false,
+            }))
+
     /**
      * The caller's grants on a node, counting only grants at or below order
      * `asOf`, and whether they own it.
@@ -353,6 +514,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           grants: [] as Grant[],
           owns: false,
           facts: null as TreeFacts | null,
+          inScope: false,
         }
         const caller = yield* CurrentCaller
         if (caller.via.kind === 'system') return none
@@ -380,7 +542,6 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         ) {
           return { ...none, facts }
         }
-        const email = caller.person?.email.toLowerCase() ?? null
         const shares =
           ids.length === 0
             ? []
@@ -393,50 +554,20 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
                      and (? is null or s.grant_order <= ?)`,
                 )
                   .bind(...ids, asOf, asOf)
-                  .all<{
-                    id: ShareId
-                    targetKind: 'email' | 'team' | 'workspace' | 'anyone'
-                    target: string
-                    role: Role
-                    onData: number
-                  }>(),
+                  .all<ShareRow>(),
               )).results
         const grants: Grant[] = []
         for (const share of shares) {
-          // A team belongs to one workspace: its shares reach its members
-          // only in the trees of that workspace.
-          const team =
-            share.targetKind === 'team' &&
-            facts.memberRole !== null &&
-            caller.person !== null &&
-            facts.teams.includes(share.target as TeamId)
-          const matches =
-            share.targetKind === 'anyone' ||
-            (share.targetKind === 'email' && share.target === email) ||
-            (share.targetKind === 'workspace' &&
-              share.target === facts.workspaceId &&
-              facts.memberRole !== null) ||
-            team
-          if (!matches) continue
-          grants.push({
-            role: share.role,
-            onData: share.onData === 1,
-            basis: {
-              kind: 'share',
-              shareId: share.id,
-              role: share.role,
-              targetKind: share.targetKind,
-            },
-            also:
-              team && caller.person !== null
-                ? {
-                    kind: 'team-member',
-                    teamId: share.target as TeamId,
-                    workspaceId: facts.workspaceId,
-                    userId: caller.person.id,
-                  }
-                : null,
-          })
+          const grant = grantOf(caller, facts, share)
+          if (grant !== null) grants.push(grant)
+        }
+        if (node.origin === 'data') {
+          grants.push(
+            ...throughPages(
+              node,
+              yield* pageSharesOf(caller, facts, node.treeId, asOf),
+            ),
+          )
         }
         if (facts.memberRole === 'admin' && caller.person !== null) {
           grants.push({
@@ -456,14 +587,19 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           node.origin === 'data' &&
           node.deletedAt === null &&
           node.ownerId === caller.person.id
-        return { grants, owns, facts }
+        return { grants, owns, facts, inScope: true }
       })
 
     /** The caller's roles on a node, counting only grants made by `asOf`. */
     const roleAt = (node: NodeRow, asOf: number | null) =>
-      Effect.map(grantsOn(node, asOf), ({ grants, owns }) =>
-        roleSetOf(grants, owns),
-      )
+      Effect.gen(function* () {
+        const { grants, owns, facts, inScope } = yield* grantsOn(node, asOf)
+        const roles = roleSetOf(grants, owns)
+        const reads =
+          readsBy(roles, node.origin) ||
+          (inScope && facts !== null && (yield* carries(node, asOf)))
+        return { ...roles, reads } satisfies RoleSet
+      })
 
     const roleOn = (node: NodeRow) => roleAt(node, null)
 
@@ -474,7 +610,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (isMissing(node)) return yield* denied(caller, node.path)
-        const { grants, owns, facts } = yield* grantsOn(node)
+        const { grants, owns, facts, inScope } = yield* grantsOn(node)
         if (facts !== null && facts.state !== 'live') {
           // People withdraw what they wrote wherever it sits, so deleting
           // an account leaves nothing of theirs in a closed workspace.
@@ -508,9 +644,13 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         const data = node.origin === 'data'
         // People's data is read through private grants, a public data
         // folder, or ownership; authored files through any grant.
-        const reads = data
-          ? roles.privateCaps.has('read') || owns
-          : roles.caps.has('read') || roles.caps.has('read-authored')
+        // What page shares, respondents' forms and comments carry is read
+        // by the one read rule.
+        const carried =
+          !readsBy(roles, node.origin) &&
+          inScope &&
+          (yield* carries(node, null))
+        const reads = readsBy(roles, node.origin) || carried
         // Answering into a shared file needs respond, not read: the form
         // that targets it already says it is there.
         const answers =
@@ -544,9 +684,13 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
           owns && caller.person !== null
             ? { kind: 'owner', nodeId: node.id, userId: caller.person.id }
             : null
+        const basis = basisFor(action, roles, grants, owner)
         return {
           ...node,
-          basis: basisFor(action, roles, grants, owner),
+          basis:
+            action === 'read' && carried
+              ? [...basis, { kind: 'carried' } satisfies Basis]
+              : basis,
         } as unknown as Granted<A>
       })
 
@@ -585,15 +729,13 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         return {
           workspaceId: facts.workspaceId,
           facts: {
-            email: sql`${caller.person?.email.toLowerCase() ?? null}`,
-            person: sql`${caller.person?.id ?? null}`,
-            member: sql`${member ? 1 : 0}`,
-            admin: sql`${facts.memberRole === 'admin' ? 1 : 0}`,
-            teams: sql`${JSON.stringify(member ? facts.teams : [])}`,
+            email: lit(caller.person?.email.toLowerCase() ?? null),
+            person: lit(caller.person?.id ?? null),
+            member: lit(member ? 1 : 0),
+            admin: lit(facts.memberRole === 'admin' ? 1 : 0),
+            teams: lit(JSON.stringify(member ? facts.teams : [])),
             within: (path: SQL) =>
-              scopePath === null
-                ? sql`1`
-                : underColumn(path, sql`${scopePath}`),
+              scopePath === null ? sql`1` : underColumn(path, lit(scopePath)),
           } satisfies CallerFacts,
         }
       })
@@ -630,13 +772,29 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
 
     const readsAsOf = (node: NodeRow, order: number) =>
       Effect.gen(function* () {
-        const roles = yield* roleAt(node, order)
-        const reads =
-          node.origin === 'data'
-            ? roles.privateCaps.has('read') || roles.owns
-            : roles.caps.has('read') || roles.caps.has('read-authored')
-        if (reads) return true
+        if ((yield* roleAt(node, order)).reads) return true
         return (yield* reached(node, order)) !== null
+      })
+
+    /**
+     * Whether the one read rule's carried part holds for the node, counting
+     * grants at or below order `asOf`.
+     */
+    const carries = (node: NodeRow, asOf: number | null) =>
+      Effect.gen(function* () {
+        const on = yield* factsOn(node.treeId, asOf)
+        if (on === null) return false
+        const found = yield* query(() =>
+          db({ DB })
+            .select({ one: sql<number>`1` })
+            .from(nodes)
+            .where(
+              sql`${nodes.id} = ${node.id} and ${carriedOn(node.treeId, on.workspaceId, on.facts, asOf)(nodeColumn)}`,
+            )
+            .limit(1)
+            .all(),
+        )
+        return found.length > 0
       })
 
     const readable = (treeId: TreeId) =>
@@ -711,6 +869,18 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
 )
 
 /**
+ * A value written into SQL as a literal: the read rule repeats the caller's
+ * facts many times, more than a query may bind. Strings are quoted with
+ * their quotes doubled, as SQLite reads them; numbers are integers.
+ */
+export const lit = (value: string | number | null): SQL =>
+  value === null
+    ? sql.raw('null')
+    : typeof value === 'number'
+      ? sql.raw(String(Math.trunc(value)))
+      : sql.raw(`'${value.replaceAll("'", "''")}'`)
+
+/**
  * Who asks, as SQL values: one caller's facts as bound literals, or many
  * callers' as the columns of a table, so one rule serves both.
  */
@@ -730,7 +900,14 @@ export interface CallerFacts {
 }
 
 export type NodeColumn = (
-  name: 'tree_id' | 'path' | 'origin' | 'owner_id' | 'underscore_from',
+  name:
+    | 'id'
+    | 'tree_id'
+    | 'path'
+    | 'origin'
+    | 'kind'
+    | 'owner_id'
+    | 'underscore_from',
 ) => SQL
 
 /** The unaliased `nodes` table's columns. */
@@ -750,14 +927,14 @@ export const grantOn =
     asOf: number | null = null,
   ) =>
   (column: (name: 'tree_id' | 'path' | 'origin') => SQL): SQL =>
-    sql`${column('tree_id')} = ${treeId} and ${f.within(column('path'))} and (${f.admin} = 1 or exists (
+    sql`${column('tree_id')} = ${lit(treeId)} and ${f.within(column('path'))} and (${f.admin} = 1 or exists (
       select 1 from shares s join nodes a on a.id = s.node_id and a.deleted_at is null
-      where s.tree_id = ${treeId}
+      where s.tree_id = ${lit(treeId)}
         and (s.target_kind = 'anyone'
           or (s.target_kind = 'email' and s.target = ${f.email})
-          or (s.target_kind = 'workspace' and s.target = ${workspaceId} and ${f.member} = 1)
+          or (s.target_kind = 'workspace' and s.target = ${lit(workspaceId)} and ${f.member} = 1)
           or (s.target_kind = 'team' and s.target in (select value from json_each(${f.teams}))))
-        and ${asOf === null ? sql`1` : sql`s.grant_order <= ${asOf}`}
+        and ${asOf === null ? sql`1` : sql`s.grant_order <= ${lit(asOf)}`}
         and ${underColumn(column('path'), sql`a.path`)}
         and (s.role <> 'respond' or ${column('origin')} = 'authored')
         and (s.target_kind <> 'anyone' or ${column('origin')} = 'authored'
@@ -771,7 +948,7 @@ export const reachFrom = (
 ): SQL => {
   const r = (name: 'tree_id' | 'path' | 'origin') => sql.raw(`r.${name}`)
   return sql`exists (select 1 from nodes r
-    where r.tree_id = ${treeId} and r.deleted_at is null
+    where r.tree_id = ${lit(treeId)} and r.deleted_at is null
       and ${underColumn(sql`r.path`, from)}
       and ${grants(r)})`
 }
@@ -786,13 +963,236 @@ export const readableOn =
   (treeId: TreeId, workspaceId: string, f: CallerFacts) =>
   (column: NodeColumn): SQL => {
     const grants = grantOn(treeId, workspaceId, f)
-    return sql`${column('tree_id')} = ${treeId} and ((${grants(column)})
+    return sql`${column('tree_id')} = ${lit(treeId)} and ((${grants(column)})
       or (${column('origin')} = 'data' and ${f.person} is not null
         and ${column('owner_id')} = ${f.person}
         and ${f.within(column('path'))})
       or (${column('origin')} = 'authored' and ${column('underscore_from')} is not null
-        and ${reachFrom(grants, treeId, column('underscore_from'))}))`
+        and ${reachFrom(grants, treeId, column('underscore_from'))})
+      or (${carriedOn(treeId, workspaceId, f)(column)}))`
   }
+
+/** The folder a path sits in, in SQL: 'a/b/c.html' → 'a/b', 'c.html' → ''. */
+const folderSql = (path: SQL): SQL =>
+  sql`rtrim(rtrim(${path}, replace(${path}, '/', '')), '/')`
+
+/** A share's target is the caller, counting grants at or below `asOf`. */
+const reachesCaller = (
+  workspaceId: string,
+  f: CallerFacts,
+  asOf: number | null,
+): SQL =>
+  sql`(s.target_kind = 'anyone'
+    or (s.target_kind = 'email' and s.target = ${f.email})
+    or (s.target_kind = 'workspace' and s.target = ${lit(workspaceId)} and ${f.member} = 1)
+    or (s.target_kind = 'team' and s.target in (select value from json_each(${f.teams}))))
+    and ${asOf === null ? sql`1` : sql`s.grant_order <= ${lit(asOf)}`}`
+
+/** A share `s` on a live page `p` of the tree that reaches the caller. */
+const sharedPage = (
+  treeId: TreeId,
+  workspaceId: string,
+  f: CallerFacts,
+  asOf: number | null,
+): SQL =>
+  sql`s.tree_id = ${lit(treeId)} and p.deleted_at is null and p.kind = 'file'
+    and p.origin = 'authored' and p.underscore_from is null
+    and substr(p.path, -5) = '.html' and ${reachesCaller(workspaceId, f, asOf)}`
+
+/**
+ * The version `hv` of the page `p` itself (`page` 1, read from its own
+ * folder), or of a tree layout composed into it now (`page` 0, from the
+ * layout's folder): none for a complete page, else the `_layout.html` of its
+ * folder and each folder above, up to the first complete one.
+ */
+const composing = (page: 0 | 1): { from: SQL; where: SQL; folder: SQL } =>
+  page === 1
+    ? {
+        from: sql`join node_versions hv on hv.id = p.current_version_id and hv.state = 'live'`,
+        where: sql`1`,
+        folder: folderSql(sql`p.path`),
+      }
+    : {
+        // A layout's folder is where its `_` part starts.
+        from: sql`join node_versions pv on pv.id = p.current_version_id
+          join html_files pf on pf.sha256 = pv.blob_sha256 and pf.complete = 0
+          join nodes l on ${liveLayoutNode('l', sql`p.tree_id`)}
+            and ${above(sql`l.underscore_from`, sql`p.path`)}
+          join node_versions hv on hv.id = l.current_version_id and hv.state = 'live'
+          join html_files lf on lf.sha256 = hv.blob_sha256
+            and not exists (select 1 from nodes l2
+            join node_versions v2 on v2.id = l2.current_version_id and v2.state = 'live'
+            join html_files f2 on f2.sha256 = v2.blob_sha256 and f2.complete = 1
+            where ${liveLayoutNode('l2', sql`p.tree_id`)}
+              and length(l2.underscore_from) > length(l.underscore_from)
+              and ${above(sql`l2.underscore_from`, sql`p.path`)})`,
+        where: sql`1`,
+        folder: sql`l.underscore_from`,
+      }
+
+/** A folder holds a file path somewhere below it, the root included. */
+const above = (folder: SQL, path: SQL): SQL =>
+  sql`(${folder} = '' or substr(${path}, 1, length(${folder}) + 1) = ${folder} || '/')`
+
+/** A live `_layout.html` node, under an alias. */
+const liveLayoutNode = (l: string, treeId: SQL): SQL => {
+  const L = sql.raw(l)
+  return sql`${L}.tree_id = ${treeId} and ${L}.deleted_at is null and ${L}.kind = 'file'
+    and ${L}.origin = 'authored' and ${L}.name = '_layout.html'`
+}
+
+/**
+ * The authored nodes page shares carry: the files a shared page and its
+ * layouts render with, as the link route reads a path (the exact path,
+ * else the page of that name; a folder as the folder alone). A layout's
+ * inline styles and scripts are read from the page's folder, so only the
+ * page's own count.
+ */
+const neededArms = (
+  treeId: TreeId,
+  workspaceId: string,
+  f: CallerFacts,
+  asOf: number | null,
+  /** The node carried, and what more the arm joins and selects. */
+  arm: { readonly as: string; readonly joins: SQL; readonly select: SQL },
+): SQL[] =>
+  ([1, 0] as const).map((page) => {
+    const c = composing(page)
+    const N = sql.raw(arm.as)
+    return sql`select ${arm.select} from shares s
+      join nodes p on p.id = s.node_id and ${sharedPage(treeId, workspaceId, f, asOf)}
+      ${c.from}
+      join render_paths rp on rp.sha256 = hv.blob_sha256 and rp.folder = ${c.folder}
+        and (${lit(page)} = 1 or rp.inline = 0)
+      join nodes ${N} on ${N}.tree_id = ${lit(treeId)} and ${N}.deleted_at is null
+        and ${N}.origin = 'authored'
+        and (${N}.path = rp.path || '.html'
+          or (substr(rp.path, -1) = '/' and ${N}.kind = 'folder' and ${N}.path || '/' = rp.path)
+          or (${N}.path = rp.path and not exists (select 1 from nodes y
+            where y.tree_id = ${lit(treeId)} and y.path = rp.path || '.html'
+              and y.deleted_at is null and y.origin = 'authored')))
+      
+      where ${N}.id <> p.id and ${f.within(sql`${N}.path`)}`
+  })
+
+/** People's data in the form targets of a version `hv`, as `x`. */
+const inTargets = (shared: boolean): SQL =>
+  shared
+    ? sql`join forms fm on fm.host_version_id = hv.id and fm.kind = 'shared'
+        join nodes x on x.tree_id = p.tree_id and x.path = fm.target_path
+          and x.origin = 'data' and x.kind = 'file' and x.owner_id is null`
+    : sql`join forms fm on fm.host_version_id = hv.id
+        join nodes x on x.tree_id = p.tree_id and x.origin = 'data'
+          and ((substr(fm.target_path, -1) = '/'
+              and ${underColumn(sql`x.path`, sql`rtrim(fm.target_path, '/')`)})
+            or x.path = fm.target_path)`
+
+/**
+ * Every node the read rule carries beyond grants, ownership and reach, as
+ * one set: the files shared pages render with; the data in a page's form
+ * targets for a private read or write share on it; for a private respond
+ * share, the shared files (nobody's own) the forms of its page, or of the
+ * pages in and layouts above its folder, write; and the data in the
+ * comments folder of a page the caller reads. Flat selects, so the rule
+ * stays within SQLite's expression depth.
+ */
+const carriedArms = (
+  treeId: TreeId,
+  workspaceId: string,
+  f: CallerFacts,
+  asOf: number | null,
+): SQL[] => {
+  const page = sharedPage(treeId, workspaceId, f, asOf)
+  const targetArms = ([1, 0] as const).flatMap((host) => {
+    const c = composing(host)
+    return [
+      sql`select x.id from shares s join nodes p on p.id = s.node_id and ${page}
+        ${c.from}
+        ${inTargets(false)}
+        where s.role <> 'respond'
+          and s.target_kind <> 'anyone' and ${f.within(sql`x.path`)}`,
+      sql`select x.id from shares s join nodes p on p.id = s.node_id and ${page}
+        ${c.from}
+        ${inTargets(true)}
+        where s.role = 'respond'
+          and s.target_kind <> 'anyone' and ${f.within(sql`x.path`)}`,
+    ]
+  })
+  // The data in a page's comments folder, for a page `q` the caller reads:
+  // `cf` is the folder and `x` what lies in it.
+  const inComments = sql`join nodes cf on cf.tree_id = q.tree_id
+      and cf.path = substr(q.path, 1, length(q.path) - 5) || '.comments'
+      and cf.deleted_at is null and cf.kind = 'folder'
+    join nodes x on x.tree_id = q.tree_id and x.origin = 'data'
+      and ${underColumn(sql`x.path`, sql`cf.path`)}`
+  const commentsOf = (readsPage: SQL) =>
+    sql`select x.id from nodes q ${inComments}
+      where q.tree_id = ${lit(treeId)} and q.deleted_at is null and q.kind = 'file'
+        and q.origin = 'authored' and substr(q.path, -5) = '.html'
+        and ${f.within(sql`x.path`)} and ${readsPage}`
+  return [
+    ...neededArms(treeId, workspaceId, f, asOf, {
+      as: 'x',
+      joins: sql``,
+      select: sql`x.id`,
+    }),
+    // A page the caller reads through a grant: as an admin, or a share on
+    // it or a folder above (a page is authored, so every role reads it).
+    commentsOf(sql`${f.admin} = 1 and ${f.within(sql`q.path`)}`),
+    sql`select x.id from nodes q ${inComments}
+      join shares s on s.tree_id = q.tree_id and ${reachesCaller(workspaceId, f, asOf)}
+      join nodes a on a.id = s.node_id and a.deleted_at is null
+        and ${underColumn(sql`q.path`, sql`a.path`)}
+      where q.tree_id = ${lit(treeId)} and q.deleted_at is null and q.kind = 'file'
+        and q.origin = 'authored' and substr(q.path, -5) = '.html'
+        and ${f.within(sql`q.path`)} and ${f.within(sql`x.path`)}`,
+    ...neededArms(treeId, workspaceId, f, asOf, {
+      as: 'q',
+      joins: inComments,
+      select: sql`x.id`,
+    }).map((arm) => sql`${arm} and ${f.within(sql`x.path`)}`),
+    ...targetArms,
+    sql`select x.id from shares s join nodes a on a.id = s.node_id
+        join forms fm on fm.tree_id = s.tree_id and fm.kind = 'shared'
+        join nodes h on h.id = fm.host_node_id and h.current_version_id = fm.host_version_id
+          and h.deleted_at is null
+        join nodes x on x.tree_id = s.tree_id and x.path = fm.target_path
+          and x.origin = 'data' and x.kind = 'file' and x.owner_id is null
+        where s.tree_id = ${lit(treeId)} and a.deleted_at is null and a.kind = 'folder'
+          and s.role = 'respond' and s.target_kind <> 'anyone'
+          and ${reachesCaller(workspaceId, f, asOf)}
+          and (${underColumn(sql`h.path`, sql`a.path`)}
+            or (h.name = '_layout.html'
+              and ${underColumn(sql`a.path`, sql`h.underscore_from`)}))
+          and ${f.within(sql`x.path`)}`,
+  ]
+}
+
+/** The node is in what the read rule carries (carriedIds). */
+export const carriedOn =
+  (
+    treeId: TreeId,
+    workspaceId: string,
+    f: CallerFacts,
+    asOf: number | null = null,
+  ) =>
+  (column: NodeColumn): SQL =>
+    anyOf(
+      carriedArms(treeId, workspaceId, f, asOf).map(
+        (arm) => sql`${column('id')} in (${arm})`,
+      ),
+    )
+
+/**
+ * Conditions joined by `or` as a balanced tree, so many of them add only
+ * their logarithm to SQLite's expression depth.
+ */
+const anyOf = (parts: readonly SQL[]): SQL => {
+  if (parts.length === 0) return sql`0`
+  if (parts.length === 1) return sql`(${parts[0]!})`
+  const half = Math.ceil(parts.length / 2)
+  return sql`(${anyOf(parts.slice(0, half))} or ${anyOf(parts.slice(half))})`
+}
 
 /** `column` is the path `prefix` or lies below it. */
 export const underColumn = (column: SQL, prefix: SQL): SQL =>

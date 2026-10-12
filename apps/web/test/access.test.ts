@@ -1,12 +1,15 @@
-import type { NodeId, Person, TreeId } from '@dossier/contracts'
+import type { NodeId, OpId, Person, TreeId } from '@dossier/contracts'
 import { env } from 'cloudflare:workers'
 import { and, eq, isNull } from 'drizzle-orm'
 import { Effect, FastCheck as fc } from 'effect'
+import { analyze, ANALYZER_VERSION } from '@dossier/html'
 import { describe, expect, it } from 'vitest'
 
+import { renderPathsOf } from '../src/core/page-needs.ts'
 import { db, schema } from '../src/db/client.ts'
 import {
   Access,
+  Data,
   TreeStore,
   type Caller,
   type NodeRow,
@@ -70,7 +73,13 @@ const at = (w: World, path: string) => `${w.ws.name}/acme/${path}`
 const attempt = (
   caller: Caller,
   target: string,
-  action: 'read' | 'write' | 'respond' | 'read-history' = 'read',
+  action:
+    | 'read'
+    | 'write'
+    | 'respond'
+    | 'comment'
+    | 'read-data'
+    | 'read-history' = 'read',
 ) =>
   runAs(
     caller,
@@ -361,7 +370,46 @@ const PATHS = [
   'f/_old/notes.json',
   '_inbox',
   '_inbox/x.json',
+  // A shared file nobody owns, and comments on e.html.
+  'a/board.json',
+  'e.comments',
+  'e.comments/m.json',
 ]
+
+/**
+ * The pages' markup and forms, and what a share on each page carries: the
+ * files it renders with, never what it links to, and its form targets.
+ */
+const PAGES: Record<
+  string,
+  {
+    readonly html: string
+    readonly needs: readonly string[]
+    readonly targets: readonly {
+      readonly path: string
+      readonly kind: 'person' | 'shared'
+    }[]
+  }
+> = {
+  'e.html': {
+    html: '<img src="a/d.txt"><a href="f/g.txt">g</a>',
+    needs: ['a/d.txt'],
+    targets: [
+      { path: 'a/answers', kind: 'person' },
+      { path: 'a/board.json', kind: 'shared' },
+    ],
+  },
+  'a/b/c.html': {
+    html: '<link rel="stylesheet" href="../d.txt"><style>@import "../../f/g.txt";</style><a href="../../e.html">e</a>',
+    needs: ['a/d.txt', 'f/g.txt'],
+    targets: [{ path: '_inbox', kind: 'person' }],
+  },
+  'f/h/i.html': {
+    html: '<img src="../g.txt"><area href="../../e.html"><iframe src="../../e"></iframe>',
+    needs: ['f/g.txt', 'e.html'],
+    targets: [{ path: 'f/_old/notes.json', kind: 'shared' }],
+  },
+}
 
 /** People's data, by the writer each belongs to. */
 const DATA = new Map<string, 'member' | 'outsider' | null>([
@@ -370,6 +418,9 @@ const DATA = new Map<string, 'member' | 'outsider' | null>([
   ['f/_old/notes.json', 'member'],
   ['_inbox', null],
   ['_inbox/x.json', 'outsider'],
+  ['a/board.json', null],
+  ['e.comments', null],
+  ['e.comments/m.json', 'outsider'],
 ])
 
 type ShareKind = 'email' | 'workspace' | 'anyone' | 'team' | 'twin-team'
@@ -481,7 +532,7 @@ const plantTree = async (
     const parent = path.includes('/')
       ? path.slice(0, path.lastIndexOf('/'))
       : ''
-    const file = path.slice(path.lastIndexOf('/') + 1).includes('.')
+    const file = isFilePath(path)
     statements.push(
       env.DB.prepare(
         `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, owner_id,
@@ -501,6 +552,71 @@ const plantTree = async (
         ),
         now,
         s.deleted === index ? now : null,
+      ),
+    )
+  }
+  // Each page's version, its stored analysis and its forms, as a push
+  // leaves them.
+  for (const [path, page] of Object.entries(PAGES)) {
+    const sha = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+    const version = crypto.randomUUID()
+    statements.push(
+      env.DB.prepare(
+        `insert into blobs (sha256, size, ref_count, state, first_seen_at)
+         values (?, ?, 1, 'live', ?)`,
+      ).bind(sha, page.html.length, now),
+      env.DB.prepare(
+        `insert into node_versions (id, node_id, tree_id, revision, authored_seq, state,
+           blob_sha256, size, content_type, author_id, created_at)
+         values (?, ?, ?, 1, 0, 'live', ?, ?, 'text/html', ?, ?)`,
+      ).bind(
+        version,
+        ids.get(path),
+        treeId,
+        sha,
+        page.html.length,
+        creator.id,
+        now,
+      ),
+      env.DB.prepare(
+        'update nodes set current_version_id = ? where id = ?',
+      ).bind(version, ids.get(path)),
+      env.DB.prepare(
+        `insert into analyses (sha256, analyzer, version, json, created_at)
+         values (?, 'html', ?, ?, ?)`,
+      ).bind(sha, ANALYZER_VERSION, JSON.stringify(analyze(page.html)), now),
+      env.DB.prepare(
+        'insert into html_files (sha256, complete) values (?, ?) on conflict do nothing',
+      ).bind(sha, analyze(page.html).complete ? 1 : 0),
+      // What it renders with, as a push records it.
+      ...renderPathsOf(
+        analyze(page.html),
+        path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '',
+      ).map((r) =>
+        env.DB.prepare(
+          `insert into render_paths (sha256, folder, path, inline)
+           values (?, ?, ?, ?) on conflict do nothing`,
+        ).bind(
+          sha,
+          path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '',
+          r.path,
+          r.inline ? 1 : 0,
+        ),
+      ),
+      ...page.targets.map((target) =>
+        env.DB.prepare(
+          `insert into forms (host_version_id, host_node_id, tree_id, target_path, form_key,
+             kind, closes_at, closed, line, title, schema_json)
+           values (?, ?, ?, ?, '', ?, null, 0, 1, null, '{}')`,
+        ).bind(
+          version,
+          ids.get(path),
+          treeId,
+          target.kind === 'shared' ? target.path : `${target.path}/`,
+          target.kind,
+        ),
       ),
     )
   }
@@ -543,6 +659,11 @@ const plantTree = async (
 const isUnder = (path: string, prefix: string): boolean =>
   prefix === '' || path === prefix || path.startsWith(`${prefix}/`)
 
+/** A planted path names a file when its last name has a dot. */
+const isFilePath = (path: string): boolean =>
+  path.slice(path.lastIndexOf('/') + 1).includes('.') &&
+  !path.endsWith('.comments')
+
 /**
  * Who reads what, written out on its own: the caller's shares and role on
  * live nodes, within an agent key's scope, plus read on an authored `_` node
@@ -570,8 +691,9 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
           other.at === given.at && target(other.kind) === target(given.kind),
       ) === i,
   )
+  const inScope = (path: string) => live(scope) && isUnder(path, scope)
   const direct = (path: string): boolean => {
-    if (!live(scope) || !isUnder(path, scope)) return false
+    if (!inScope(path)) return false
     if (s.caller === 'admin') return true
     return planted.some(
       (given) =>
@@ -585,6 +707,64 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
           origin(pathAt(given.at)) === 'data'),
     )
   }
+  /** The shares on live pages that reach the caller. */
+  const pageShares = planted.filter(
+    (given) =>
+      matches(given.kind) &&
+      PAGES[pathAt(given.at)] !== undefined &&
+      live(pathAt(given.at)),
+  )
+  const inTargets = (path: string, page: string) =>
+    PAGES[page]!.targets.some((t) =>
+      t.kind === 'shared' ? path === t.path : isUnder(path, t.path),
+    )
+  /**
+   * What a share on a page carries beside the page: the authored files it
+   * renders with, and the data in its form targets for a private read or
+   * write share.
+   */
+  const throughPages = (path: string): boolean =>
+    inScope(path) &&
+    pageShares.some((given) => {
+      const page = pathAt(given.at)
+      if (page === path) return false
+      if (origin(path) === 'authored') {
+        return PAGES[page]!.needs.includes(path)
+      }
+      return (
+        given.role !== 'respond' &&
+        given.kind !== 'anyone' &&
+        inTargets(path, page)
+      )
+    })
+  /**
+   * A shared file nobody owns that a form in the caller's private respond
+   * reach writes to: a page shared to respond on, or a page in a folder
+   * shared to respond on.
+   */
+  const answersInto = (path: string): boolean =>
+    inScope(path) &&
+    origin(path) === 'data' &&
+    DATA.get(path) === null &&
+    isFilePath(path) &&
+    planted.some((given) => {
+      if (
+        !matches(given.kind) ||
+        given.kind === 'anyone' ||
+        given.role !== 'respond' ||
+        !live(pathAt(given.at))
+      ) {
+        return false
+      }
+      const on = pathAt(given.at)
+      const writesHere = (page: string) =>
+        PAGES[page]!.targets.some((t) => t.kind === 'shared' && t.path === path)
+      if (PAGES[on] !== undefined) return writesHere(on)
+      if (isFilePath(on)) return false
+      return Object.keys(PAGES).some(
+        (page) => live(page) && isUnder(page, on) && writesHere(page),
+      )
+    })
   /** The person the caller is, for what they wrote. */
   const who =
     s.caller === 'member' || s.caller === 'readonly'
@@ -596,14 +776,15 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
     who !== null &&
     origin(path) === 'data' &&
     DATA.get(path) === who &&
-    live(scope) &&
-    isUnder(path, scope)
+    inScope(path)
   const all = ['', ...PATHS].filter(live)
   const readable = new Set<string>()
   // A suspended workspace reads as missing, for everyone.
   if (s.suspended === true) return readable
+  const reads = (path: string) =>
+    direct(path) || throughPages(path) || owns(path) || answersInto(path)
   for (const path of all) {
-    if (direct(path) || owns(path)) {
+    if (reads(path)) {
       readable.add(path)
       continue
     }
@@ -613,6 +794,19 @@ const expectedReadable = (s: Scenario): ReadonlySet<string> => {
     if (all.some((other) => isUnder(other, from) && direct(other))) {
       readable.add(path)
     }
+  }
+  // Comments on a page the caller reads are theirs to read, in a live
+  // comments folder.
+  for (const path of all) {
+    if (readable.has(path) || origin(path) !== 'data' || !inScope(path)) {
+      continue
+    }
+    const commented = path.split('/').some((_, i, names) => {
+      const folder = names.slice(0, i + 1).join('/')
+      if (!folder.endsWith('.comments') || !live(folder)) return false
+      return readable.has(`${folder.slice(0, -'.comments'.length)}.html`)
+    })
+    if (commented) readable.add(path)
   }
   return readable
 }
@@ -1061,8 +1255,478 @@ describe('people’s data', () => {
   })
 })
 
+const SHARED_PAGE = `<!doctype html><html><head><title>Questions</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="icon.png">
+<link rel="alternate" href="feed.xml">
+<style>.hero { background: url(bg.png) }</style>
+</head><body>
+<img src="photo.png">
+<iframe src="embed.html"></iframe>
+<svg><image href="pic.png"/><use xlink:href="icons.svg#x"/><use href="#local"/></svg>
+<a href="../private.html">Private</a>
+<map name="m"><area href="../area.html" alt="Area"></map>
+<form action="answers/" method="post"><label>A <input name="a"></label><button>Send</button></form>
+<form action="decisions.json" method="post"><label>D <input name="d"></label><button>Vote</button></form>
+</body></html>`
+
+const SHARING_TREE = {
+  '_layout.html': '<header>Site</header><slot></slot>',
+  'private.html': '<title>Private</title>',
+  'area.html': '<title>Area</title>',
+  'questions/index.html': SHARED_PAGE,
+  'questions/_theme.css': ':root { --accent: red }',
+  'questions/style.css': 'p { color: red }',
+  'questions/icon.png': 'icon',
+  'questions/bg.png': 'bg',
+  'questions/photo.png': 'photo',
+  'questions/embed.html': '<title>Embed</title>',
+  'questions/pic.png': 'pic',
+  'questions/icons.svg': '<svg></svg>',
+  'questions/feed.xml': '<feed/>',
+  'questions/other.txt': 'other',
+}
+
+describe('what a share carries', () => {
+  /** A data node written straight into D1, as a send leaves one. */
+  const plant = async (
+    treeId: string,
+    path: string,
+    owner: Person | null,
+    by: Person,
+    kind: 'file' | 'folder' = 'file',
+  ) => {
+    const id = crypto.randomUUID()
+    await exec(
+      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, owner_id,
+         created_at)
+       values (?, ?, (select id from nodes where tree_id = ? and path = ? and deleted_at is null),
+         ?, ?, ?, ?, 'data', ?, ?)`,
+      id,
+      treeId,
+      treeId,
+      path.slice(0, Math.max(0, path.lastIndexOf('/'))),
+      path.slice(path.lastIndexOf('/') + 1),
+      path,
+      path.split('/').length,
+      kind,
+      owner?.id ?? null,
+      Date.now(),
+    )
+    if (kind === 'file') {
+      const version = crypto.randomUUID()
+      await exec(
+        `insert into node_versions (id, node_id, tree_id, revision, state, json_value, size,
+           content_type, author_id, created_at)
+         values (?, ?, ?, 1, 'live', '{"a":"x"}', 9, 'application/json', ?, ?)`,
+        version,
+        id,
+        treeId,
+        (owner ?? by).id,
+        Date.now(),
+      )
+      await exec(
+        'update nodes set current_version_id = ? where id = ?',
+        version,
+        id,
+      )
+    }
+    return id as NodeId
+  }
+
+  /**
+   * The questions page with its forms, the files it renders with and the
+   * pages it links to; Sara's and Bob's answers, a shared decisions file,
+   * and a comment on the page.
+   */
+  const sharing = async () => {
+    const admin = await person('admin')
+    const ws = await workspace(admin)
+    const people = {
+      sara: await person('sara'),
+      bob: await person('bob'),
+      carol: await person('carol'),
+      dave: await person('dave'),
+      eve: await person('eve'),
+    }
+    const pushed = await pushAll(
+      await agent(admin),
+      `${ws.name}/acme`,
+      SHARING_TREE,
+    )
+    if (!('treeId' in pushed)) throw new Error('no tree')
+    const treeId = pushed.treeId
+    const answers = await plant(
+      treeId,
+      'questions/answers',
+      null,
+      admin,
+      'folder',
+    )
+    await plant(treeId, 'questions/answers/sara.json', people.sara, admin)
+    await plant(treeId, 'questions/answers/bob.json', people.bob, admin)
+    await plant(treeId, 'questions/decisions.json', null, people.bob)
+    await plant(treeId, 'questions/index.comments', null, admin, 'folder')
+    await plant(
+      treeId,
+      'questions/index.comments/bob',
+      people.bob,
+      admin,
+      'folder',
+    )
+    await plant(
+      treeId,
+      'questions/index.comments/bob/1.json',
+      people.bob,
+      admin,
+    )
+    const node = async (path: string) => {
+      const found = await nodeAt(treeId, path)
+      if (found === undefined) throw new Error(`no node at ${path}`)
+      return found.id as NodeId
+    }
+    const path = (p: string) => `${ws.name}/acme/${p}`
+    const give = async (
+      where: string,
+      kind: 'email' | 'anyone',
+      who: Person | null,
+      role: 'read' | 'respond' | 'write',
+    ) =>
+      share(
+        treeId,
+        where === 'answers' ? answers : await node(where),
+        kind,
+        kind === 'anyone' ? '*' : who!.email,
+        role,
+        admin,
+      )
+    return { admin, ws, treeId, people, node, path, give }
+  }
+
+  type Sharing = Awaited<ReturnType<typeof sharing>>
+
+  /** What require(action) answers on each path, by path. */
+  const answersFor = async (
+    s: Sharing,
+    caller: Caller,
+    paths: readonly string[],
+    action: 'read' | 'respond' | 'comment' | 'read-data' = 'read',
+  ) => {
+    const out: Record<string, string> = {}
+    for (const p of paths)
+      out[p] = await attempt(caller, s.path(p), action as never)
+    return out
+  }
+
+  /** The paths the list check gives the caller, sorted. */
+  const listed = async (s: Sharing, caller: Caller) => {
+    const database = db(env)
+    const rows = await runAs(
+      caller,
+      Effect.gen(function* () {
+        const readable = yield* (yield* Access).readable(s.treeId as TreeId)
+        return yield* Effect.promise(() =>
+          database
+            .select({ path: schema.nodes.path })
+            .from(schema.nodes)
+            .where(
+              and(
+                eq(schema.nodes.treeId, s.treeId),
+                isNull(schema.nodes.deletedAt),
+                readable.where,
+              ),
+            )
+            .all(),
+        )
+      }),
+    )
+    return rows.map((row) => row.path).sort()
+  }
+
+  const RENDERED = [
+    'questions/style.css',
+    'questions/icon.png',
+    'questions/bg.png',
+    'questions/photo.png',
+    'questions/embed.html',
+    'questions/pic.png',
+    'questions/icons.svg',
+  ]
+  const KIT = ['_layout.html', 'questions/_theme.css']
+  const ANSWERS = ['questions/answers/sara.json', 'questions/answers/bob.json']
+
+  it('lets a respondent on a folder read its authored files, their own answer and the shared file a form there targets, never another person’s answer', async () => {
+    const s = await sharing()
+    await s.give('questions', 'email', s.people.sara, 'respond')
+    const sara = await agent(s.people.sara)
+    expect(
+      await answersFor(s, sara, [
+        'questions/index.html',
+        'questions/other.txt',
+        'questions/answers/sara.json',
+        'questions/decisions.json',
+        'questions/answers/bob.json',
+        'private.html',
+      ]),
+    ).toEqual({
+      'questions/index.html': 'ok',
+      'questions/other.txt': 'ok',
+      'questions/answers/sara.json': 'ok',
+      'questions/decisions.json': 'ok',
+      'questions/answers/bob.json': 'not_found',
+      'private.html': 'not_found',
+    })
+    // Comments on a page they read are theirs to read too.
+    expect(
+      await attempt(sara, s.path('questions/index.comments/bob/1.json')),
+    ).toBe('ok')
+    const list = await listed(s, sara)
+    expect(list).toContain('questions/decisions.json')
+    expect(list).toContain('questions/answers/sara.json')
+    expect(list).not.toContain('questions/answers/bob.json')
+  })
+
+  it('adds read on a folder and respond on a page inside it up to every answer there', async () => {
+    const s = await sharing()
+    await s.give('questions', 'email', s.people.sara, 'read')
+    await s.give('questions/index.html', 'email', s.people.sara, 'respond')
+    const sara = await agent(s.people.sara)
+    expect(await answersFor(s, sara, ANSWERS)).toEqual({
+      'questions/answers/sara.json': 'ok',
+      'questions/answers/bob.json': 'ok',
+    })
+    expect(await attempt(sara, s.path('questions/index.html'), 'respond')).toBe(
+      'ok',
+    )
+  })
+
+  it('carries with a read share on one page its rendered files, comments, every file in its form targets and its kit, never a page it links to', async () => {
+    const s = await sharing()
+    await s.give('questions/index.html', 'email', s.people.carol, 'read')
+    const carol = await agent(s.people.carol)
+    const reads = [
+      'questions/index.html',
+      ...RENDERED,
+      ...KIT,
+      ...ANSWERS,
+      'questions/decisions.json',
+      'questions/index.comments/bob/1.json',
+    ]
+    const refused = [
+      'questions/feed.xml',
+      'questions/other.txt',
+      'private.html',
+      'area.html',
+    ]
+    const answered = await answersFor(s, carol, [...reads, ...refused])
+    for (const p of reads) expect(answered[p], p).toBe('ok')
+    for (const p of refused) expect(answered[p], p).toBe('not_found')
+    expect(
+      await answersFor(s, carol, ['questions/answers'], 'read-data'),
+    ).toEqual({
+      'questions/answers': 'ok',
+    })
+    const list = await listed(s, carol)
+    for (const p of reads) expect(list, p).toContain(p)
+    for (const p of refused) expect(list, p).not.toContain(p)
+  })
+
+  it('carries the same with a respond share on one page, except other people’s answers, with respond on its form targets and comment on the page', async () => {
+    const s = await sharing()
+    await s.give('questions/index.html', 'email', s.people.sara, 'respond')
+    const sara = await agent(s.people.sara)
+    const reads = [
+      'questions/index.html',
+      ...RENDERED,
+      ...KIT,
+      'questions/answers/sara.json',
+      'questions/decisions.json',
+      'questions/index.comments/bob/1.json',
+    ]
+    const answered = await answersFor(s, sara, [
+      ...reads,
+      'questions/answers/bob.json',
+      'private.html',
+    ])
+    for (const p of reads) expect(answered[p], p).toBe('ok')
+    expect(answered['questions/answers/bob.json']).toBe('not_found')
+    expect(answered['private.html']).toBe('not_found')
+    expect(
+      await answersFor(s, sara, ['questions/decisions.json'], 'respond'),
+    ).toEqual({ 'questions/decisions.json': 'ok' })
+    expect(
+      await answersFor(s, sara, ['questions/index.html'], 'comment'),
+    ).toEqual({ 'questions/index.html': 'ok' })
+    const list = await listed(s, sara)
+    for (const p of reads) expect(list, p).toContain(p)
+    expect(list).not.toContain('questions/answers/bob.json')
+  })
+
+  it('makes a public folder’s authored files and the `_` files above it public, never a page above it or its data, for visitors and signed-in people alike', async () => {
+    const s = await sharing()
+    await s.give('questions', 'anyone', null, 'read')
+    const eve = await agent(s.people.eve)
+    for (const caller of [visitorCaller(), eve]) {
+      const missing = caller.person === null ? 'sign_in_required' : 'not_found'
+      const answered = await answersFor(s, caller, [
+        'questions/index.html',
+        'questions/other.txt',
+        ...KIT,
+        'private.html',
+        ...ANSWERS,
+        'questions/decisions.json',
+      ])
+      expect(answered).toEqual({
+        'questions/index.html': 'ok',
+        'questions/other.txt': 'ok',
+        '_layout.html': 'ok',
+        'questions/_theme.css': 'ok',
+        'private.html': missing,
+        'questions/answers/sara.json': missing,
+        'questions/answers/bob.json': missing,
+        'questions/decisions.json': missing,
+      })
+      // Comments on a page anyone reads are public with it.
+      expect(
+        await attempt(caller, s.path('questions/index.comments/bob/1.json')),
+      ).toBe('ok')
+    }
+  })
+
+  it('never makes data public through an anyone share on a page whose form targets it', async () => {
+    const s = await sharing()
+    await s.give('questions/index.html', 'anyone', null, 'read')
+    const eve = await agent(s.people.eve)
+    for (const caller of [visitorCaller(), eve]) {
+      const missing = caller.person === null ? 'sign_in_required' : 'not_found'
+      const answered = await answersFor(s, caller, [
+        'questions/index.html',
+        'questions/photo.png',
+        ...ANSWERS,
+        'questions/decisions.json',
+      ])
+      expect(answered).toEqual({
+        'questions/index.html': 'ok',
+        'questions/photo.png': 'ok',
+        'questions/answers/sara.json': missing,
+        'questions/answers/bob.json': missing,
+        'questions/decisions.json': missing,
+      })
+    }
+  })
+
+  it('leaves a page a public page links to unreadable, while what it renders is readable', async () => {
+    const s = await sharing()
+    await s.give('questions/index.html', 'anyone', null, 'read')
+    const visitor = visitorCaller()
+    const answered = await answersFor(s, visitor, [
+      'private.html',
+      'area.html',
+      'questions/feed.xml',
+      ...RENDERED,
+    ])
+    expect(answered['private.html']).toBe('sign_in_required')
+    expect(answered['area.html']).toBe('sign_in_required')
+    expect(answered['questions/feed.xml']).toBe('sign_in_required')
+    for (const p of RENDERED) expect(answered[p], p).toBe('ok')
+    // The page, what it renders, its kit, and its comments: nothing else.
+    const list = await listed(s, visitor)
+    expect(list).toEqual(
+      [
+        ...KIT,
+        'questions/index.html',
+        ...RENDERED,
+        'questions/index.comments',
+        'questions/index.comments/bob',
+        'questions/index.comments/bob/1.json',
+      ].sort(),
+    )
+  })
+
+  it('exposes a data folder made public to everyone, its responses included, while an anyone respond share there reads only one’s own file', async () => {
+    const s = await sharing()
+    await s.give('questions', 'anyone', null, 'read')
+    await s.give('answers', 'anyone', null, 'read')
+    const eve = await agent(s.people.eve)
+    expect(await answersFor(s, visitorCaller(), ANSWERS)).toEqual({
+      'questions/answers/sara.json': 'ok',
+      'questions/answers/bob.json': 'ok',
+    })
+    expect(
+      await answersFor(s, eve, ['questions/answers'], 'read-data'),
+    ).toEqual({ 'questions/answers': 'ok' })
+    const responses = await runAs(
+      eve,
+      Effect.flatMap(Data, (data) => data.responses(ref(s.path('questions/')))),
+    )
+    expect(responses.forms[0]?.people).toBe(2)
+
+    const t = await sharing()
+    await t.give('answers', 'anyone', null, 'respond')
+    const sara = await agent(t.people.sara)
+    expect(await answersFor(t, sara, ANSWERS)).toEqual({
+      'questions/answers/sara.json': 'ok',
+      'questions/answers/bob.json': 'not_found',
+    })
+    // An email read share on the folder still reads every answer.
+    await t.give('questions', 'email', t.people.carol, 'read')
+    expect(await answersFor(t, await agent(t.people.carol), ANSWERS)).toEqual({
+      'questions/answers/sara.json': 'ok',
+      'questions/answers/bob.json': 'ok',
+    })
+  })
+
+  it('lets a respondent’s read-only key read its own answer and the shared file, refusing every change and anything outside its scope', async () => {
+    const s = await sharing()
+    await s.give('questions', 'email', s.people.sara, 'respond')
+    const key = await agent(s.people.sara, {
+      readOnly: true,
+      scope: await s.node('questions'),
+    })
+    expect(
+      await answersFor(s, key, [
+        'questions/answers/sara.json',
+        'questions/decisions.json',
+        'questions/answers/bob.json',
+        'private.html',
+      ]),
+    ).toEqual({
+      'questions/answers/sara.json': 'ok',
+      'questions/decisions.json': 'ok',
+      'questions/answers/bob.json': 'not_found',
+      'private.html': 'not_found',
+    })
+    expect(
+      await answersFor(
+        s,
+        key,
+        ['questions/index.html', 'questions/decisions.json'],
+        'respond',
+      ),
+    ).toEqual({
+      'questions/index.html': 'forbidden',
+      'questions/decisions.json': 'forbidden',
+    })
+    const withdrawn = await failureAs(
+      key,
+      Effect.flatMap(Data, (data) =>
+        data.withdraw({
+          treeId: s.treeId as TreeId,
+          path: 'questions/answers/sara.json',
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+    expect(withdrawn.code).toBe('forbidden')
+    const list = await listed(s, key)
+    expect(list).toContain('questions/decisions.json')
+    expect(list).not.toContain('private.html')
+    expect(list).not.toContain('area.html')
+  })
+})
+
 describe('the list check', () => {
-  it('reaches the `_` files above a shared page, never a sibling folder’s or data', () => {
+  it('reaches the `_` files above a shared page and what the page carries, never a sibling folder’s', () => {
     const reached = expectedReadable({
       shares: [
         { at: PATHS.indexOf('a/b/c.html'), kind: 'email', role: 'read' },
@@ -1071,8 +1735,10 @@ describe('the list check', () => {
       scopeAt: -1,
       deleted: null,
     })
-    // Their own answers are theirs to read, by ownership and not by reach.
+    // Their own answers are theirs to read, by ownership and not by reach;
+    // the page carries the files it renders with and its form target.
     expect([...reached].sort()).toEqual([
+      '_inbox',
       '_inbox/x.json',
       '_layout.html',
       'a/_theme.css',
@@ -1080,6 +1746,9 @@ describe('the list check', () => {
       'a/b/_components',
       'a/b/_components/x-y.js',
       'a/b/c.html',
+      'a/d.txt',
+      'e.comments/m.json',
+      'f/g.txt',
     ])
   })
 
@@ -1159,6 +1828,46 @@ describe('the list check', () => {
         numRuns: 80,
         // Two shares on one node for one target: only the first is planted.
         examples: [
+          // A public page that frames e.html: e.html and its comments are
+          // read through what the public page carries.
+          [
+            {
+              shares: [
+                {
+                  at: PATHS.indexOf('f/h/i.html'),
+                  kind: 'anyone',
+                  role: 'read',
+                },
+              ],
+              caller: 'visitor',
+              scopeAt: -1,
+              deleted: null,
+            },
+          ],
+          // A respond share on a page with a shared file in its targets, and
+          // the page made public, for its respondent and a visitor.
+          [
+            {
+              shares: [
+                { at: PATHS.indexOf('e.html'), kind: 'email', role: 'respond' },
+                { at: PATHS.indexOf('e.html'), kind: 'anyone', role: 'read' },
+              ],
+              caller: 'outsider',
+              scopeAt: -1,
+              deleted: null,
+            },
+          ],
+          [
+            {
+              shares: [
+                { at: PATHS.indexOf('a/b/c.html'), kind: 'team', role: 'read' },
+                { at: -1, kind: 'workspace', role: 'respond' },
+              ],
+              caller: 'member',
+              scopeAt: -1,
+              deleted: null,
+            },
+          ],
           [
             {
               shares: [

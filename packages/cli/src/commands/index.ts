@@ -4,6 +4,7 @@ import { ls } from './ls.ts'
 import { pull } from './pull.ts'
 import { push } from './push.ts'
 import { read } from './read.ts'
+import { share } from './share.ts'
 import { update } from './update.ts'
 import { watch } from './watch.ts'
 import { whoami } from './whoami.ts'
@@ -16,6 +17,7 @@ export const verbs = [
   update,
   push,
   pull,
+  share,
   ls,
   read,
   watch,

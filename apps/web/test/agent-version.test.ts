@@ -12,6 +12,7 @@ import {
   type CommitResult,
   type StageResult,
 } from '../src/core/index.ts'
+import { exec } from './support/d1.ts'
 import { harness } from './support/harness.ts'
 import { runAs, sessionFor } from './support/people.ts'
 import {
@@ -184,22 +185,40 @@ describe('a page without a companion', () => {
 
 describe('the pointer', () => {
   it('counts only the files the caller can read', async () => {
-    const reader = await person('reader')
+    // A public page's reader reads its comments, never people's answers.
     const plan = await nodeAt(tree.id, 'plan.html')
-    await share(tree.id, plan!.id, 'email', reader.email, 'read', admin)
-    const result = page(await read(await sessionFor(reader), at('plan')))
+    const passer = await person('passer')
+    await share(tree.id, plan!.id, 'anyone', '*', 'read', admin)
+    const result = page(await read(await sessionFor(passer), at('plan')))
     expect(result.pointer).toEqual({
       data: [
         { path: 'answers/', files: 0 },
         { path: 'decisions.json', files: 0 },
       ],
-      comments: 0,
+      comments: 1,
     })
     expect(
       result.text.endsWith(
-        '\n\nData: answers/ (0 files), decisions.json (0 files) · Comments: 0\n',
+        '\n\nData: answers/ (0 files), decisions.json (0 files) · Comments: 1\n',
       ),
     ).toBe(true)
+    // Later tests read the page as private again.
+    await exec(
+      "delete from shares where node_id = ? and target_kind = 'anyone'",
+      plan!.id,
+    )
+    // A read share on the page carries the data its forms write.
+    const reader = await person('reader')
+    await share(tree.id, plan!.id, 'email', reader.email, 'read', admin)
+    expect(
+      page(await read(await sessionFor(reader), at('plan'))).pointer,
+    ).toEqual({
+      data: [
+        { path: 'answers/', files: 2 },
+        { path: 'decisions.json', files: 1 },
+      ],
+      comments: 1,
+    })
   })
 })
 

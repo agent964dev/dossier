@@ -15,6 +15,7 @@ import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
 import { Push, PushLive } from './push.ts'
 import { Settings, SettingsLive } from './settings.ts'
+import { Shares, SharesLive } from './shares.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
 import { TreeStore, TreeStoreLive } from './tree-store.ts'
 import { Watch, WatchLive } from './watch.ts'
@@ -39,6 +40,7 @@ export type CoreServices =
   | ChangeFeed
   | Watch
   | LookSettings
+  | Shares
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -71,10 +73,11 @@ export const makeLayer = (
   )
   const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(trees))
   const people = PeopleLive.pipe(Layer.provide(DataLive))
+  const shares = SharesLive.pipe(Layer.provideMerge(people))
   return Layer.mergeAll(
     SignInLive,
-    PushLive,
-    people,
+    PushLive.pipe(Layer.provide(shares)),
+    shares,
     LookSettingsLive.pipe(Layer.provide(people)),
     PagesLive.pipe(Layer.provideMerge(FilesLive)),
     DataLive,

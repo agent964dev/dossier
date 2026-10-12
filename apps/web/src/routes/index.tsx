@@ -1,15 +1,22 @@
 import { createFileRoute, Link, redirect } from '@tanstack/react-router'
-import { Folder, Info } from 'lucide-react'
+import { FileText, Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
 import { HostName } from '../components/host-name'
 import { AppHeader } from '../components/app-header'
 import { SectionLabel } from '../components/section-label'
+import { Note } from '../components/settings-parts'
+import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { WorkspaceMenu } from '../components/workspace-menu'
 import type { TreeSharing } from '../core/index'
 import { signOut, startGoogleSignIn } from '../lib/auth-client'
-import { homeView, type HomeTree, type HomeView } from '../server/home'
+import {
+  homeView,
+  type HomeTree,
+  type HomeView,
+  type SharedWithMe,
+} from '../server/home'
 import { isScreenFailure } from '../server/failure'
 
 interface HomeSearch {
@@ -130,6 +137,71 @@ function Trees({
   )
 }
 
+const DAY = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'short',
+  timeZone: 'UTC',
+})
+
+/** The tile's tone follows the row's label. */
+const TILE = {
+  'waiting for your answer':
+    'border-complement-400/25 bg-complement-400/10 text-complement-400',
+  'mentioned you': 'border-brand-300/25 bg-brand-300/10 text-brand-300',
+} as const
+
+function SharedRow({ row }: { row: SharedWithMe }) {
+  return (
+    <li>
+      <a
+        href={row.link}
+        className="flex items-center gap-3 px-3.5 py-3 outline-none transition-colors duration-200 ease-agent hover:bg-neutral-800/40 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
+      >
+        <span
+          aria-hidden
+          className={`flex size-8 shrink-0 items-center justify-center rounded-lg border ${
+            row.label === null
+              ? 'border-border bg-neutral-800/70 text-neutral-300'
+              : TILE[row.label]
+          }`}
+        >
+          {row.kind === 'folder' ? (
+            <Folder className="size-4" />
+          ) : (
+            <FileText className="size-4" />
+          )}
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-[0.9375rem] text-neutral-50">
+            {row.title}
+          </span>
+          <span className="font-mono text-xs break-words text-neutral-400">
+            {row.place} · from {row.from} ·{' '}
+            <time dateTime={row.date}>{DAY.format(new Date(row.date))}</time>
+          </span>
+          {row.label === null ? null : (
+            <Badge
+              variant={
+                row.label === 'waiting for your answer' ? 'accent' : 'default'
+              }
+              className="mt-1"
+            >
+              <span
+                aria-hidden
+                className="size-1.5 rounded-full bg-current shadow-[0_0_6px_currentColor]"
+              />
+              {row.label}
+            </Badge>
+          )}
+        </span>
+        <span className="shrink-0 font-mono text-[0.6875rem] tracking-[0.16em] text-neutral-400 uppercase">
+          {row.action}
+        </span>
+      </a>
+    </li>
+  )
+}
+
 function Home({
   view,
   me,
@@ -173,30 +245,50 @@ function Home({
           className="flex flex-col gap-3"
         >
           {view.workspace === null ? null : (
-            <SectionLabel id="shared-label">Shared with me</SectionLabel>
-          )}
-          <div className="flex flex-col gap-4 rounded-xl border border-border bg-card px-4 py-5">
-            <p className="flex gap-2.5 text-[0.9375rem] leading-relaxed text-neutral-300">
-              <Info
-                aria-hidden
-                className="mt-1 size-4 shrink-0 text-neutral-500"
-              />
-              <span>
-                Nothing is shared with{' '}
-                <span className="text-neutral-50">{me.email}</span> yet. If
-                someone sent you a link, open it while signed in with this
-                address.
-              </span>
-            </p>
-            <Button
-              variant="outline"
-              className="w-fit"
-              disabled={busy}
-              onClick={useAnotherAccount}
+            <SectionLabel
+              id="shared-label"
+              count={view.shared.length === 0 ? undefined : view.shared.length}
             >
-              Use another Google account
-            </Button>
-          </div>
+              Shared with me
+            </SectionLabel>
+          )}
+          {view.shared.length === 0 ? null : (
+            <ul className="divide-y divide-border/80 overflow-hidden rounded-xl border border-border bg-card">
+              {view.shared.map((row) => (
+                <SharedRow key={row.link} row={row} />
+              ))}
+            </ul>
+          )}
+          {view.shared.length === 0 ? null : view.workspace === null ? (
+            <Note>
+              A guest has only what others share with{' '}
+              <span className="text-neutral-300">{me.email}</span>.
+            </Note>
+          ) : null}
+          {view.shared.length > 0 ? null : (
+            <div className="flex flex-col gap-4 rounded-xl border border-border bg-card px-4 py-5">
+              <p className="flex gap-2.5 text-[0.9375rem] leading-relaxed text-neutral-300">
+                <Info
+                  aria-hidden
+                  className="mt-1 size-4 shrink-0 text-neutral-500"
+                />
+                <span>
+                  Nothing is shared with{' '}
+                  <span className="text-neutral-50">{me.email}</span> yet. If
+                  someone sent you a link, open it while signed in with this
+                  address.
+                </span>
+              </p>
+              <Button
+                variant="outline"
+                className="w-fit"
+                disabled={busy}
+                onClick={useAnotherAccount}
+              >
+                Use another Google account
+              </Button>
+            </div>
+          )}
         </section>
       </main>
     </div>

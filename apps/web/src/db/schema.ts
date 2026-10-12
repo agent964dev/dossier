@@ -560,6 +560,8 @@ export const pushes = sqliteTable(
     /** A day after staging. */
     expiresAt: integer('expires_at').notNull(),
     committedAt: integer('committed_at'),
+    /** The shares the commit grants on the pushed folder, as JSON. */
+    sharesJson: text('shares_json'),
   },
   (t) => [
     uniqueIndex('pushes_tree_number_unique').on(t.treeId, t.number),
@@ -866,6 +868,7 @@ export const viewHandles = sqliteTable(
   },
   (t) => [
     uniqueIndex('view_handles_session_tree_unique').on(t.sessionId, t.treeId),
+    uniqueIndex('view_handles_anon_tree_unique').on(t.anonSessionId, t.treeId),
     index('view_handles_expires_idx').on(t.expiresAt),
     check(
       'view_handles_owner_check',
@@ -938,6 +941,44 @@ export const seenBy = sqliteTable(
     lastSeenAt: integer('last_seen_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.nodeId, t.userId] })],
+)
+
+/**
+ * What an HTML file renders with, by its bytes and the folder it is read
+ * from: the tree paths a page shared on its own carries. Written by pushes.
+ */
+export const renderPaths = sqliteTable(
+  'render_paths',
+  {
+    sha256: text('sha256').notNull(),
+    /** The folder the file's URLs resolve from, '' for the root. */
+    folder: text('folder').notNull(),
+    /** A tree path; a folder's ends with '/'. */
+    path: text('path').notNull(),
+    /** Named in an inline style or module script. */
+    inline: integer('inline', { mode: 'boolean' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.sha256, t.folder, t.path, t.inline] })],
+)
+
+/** Whether an HTML file's bytes are a complete document, for the read rule. */
+export const htmlFiles = sqliteTable('html_files', {
+  sha256: text('sha256').primaryKey(),
+  complete: integer('complete', { mode: 'boolean' }).notNull(),
+})
+
+/** Views of public pages, counted per UTC day. */
+export const pageViews = sqliteTable(
+  'page_views',
+  {
+    nodeId: text('node_id')
+      .notNull()
+      .references(() => nodes.id),
+    /** 'YYYY-MM-DD' in UTC. */
+    day: text('day').notNull(),
+    count: integer('count').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.nodeId, t.day] })],
 )
 
 /** One row per counted key, over a fixed one-minute window. */

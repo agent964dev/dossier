@@ -293,9 +293,42 @@ const escapeHtml = (text: string) =>
     .replaceAll('"', '&quot;')
 
 /**
+ * What a link preview reads from the shell: a public page's own title,
+ * description and image, or for any other page only the deployment's name.
+ */
+const previewTags = (boot: ShellBoot): string => {
+  const preview = boot.preview
+  if (preview === null) {
+    return `<title>${escapeHtml(boot.deployment.name)}</title>`
+  }
+  const meta = (key: 'name' | 'property', name: string, value: string) =>
+    `<meta ${key}="${name}" content="${escapeHtml(value)}">`
+  return [
+    `<title>${escapeHtml(preview.title)}</title>`,
+    ...(preview.description === null
+      ? []
+      : [meta('name', 'description', preview.description)]),
+    meta('property', 'og:title', preview.title),
+    ...(preview.description === null
+      ? []
+      : [meta('property', 'og:description', preview.description)]),
+    ...(preview.image === null
+      ? []
+      : [meta('property', 'og:image', preview.image)]),
+    meta('property', 'og:site_name', boot.deployment.name),
+    meta('property', 'og:url', boot.link),
+    meta(
+      'name',
+      'twitter:card',
+      preview.image === null ? 'summary' : 'summary_large_image',
+    ),
+  ].join('\n')
+}
+
+/**
  * The shell: a small first-party document that frames the page from its
- * tree's content host. It adds nothing visible, and its title is only the
- * deployment's name, so a link preview shows nothing of a private page.
+ * tree's content host. It adds nothing visible. A private page's title is
+ * only the deployment's name, so a link preview shows nothing of it.
  */
 export const renderShell = (boot: ShellBoot): Response => {
   const data = JSON.stringify(boot).replaceAll('<', '\\u003c')
@@ -304,7 +337,7 @@ export const renderShell = (boot: ShellBoot): Response => {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>${escapeHtml(boot.deployment.name)}</title>
+${previewTags(boot)}
 <link rel="icon" href="/_/app/favicon.svg" type="image/svg+xml">
 <style>html,body{margin:0;height:100%}iframe{display:block;border:0;width:100%;height:100%}</style>
 <script type="application/json" id="dossier-shell">${data}</script>

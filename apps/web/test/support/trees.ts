@@ -8,6 +8,7 @@ import type {
   PersonId,
   PushId,
   Sha256,
+  ShareSpec,
   WorkspaceId,
 } from '@dossier/contracts'
 import { parseTarget } from '@dossier/contracts'
@@ -185,6 +186,8 @@ export interface PushOptions {
   readonly force?: boolean
   readonly dryRun?: boolean
   readonly message?: string | null
+  /** Shares the commit grants on the pushed folder. */
+  readonly share?: readonly ShareSpec[]
 }
 
 export const stage = (
@@ -205,6 +208,7 @@ export const stage = (
           dryRun: options.dryRun ?? false,
           message: options.message ?? null,
           files: manifest,
+          share: options.share ?? [],
         }),
       ),
     ),

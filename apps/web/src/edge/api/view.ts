@@ -8,7 +8,11 @@ import { Pages } from '../../core/index.ts'
 export const ViewLive = HttpApiBuilder.group(DossierApi, 'view', (handlers) =>
   handlers.handle('view', ({ payload }) =>
     Effect.flatMap(Pages, (pages) =>
-      pages.view({ treeId: payload.tree, path: payload.path }),
+      pages.view({
+        treeId: payload.tree,
+        path: payload.path,
+        renewal: payload.renewal,
+      }),
     ),
   ),
 )

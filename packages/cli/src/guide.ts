@@ -12,6 +12,7 @@ import layouts from './guide/layouts.md' with { type: 'text' }
 import liveData from './guide/live-data.md' with { type: 'text' }
 import pageClient from './guide/page-client.md' with { type: 'text' }
 import reading from './guide/reading.md' with { type: 'text' }
+import sharing from './guide/sharing.md' with { type: 'text' }
 import themes from './guide/themes.md' with { type: 'text' }
 import treeAndLinks from './guide/tree-and-links.md' with { type: 'text' }
 import { VERSION } from './io.ts'
@@ -54,6 +55,7 @@ const CONVENTIONS: readonly string[] = [
   liveData,
   agentVersions,
   reading,
+  sharing,
 ]
 
 /** A convention file: its `## Title` line, then its Markdown. */

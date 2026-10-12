@@ -1,6 +1,10 @@
 // An in-memory ShellStore for the shell's tests, with the same keys as the
 // IndexedDB one.
-import type { DraftValues, PendingSend } from '@dossier/contracts/bridge'
+import {
+  VISITOR_VIEWER,
+  type DraftValues,
+  type PendingSend,
+} from '@dossier/contracts/bridge'
 import type { ShellStore } from '../src/shell/store.ts'
 
 export interface MemoryStore extends ShellStore {
@@ -35,14 +39,21 @@ export const memoryStore = (): MemoryStore => {
       else forms[form] = values
       drafts.set(key, forms)
     },
-    adoptDrafts: async (from, to, tree) => {
-      if (from === to) return
+    claimVisitor: async (viewer, tree) => {
+      if (viewer === VISITOR_VIEWER) return
+      const from = `${VISITOR_VIEWER}|${tree}|`
       for (const [key, forms] of drafts) {
-        const [viewer, inTree, ...page] = key.split('|')
-        if (viewer !== from || inTree !== tree) continue
-        const target = `${to}|${tree}|${page.join('|')}`
-        drafts.set(target, { ...drafts.get(target), ...forms })
+        if (!key.startsWith(from)) continue
+        const target = `${viewer}|${tree}|${key.slice(from.length)}`
+        // The person's own draft of a form stays.
+        drafts.set(target, { ...forms, ...drafts.get(target) })
         drafts.delete(key)
+      }
+      for (const [key, sends] of pending) {
+        if (!key.startsWith(`${tree}|`)) continue
+        for (const [opId, send] of sends) {
+          if (send.by === null) sends.set(opId, { ...send, by: viewer })
+        }
       }
     },
     loadPending: async (tree, page) =>

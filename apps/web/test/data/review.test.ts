@@ -70,8 +70,10 @@ const respondent = async (tree: FormTree, kind: 'email' | 'anyone') => {
 }
 
 describe('a send into a shared file', () => {
+  // A respondent through a private share reads the shared file their form
+  // writes; one through an anyone share never reads other people's data.
   it.each(['email', 'anyone'] as const)(
-    'answers a sender who may not read the file with only what they sent (%s respond)',
+    'answers a sender with the whole file only when they read it (%s respond)',
     async (kind) => {
       const tree = await pushForms(owner, ws, FILES)
       const board = await formRef(tree, 'board.html', 'board.json')
@@ -103,7 +105,16 @@ describe('a send into a shared file', () => {
         entries: [['vote', 'yes']],
         opId,
       })
-      expect(JSON.stringify(replayed)).not.toContain('SECRET')
+      if (kind === 'anyone') {
+        expect(JSON.stringify(sent)).not.toContain('SECRET')
+        expect(JSON.stringify(replayed)).not.toContain('SECRET')
+      } else {
+        expect(replayed.doc?.data).toEqual({
+          status: 'SECRET-status',
+          owner: 'SECRET-owner',
+          vote: 'yes',
+        })
+      }
       // The file itself keeps everyone's fields.
       expect((await liveValue(tree.treeId, 'board.json'))?.value).toEqual({
         status: 'SECRET-status',

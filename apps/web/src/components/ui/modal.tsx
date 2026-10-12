@@ -20,6 +20,7 @@ export function Modal({
   children,
   footer,
   className,
+  handle = false,
 }: {
   open: boolean
   onClose: () => void
@@ -28,6 +29,8 @@ export function Modal({
   children?: ReactNode
   footer?: ReactNode
   className?: string
+  /** A sheet's grab bar above the title, on phones only. */
+  handle?: boolean
 }) {
   const ref = useRef<HTMLDialogElement>(null)
   const titleId = useId()
@@ -58,6 +61,12 @@ export function Modal({
       )}
     >
       <div className="flex max-h-[min(85dvh,44rem)] flex-col pb-[var(--safe-area-bottom)] sm:pb-0">
+        {handle ? (
+          <span
+            aria-hidden
+            className="mx-auto mt-2 block h-1.5 w-10 shrink-0 rounded-full bg-neutral-600 sm:hidden"
+          />
+        ) : null}
         <div className="flex items-start justify-between gap-3 border-b border-border/70 px-4 py-3.5 sm:px-5">
           <div className="min-w-0">
             <h2

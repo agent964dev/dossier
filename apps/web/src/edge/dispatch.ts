@@ -39,6 +39,7 @@ import { apiHandlerFor } from './api/index.ts'
 import {
   bearerOf,
   callerFor,
+  newVisitorCookie,
   frameCallerFor,
   framePathOf,
   requestIdOf,
@@ -413,6 +414,15 @@ export const serve = async (
   async function answer(served: Served, who: Caller): Promise<Response> {
     switch (served.kind) {
       case 'shell':
+        // A visitor's first page gives them an anonymous session, which
+        // binds their view handles to this browser.
+        if (
+          who.person === null &&
+          who.via.kind === 'visitor' &&
+          who.via.anonSessionId === null
+        ) {
+          setCookie = [...setCookie, newVisitorCookie()]
+        }
         return renderShell(served.boot)
       case 'listing':
         return screen(who)

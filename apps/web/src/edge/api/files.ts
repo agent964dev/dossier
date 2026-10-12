@@ -9,6 +9,12 @@ import { targetOf } from './target.ts'
 const attachment = (name: string) =>
   `attachment; filename*=UTF-8''${encodeURIComponent(name)}`
 
+/**
+ * Raster images keep their type, so a link preview's image shows; they run
+ * nothing. Everything else is bytes.
+ */
+const RASTER = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+
 export const FilesLive = HttpApiBuilder.group(DossierApi, 'files', (handlers) =>
   handlers
     .handle('ls', ({ urlParams }) =>
@@ -37,7 +43,9 @@ export const FilesLive = HttpApiBuilder.group(DossierApi, 'files', (handlers) =>
         return HttpServerResponse.raw(file.body, {
           status: 200,
           headers: {
-            'content-type': 'application/octet-stream',
+            'content-type': RASTER.has(file.version.contentType ?? '')
+              ? (file.version.contentType as string)
+              : 'application/octet-stream',
             'content-length': String(file.size),
             'content-disposition': attachment(file.name),
             'x-content-type-options': 'nosniff',

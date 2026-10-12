@@ -22,6 +22,7 @@ export const BOOT: ShellBoot = {
   seq: 7,
   base: 'b1',
   me: { email: 'sara@acme.com', name: 'Sara' },
+  preview: null,
 }
 
 export const grant = (

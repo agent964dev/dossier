@@ -2,6 +2,7 @@ import {
   BRIDGE_VERSION,
   DossierError,
   ERRORS,
+  VISITOR_VIEWER,
   WINDOW_NAME_PREFIX,
   formKey,
   isHello,
@@ -133,6 +134,8 @@ export interface ShellApi {
   readonly view: (i: {
     readonly tree: string
     readonly path: string
+    /** The shell renewing the open page's handle: not a new view. */
+    readonly renewal?: boolean
   }) => Promise<ViewGrant>
   /**
    * The page a nested page says it is, as the deployment answers for this
@@ -333,11 +336,12 @@ export const createShell = (
   const ports = new Map<MessagePort, string>()
   /** The pages whose kept sends are being tried now. */
   const replaying = new Set<string>()
-  let adopted = false
+  /** The visitor's drafts and kept sends becoming the person's, once. */
+  let claimed: Promise<void> | null = null
 
   const me = (): Me | null => (boot.me === null ? null : { ...boot.me, role })
-  /** Whose drafts these are: the person's email, or '' for a visitor. */
-  const viewer = (): string => boot.me?.email ?? ''
+  /** Whose drafts these are: the person's email, or the visitor's key. */
+  const viewer = (): string => boot.me?.email ?? VISITOR_VIEWER
   /** Whom this shell's pages were shown to; every send says so. */
   const shownTo = (): string | null => boot.me?.email ?? null
   /**
@@ -387,17 +391,26 @@ export const createShell = (
     }
   }
 
-  const adoptOnce = async (): Promise<void> => {
-    if (adopted || boot.me === null) return
-    adopted = true
-    await quietly(() => store.adoptDrafts('', boot.me!.email, tree), undefined)
+  /**
+   * Back from sign-in, what the visitor kept in this tree on this device
+   * becomes the person's: their drafts (the person's own stay) and kept
+   * sends, which then go as the person. Every read of drafts or kept sends
+   * waits for it, so a claimed send is tried once, as the person.
+   */
+  const claim = (): Promise<void> => {
+    const person = boot.me
+    if (person === null) return Promise.resolve()
+    claimed ??= quietly(() => store.claimVisitor(person.email, tree), undefined)
+    return claimed
   }
 
   /**
-   * The kept sends of a page this viewer may send: a visitor's, or their
-   * own. Another person's are dropped; their draft stays theirs.
+   * The kept sends of a page this viewer may send: their own, the visitor's
+   * having become a signed-in person's by then, or a visitor's kept since.
+   * Another person's are dropped; their draft stays theirs.
    */
   const pendingFor = async (page: string): Promise<PendingSend[]> => {
+    await claim()
     const all = await quietly(() => store.loadPending(tree, page), [])
     const email = boot.me?.email ?? null
     const mine: PendingSend[] = []
@@ -418,7 +431,7 @@ export const createShell = (
     readonly drafts: Readonly<Record<string, DraftValues>>
     readonly resume: readonly string[]
   }> => {
-    await adoptOnce()
+    await claim()
     const drafts = await quietly(
       () => store.loadDrafts(viewer(), tree, page),
       {},
@@ -953,7 +966,11 @@ export const createShell = (
   const renew = async (): Promise<void> => {
     const current = loads
     try {
-      const grant = await api.view({ tree: boot.tree.id, path: linkPath })
+      const grant = await api.view({
+        tree: boot.tree.id,
+        path: linkPath,
+        renewal: true,
+      })
       // A load since then holds a fresher grant.
       if (disposed || current !== loads) return
       if (!samePerson(grant.email)) {

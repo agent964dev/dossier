@@ -116,6 +116,7 @@ export {
   parseRange,
   treeRefOf,
   type PagesService,
+  type SeenBy,
   type SeenByRow,
   type Served,
 } from './pages.ts'
@@ -171,3 +172,13 @@ export type {
   VersionRow,
   WorkspaceRow,
 } from './rows.ts'
+export {
+  Shares,
+  sharingLine,
+  strongest,
+  type NodeShares,
+  type SharedRow,
+  type ShareView,
+  type SharesService,
+} from './shares.ts'
+export { newVisitorSecret, sha256Hex } from './ids.ts'

@@ -15,6 +15,9 @@ const randomBytes = (length: number): Uint8Array =>
 /** A random row id: 16 bytes in base64url. */
 export const newId = (): string => base64url(randomBytes(16))
 
+/** A visitor's anonymous session: 32 random bytes in base64url. */
+export const newVisitorSecret = (): string => base64url(randomBytes(32))
+
 /** A new agent key secret: `dsk_` and 32 random bytes in base64url. */
 export const newKeySecret = (): `dsk_${string}` =>
   `dsk_${base64url(randomBytes(32))}`

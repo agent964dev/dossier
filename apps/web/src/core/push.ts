@@ -7,6 +7,7 @@ import {
   type PushId,
   type PushNumber,
   type Sha256,
+  type ShareSpec,
   type TreeId,
 } from '@dossier/contracts'
 import {
@@ -37,8 +38,10 @@ import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
+import { renderPathsOf } from './page-needs.ts'
+import { Shares } from './shares.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
-import { blobKey, TreeStore } from './tree-store.ts'
+import { blobKey, TreeStore, type NewShare } from './tree-store.ts'
 
 export interface ManifestFile {
   /** Inside the pushed folder. */
@@ -56,6 +59,8 @@ export interface StageInput {
   readonly dryRun: boolean
   readonly message: string | null
   readonly files: readonly ManifestFile[]
+  /** Shares the commit grants on the pushed folder. */
+  readonly share?: readonly ShareSpec[]
 }
 
 export interface PushPlan {
@@ -308,6 +313,8 @@ interface StagedPush {
   readonly base_seq: number | null
   readonly force: number
   readonly expires_at: number
+  /** The shares to grant, as NewShare JSON. */
+  readonly shares_json: string | null
 }
 
 interface LiveFile {
@@ -320,12 +327,13 @@ interface LiveFile {
 export const PushLive: Layer.Layer<
   Push,
   never,
-  TreeStore | Access | Limits | Bindings | Config | BaseLayer
+  TreeStore | Access | Limits | Bindings | Config | BaseLayer | Shares
 > = Layer.effect(
   Push,
   Effect.gen(function* () {
     const store = yield* TreeStore
     const access = yield* Access
+    const sharing = yield* Shares
     const baseLayer = yield* BaseLayer
     const limits = yield* Limits
     const config = yield* Config
@@ -616,6 +624,8 @@ export const PushLive: Layer.Layer<
         }
         const ws = workspace as WorkspaceRow
         const link = folderLink(ws.name, target.tree, target.path)
+        // Who may push here may share what they push: write holds share.
+        const shares = yield* sharing.toNewShares(ws, i.share ?? [])
 
         // A hash the tree already holds is not uploaded again, so its size
         // is the stored blob's, never the one the manifest claims.
@@ -725,8 +735,8 @@ export const PushLive: Layer.Layer<
           DB.prepare(
             `insert into pushes (id, workspace_id, tree_name, tree_id, path, base_seq, number,
                message, force, author_id, key_id, state, file_count, byte_count, created_at,
-               expires_at, committed_at)
-             values (?, ?, ?, ?, ?, ?, null, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, null)`,
+               expires_at, committed_at, shares_json)
+             values (?, ?, ?, ?, ?, ?, null, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, null, ?)`,
           ).bind(
             pushId,
             ws.id,
@@ -744,6 +754,7 @@ export const PushLive: Layer.Layer<
             total,
             now,
             now + DAY,
+            shares.length === 0 ? null : JSON.stringify(shares),
           ),
           ...chunks(files).map((chunk) =>
             DB.prepare(
@@ -1013,14 +1024,16 @@ export const PushLive: Layer.Layer<
                   .bind(tree.id, push.path, ANALYZER)
                   .all<{ path: string; sha256: Sha256; json: string | null }>(),
               )).results
-        const pages: PushFile[] = []
+        const pages: (PushFile & { readonly sha256: Sha256 })[] = []
         for (const row of [...manifestRows, ...outside]) {
           if (!isPageFile(row.path)) continue
           const analysis =
             row.json === null
               ? yield* store.analysis(row.sha256)
               : (JSON.parse(row.json) as HtmlAnalysis)
-          if (analysis !== null) pages.push({ path: row.path, analysis })
+          if (analysis !== null) {
+            pages.push({ path: row.path, analysis, sha256: row.sha256 })
+          }
         }
         return pages
       })
@@ -1035,6 +1048,7 @@ export const PushLive: Layer.Layer<
           target,
           membership,
         } = yield* authorize(push)
+        const shares = JSON.parse(push.shares_json ?? '[]') as NewShare[]
         const notHeld = yield* query(() =>
           DB.prepare(
             `select f.path from push_files f where f.push_id = ?1
@@ -1199,6 +1213,46 @@ export const PushLive: Layer.Layer<
           )
         }
 
+        // What each HTML file renders with, by its bytes and folder, for
+        // page shares. Kept whatever the commit does: it names no access.
+        const rendered = pages.flatMap((page) =>
+          renderPathsOf(page.analysis, parentOf(page.path)).map((r) => ({
+            sha256: page.sha256,
+            folder: parentOf(page.path),
+            path: r.path,
+            inline: r.inline ? 1 : 0,
+          })),
+        )
+        const flags = pages.map((page) => ({
+          sha256: page.sha256,
+          complete: page.analysis.complete ? 1 : 0,
+        }))
+        for (let at = 0; at < flags.length; at += 500) {
+          const chunk = flags.slice(at, at + 500)
+          yield* query(() =>
+            DB.prepare(
+              `insert into html_files (sha256, complete)
+               select json_extract(j.value, '$.sha256'), json_extract(j.value, '$.complete')
+               from json_each(?) j where true on conflict do nothing`,
+            )
+              .bind(JSON.stringify(chunk))
+              .run(),
+          )
+        }
+        for (let at = 0; at < rendered.length; at += 500) {
+          const chunk = rendered.slice(at, at + 500)
+          yield* query(() =>
+            DB.prepare(
+              `insert into render_paths (sha256, folder, path, inline)
+               select json_extract(j.value, '$.sha256'), json_extract(j.value, '$.folder'),
+                 json_extract(j.value, '$.path'), json_extract(j.value, '$.inline')
+               from json_each(?) j where true on conflict do nothing`,
+            )
+              .bind(JSON.stringify(chunk))
+              .run(),
+          )
+        }
+
         const baseSeq = push.base_seq ?? 0
         if (tree !== null && push.force === 0) {
           const since = yield* pushedSince(tree.id, push.path, baseSeq)
@@ -1248,8 +1302,16 @@ export const PushLive: Layer.Layer<
                   cs.guardHead(push.path, baseSeq as AuthoredSeq)
                 }
               }
-              cs.putStaged(root ?? (target as Granted<'write'>), pushId)
+              const folder = cs.putStaged(
+                root ?? (target as Granted<'write'>),
+                pushId,
+              )
               cs.putForms(pushId)
+              // A failed commit grants nothing: the shares are in its batch.
+              for (const share of shares) cs.grant(folder, share)
+              if (shares.length > 0) {
+                cs.event({ type: 'share', path: push.path })
+              }
               cs.event({ type: 'push', path: push.path, pushId })
               return {}
             }),

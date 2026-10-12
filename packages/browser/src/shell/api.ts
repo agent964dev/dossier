@@ -217,14 +217,17 @@ export const shellApi = (
   ): { readonly value: T } | null =>
     value === null || value === undefined ? null : { value }
 
-  const view: ShellApi['view'] = async ({ tree, path }) => {
+  const view: ShellApi['view'] = async ({ tree, path, renewal = false }) => {
     let response: Response
     let body: unknown
     try {
       response = await fetch(`${origin}/_/api/view`, {
         method: 'POST',
         headers: writeHeaders('application/json'),
-        body: JSON.stringify({ tree, path }),
+        // A first view leaves renewal out: the API takes it as false.
+        body: JSON.stringify(
+          renewal ? { tree, path, renewal } : { tree, path },
+        ),
         credentials: 'same-origin',
       })
       body = await response.json()

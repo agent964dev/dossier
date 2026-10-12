@@ -2,12 +2,18 @@ import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 import { Args, Command, Options } from '@effect/cli'
+import {
+  dossierError,
+  parseShareSpec,
+  type ShareSpec,
+} from '@dossier/contracts'
 import { Effect, Option } from 'effect'
 
 import { Cli } from '../io.ts'
 import { jsonOption, usage } from '../render.ts'
 import { type PushOutcome, Remote, Sync, SyncLive } from '../sync.ts'
 import { resolveTarget } from '../target.ts'
+import { whomInSentence } from './share.ts'
 
 /** The longest message a push may carry. */
 const MESSAGE_LIMIT = 500
@@ -43,6 +49,32 @@ export const describePush = (outcome: PushOutcome): string => {
   }
   return lines.join('\n')
 }
+
+/** `Shared with sara@acme.com (respond).`, one line per share a push gave. */
+export const describePushShares = (
+  shares: readonly ShareSpec[],
+  workspace: string,
+): string[] =>
+  shares.map(
+    (spec) =>
+      `Shared with ${whomInSentence(spec.target, workspace)} (${spec.role}).`,
+  )
+
+/** Each `--share`, read before anything is staged. */
+const shareSpecs = (given: readonly string[]) =>
+  Effect.forEach(given, (text) => {
+    const spec = parseShareSpec(text)
+    return spec === null
+      ? Effect.fail(
+          dossierError(
+            'invalid',
+            `--share ${text} is not a share.`,
+            'Give it as <target>:<role>, such as sara@acme.com:respond, ' +
+              'team:Design:read, workspace:write or anyone:read.',
+          ),
+        )
+      : Effect.succeed(spec)
+  })
 
 export const pushJson = (outcome: PushOutcome) => ({
   push: outcome.dryRun ? null : outcome.number,
@@ -80,9 +112,17 @@ export const push = Command.make(
           'pulled or pushed.',
       ),
     ),
+    share: Options.text('share').pipe(
+      Options.withDescription(
+        'Share the node as it is pushed: <target>:<role>, such as ' +
+          'sara@acme.com:respond or anyone:read. Repeat for more.',
+      ),
+      Options.repeated,
+      Options.optional,
+    ),
     json: jsonOption,
   },
-  ({ dir, target, message, dryRun, force }) =>
+  ({ dir, target, message, dryRun, force, share }) =>
     Effect.gen(function* () {
       const { io, output } = yield* Cli
       const text = Option.getOrNull(message)
@@ -95,6 +135,7 @@ export const push = Command.make(
           ),
         )
       }
+      const shares = yield* shareSpecs(Option.getOrElse(share, () => []))
       const { remote, ref } = yield* resolveTarget(target)
       const folder = resolve(io.cwd, dir)
       const info = yield* Effect.promise(() => stat(folder).catch(() => null))
@@ -113,9 +154,21 @@ export const push = Command.make(
           message: text,
           dryRun,
           force,
+          share: shares,
         }),
       ).pipe(Effect.provide(SyncLive), Effect.provideService(Remote, remote))
-      output.result(describePush(outcome), pushJson(outcome))
+      // Shares go with a commit; with nothing to commit, none was given.
+      const shared = outcome.committed
+        ? describePushShares(shares, ref.workspace)
+        : shares.length > 0 && !outcome.dryRun
+          ? [
+              'Nothing changed, so nothing was shared. Use dossier share <path> <target> <role> to share it.',
+            ]
+          : []
+      output.result(
+        [describePush(outcome), ...shared].join('\n'),
+        pushJson(outcome),
+      )
     }),
 ).pipe(
   Command.withDescription(

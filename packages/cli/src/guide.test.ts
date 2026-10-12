@@ -18,6 +18,7 @@ const TITLES = [
   'Live data',
   'Agent versions',
   'Reading',
+  'Sharing',
 ]
 
 describe('the agent guide', () => {
@@ -133,6 +134,44 @@ describe('the agent guide', () => {
       ]) {
         expect(markdown).toContain(line)
       }
+    } finally {
+      await cli.cleanup()
+    }
+  })
+
+  it('gives agents the sharing rules, with what a page shared on its own carries', async () => {
+    const fetch = stubFetch(() => new Response(null, { status: 500 }))
+    const cli = await harness({ fetch: fetch.fetch })
+    try {
+      expect(await cli.run(['--agent-info'])).toBe(0)
+      const markdown = cli.stdout()
+      const at = markdown.indexOf('\n## Sharing\n')
+      expect(at).toBeGreaterThan(0)
+      const sharing = markdown.slice(at)
+      expect(sharing).toContain(
+        'A page shared on its own carries the files its markup loads, not ' +
+          'files referenced only from inside its stylesheets or scripts, or ' +
+          'URLs its scripts build. Share the folder for those, or keep them ' +
+          'in a `_` folder.',
+      )
+      for (const phrase of [
+        '`read`',
+        '`respond`',
+        '`write`',
+        'Roles add up across shares',
+        'a lower node\ncannot narrow it',
+        '`sara@acme.com`, `team:Design`, `workspace`, `anyone`',
+        'Workspace admins hold write on every tree',
+        'sara@acme.com --remove',
+        '--share sara@acme.com:respond --share anyone:read',
+        'sign in with Google',
+        'never a\npage above it',
+        "closes that person's live watches",
+      ]) {
+        expect(sharing).toContain(phrase)
+      }
+      expect(markdown).toContain('### share\n')
+      expect(markdown).toContain('dossier share [--remove] [--json] <path>')
     } finally {
       await cli.cleanup()
     }

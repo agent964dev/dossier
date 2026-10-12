@@ -241,11 +241,18 @@ export interface ChangeSet {
   readonly guardHead: (path: string, base: AuthoredSeq) => void
   /** The new tree's root; the creator's write share is added with it. */
   readonly createTree: (member: Membership, name: string) => NodeHandle
-  /** Makes the pushed folder's authored files match the staged manifest. */
+  /**
+   * Makes the pushed folder's authored files match the staged manifest, and
+   * names the pushed folder, new or existing, for steps after it.
+   */
   readonly putStaged: (
     target: Granted<'write'> | NodeHandle,
     pushId: PushId,
-  ) => void
+  ) => NodeHandle
+  /**
+   * A share on the node, or a new role for the target's share there. A role
+   * changed in place closes the target's sockets like a revoke.
+   */
   readonly grant: (on: Granted<'share'> | NodeHandle, share: NewShare) => void
   /**
    * Also records whose watching sockets close after the commit: the person
@@ -498,6 +505,8 @@ const TREE_ID = /^[a-z0-9]{20}$/
 interface HandleValue {
   readonly handle: true
   readonly id: NodeId
+  /** The live folder a staged push lands in, which the change itself writes. */
+  readonly pushed?: PushId
 }
 
 const isHandle = (value: unknown): value is NodeHandle =>
@@ -509,6 +518,28 @@ const handleId = (h: NodeHandle): NodeId => (h as unknown as HandleValue).id
 
 const makeHandle = (id: NodeId): NodeHandle =>
   ({ handle: true, id }) satisfies HandleValue as unknown as NodeHandle
+
+/** The folder a push lands in, new or existing, read when the batch runs. */
+const pushedHandle = (pushId: PushId): NodeHandle =>
+  ({
+    handle: true,
+    id: '' as NodeId,
+    pushed: pushId,
+  }) satisfies HandleValue as unknown as NodeHandle
+
+/** SQL for a node's id: a known id, or the folder a push lands in. */
+const nodeIdSql = (on: NodeRow | NodeHandle, treeId: string): Statement => {
+  if (!isHandle(on)) return { sql: '?', binds: [on.id] }
+  const value = on as unknown as HandleValue
+  return value.pushed === undefined
+    ? { sql: '?', binds: [value.id] }
+    : {
+        sql: `(select n.id from nodes n join pushes p on p.id = ?
+                where n.tree_id = ? and n.path = p.path and n.deleted_at is null
+                  and n.kind = 'folder')`,
+        binds: [value.pushed, treeId],
+      }
+}
 
 interface VersionValue {
   readonly version: true
@@ -595,8 +626,9 @@ const basisHolds = (basis: Basis, personId: string): Statement => {
                 where tm.team_id = ? and tm.user_id = ? and t.workspace_id = ?)`,
         binds: [basis.teamId, basis.userId, basis.workspaceId],
       }
-    // Reach gives read only, which no change rests on.
+    // Reach and what is carried give read only, which no change rests on.
     case 'reach':
+    case 'carried':
       return { sql: '0', binds: [] }
     case 'owner':
       return {
@@ -1765,28 +1797,59 @@ export const TreeStoreLive: Layer.Layer<
                 keyId,
               }),
             )
+            return pushedHandle(pushId)
           },
 
           grant: (on, share) => {
             const t = tid()
-            const nodeId = isHandle(on) ? handleId(on) : on.id
             if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
-            writes.push({
-              sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
+            const node = nodeIdSql(on, t)
+            writes.push(
+              {
+                // A role changed in place is lost access for its target
+                // when it is lower: their sockets close as on a revoke.
+                sql: `select s.target_kind as kind,
+                        (select u.id from "user" u where lower(u.email) = s.target) as person
+                      from shares s where s.node_id = ${node.sql}
+                        and s.target_kind = ? and s.target = ? and s.role <> ?`,
+                binds: [
+                  ...node.binds,
+                  share.targetKind,
+                  share.target,
+                  share.role,
+                ],
+                rows: (rows) => {
+                  for (const row of rows as {
+                    kind: string
+                    person: PersonId | null
+                  }[]) {
+                    closing.push(
+                      row.kind === 'email'
+                        ? row.person === null
+                          ? null
+                          : { people: [row.person] }
+                        : { all: true },
+                    )
+                  }
+                },
+              },
+              {
+                sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
                         created_by, created_at)
-                      values (?, ?, ?, ?, ?, ?, ?, ?)
+                      values (?, ?, ${node.sql}, ?, ?, ?, ?, ?)
                       on conflict (node_id, target_kind, target) do update set role = excluded.role`,
-              binds: [
-                newId(),
-                t,
-                nodeId,
-                share.targetKind,
-                share.target,
-                share.role,
-                person.id,
-                now,
-              ],
-            })
+                binds: [
+                  newId(),
+                  t,
+                  ...node.binds,
+                  share.targetKind,
+                  share.target,
+                  share.role,
+                  person.id,
+                  now,
+                ],
+              },
+            )
           },
 
           revoke: (on, shareId) => {

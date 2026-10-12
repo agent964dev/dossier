@@ -7,7 +7,13 @@ import {
 } from '@dossier/contracts'
 import { Effect } from 'effect'
 
-import { Pages, SignIn, type Caller } from '../core/index.ts'
+import {
+  newVisitorSecret,
+  Pages,
+  sha256Hex,
+  SignIn,
+  type Caller,
+} from '../core/index.ts'
 import type { RequestKind } from './dispatch.ts'
 
 /**
@@ -45,6 +51,28 @@ const BEARER_KINDS: ReadonlySet<RequestKind> = new Set([
   'api-write',
   'upgrade',
 ])
+
+/**
+ * A visitor's anonymous browser session, on the main host only: it binds
+ * the visitor's view handles to one browser and grants nothing.
+ */
+export const VISITOR_COOKIE = '__Secure-dossier.visitor'
+const VISITOR_VALUE = /^[A-Za-z0-9_-]{43}$/
+
+/** The visitor cookie's value from the request, when well formed. */
+const visitorCookieOf = (request: Request): string | null => {
+  for (const part of (request.headers.get('cookie') ?? '').split(';')) {
+    const at = part.indexOf('=')
+    if (at < 0 || part.slice(0, at).trim() !== VISITOR_COOKIE) continue
+    const value = part.slice(at + 1).trim()
+    return VISITOR_VALUE.test(value) ? value : null
+  }
+  return null
+}
+
+/** A new visitor cookie: 32 random bytes, for 30 days, host-only. */
+export const newVisitorCookie = (): string =>
+  `${VISITOR_COOKIE}=${newVisitorSecret()}; Max-Age=2592000; Path=/; HttpOnly; Secure; SameSite=Lax`
 
 export const requestIdOf = (request: Request): string =>
   request.headers.get('cf-ray') ?? crypto.randomUUID()
@@ -138,17 +166,23 @@ export const callerFor = (
         setCookie: [],
       }
     }
-    const nobody = {
+    const nobody = (anonSessionId: string | null) => ({
       caller: {
         person: null,
-        via: { kind: 'visitor', anonSessionId: null },
+        via: { kind: 'visitor', anonSessionId },
         requestId,
       } satisfies Caller,
       setCookie: [] as readonly string[],
-    }
-    if (!cookieRuleHolds(kind, request, origin)) return nobody
+    })
+    if (!cookieRuleHolds(kind, request, origin)) return nobody(null)
     const session = yield* signIn.session(request.headers)
-    if (session === null) return nobody
+    if (session === null) {
+      // Someone not signed in: their anonymous session, under the same rule.
+      const cookie = visitorCookieOf(request)
+      return nobody(
+        cookie === null ? null : yield* Effect.promise(() => sha256Hex(cookie)),
+      )
+    }
     return {
       caller: {
         person: session.person,

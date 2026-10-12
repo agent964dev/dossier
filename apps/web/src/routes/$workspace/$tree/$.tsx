@@ -1,4 +1,9 @@
-import { createFileRoute, Link, redirect } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  Link,
+  redirect,
+  useRouter,
+} from '@tanstack/react-router'
 import {
   File,
   FileText,
@@ -6,6 +11,7 @@ import {
   FolderOpen,
   Globe,
   Lock,
+  UserPlus,
   Users,
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
@@ -14,13 +20,15 @@ import { AppHeader } from '../../../components/app-header'
 import { NoAccessScreen } from '../../../components/no-access'
 import { MenuButton, MenuLink, RowMenu } from '../../../components/row-menu'
 import { SectionLabel } from '../../../components/section-label'
+import { ShareDialog } from '../../../components/share-dialog'
+import { Button } from '../../../components/ui/button'
 import { Modal } from '../../../components/ui/modal'
 import { isScreenFailure } from '../../../server/failure'
 import {
   listingView,
   seenBy,
   type ListingView,
-  type SeenByRow,
+  type SeenBy,
 } from '../../../server/listing'
 import { noAccessView } from '../../../server/no-access'
 
@@ -235,7 +243,9 @@ function SharingLine({ text }: { text: string }) {
 }
 
 function Listing({ view }: { view: ListingView }) {
+  const router = useRouter()
   const [seen, setSeen] = useState<{ title: string; link: string } | null>(null)
+  const [sharing, setSharing] = useState<string | null>(null)
   const answered = view.pages.some((page) => page.responses !== null)
   return (
     <div className="min-h-dvh">
@@ -261,9 +271,22 @@ function Listing({ view }: { view: ListingView }) {
               ))}
             </ol>
           </nav>
-          <h1 className="font-clash text-[2rem] leading-tight font-semibold tracking-[-0.03em] break-words text-neutral-50">
-            {view.folder.name}
-          </h1>
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="min-w-0 font-clash text-[2rem] leading-tight font-semibold tracking-[-0.03em] break-words text-neutral-50">
+              {view.folder.name}
+            </h1>
+            {view.can.share ? (
+              <Button
+                size="sm"
+                className="sm:h-10 sm:px-4 sm:text-sm"
+                aria-haspopup="dialog"
+                onClick={() => setSharing(view.folder.link)}
+              >
+                <UserPlus aria-hidden />
+                Share
+              </Button>
+            ) : null}
+          </div>
           <SharingLine text={view.sharing} />
         </div>
 
@@ -330,6 +353,11 @@ function Listing({ view }: { view: ListingView }) {
                           Responses
                         </MenuLink>
                       )}
+                      {view.can.share ? (
+                        <MenuButton onSelect={() => setSharing(page.link)}>
+                          Share
+                        </MenuButton>
+                      ) : null}
                       {view.can.seenBy ? (
                         <MenuButton
                           onSelect={() =>
@@ -376,6 +404,11 @@ function Listing({ view }: { view: ListingView }) {
                     </div>
                     <RowMenu label={`More for ${folder.name}/`}>
                       <MenuLink href={folder.link}>Open</MenuLink>
+                      {view.can.share ? (
+                        <MenuButton onSelect={() => setSharing(folder.link)}>
+                          Share
+                        </MenuButton>
+                      ) : null}
                     </RowMenu>
                   </li>
                 ))}
@@ -419,6 +452,11 @@ function Listing({ view }: { view: ListingView }) {
         {view.kit === null ? null : <KitRow names={view.kit.names} />}
       </main>
       <SeenBySheet page={seen} onClose={() => setSeen(null)} />
+      <ShareDialog
+        link={sharing}
+        onClose={() => setSharing(null)}
+        onChanged={() => void router.invalidate()}
+      />
     </div>
   )
 }
@@ -496,57 +534,71 @@ function SeenBySheet({
 
 /** Who opened a page; loaded when the sheet opens for it. */
 function SeenByList({ link }: { link: string }) {
-  const [rows, setRows] = useState<readonly SeenByRow[] | 'loading' | 'failed'>(
-    'loading',
-  )
+  const [seen, setSeen] = useState<SeenBy | 'loading' | 'failed'>('loading')
   useEffect(() => {
     let live = true
     seenBy({ data: { link } }).then(
       (value) => {
-        if (live) setRows(isScreenFailure(value) ? 'failed' : value)
+        if (live) setSeen(isScreenFailure(value) ? 'failed' : value)
       },
       () => {
-        if (live) setRows('failed')
+        if (live) setSeen('failed')
       },
     )
     return () => {
       live = false
     }
   }, [link])
-  if (rows === 'loading') {
+  if (seen === 'loading') {
     return <p className="text-sm text-neutral-400">Loading…</p>
   }
-  if (rows === 'failed') {
+  if (seen === 'failed') {
     return (
       <p className="text-sm text-neutral-300">
         Something went wrong. Try again.
       </p>
     )
   }
-  if (rows.length === 0) {
-    return (
-      <p className="text-sm text-neutral-300">
-        Nobody has opened this page yet.
+  const views =
+    seen.views === null ? null : (
+      <p className="font-mono text-xs text-neutral-300">
+        {seen.views === 1
+          ? '1 view in the last 30 days'
+          : `${seen.views} views in the last 30 days`}
       </p>
+    )
+  if (seen.people.length === 0) {
+    return (
+      <div className="flex flex-col gap-3">
+        {views}
+        <p className="text-sm text-neutral-300">
+          {seen.views === null
+            ? 'Nobody has opened this page yet.'
+            : 'Nobody signed in has opened this page yet.'}
+        </p>
+      </div>
     )
   }
   return (
-    <ul className="divide-y divide-border/80">
-      {rows.map((row) => (
-        <li
-          key={row.email}
-          className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-2.5"
-        >
-          <span className="min-w-0 font-mono text-sm break-all text-neutral-50">
-            {row.email}
-          </span>
-          <span className="text-xs text-neutral-400">
-            {row.withinHour
-              ? 'last opened within the hour'
-              : DAY.format(new Date(row.lastSeenAt))}
-          </span>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col gap-3">
+      {views}
+      <ul className="divide-y divide-border/80">
+        {seen.people.map((row) => (
+          <li
+            key={row.email}
+            className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 py-2.5"
+          >
+            <span className="min-w-0 font-mono text-sm break-all text-neutral-50">
+              {row.email}
+            </span>
+            <span className="text-xs text-neutral-400">
+              {row.withinHour
+                ? 'last opened within the hour'
+                : DAY.format(new Date(row.lastSeenAt))}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }

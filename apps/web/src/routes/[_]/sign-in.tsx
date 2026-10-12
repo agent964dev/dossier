@@ -37,8 +37,9 @@ export const Route = createFileRoute('/_/sign-in')({
     }
     return view
   },
+  // A private link redirects here, so its preview names only the deployment.
   head: ({ loaderData }) => ({
-    meta: [{ title: `Sign in · ${loaderData?.deployment ?? 'Dossier'}` }],
+    meta: [{ title: loaderData?.deployment ?? 'Dossier' }],
   }),
   component: SignInScreen,
 })

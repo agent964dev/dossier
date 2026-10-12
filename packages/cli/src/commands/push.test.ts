@@ -185,6 +185,7 @@ describe('dossier push', () => {
       force: false,
       dryRun: false,
       message: 'First push',
+      share: [],
       files: await Promise.all(
         FIXTURE_FILES.map(async (path) => ({
           path,
@@ -321,6 +322,152 @@ describe('dossier push', () => {
     ).toBe(0)
     expect(JSON.parse(cli.stdout())).toMatchObject({ push: null, dryRun: true })
   })
+
+  it('sends each --share in the stage payload and says whom the push shared with', async () => {
+    const cli = await setUp(
+      pushing({ plan: plan({ added: ['plan.html'], unchanged: 5 }) }),
+    )
+
+    const exit = await cli.run([
+      'push',
+      FIXTURE,
+      'agent964/acme/questions',
+      '--share',
+      'Sara@Acme.com:respond',
+      '--share',
+      'team:Design:read',
+      '--share',
+      'anyone:read',
+    ])
+
+    expect(cli.stderr()).toBe('')
+    expect(exit).toBe(0)
+    expect(requests[0]?.body).toMatchObject({
+      target: 'agent964/acme/questions',
+      share: [
+        { target: { kind: 'email', email: 'sara@acme.com' }, role: 'respond' },
+        { target: { kind: 'team', team: 'Design' }, role: 'read' },
+        { target: { kind: 'anyone' }, role: 'read' },
+      ],
+    })
+    expect(cli.stdout()).toBe(
+      [
+        'added    plan.html',
+        `${LINK}  (push 3)`,
+        'Shared with sara@acme.com (respond).',
+        'Shared with Team Design (read).',
+        'Shared with anyone with the link (read).',
+        '',
+      ].join('\n'),
+    )
+
+    expect(
+      await cli.run([
+        'push',
+        FIXTURE,
+        'agent964/acme',
+        '--share',
+        'workspace:write',
+        '--json',
+      ]),
+    ).toBe(0)
+    expect(JSON.parse(cli.stdout())).toMatchObject({ push: 3, dryRun: false })
+  })
+
+  it('sends the shares with a dry run, so the deployment checks them, and shares nothing', async () => {
+    const cli = await setUp(pushing({ plan: plan({ added: ['plan.html'] }) }))
+
+    expect(
+      await cli.run([
+        'push',
+        FIXTURE,
+        'agent964/acme',
+        '--dry-run',
+        '--share',
+        'anyone:write',
+      ]),
+    ).toBe(0)
+    expect(sequence()).toEqual(['POST /_/api/pushes'])
+    expect(requests[0]?.body).toMatchObject({
+      dryRun: true,
+      share: [{ target: { kind: 'anyone' }, role: 'write' }],
+    })
+    expect(cli.stdout()).toBe(
+      `added    plan.html\nDry run: nothing was published. ${LINK}\n`,
+    )
+  })
+
+  it('exits 6 when the deployment refuses a share', async () => {
+    const cli = await setUp(
+      pushing({
+        stage: () =>
+          errorResponse(
+            'invalid',
+            'Design is not a team in agent964.',
+            'Check the team name in the workspace settings.',
+          ),
+      }),
+    )
+
+    expect(
+      await cli.run([
+        'push',
+        FIXTURE,
+        'agent964/acme',
+        '--share',
+        'team:Design:read',
+      ]),
+    ).toBe(6)
+    expect(cli.stderr()).toBe(
+      'dossier: Design is not a team in agent964.\n' +
+        'Check the team name in the workspace settings.\n',
+    )
+    expect(sequence()).toEqual(['POST /_/api/pushes'])
+  })
+
+  it.each([
+    ['sara@acme.com'],
+    ['sara@acme.com:admin'],
+    ['someone:read'],
+    [':read'],
+    ['team::read'],
+  ])(
+    'exits 6 for a --share that is not one, before any request: %s',
+    async (spec) => {
+      const cli = await setUp(pushing())
+
+      expect(
+        await cli.run([
+          'push',
+          FIXTURE,
+          'agent964/acme',
+          '--share',
+          'anyone:read',
+          '--share',
+          spec,
+        ]),
+      ).toBe(6)
+      expect(cli.stderr()).toBe(
+        `dossier: --share ${spec} is not a share.\n` +
+          'Give it as <target>:<role>, such as sara@acme.com:respond, ' +
+          'team:Design:read, workspace:write or anyone:read.\n',
+      )
+      expect(requests).toEqual([])
+
+      expect(
+        await cli.run([
+          'push',
+          FIXTURE,
+          'agent964/acme',
+          '--share',
+          spec,
+          '--json',
+        ]),
+      ).toBe(6)
+      expect(JSON.parse(cli.stdout()).error).toMatchObject({ code: 6 })
+      expect(requests).toEqual([])
+    },
+  )
 
   it('prints No changes with the current push and records the head', async () => {
     const cli = await setUp(

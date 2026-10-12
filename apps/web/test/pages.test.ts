@@ -482,9 +482,10 @@ describe('Seen by', () => {
       w.owner,
       Effect.flatMap(Pages, (pages) => pages.seenBy(ref(w.at('plan')))),
     )
-    expect(seen).toEqual([
-      expect.objectContaining({ email: reader.person!.email }),
-    ])
+    expect(seen).toEqual({
+      people: [expect.objectContaining({ email: reader.person!.email })],
+      views: null,
+    })
     const refused = await failureAs(
       reader,
       Effect.flatMap(Pages, (pages) => pages.seenBy(ref(w.at('plan')))),

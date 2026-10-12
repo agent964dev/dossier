@@ -25,6 +25,7 @@ import {
   type PushNumber,
   type PushPlanWire,
   type Sha256,
+  type ShareSpec,
   TreeId,
 } from '@dossier/contracts'
 import {
@@ -143,6 +144,8 @@ export interface SyncService {
     readonly message: string | null
     readonly dryRun: boolean
     readonly force: boolean
+    /** Shares the push gives the node it lands on; the dry run checks them. */
+    readonly share?: readonly ShareSpec[]
   }) => Effect.Effect<PushOutcome, SyncError>
   readonly pull: (i: {
     readonly target: LinkRef
@@ -553,6 +556,7 @@ const pushWith = (
           force: i.force,
           dryRun: i.dryRun,
           message: i.message,
+          share: i.share ?? [],
           files: local.files.map((file) => ({
             path: file.path,
             sha256: file.sha256,

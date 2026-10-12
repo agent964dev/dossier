@@ -17,6 +17,7 @@ import {
 import type {
   FormInfo,
   PageBootstrap,
+  Preview,
   RoleName,
   ShellBoot,
 } from '@dossier/contracts/bridge'
@@ -28,10 +29,12 @@ import {
   COMPOSER_VERSION,
   formKind,
   layoutsOf,
+  previewOf,
   relativeFrom,
   resolveFormAction,
   type Found,
   type HtmlAnalysis,
+  type PreviewSource,
   type Source,
 } from '@dossier/html'
 import { sql } from 'drizzle-orm'
@@ -43,7 +46,7 @@ import { makeReader, type AgentServed } from './agent-version.ts'
 import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { sealCursor } from './cursors.ts'
-import { CurrentCaller, type Caller } from './caller.ts'
+import { CurrentCaller, visitor, type Caller } from './caller.ts'
 import { Config } from './config.ts'
 import { Files } from './files.ts'
 import { hmacSha256, sha256Hex } from './ids.ts'
@@ -102,6 +105,13 @@ export interface SeenByRow {
   readonly withinHour: boolean
 }
 
+/** Who opened a page, and how often anyone did when it is public. */
+export interface SeenBy {
+  readonly people: readonly SeenByRow[]
+  /** Views in the last 30 days; null unless the page is public. */
+  readonly views: number | null
+}
+
 type Denied = DossierError<'not_found' | 'sign_in_required'>
 
 export interface PagesService {
@@ -117,6 +127,8 @@ export interface PagesService {
     readonly treeId: TreeId
     /** The link's path inside the tree, encoded: '', 'questions/', 'plan'. */
     readonly path: string
+    /** The shell renewing an open page's handle, which is not a new view. */
+    readonly renewal?: boolean
   }) => Effect.Effect<
     ViewGrant,
     DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
@@ -145,7 +157,7 @@ export interface PagesService {
   readonly seenBy: (
     ref: LinkRef,
   ) => Effect.Effect<
-    readonly SeenByRow[],
+    SeenBy,
     DossierError<
       'not_found' | 'sign_in_required' | 'forbidden' | 'unavailable'
     >,
@@ -173,6 +185,9 @@ export interface PagesService {
 export class Pages extends Context.Tag('Pages')<Pages, PagesService>() {}
 
 const HOUR = 60 * 60 * 1000
+const DAY = 24 * HOUR
+/** How far back a public page's view count reaches. */
+const VIEW_DAYS = 30
 /** A handle lasts this long after its last renewal. */
 const HANDLE_LIFE = 24 * HOUR
 const HANDLE = /^[A-Za-z0-9_-]{43}$/
@@ -180,18 +195,6 @@ const HANDLE = /^[A-Za-z0-9_-]{43}$/
 const MAX_LOADED = 200
 /** How often a view reads again when another one changed the handle. */
 const ISSUE_ATTEMPTS = 4
-
-/**
- * Whether these roles read the node: respond reads authored files only, and
- * people's data is read through private grants or by its writer.
- */
-const readsWith = (
-  roles: RoleSet,
-  node: { readonly origin: string },
-): boolean =>
-  node.origin === 'data'
-    ? roles.privateCaps.has('read') || roles.owns
-    : roles.caps.has('read') || roles.caps.has('read-authored')
 
 /**
  * A denial names only the path that was asked, never the node it resolved
@@ -423,6 +426,98 @@ export const PagesLive: Layer.Layer<
         return null
       })
 
+    /** Whether anyone with the link reads the node, signed in or not. */
+    const isPublic = (node: NodeRow) =>
+      access
+        .require('read', node)
+        .pipe(
+          Effect.provideService(CurrentCaller, visitor('public')),
+          Effect.isSuccess,
+        )
+
+    /**
+     * A public page's link preview: its title, description and image, read
+     * from the page and its layouts as composed now. The image is kept only
+     * when anyone may see it: a tree file anyone reads, served from the main
+     * host, or an image elsewhere on the web.
+     */
+    const previewFor = (
+      page: Extract<Resolved, { kind: 'page' }>,
+      ref: LinkRef,
+    ) =>
+      Effect.gen(function* () {
+        const sha = page.version.blobSha256
+        const analysis =
+          sha === null ? null : yield* store.analysis(sha as Sha256)
+        if (analysis === null) return null
+        const chain = yield* composedLayouts({
+          treeId: page.tree.id,
+          page: { node: page.node, version: page.version, analysis },
+          at: page.tree.authoredSeq as AuthoredSeq,
+        }).pipe(Effect.provide(context))
+        const layouts: PreviewSource[] = []
+        for (const link of [...chain].reverse()) {
+          layouts.push({
+            source: yield* textOf(link.node.path, link.version),
+            analysis: link.analysis,
+          })
+        }
+        const raw = previewOf(
+          { source: yield* textOf(page.node.path, page.version), analysis },
+          layouts,
+        )
+        return {
+          title: raw.title ?? page.node.name.replace(/\.html$/, ''),
+          description: raw.description,
+          image:
+            raw.image === null
+              ? null
+              : yield* publicImage(raw.image, page, ref),
+        } satisfies Preview
+      }).pipe(Effect.orElseSucceed(() => null))
+
+    /** A preview image's absolute URL, when anyone may see it; else null. */
+    const publicImage = (
+      written: string,
+      page: Extract<Resolved, { kind: 'page' }>,
+      ref: LinkRef,
+    ) =>
+      Effect.gen(function* () {
+        const folder = folderOf(page.node.path)
+        let url: URL
+        try {
+          url = new URL(
+            written.trim(),
+            `https://tree.invalid/${linkPathOf(folder, true)}`,
+          )
+        } catch {
+          return null
+        }
+        if (url.origin !== 'https://tree.invalid') {
+          return url.protocol === 'https:' || url.protocol === 'http:'
+            ? url.href
+            : null
+        }
+        const at = treeRefOf(page.tree.id, url.pathname.slice(1))
+        if (at === null || at.folder) return null
+        const found = yield* store.resolve(at)
+        if ('missing' in found) return null
+        let node: NodeRow | null = null
+        if (found.kind === 'kit') {
+          for (const candidate of found.found) {
+            if (candidate.kind === 'base') break
+            if (yield* isPublic(candidate.node)) {
+              node = candidate.node
+              break
+            }
+          }
+        } else if (found.kind === 'file' && (yield* isPublic(found.node))) {
+          node = found.node
+        }
+        if (node === null) return null
+        return `${config.origin.origin}/_/api/file?path=${encodeURIComponent(`${ref.workspace}/${ref.tree}/${node.path}`)}`
+      })
+
     const reader = makeReader({
       store,
       access,
@@ -486,6 +581,10 @@ export const PagesLive: Layer.Layer<
                       ? resolved.linkPath
                       : linkPathOf(resolved.node.path, false)
                   const person = caller.person
+                  const preview =
+                    resolved.kind === 'page' && (yield* isPublic(resolved.node))
+                      ? yield* previewFor(resolved, ref)
+                      : null
                   return {
                     kind: 'shell',
                     boot: {
@@ -512,6 +611,7 @@ export const PagesLive: Layer.Layer<
                         person === null
                           ? null
                           : { email: person.email, name: person.name },
+                      preview,
                     },
                   } satisfies Served
                 }
@@ -545,7 +645,7 @@ export const PagesLive: Layer.Layer<
         }
         if (found.kind !== 'page' && found.kind !== 'file') return null
         const roles = yield* access.roleOn(found.node)
-        return readsWith(roles, found.node) ? found.node : null
+        return roles.reads ? found.node : null
       })
 
     /**
@@ -639,22 +739,29 @@ export const PagesLive: Layer.Layer<
      * state never undoes a newer generation; a lost race reads again.
      */
     const issue = (
-      sessionId: SessionId,
-      personId: string,
+      owner:
+        | {
+            readonly kind: 'session'
+            readonly id: SessionId
+            readonly personId: string
+          }
+        | { readonly kind: 'visitor'; readonly id: string },
       tree: TreeRow,
       seq: AuthoredSeq,
       nodeIds: readonly string[],
       extra: readonly D1PreparedStatement[],
     ) =>
       Effect.gen(function* () {
+        const ownerColumn =
+          owner.kind === 'session' ? 'session_id' : 'anon_session_id'
         for (let attempt = 0; attempt < ISSUE_ATTEMPTS; attempt += 1) {
           const now = yield* Clock.currentTimeMillis
           const row = yield* query(() =>
             DB.prepare(
               `select hash_sha256 as hash, generation, expires_at as expiresAt
-               from view_handles where session_id = ? and tree_id = ?`,
+               from view_handles where ${ownerColumn} = ? and tree_id = ?`,
             )
-              .bind(sessionId, tree.id)
+              .bind(owner.id, tree.id)
               .first<{ hash: string; generation: number; expiresAt: number }>(),
           )
           const live = row !== null && row.expiresAt > now
@@ -662,7 +769,9 @@ export const PagesLive: Layer.Layer<
           const handle = yield* Effect.promise(() =>
             hmacSha256(
               Redacted.value(config.handleSecret),
-              `view:${sessionId}:${tree.id}:${generation}`,
+              owner.kind === 'session'
+                ? `view:${owner.id}:${tree.id}:${generation}`
+                : `visitor:${owner.id}:${tree.id}:${generation}`,
             ),
           )
           const hash = yield* Effect.promise(() => sha256Hex(handle))
@@ -699,17 +808,19 @@ export const PagesLive: Layer.Layer<
               DB.prepare(
                 `insert into view_handles (hash_sha256, generation, user_id, session_id,
                    anon_session_id, tree_id, expires_at, renewed_at, created_at)
-                 select ?1, ?2, ?3, ?4, null, ?5, ?6, ?7, ?7
+                 select ?1, ?2, ?3, ?4, ?8, ?5, ?6, ?7, ?7
                  where not exists (select 1 from view_handles
-                                   where session_id = ?4 and tree_id = ?5)`,
+                                   where ${ownerColumn} = ?9 and tree_id = ?5)`,
               ).bind(
                 hash,
                 generation,
-                personId,
-                sessionId,
+                owner.kind === 'session' ? owner.personId : null,
+                owner.kind === 'session' ? owner.id : null,
                 tree.id,
                 expiresAt,
                 now,
+                owner.kind === 'visitor' ? owner.id : null,
+                owner.id,
               ),
             )
           }
@@ -740,8 +851,8 @@ export const PagesLive: Layer.Layer<
             DB.prepare(
               `select hash_sha256 as hash, expires_at as expiresAt,
                  (select authored_seq from trees where id = ?2) as seq
-               from view_handles where session_id = ?1 and tree_id = ?2`,
-            ).bind(sessionId, tree.id),
+               from view_handles where ${ownerColumn} = ?1 and tree_id = ?2`,
+            ).bind(owner.id, tree.id),
           )
           const results = yield* query(() => DB.batch(statements))
           const stands = results[results.length - 1]?.results[0] as
@@ -764,7 +875,7 @@ export const PagesLive: Layer.Layer<
         return yield* Effect.fail(dossierError('unavailable'))
       })
 
-    const view: PagesService['view'] = ({ treeId, path }) =>
+    const view: PagesService['view'] = ({ treeId, path, renewal = false }) =>
       askedAs(
         path,
         Effect.gen(function* () {
@@ -803,7 +914,21 @@ export const PagesLive: Layer.Layer<
               return yield* Effect.fail(notFound(path))
             }
             const person = caller.person
-            if (person === null || caller.via.kind !== 'browser') {
+            // A person's browser session, or a visitor's anonymous one: a
+            // handle is bound to one browser.
+            const owner =
+              person !== null && caller.via.kind === 'browser'
+                ? ({
+                    kind: 'session',
+                    id: caller.via.sessionId,
+                    personId: person.id,
+                  } as const)
+                : person === null &&
+                    caller.via.kind === 'visitor' &&
+                    caller.via.anonSessionId !== null
+                  ? ({ kind: 'visitor', id: caller.via.anonSessionId } as const)
+                  : null
+            if (owner === null) {
               return yield* Effect.fail(
                 dossierError(
                   'sign_in_required',
@@ -818,25 +943,33 @@ export const PagesLive: Layer.Layer<
             const seq = tree.authoredSeq as AuthoredSeq
             const nodeIds = yield* loadedBy(resolved, seq)
             const now = yield* Clock.currentTimeMillis
-            const seen =
-              resolved.kind === 'page'
+            const page = resolved.kind === 'page'
+            // Public pages count views: one per load, never a renewal.
+            const counted = page && !renewal && (yield* isPublic(resolved.node))
+            const seen = [
+              // Seen by moves at most once an hour per person and page.
+              ...(page && person !== null
                 ? [
-                    // Seen by moves at most once an hour per person and page.
                     DB.prepare(
                       `insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?)
                      on conflict (node_id, user_id) do update set last_seen_at = excluded.last_seen_at
                      where seen_by.last_seen_at < excluded.last_seen_at - ?`,
                     ).bind(resolved.node.id, person.id, now, HOUR),
                   ]
-                : []
-            const h = yield* issue(
-              caller.via.sessionId,
-              person.id,
-              tree,
-              seq,
-              nodeIds,
-              seen,
-            )
+                : []),
+              ...(counted
+                ? [
+                    DB.prepare(
+                      `insert into page_views (node_id, day, count) values (?, ?, 1)
+                       on conflict (node_id, day) do update set count = count + 1`,
+                    ).bind(
+                      resolved.node.id,
+                      new Date(now).toISOString().slice(0, 10),
+                    ),
+                  ]
+                : []),
+            ]
+            const h = yield* issue(owner, tree, seq, nodeIds, seen)
             if (h.moved) continue
             return {
               handle: h.handle,
@@ -844,14 +977,15 @@ export const PagesLive: Layer.Layer<
               seq,
               role: highest(roles),
               path: resolved.node.path,
-              email: person.email,
+              email: person?.email ?? null,
               // Read before the handle was issued, so no later event is missed.
               events: yield* Effect.promise(() =>
                 sealCursor(
                   bindings.HANDLE_SECRET,
                   tree.id,
                   tree.eventSeq,
-                  person.id,
+                  // A visitor's cursors are a visitor's.
+                  person?.id ?? '',
                 ),
               ),
             } satisfies ViewGrant
@@ -1169,7 +1303,7 @@ export const PagesLive: Layer.Layer<
             .pipe(Effect.isSuccess)
         }
         const roles = yield* access.roleOn(target.node)
-        if (!readsWith(roles, target.node)) return false
+        if (!roles.reads) return false
         const parts = yield* composedAt(target, target.tree.id, seq)
         if (parts === null) return false
         return yield* opensAt(handleHash, seq, [
@@ -1288,7 +1422,7 @@ export const PagesLive: Layer.Layer<
           return yield* Effect.fail(notFound(i.path))
         }
         const roles = yield* access.roleOn(target.node)
-        if (!readsWith(roles, target.node)) {
+        if (!roles.reads) {
           return yield* Effect.fail(notFound(i.path))
         }
         const parts = yield* composedAt(target, i.treeId, i.seq)
@@ -1373,10 +1507,23 @@ export const PagesLive: Layer.Layer<
               .bind(resolved.node.id)
               .all<{ email: string; name: string; lastSeenAt: number }>(),
           )
-          return rows.results.map((row) => ({
+          const people = rows.results.map((row) => ({
             ...row,
             withinHour: now - row.lastSeenAt < HOUR,
           }))
+          if (!(yield* isPublic(resolved.node))) return { people, views: null }
+          const since = new Date(now - (VIEW_DAYS - 1) * DAY)
+            .toISOString()
+            .slice(0, 10)
+          const views = yield* query(() =>
+            DB.prepare(
+              `select coalesce(sum(count), 0) as views from page_views
+               where node_id = ? and day >= ?`,
+            )
+              .bind(resolved.node.id, since)
+              .first<{ views: number }>(),
+          )
+          return { people, views: views?.views ?? 0 }
         }),
       )
 
@@ -1385,6 +1532,29 @@ export const PagesLive: Layer.Layer<
         if (!HANDLE.test(handle)) return null
         const hash = yield* Effect.promise(() => sha256Hex(handle))
         const now = yield* Clock.currentTimeMillis
+        // A visitor's handle stands on its own: nobody signed in behind it.
+        const anon = yield* query(() =>
+          DB.prepare(
+            `select anon_session_id as anonSessionId from view_handles
+             where hash_sha256 = ? and tree_id = ? and expires_at > ?
+               and anon_session_id is not null`,
+          )
+            .bind(hash, treeId, now)
+            .first<{ anonSessionId: string }>(),
+        )
+        if (anon !== null) {
+          return {
+            person: null,
+            via: {
+              kind: 'handle',
+              treeId,
+              sessionId: null,
+              anonSessionId: anon.anonSessionId,
+              handleHash: hash,
+            },
+            requestId: '',
+          } satisfies Caller
+        }
         const row = yield* query(() =>
           DB.prepare(
             `select h.session_id as sessionId, u.id, u.email, u.name, u.image

@@ -130,6 +130,7 @@ describe('the agent guide', () => {
       'update',
       'push',
       'pull',
+      'share',
       'ls',
       'read',
     ]) {
@@ -139,11 +140,14 @@ describe('the agent guide', () => {
     expect(markdown).toContain('dossier update [--check] [--json]')
     expect(markdown).toContain('dossier login [--json] [<deployment>]')
     expect(markdown).toContain(
-      'dossier push [(-m, --message text)] [--dry-run] [--force] [--json] ' +
-        '<dir> <target>',
+      'dossier push [(-m, --message text)] [--dry-run] [--force] ' +
+        '[--share text...] [--json] <dir> <target>',
     )
     expect(markdown).toContain('dossier pull [--json] <target> <dir>')
     expect(markdown).toContain('dossier ls [--json] <target>')
+    expect(markdown).toContain(
+      'dossier share [--remove] [--json] <path> [<target>] [<role>]',
+    )
     expect(markdown).toContain('dossier watch [--next] [--json] <target>')
     for (const [code, meaning] of [
       [0, 'success'],
@@ -172,6 +176,7 @@ describe('the agent guide', () => {
       'update',
       'push',
       'pull',
+      'share',
       'ls',
       'read',
       'watch',

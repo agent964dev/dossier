@@ -9,14 +9,14 @@ import {
   Data,
   Files,
   Pages,
-  People,
+  Shares,
   type Entry,
-  type SeenByRow,
+  type SeenBy,
 } from '../core/index.ts'
 import { kitNames } from './kit-row.ts'
 import { runScreen, type ScreenFailure } from './run.ts'
 
-export type { SeenByRow } from '../core/index.ts'
+export type { SeenBy, SeenByRow } from '../core/index.ts'
 
 interface PushStamp {
   readonly number: number
@@ -37,7 +37,11 @@ export interface ListingView {
   /** "Private to you", "Shared with sara@acme.com and 2 others". */
   readonly sharing: string
   /** Write holders' actions; more arrive with their features. */
-  readonly can: { readonly seenBy: boolean; readonly kit: boolean }
+  readonly can: {
+    readonly seenBy: boolean
+    readonly kit: boolean
+    readonly share: boolean
+  }
   readonly pages: readonly {
     readonly title: string
     /** As the folder names it: 'plan.html', 'questions/'. */
@@ -92,30 +96,6 @@ const typeOf = (entry: Entry): string => {
     : subtype.toUpperCase()
 }
 
-/** One line on who else a folder is shared with. */
-const sharingLine = (
-  shares: readonly { readonly targetKind: string; readonly target: string }[],
-  me: string,
-): string => {
-  if (shares.some((s) => s.targetKind === 'anyone')) return 'Public'
-  if (shares.some((s) => s.targetKind === 'workspace')) {
-    return 'Shared with the workspace'
-  }
-  const others = [
-    ...new Set(
-      shares
-        .filter((s) => s.targetKind !== 'team' && s.target !== me)
-        .map((s) => s.target),
-    ),
-  ]
-  const teams = shares.filter((s) => s.targetKind === 'team').length
-  const count = others.length + teams
-  if (count === 0) return 'Private to you'
-  const first = others[0] ?? 'a team'
-  if (count === 1) return `Shared with ${first}`
-  return `Shared with ${first} and ${count - 1} ${count === 2 ? 'other' : 'others'}`
-}
-
 const notFound = () =>
   dossierError('not_found', 'Nothing is here, or you cannot open it.')
 
@@ -155,7 +135,7 @@ export const listingView = createServerFn({ method: 'GET' })
         const kit = writer
           ? kitNames((yield* (yield* Files).kit(ref)).items)
           : []
-        const shares = yield* (yield* People).sharedWith(listing.folder)
+        const sharing = yield* (yield* Shares).sharingLabel(listing.folder)
         const at = (path: string, kind: 'page' | 'folder' | 'file') =>
           linkFor(config.origin, {
             workspace: ref.workspace,
@@ -228,8 +208,8 @@ export const listingView = createServerFn({ method: 'GET' })
             path: ref.path,
             link: at(ref.path, 'folder'),
           },
-          sharing: sharingLine(shares, me.email.toLowerCase()),
-          can: { seenBy: writer, kit: writer },
+          sharing,
+          can: { seenBy: writer, kit: writer, share: writer },
           pages,
           folders,
           files,
@@ -251,7 +231,7 @@ export const seenBy = createServerFn({ method: 'GET' })
   .validator((input: { readonly link: string }) => ({
     link: String(input.link),
   }))
-  .handler(({ data }): Promise<readonly SeenByRow[] | ScreenFailure> =>
+  .handler(({ data }): Promise<SeenBy | ScreenFailure> =>
     runScreen(
       Effect.gen(function* () {
         const config = yield* Config

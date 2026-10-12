@@ -1,9 +1,16 @@
 // What the shell keeps on this device, in its own IndexedDB: each viewer's
 // drafts, and the sends it still has to deliver. It keeps nothing else.
-import type { DraftValues, PendingSend } from '@dossier/contracts/bridge'
+import {
+  VISITOR_VIEWER,
+  type DraftValues,
+  type PendingSend,
+} from '@dossier/contracts/bridge'
 
 export interface ShellStore {
-  /** A viewer's drafts on a page, by formKey. The viewer is '' for a visitor. */
+  /**
+   * A viewer's drafts on a page, by formKey. The viewer is the person's email,
+   * or VISITOR_VIEWER for someone not signed in.
+   */
   readonly loadDrafts: (
     viewer: string,
     treeId: string,
@@ -17,12 +24,13 @@ export interface ShellStore {
     form: string,
     values: DraftValues | null,
   ) => Promise<void>
-  /** Hands every draft of `from` in a tree to `to`, replacing theirs. */
-  readonly adoptDrafts: (
-    from: string,
-    to: string,
-    treeId: string,
-  ) => Promise<void>
+  /**
+   * Hands what a visitor kept in a tree to the person who signed in: each
+   * draft becomes theirs unless they have their own for that form, which
+   * stays (the visitor's is dropped), and each of the visitor's kept sends
+   * becomes theirs to send.
+   */
+  readonly claimVisitor: (viewer: string, treeId: string) => Promise<void>
   /** The sends kept for a page, oldest first. */
   readonly loadPending: (treeId: string, page: string) => Promise<PendingSend[]>
   readonly savePending: (
@@ -129,17 +137,38 @@ export const browserStore = (indexedDB: IDBFactory): ShellStore => {
         const record: DraftRecord = { viewer, tree: treeId, page, form, values }
         await settle(store.put(record))
       }),
-    adoptDrafts: (from, to, treeId) =>
-      run(DRAFTS, 'readwrite', async (store) => {
-        if (from === to) return
-        const records = (await settle(
-          store.index('tree').getAll([from, treeId]),
-        )) as DraftRecord[]
-        for (const record of records) {
-          await settle(store.put({ ...record, viewer: to }))
-          await settle(store.delete([from, treeId, record.page, record.form]))
+    claimVisitor: async (viewer, treeId) => {
+      if (viewer === VISITOR_VIEWER) return
+      const db = await database()
+      const transaction = db.transaction([DRAFTS, PENDING], 'readwrite')
+      const done = finished(transaction)
+      const drafts = transaction.objectStore(DRAFTS)
+      const visitor = (await settle(
+        drafts.index('tree').getAll([VISITOR_VIEWER, treeId]),
+      )) as DraftRecord[]
+      for (const record of visitor) {
+        const own = [viewer, treeId, record.page, record.form]
+        if ((await settle(drafts.getKey(own))) === undefined) {
+          await settle(drafts.put({ ...record, viewer }))
         }
-      }),
+        await settle(
+          drafts.delete([VISITOR_VIEWER, treeId, record.page, record.form]),
+        )
+      }
+      // A device keeps few sends: reading them all needs no key range, whose
+      // constructor belongs to the IndexedDB the store was given.
+      const pending = transaction.objectStore(PENDING)
+      const kept = (await settle(pending.getAll())) as PendingRecord[]
+      for (const record of kept) {
+        if (record.tree !== treeId || record.send.by !== null) continue
+        const claimed: PendingRecord = {
+          ...record,
+          send: { ...record.send, by: viewer },
+        }
+        await settle(pending.put(claimed))
+      }
+      await done
+    },
     loadPending: (treeId, page) =>
       run(PENDING, 'readonly', async (store) => {
         const records = (await settle(

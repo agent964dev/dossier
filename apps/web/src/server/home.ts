@@ -7,7 +7,10 @@ import {
   CurrentCaller,
   People,
   Settings,
+  Shares,
+  strongest,
   type Membership,
+  type SharedRow,
   type TreeSharing,
 } from '../core/index.ts'
 import { runScreen } from './run.ts'
@@ -38,6 +41,38 @@ export const menuOf = (
     suspended: m.workspace.suspendedAt !== null,
   }))
 
+/** Something another person shared with the viewer. */
+export interface SharedWithMe {
+  readonly title: string
+  readonly kind: 'folder' | 'page' | 'file'
+  /** 'acme/questions'. */
+  readonly place: string
+  /** The workspace it is in: "from agent964". */
+  readonly from: string
+  /** When it was shared, ISO 8601. */
+  readonly date: string
+  readonly label: 'waiting for your answer' | 'mentioned you' | null
+  readonly action: 'Respond' | 'Read' | 'Write'
+  readonly link: string
+}
+
+const ACTIONS = { read: 'Read', respond: 'Respond', write: 'Write' } as const
+
+const sharedRow = (row: SharedRow): SharedWithMe => ({
+  title: row.title,
+  kind: row.kind,
+  place: row.place,
+  from: row.workspace.name,
+  date: new Date(row.sharedAt).toISOString(),
+  label: row.waiting
+    ? 'waiting for your answer'
+    : row.mentioned
+      ? 'mentioned you'
+      : null,
+  action: ACTIONS[strongest(row.roles)],
+  link: row.link,
+})
+
 export interface HomeView {
   readonly deployment: string
   /** Null renders the front page. */
@@ -49,8 +84,8 @@ export interface HomeView {
   /** The workspace the home shows: `?w=`, or the first one. */
   readonly workspace: string | null
   readonly trees: readonly HomeTree[]
-  /** "Shared with me" rows arrive with sharing. */
-  readonly shared: readonly never[]
+  /** What others shared with the viewer, newest first. */
+  readonly shared: readonly SharedWithMe[]
 }
 
 export const homeView = createServerFn({ method: 'GET' })
@@ -86,8 +121,10 @@ export const homeView = createServerFn({ method: 'GET' })
           memberships.find((m) => m.workspace.name === data.w) ?? memberships[0]
         const trees =
           chosen === undefined ? [] : yield* people.trees(chosen.workspace)
+        const shared = yield* (yield* Shares).sharedWithMe()
         return {
           ...base,
+          shared: shared.map(sharedRow),
           me: { email: person.email, name: person.name },
           firstRun,
           workspaces: menuOf(memberships),

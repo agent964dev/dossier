@@ -240,7 +240,20 @@ export interface ShellBoot {
   /** The base layer's version. */
   readonly base: string
   readonly me: { readonly email: string; readonly name: string } | null
+  /** Public pages only; the edge renders it into the shell's head. */
+  readonly preview: Preview | null
 }
+
+/** What a public page's link previews with in messaging apps. */
+export interface Preview {
+  readonly title: string
+  readonly description: string | null
+  /** An absolute URL. */
+  readonly image: string | null
+}
+
+/** The ShellStore viewer key of someone not signed in. */
+export const VISITOR_VIEWER = 'visitor' as const
 
 /** JSON in the composed page, in `#dossier-bootstrap`; alike for every viewer. */
 export interface PageBootstrap {

@@ -21,6 +21,11 @@ import {
 } from './ids.ts'
 import { Person } from './person.ts'
 import { PROTOCOL } from './protocol.ts'
+import {
+  ShareRoleSchema,
+  ShareSpecSchema,
+  ShareTargetSchema,
+} from './shares.ts'
 
 export const Health = Schema.Struct({
   ok: Schema.Literal(true),
@@ -121,6 +126,10 @@ export const StagePayload = Schema.Struct({
   dryRun: Schema.Boolean,
   message: Schema.NullOr(Schema.String.pipe(Schema.maxLength(500))),
   files: Schema.Array(ManifestFileSchema),
+  /** Shares granted on the pushed folder in the commit's batch. */
+  share: Schema.optionalWith(Schema.Array(ShareSpecSchema), {
+    default: () => [],
+  }),
 })
 export type StagePayload = typeof StagePayload.Type
 
@@ -261,6 +270,10 @@ export class ViewGroup extends HttpApiGroup.make('view')
           tree: TreeId,
           /** The link's path inside the tree: '', 'questions/', 'plan'. */
           path: Schema.String,
+          /** The shell renewing an open page's handle: not a new view. */
+          renewal: Schema.optionalWith(Schema.Boolean, {
+            default: () => false,
+          }),
         }),
       )
       .addSuccess(ViewGrantSchema),
@@ -566,6 +579,51 @@ export class DataGroup extends HttpApiGroup.make('data')
       .addSuccess(DocWire),
   ) {}
 
+export const ShareWire = Schema.Struct({
+  target: ShareTargetSchema,
+  role: ShareRoleSchema,
+  /** The tree path of the node the share sits on. */
+  on: Schema.String,
+  /** A share on a folder above: a lower node cannot narrow it. */
+  inherited: Schema.Boolean,
+  /** ISO 8601. */
+  createdAt: Schema.String,
+})
+export type ShareWire = typeof ShareWire.Type
+
+export const SharesResponse = Schema.Struct({
+  /** The node's tree path. */
+  path: Schema.String,
+  link: Schema.String,
+  shares: Schema.Array(ShareWire),
+  /** Tree paths of the `_` files above that are public with the node. */
+  publicReach: Schema.Array(Schema.String),
+})
+export type SharesResponse = typeof SharesResponse.Type
+
+export const SetSharePayload = Schema.Struct({
+  /** '<workspace>/<tree>/<path>', or a link on this deployment. */
+  path: Schema.String,
+  target: ShareTargetSchema,
+  /** null removes the target's share. */
+  role: Schema.NullOr(ShareRoleSchema),
+})
+export type SetSharePayload = typeof SetSharePayload.Type
+
+export class SharesGroup extends HttpApiGroup.make('shares')
+  // not_found | sign_in_required | forbidden
+  .add(
+    HttpApiEndpoint.get('list', '/shares')
+      .setUrlParams(Schema.Struct({ path: Schema.String }))
+      .addSuccess(SharesResponse),
+  )
+  // not_found | sign_in_required | forbidden | invalid | conflict
+  .add(
+    HttpApiEndpoint.post('set', '/shares')
+      .setPayload(SetSharePayload)
+      .addSuccess(SharesResponse),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -576,5 +634,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(ReadGroup)
   .add(DataGroup)
   .add(EventsGroup)
+  .add(SharesGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

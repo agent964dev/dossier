@@ -7,6 +7,7 @@ import {
   type FormRef,
   type PendingSend,
   type SendRequest,
+  VISITOR_VIEWER,
 } from '@dossier/contracts/bridge'
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -99,6 +100,19 @@ describe('shellApi', () => {
       tree: 't1',
       path: 'questions/',
     })
+  })
+
+  test('says renewal only when the shell renews an open page’s handle', async () => {
+    const fetch = answer(200, grant('h2', 7, 'read', PAGE_PATH, null))
+    const api = shellApi(fetch, 'https://main.test')
+    await api.view({ tree: 't1', path: 'questions/', renewal: true })
+    await api.view({ tree: 't1', path: 'questions/', renewal: false })
+    expect(
+      fetch.spy.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    ).toEqual([
+      { tree: 't1', path: 'questions/', renewal: true },
+      { tree: 't1', path: 'questions/' },
+    ])
   })
 
   test('rejects an error body with its DossierError', async () => {
@@ -487,7 +501,11 @@ describe('createShell', () => {
     const frame = it.frame()
     await vi.advanceTimersByTimeAsync(HOUR)
     expect(it.view).toHaveBeenCalledTimes(2)
-    expect(it.view).toHaveBeenLastCalledWith({ tree: 't1', path: 'questions/' })
+    // The first view opens the page; the next one only renews its handle.
+    expect(it.view.mock.calls).toEqual([
+      [{ tree: 't1', path: 'questions/' }],
+      [{ tree: 't1', path: 'questions/', renewal: true }],
+    ])
     expect(it.frame()).toBe(frame)
 
     // The page in the frame keeps its handle; new pages get the renewed one.
@@ -544,6 +562,11 @@ describe('createShell', () => {
     doc.dispatchEvent(new it.win.Event('visibilitychange'))
     await flush()
     expect(it.view).toHaveBeenCalledTimes(2)
+    expect(it.view).toHaveBeenLastCalledWith({
+      tree: 't1',
+      path: 'questions/',
+      renewal: true,
+    })
     it.shell.dispose()
   })
 
@@ -660,38 +683,128 @@ describe('shell drafts and sends', () => {
     it.shell.dispose()
   })
 
-  test('a visitor keeps drafts as the empty viewer', async () => {
+  test('a visitor keeps drafts as the visitor', async () => {
     const it = openShell({ boot: { ...BOOT, me: null } })
     await it.shell.start()
     const { page } = it.hello({ source: it.page() })
     page.postMessage({ type: 'draft', form: KEY_A, values: { name: 'V' } })
     await flush()
-    expect(it.store.drafts.get(`|t1|${PAGE}`)).toEqual({
+    expect(it.store.drafts.get(`${VISITOR_VIEWER}|t1|${PAGE}`)).toEqual({
       [KEY_A]: { name: 'V' },
     })
     it.shell.dispose()
   })
 
-  test('hands a visitor’s drafts in this tree to the person who signs in', async () => {
+  test('hands the visitor’s drafts and sends here to the person who signs in, before any send', async () => {
     const store = memoryStore()
-    await store.saveDraft('', 't1', PAGE, KEY_A, { name: 'Before sign-in' })
-    await store.saveDraft('', 't2', PAGE, KEY_A, { name: 'Other tree' })
-    const adopt = vi.spyOn(store, 'adoptDrafts')
+    await store.saveDraft(VISITOR_VIEWER, 't1', PAGE, KEY_A, { name: 'Visit' })
+    await store.saveDraft(VISITOR_VIEWER, 't1', PAGE, KEY_B, { title: 'V' })
+    await store.saveDraft(VISITOR_VIEWER, 't2', PAGE, KEY_A, { name: 'Away' })
+    await store.saveDraft('sara@acme.com', 't1', PAGE, KEY_A, { name: 'Own' })
+    await store.savePending('t1', PAGE, pendingSend('op-visitor', null, FORM_B))
+    // The claim takes its time: nothing of the page is read before it ends.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const claimVisitor = store.claimVisitor
+    const claim = vi
+      .spyOn(store, 'claimVisitor')
+      .mockImplementation(async (viewer, tree) => {
+        await gate
+        await claimVisitor(viewer, tree)
+      })
+    const loadPending = vi.spyOn(store, 'loadPending')
+    const loadDrafts = vi.spyOn(store, 'loadDrafts')
     const it = openShell({ store })
-    await it.shell.start()
+    const started = it.shell.start()
+    await flush()
+    expect(claim).toHaveBeenCalledWith('sara@acme.com', 't1')
+    expect(loadPending).not.toHaveBeenCalled()
+    expect(loadDrafts).not.toHaveBeenCalled()
+    release()
+    await started
+
+    // The person's own draft of a form stays; the visitor's others are theirs.
     expect(bootOf(it.frame())).toMatchObject({
-      drafts: { [KEY_A]: { name: 'Before sign-in' } },
+      drafts: { [KEY_A]: { name: 'Own' }, [KEY_B]: { title: 'V' } },
+      resume: [KEY_B],
     })
-    expect(store.drafts.get(`|t1|${PAGE}`)).toBeUndefined()
-    expect(store.drafts.get(`|t2|${PAGE}`)).toEqual({
-      [KEY_A]: { name: 'Other tree' },
+    expect(store.drafts.get(`${VISITOR_VIEWER}|t1|${PAGE}`)).toBeUndefined()
+    expect(store.drafts.get(`${VISITOR_VIEWER}|t2|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'Away' },
     })
-    // Once per shell, not on every load.
+
+    // The visitor's kept send goes once, as the person.
     const { page } = it.hello({ source: it.page() })
+    await flush()
+    expect(it.send).toHaveBeenCalledTimes(1)
+    expect(it.send.mock.calls[0]![0]).toMatchObject({
+      opId: 'op-visitor',
+      as: 'sara@acme.com',
+    })
+    expect(page.inbox.at(-1)).toMatchObject({
+      type: 'resumed',
+      form: KEY_B,
+      ok: true,
+    })
+    expect(store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
+
+    // Once per shell, not on every load or every try of kept sends.
     page.postMessage({ type: 'open', path: 'plan', hash: '' })
     await flush()
-    expect(adopt).toHaveBeenCalledTimes(1)
+    it.win.dispatchEvent(new it.win.Event('online'))
+    await flush()
+    expect(claim).toHaveBeenCalledTimes(1)
+    expect(it.send).toHaveBeenCalledTimes(1)
     it.shell.dispose()
+  })
+
+  test('a visitor’s send that needed sign-in goes once as the person on their return', async () => {
+    const store = memoryStore()
+    const visitor = openShell({ boot: { ...BOOT, me: null }, store })
+    await visitor.shell.start()
+    const before = visitor.hello({ source: visitor.page() })
+    await flush()
+    before.page.postMessage({
+      type: 'draft',
+      form: KEY_A,
+      values: { name: 'Sara' },
+    })
+    visitor.send.mockRejectedValueOnce(
+      new DossierError({
+        code: 'sign_in_required',
+        message: 'Sign in.',
+        fix: null,
+        path: null,
+      }),
+    )
+    before.page.postMessage(request(1))
+    await flush()
+    expect(visitor.assign).toHaveBeenCalledTimes(1)
+    visitor.shell.dispose()
+
+    // Back from sign-in: a new shell for the person on the same device.
+    const person = openShell({ store })
+    await person.shell.start()
+    expect(bootOf(person.frame())).toMatchObject({
+      drafts: { [KEY_A]: { name: 'Sara' } },
+      resume: [KEY_A],
+    })
+    const after = person.hello({ source: person.page() })
+    await flush()
+    expect(person.send).toHaveBeenCalledTimes(1)
+    expect(person.send.mock.calls[0]![0]).toMatchObject({
+      opId: 'op-1',
+      as: 'sara@acme.com',
+    })
+    expect(after.page.inbox.at(-1)).toMatchObject({
+      type: 'resumed',
+      form: KEY_A,
+      ok: true,
+    })
+    // What was sent is no longer a draft, and nothing is kept.
+    expect(store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({})
+    expect(store.pending.get(`t1|${PAGE}`)!.size).toBe(0)
+    person.shell.dispose()
   })
 
   test('replays kept sends only for the same email or a visitor', async () => {
@@ -732,8 +845,8 @@ describe('shell drafts and sends', () => {
       submitter: null,
       entry: null,
       opId: 'op-visitor',
-      // A visitor's kept send goes as whoever signed in since.
-      as: null,
+      // The visitor's kept send became the person's: it goes as them.
+      as: 'sara@acme.com',
     })
     expect(page.inbox[0]).toMatchObject({
       type: 'welcome',
