@@ -78,8 +78,8 @@ const expectServedShape = (html: string): void => {
   ])
 }
 
-it('is the third version of the composer', () => {
-  expect(COMPOSER_VERSION).toBe(3)
+it('is the fourth version of the composer', () => {
+  expect(COMPOSER_VERSION).toBe(4)
 })
 
 describe('a complete document', () => {
@@ -323,6 +323,33 @@ describe('layouts', () => {
       },
     })
     expect(seen).toEqual([['acme-card']])
+  })
+
+  it('hand the composer’s inject each library the page and its layouts use, once', () => {
+    const read = (name: string) => ({
+      source: fixture(`libraries/${name}`),
+      analysis: analyze(fixture(`libraries/${name}`)),
+      folder: '',
+    })
+    const layout = read('_layout.html')
+    const found = (page: Source) => {
+      const seen: (readonly string[])[] = []
+      compose({
+        page,
+        layouts: layoutsOf(page, [layout], base),
+        inject: (given) => {
+          seen.push(given.libraries)
+          return ''
+        },
+      })
+      return seen
+    }
+    // The page holds all three, the layout two of them: each is listed once.
+    expect(found(read('page.html'))).toEqual([['katex', 'mermaid', 'shiki']])
+    // Mermaid from the page, math and code from the layout.
+    expect(found(read('diagram.html'))).toEqual([['katex', 'mermaid', 'shiki']])
+    // A page with none of them still gets the layout's.
+    expect(found(read('plain.html'))).toEqual([['katex', 'shiki']])
   })
 
   it('stop at a complete-document layout in a subfolder', () => {

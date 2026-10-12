@@ -26,9 +26,10 @@ import { toMarkdown as writeMarkdown } from 'mdast-util-to-markdown'
 import { parse } from 'parse5'
 
 import { isCustomElementName } from './kit.ts'
+import { texOf } from './libraries.ts'
 
 /** Bumped whenever the generated text changes for the same page. */
-export const MARKDOWN_VERSION: number = 3
+export const MARKDOWN_VERSION: number = 4
 
 /** A line Dossier writes as it stands, never escaped. */
 interface Line {
@@ -523,11 +524,11 @@ const prepare = (node: Element, forms: Forms): Element => {
       continue
     }
     if (kinds.includes('math') && kinds.includes('display')) {
-      children.push(line(`$$\n${rawTextOf(child).trim()}\n$$`, true))
+      children.push(line(`$$\n${texOf(rawTextOf(child))}\n$$`, true))
       continue
     }
     if (kinds.includes('math') && kinds.includes('inline')) {
-      children.push(line(`$${rawTextOf(child).trim()}$`, false))
+      children.push(line(`$${texOf(rawTextOf(child))}$`, false))
       continue
     }
     if (tag === 'form') {
@@ -535,6 +536,19 @@ const prepare = (node: Element, forms: Forms): Element => {
         type: 'dossierForm',
         nodes: formNodes(child, forms),
       } as unknown as ElementContent)
+      continue
+    }
+    // The base layer's diff names the files it compares, which an agent
+    // reads on their own.
+    if (tag === 'dossier-diff' && textOf(child) === '') {
+      const src = prop(child, 'src')
+      const sides = [prop(child, 'before'), prop(child, 'after')].filter(
+        (side): side is string => side !== null && side.trim() !== '',
+      )
+      const files = src !== null && src.trim() !== '' ? [src] : sides
+      if (files.length > 0) {
+        children.push(line(`[Diff: ${files.join(' → ')}]`, true))
+      }
       continue
     }
     const placeholder = PLACEHOLDER[tag]

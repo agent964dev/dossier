@@ -20,3 +20,13 @@ Inline math $x_1^2 + y^2$ sits in the line.
 $$
 \int_0^1 x\,dx = \frac{1}{2}
 $$
+
+Written by Pandoc: $e^{i\pi}$.
+
+$$
+a^2 + b^2 = c^2
+$$
+
+[Diff: v1/plan.md → plan.md]
+
+[Diff: changes.patch]

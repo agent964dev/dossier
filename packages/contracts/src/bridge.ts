@@ -9,6 +9,12 @@ export {
   type ErrorCode,
   type ErrorFields,
 } from './codes.ts'
+export type {
+  BaseBuilds,
+  BaseComponentTag,
+  BaseGrammar,
+  BaseLibraries,
+} from './base.ts'
 
 export const BRIDGE_VERSION = 1 as const
 /** The prefix of the boot data the shell puts in a top page's window.name. */

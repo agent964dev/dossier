@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(6)
+    expect(page.v).toBe(7)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })
@@ -696,5 +696,41 @@ describe('the companion a page names', () => {
         '<!doctype html><html><head></head><body><link rel="alternate" href="x.md"></body></html>',
       ).alternate,
     ).toBeNull()
+  })
+})
+
+describe('the base libraries a page uses', () => {
+  it('finds Mermaid, highlighted code and math, and the languages of the code', () => {
+    const page = analyze(fixture('libraries/page.html'))
+    expect(page.libraries).toEqual(['katex', 'mermaid', 'shiki'])
+    // Lower-cased and once each; code outside a <pre> and code inside a
+    // <template> are not highlighted, so their languages do not count.
+    expect(page.codeLanguages).toEqual(['py', 'typescript'])
+  })
+
+  it('counts .math only with inline or display, and nothing inside a <template>', () => {
+    const page = analyze(fixture('libraries/plain.html'))
+    expect(page.libraries).toEqual([])
+    expect(page.codeLanguages).toEqual([])
+  })
+
+  it('finds them in a layout as in a page', () => {
+    const layout = analyze(fixture('libraries/_layout.html'))
+    expect(layout.libraries).toEqual(['katex', 'shiki'])
+    expect(layout.codeLanguages).toEqual(['sh'])
+  })
+
+  it('lists a library once however often its markup appears', () => {
+    const page = analyze(fixture('libraries/diagram.html'))
+    expect(page.libraries).toEqual(['mermaid'])
+    expect(page.codeLanguages).toEqual([])
+  })
+
+  it('reads .math.inline and .math.display in any order of the class names', () => {
+    expect(analyze('<i class="inline math">x</i>').libraries).toEqual(['katex'])
+    expect(analyze('<b class=" display  math ">x</b>').libraries).toEqual([
+      'katex',
+    ])
+    expect(analyze('<b class="math-display">x</b>').libraries).toEqual([])
   })
 })

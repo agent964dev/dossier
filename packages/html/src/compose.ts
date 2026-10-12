@@ -9,6 +9,7 @@
 // with no layout keeps all of its own bytes around those edits.
 
 import type { Attr, HeadItem, HtmlAnalysis, Range } from './analyze.ts'
+import type { LibraryName } from './libraries.ts'
 import {
   isRelativeUrl,
   isRewritable,
@@ -18,7 +19,7 @@ import {
 } from './urls.ts'
 
 /** Bumped whenever composing changes what it makes of the same input. */
-export const COMPOSER_VERSION: number = 3
+export const COMPOSER_VERSION: number = 4
 
 export interface Source {
   readonly source: string
@@ -31,6 +32,8 @@ export interface Source {
 export interface Found {
   /** Custom element tags the page and its layouts use, sorted, once each. */
   readonly tags: readonly string[]
+  /** The base libraries the page and its layouts use, sorted, once each. */
+  readonly libraries: readonly LibraryName[]
 }
 
 export interface ComposeInput {
@@ -292,6 +295,9 @@ const headStart = (analysis: HtmlAnalysis): number =>
 const tagsOf = (chain: readonly Source[]): string[] =>
   [...new Set(chain.flatMap((s) => s.analysis.tags))].sort()
 
+const librariesOf = (chain: readonly Source[]): LibraryName[] =>
+  [...new Set(chain.flatMap((s) => s.analysis.libraries))].sort()
+
 /**
  * The layouts a page composes into, outermost first: none for a complete
  * page; otherwise the tree's layouts closest first up to the first complete
@@ -329,7 +335,9 @@ export const compose = (input: ComposeInput): string => {
   )
   const sealOf = (index: number): string =>
     index > 0 ? (chain[index]?.analysis.seal.body ?? '') : ''
-  const inject = CHARSET + input.inject({ tags: tagsOf(chain) })
+  const inject =
+    CHARSET +
+    input.inject({ tags: tagsOf(chain), libraries: librariesOf(chain) })
 
   if (layouts.length === 0) {
     if (!page.analysis.complete) {

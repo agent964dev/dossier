@@ -9,11 +9,12 @@ import {
   parseDocument,
 } from './parse.ts'
 import { isCustomElementName } from './kit.ts'
+import { codeLanguageOf, type LibraryName } from './libraries.ts'
 import { type BodyClose, findRepairs } from './repairs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 6
+export const ANALYZER_VERSION: number = 7
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -126,6 +127,13 @@ export interface HtmlAnalysis {
   readonly alternate: string | null
   /** Custom element names used, sorted, once each. */
   readonly tags: readonly string[]
+  /**
+   * The base layer's libraries whose markup the page holds outside any
+   * <template>, sorted, once each.
+   */
+  readonly libraries: readonly LibraryName[]
+  /** The languages of `pre > code.language-<lang>`, lower-cased, sorted, once each. */
+  readonly codeLanguages: readonly string[]
   readonly urls: readonly UrlRef[]
   readonly forms: readonly FormSummary[]
   /** Where parse5 had to repair the structure. */
@@ -331,6 +339,8 @@ export const analyze = (source: string): HtmlAnalysis => {
 
   const charsetMetas: Range[] = []
   const tags = new Set<string>()
+  const libraries = new Set<LibraryName>()
+  const codeLanguages = new Set<string>()
   const urls: UrlRef[] = []
   const forms: FormSummary[] = []
   let slot: Range | null = null
@@ -437,12 +447,44 @@ export const analyze = (source: string): HtmlAnalysis => {
     })
   }
 
+  /** The markup LIBRARY_SELECTORS names, as a browser would match it. */
+  const addLibraries = (element: Element): void => {
+    const className = attrOf(element, 'class')
+    if (className === null) return
+    const classes = className.split(/[\t\n\f\r ]+/)
+    const inHtml = element.namespaceURI === HTML_NS
+    if (inHtml && element.tagName === 'pre' && classes.includes('mermaid')) {
+      libraries.add('mermaid')
+    }
+    const parent = element.parentNode
+    if (
+      inHtml &&
+      element.tagName === 'code' &&
+      className.includes('language-') &&
+      parent !== null &&
+      isElement(parent) &&
+      parent.namespaceURI === HTML_NS &&
+      parent.tagName === 'pre'
+    ) {
+      libraries.add('shiki')
+      const language = codeLanguageOf(className)
+      if (language !== null) codeLanguages.add(language)
+    }
+    if (
+      classes.includes('math') &&
+      (classes.includes('inline') || classes.includes('display'))
+    ) {
+      libraries.add('katex')
+    }
+  }
+
   const visit = (nodes: readonly Node[], place: Place): void => {
     for (const node of nodes) {
       if (!isElement(node)) continue
       const name = node.tagName
       const isHtml = node.namespaceURI === HTML_NS
       if (isHtml && isCustomElementName(name)) tags.add(name)
+      if (!place.inTemplate) addLibraries(node)
       addUrls(node, place)
       if (isHtml) {
         if (name === 'form') addForm(node)
@@ -624,6 +666,8 @@ export const analyze = (source: string): HtmlAnalysis => {
     baseLine,
     alternate,
     tags: [...tags].sort(),
+    libraries: [...libraries].sort(),
+    codeLanguages: [...codeLanguages].sort(),
     urls,
     forms,
     repaired: findRepairs(parsed, source, body, bodyClose),

@@ -17,7 +17,7 @@ const pair = (name: string) => ({
 
 describe('toMarkdown', () => {
   it('has a version that stored conversions are keyed by', () => {
-    expect(MARKDOWN_VERSION).toBe(3)
+    expect(MARKDOWN_VERSION).toBe(4)
   })
 
   it('holds a golden pair for every rule', () => {
