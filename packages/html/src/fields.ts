@@ -108,6 +108,26 @@ const ancestors = function* (node: Element): Generator<Element> {
   }
 }
 
+/**
+ * A control the browser treats as disabled: its own attribute, or a
+ * disabled fieldset around it, unless it sits in that fieldset's first
+ * legend. It sends nothing, so it is never required.
+ */
+const isDisabled = (control: Element): boolean => {
+  if (hasAttr(control, 'disabled')) return true
+  let below: Element = control
+  for (const element of ancestors(control)) {
+    if (isHtml(element, 'fieldset') && hasAttr(element, 'disabled')) {
+      const legend = element.childNodes.find(
+        (node): node is Element => isElement(node) && isHtml(node, 'legend'),
+      )
+      if (legend !== below) return true
+    }
+    below = element
+  }
+  return false
+}
+
 const legendOf = (fieldset: Element): string | null => {
   for (const node of fieldset.childNodes) {
     if (isElement(node) && isHtml(node, 'legend')) return nonEmpty(textOf(node))
@@ -303,7 +323,9 @@ const fieldsOf = (
         type === 'radio' || type === 'checkboxes'
           ? groupLabel(first)
           : labelOf(first),
-      required: group.some((control) => hasAttr(control, 'required')),
+      required: group.some(
+        (control) => hasAttr(control, 'required') && !isDisabled(control),
+      ),
       min: attrOf(first, 'min'),
       max: attrOf(first, 'max'),
       step: attrOf(first, 'step'),

@@ -614,3 +614,117 @@ describe('validateSend', () => {
     expect(problem(colour('#abc'))).toBe('Enter a valid value.')
   })
 })
+
+describe('disabled controls and date steps', () => {
+  const schemaOf = (html: string) => {
+    const [form] = analyze(html).forms
+    if (form === undefined) throw new Error('no form')
+    return formSchema(form)
+  }
+
+  it('never requires a disabled control, one in a disabled fieldset included', () => {
+    const schema = schemaOf(`<form action="a/">
+      <input name="kept" required>
+      <input name="off" required disabled>
+      <fieldset disabled><legend><input name="inLegend" required></legend>
+        <input name="inside" required></fieldset>
+    </form>`)
+    const required = Object.fromEntries(
+      schema.fields.map((f) => [f.name, f.required]),
+    )
+    expect(required).toEqual({
+      kept: true,
+      off: false,
+      inLegend: true,
+      inside: false,
+    })
+    expect(
+      validateSend(
+        schema,
+        [
+          ['kept', 'x'],
+          ['inLegend', 'y'],
+        ],
+        null,
+      ),
+    ).toMatchObject({ ok: true })
+    // Page code may enable one and send it: it is still a field of the form.
+    expect(
+      validateSend(
+        schema,
+        [
+          ['kept', 'x'],
+          ['inLegend', 'y'],
+          ['off', 'z'],
+        ],
+        null,
+      ),
+    ).toMatchObject({ ok: true, values: { off: 'z' } })
+  })
+
+  it('checks date and time steps as the browser does', () => {
+    const one = (input: string, value: string) =>
+      validateSend(
+        schemaOf(`<form action="a/">${input}</form>`),
+        [['d', value]],
+        null,
+      )
+    // A time's default step is a minute.
+    expect(one('<input type="time" name="d">', '09:15')).toMatchObject({
+      ok: true,
+    })
+    expect(one('<input type="time" name="d">', '09:15:30')).toMatchObject({
+      ok: false,
+    })
+    expect(
+      one('<input type="time" name="d" step="1">', '09:15:30'),
+    ).toMatchObject({ ok: true })
+    expect(
+      one('<input type="time" name="d" step="900">', '09:15'),
+    ).toMatchObject({ ok: true })
+    expect(
+      one('<input type="time" name="d" step="900">', '09:20'),
+    ).toMatchObject({ ok: false })
+    expect(
+      one('<input type="time" name="d" step="any">', '09:20:07'),
+    ).toMatchObject({ ok: true })
+    // Dates step in days from min, or from 1970-01-01.
+    expect(
+      one(
+        '<input type="date" name="d" step="7" min="2026-10-05">',
+        '2026-10-19',
+      ),
+    ).toMatchObject({ ok: true })
+    expect(
+      one(
+        '<input type="date" name="d" step="7" min="2026-10-05">',
+        '2026-10-20',
+      ),
+    ).toMatchObject({ ok: false })
+    expect(
+      one('<input type="date" name="d" step="2">', '1970-01-03'),
+    ).toMatchObject({ ok: true })
+    expect(
+      one('<input type="date" name="d" step="2">', '1970-01-02'),
+    ).toMatchObject({ ok: false })
+    // Months and weeks in their own units, datetimes in seconds.
+    expect(
+      one('<input type="month" name="d" step="3" min="2026-01">', '2026-07'),
+    ).toMatchObject({ ok: true })
+    expect(
+      one('<input type="month" name="d" step="3" min="2026-01">', '2026-08'),
+    ).toMatchObject({ ok: false })
+    expect(
+      one('<input type="week" name="d" step="2" min="2026-W01">', '2026-W05'),
+    ).toMatchObject({ ok: true })
+    expect(
+      one('<input type="week" name="d" step="2" min="2026-W01">', '2026-W04'),
+    ).toMatchObject({ ok: false })
+    expect(
+      one('<input type="datetime-local" name="d">', '2026-10-12T09:15'),
+    ).toMatchObject({ ok: true })
+    expect(
+      one('<input type="datetime-local" name="d">', '2026-10-12T09:15:01'),
+    ).toMatchObject({ ok: false })
+  })
+})

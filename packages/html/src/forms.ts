@@ -392,6 +392,75 @@ const accepts = (accept: string, upload: UploadValue): boolean => {
   )
 }
 
+const DAY = 86_400_000
+
+/**
+ * A date or time as a number in its step's unit, as the browser counts it:
+ * days for a date, months for a month, weeks for a week (from 1970-W01),
+ * seconds for a time or a date and time. Null for text that is not one.
+ */
+const stepNumber = (type: FieldType, text: string): number | null => {
+  if (!isDateText(type, text)) return null
+  const seconds = (time: string): number => {
+    const [h = '0', m = '0', s = '0'] = time.split(':')
+    return Number(h) * 3600 + Number(m) * 60 + Number(s)
+  }
+  switch (type) {
+    case 'date':
+      return (
+        Date.UTC(
+          Number(text.slice(0, -6)),
+          Number(text.slice(-5, -3)) - 1,
+          Number(text.slice(-2)),
+        ) / DAY
+      )
+    case 'month': {
+      const [y = '0', m = '0'] = text.split('-')
+      return (Number(y) - 1970) * 12 + Number(m) - 1
+    }
+    case 'week': {
+      const [y = '0', w = '0'] = text.split('-W')
+      // Week 1 holds 4 January; its Monday starts it.
+      const jan4 = Date.UTC(Number(y), 0, 4)
+      const monday = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * DAY
+      const start = Date.UTC(1969, 11, 29)
+      return Math.round((monday - start) / (7 * DAY)) + Number(w) - 1
+    }
+    case 'time':
+      return seconds(text)
+    case 'datetime-local': {
+      const at = text.indexOf('T')
+      return (
+        (stepNumber('date', text.slice(0, at)) ?? 0) * 86_400 +
+        seconds(text.slice(at + 1))
+      )
+    }
+    default:
+      return null
+  }
+}
+
+/** A minute for times, one unit otherwise: the browser's default steps. */
+const DEFAULT_STEP: Partial<Record<FieldType, number>> = {
+  time: 60,
+  'datetime-local': 60,
+}
+
+const dateStepProblem = (field: FieldRule, text: string): string | null => {
+  const step = field.step?.trim().toLowerCase() ?? ''
+  if (step === 'any') return null
+  const written = numberOf(step)
+  const unit =
+    written !== null && written > 0 ? written : (DEFAULT_STEP[field.type] ?? 1)
+  const value = stepNumber(field.type, text)
+  if (value === null) return null
+  const base =
+    (field.min === null ? null : stepNumber(field.type, field.min)) ?? 0
+  // Whole units, counted exactly: a remainder, not a ratio of large numbers.
+  const rest = (((value - base) % unit) + unit) % unit
+  return rest > 1e-6 && unit - rest > 1e-6 ? VALID : null
+}
+
 const numberProblem = (field: FieldRule, value: number): string | null => {
   const range = field.type === 'range'
   const min = numberOf(field.min) ?? (range ? 0 : null)
@@ -534,6 +603,8 @@ const checkField = (field: FieldRule, sent: readonly unknown[]): Outcome => {
         return { message: `Enter ${field.max} or earlier.` }
       }
     }
+    const stepped = dateStepProblem(field, text)
+    if (stepped !== null) return { message: stepped }
     return { value: text }
   }
   const message = textProblem(field, text)
