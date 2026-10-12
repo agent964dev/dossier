@@ -250,7 +250,7 @@ function InviteRow({
             aria-label="Add to a team"
             value={team}
             wrapperClassName="col-span-2 row-start-2 sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:w-56"
-            className={team === '' ? 'text-muted-foreground' : undefined}
+            className={team === '' ? 'text-neutral-400' : undefined}
             onChange={(event) => setTeam(event.target.value)}
           >
             <option value="">Add to a team</option>

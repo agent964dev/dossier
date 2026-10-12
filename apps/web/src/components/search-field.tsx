@@ -150,12 +150,12 @@ export const SearchField = forwardRef<
             typed(event.target.value, event.target.selectionStart)
           }
           onKeyDown={keyDown}
-          className="h-10 min-w-0 flex-1 bg-transparent text-base text-neutral-100 outline-none placeholder:text-muted-foreground md:h-9 md:text-sm [&::-webkit-search-cancel-button]:hidden"
+          className="h-10 min-w-0 flex-1 bg-transparent text-base text-neutral-100 outline-none placeholder:text-neutral-400 md:h-9 md:text-sm [&::-webkit-search-cancel-button]:hidden"
         />
         {value === '' ? null : (
           <kbd
             aria-hidden
-            className="shrink-0 rounded-[0.3125rem] border border-border px-1.5 py-0.5 font-mono text-[0.625rem] text-muted-foreground"
+            className="shrink-0 rounded-[0.3125rem] border border-border px-1.5 py-0.5 font-mono text-[0.625rem] text-neutral-400"
           >
             esc
           </kbd>

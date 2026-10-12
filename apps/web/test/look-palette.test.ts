@@ -7,6 +7,7 @@ import {
   checkLook,
   contrast,
   contrastChecks,
+  FIELD_TEXT,
   lookCss,
   lookVersion,
   parseColor,
@@ -280,6 +281,53 @@ describe('what the contrast checks cover', () => {
       (name) => !CHECKED_TEXT.includes(name) && !(name in TEXT_EXEMPT),
     )
     expect(unchecked).toEqual([])
+  })
+
+  it('checks text on fields, over the page and over cards', () => {
+    const fields = contrastChecks(AGENT964_LOOK).find(
+      (check) => check.pair === 'Text on fields',
+    )
+    expect(fields?.ok).toBe(true)
+    // A field as light as the text people read on it fails the check.
+    const look: Look = {
+      ...AGENT964_LOOK,
+      roles: { ...AGENT964_LOOK.roles, input: { step: 'neutral-400' } },
+    }
+    const failing = contrastChecks(look).find(
+      (check) => check.pair === 'Text on fields',
+    )
+    expect(failing?.ok).toBe(false)
+    expect(failing?.worst).toMatch(/^neutral-400 on fields/)
+  })
+
+  it('puts on fields only text colours the fields line checks', () => {
+    const sources = import.meta.glob('../src/**/*.tsx', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>
+    const COLOUR =
+      /\btext-((?:neutral|brand|accent|complement|success|warning|error)-\d+|foreground|muted-foreground|primary|[a-z]+-foreground)\b/g
+    const wrong: string[] = []
+    for (const [path, text] of Object.entries(sources)) {
+      // Placeholders sit on a field wherever they are.
+      for (const match of text.matchAll(
+        /placeholder:text-([a-z]+(?:-[a-z0-9]+)*)/g,
+      )) {
+        if (!FIELD_TEXT.includes(match[1]!)) wrong.push(`${path}: ${match[0]}`)
+      }
+      // So does any text in a class list that paints a field's surface.
+      for (const list of text.matchAll(/(['"`])([^'"`]*?)\1/g)) {
+        const classes = list[2]!
+        if (!/\bbg-input\b/.test(classes)) continue
+        for (const match of classes.matchAll(COLOUR)) {
+          if (!FIELD_TEXT.includes(match[1]!)) {
+            wrong.push(`${path}: ${match[0]} in "${classes.slice(0, 60)}…"`)
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([])
   })
 })
 

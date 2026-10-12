@@ -751,7 +751,7 @@ function LivePreview({ draft }: { draft: Look }) {
           <p className="font-clash text-[1.75rem] leading-tight font-semibold tracking-[-0.03em] text-neutral-50">
             agent964
           </p>
-          <div className="flex h-10 items-center gap-2 rounded-lg border border-border bg-input px-3 text-sm text-muted-foreground">
+          <div className="flex h-10 items-center gap-2 rounded-lg border border-border bg-input px-3 text-sm text-neutral-400">
             <Search className="size-4 shrink-0" />
             Search titles and paths
           </div>

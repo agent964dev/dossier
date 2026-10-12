@@ -545,7 +545,7 @@ function AddRow({
           className={cn(
             'flex h-11 w-full min-w-0 rounded-lg border border-border bg-input py-2 pr-3 pl-10',
             'text-base text-neutral-100 md:text-sm',
-            'placeholder:text-muted-foreground',
+            'placeholder:text-neutral-400',
             'transition-[color,border-color,box-shadow] duration-200 ease-agent',
             'outline-none focus-visible:border-brand-300/50 focus-visible:ring-[3px] focus-visible:ring-ring/40',
             target?.kind === 'team' && 'pr-16',

@@ -615,7 +615,14 @@ export const roleColor = (look: Look, role: RoleName): ParsedColor => {
 type TextColour = RoleName | StepName
 
 /** Where text sits: the surfaces the screens put text on. */
-type Surface = 'background' | 'card' | 'popover' | 'primary' | 'secondary'
+type Surface =
+  | 'background'
+  | 'card'
+  | 'popover'
+  | 'primary'
+  | 'secondary'
+  | 'input'
+  | 'input-card'
 
 const SURFACE_NAMES: Readonly<Record<Surface, string>> = {
   background: 'background',
@@ -623,6 +630,8 @@ const SURFACE_NAMES: Readonly<Record<Surface, string>> = {
   popover: 'menus',
   primary: 'primary',
   secondary: 'secondary buttons',
+  input: 'fields',
+  'input-card': 'fields on cards',
 }
 
 /** Steps the screens use for text, from headings to quiet labels. */
@@ -646,6 +655,13 @@ const COLOURED_TEXT: readonly TextColour[] = [
   'warning-300',
   'complement-400',
 ]
+
+/**
+ * Text the screens put on a field's surface: what people type, and the
+ * placeholders, prompts and hints inside fields, which use neutral-400 (the
+ * muted colour is too faint on a field).
+ */
+export const FIELD_TEXT: readonly string[] = TEXT_STEPS
 
 const on = (
   colours: readonly TextColour[],
@@ -682,6 +698,10 @@ const CHECKS: readonly {
       ['primary-foreground', 'primary'],
       ['secondary-foreground', 'secondary'],
     ],
+  },
+  {
+    pair: 'Text on fields',
+    members: on(TEXT_STEPS, ['input', 'input-card']),
   },
   {
     pair: 'Muted text',
@@ -731,8 +751,13 @@ export const contrastChecks = (
   readonly worst: string
 }[] => {
   const background = over(roleColor(look, 'background'), BLACK)
+  const card = over(roleColor(look, 'card'), background)
   const surface = (name: Surface) =>
-    name === 'background' ? background : over(roleColor(look, name), background)
+    name === 'background'
+      ? background
+      : name === 'input-card'
+        ? over(roleColor(look, 'input'), card)
+        : over(roleColor(look, name), background)
   return CHECKS.map(({ pair, members }) => {
     let lowest = Number.POSITIVE_INFINITY
     let worst = ''
