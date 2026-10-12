@@ -1,9 +1,15 @@
-import { createFileRoute, Link, redirect } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  Link,
+  redirect,
+  useNavigate,
+} from '@tanstack/react-router'
 import { FileText, Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
 import { HostName } from '../components/host-name'
 import { MentionedBadge } from '../components/mentioned-badge'
+import { SearchField } from '../components/search-field'
 import { AppHeader } from '../components/app-header'
 import { SectionLabel } from '../components/section-label'
 import { Note } from '../components/settings-parts'
@@ -205,6 +211,27 @@ function SharedRow({ row }: { row: SharedWithMe }) {
   )
 }
 
+/** The field on the home: typing or Enter opens the search screen. */
+function HomeSearch() {
+  const navigate = useNavigate()
+  const [text, setText] = useState('')
+  const open = (q: string) =>
+    navigate({ to: '/_/search', search: q === '' ? {} : { q } })
+  return (
+    <search>
+      <SearchField
+        id="home-search"
+        value={text}
+        onChange={(next) => {
+          setText(next)
+          if (next.trim() !== '') void open(next)
+        }}
+        onEnter={() => void open(text)}
+      />
+    </search>
+  )
+}
+
 function Home({
   view,
   me,
@@ -239,6 +266,7 @@ function Home({
         <h1 className="font-clash text-[1.75rem] font-semibold tracking-[-0.03em] text-neutral-50 break-words">
           {view.workspace ?? 'Shared with me'}
         </h1>
+        <HomeSearch />
         {view.workspace === null ? null : (
           <Trees workspace={view.workspace} trees={view.trees} />
         )}

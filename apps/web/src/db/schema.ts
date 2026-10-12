@@ -472,6 +472,8 @@ export const nodes = sqliteTable(
       .where(sql`${t.deletedAt} is null`),
     index('nodes_tree_path_idx').on(t.treeId, t.path),
     index('nodes_parent_idx').on(t.parentId),
+    // Search finds folders and attachments by the start of their name.
+    index('nodes_name_nocase_idx').on(sql`${t.name} collate nocase`),
     check('nodes_kind_check', sql`${t.kind} in ('folder', 'file')`),
     check('nodes_origin_check', sql`${t.origin} in ('authored', 'data')`),
     check(
@@ -1124,5 +1126,46 @@ export const purgeRuns = sqliteTable(
       'purge_runs_state_check',
       sql`${t.state} in ('running', 'done', 'partial', 'failed')`,
     ),
+  ],
+)
+
+/**
+ * The current text of every page, with its companion's, as search reads it.
+ * The FTS5 table `search_pages` indexes it as external content (by hand, in
+ * the migration; Drizzle cannot declare virtual tables), and its triggers
+ * keep the two together. A row is found by its node, so a page's text is
+ * replaced in the same batch as its version.
+ */
+export const searchDocs = sqliteTable(
+  'search_docs',
+  {
+    /** The FTS5 rowid. */
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    nodeId: text('node_id')
+      .notNull()
+      .unique()
+      .references(() => nodes.id, { onDelete: 'cascade' }),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    /** The page version the text came from; read only while current. */
+    versionId: text('version_id').notNull(),
+    /** The companion indexed with the page; its own access decides. */
+    companionNodeId: text('companion_node_id'),
+    companionVersionId: text('companion_version_id'),
+    /** As shown: the page's <title>, else its file name. */
+    title: text('title').notNull(),
+    /** As shown: the tree path. */
+    path: text('path').notNull(),
+    searchTitle: text('search_title').notNull(),
+    searchPath: text('search_path').notNull(),
+    /** The page's own text only. */
+    searchBody: text('search_body').notNull(),
+    /** The companion's text, '' when there is none. */
+    searchCompanion: text('search_companion').notNull(),
+  },
+  (t) => [
+    index('search_docs_tree_idx').on(t.treeId),
+    index('search_docs_companion_idx').on(t.companionNodeId),
   ],
 )

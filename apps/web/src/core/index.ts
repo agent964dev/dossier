@@ -206,3 +206,9 @@ export {
   unseenMentions,
   type UnseenMention,
 } from './mentions.ts'
+export {
+  Search,
+  type SearchPage,
+  type SearchResult,
+  type SearchService,
+} from './search.ts'

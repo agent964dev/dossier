@@ -261,10 +261,16 @@ const formProblems = (
 export const companionOf = (
   path: string,
   analysis: HtmlAnalysis,
+): string | null => namedCompanion(path, analysis.alternate)
+
+/** companionOf, from the alternate's href as the analysis holds it. */
+export const namedCompanion = (
+  path: string,
+  alternate: string | null,
 ): string | null => {
-  if (analysis.alternate === null) return null
+  if (alternate === null) return null
   if (path.split('/').some(isKitName)) return null
-  const target = resolveFrom(parentOf(path), analysis.alternate)
+  const target = resolveFrom(parentOf(path), alternate)
   return target === null || target === '' || target.endsWith('/')
     ? null
     : target

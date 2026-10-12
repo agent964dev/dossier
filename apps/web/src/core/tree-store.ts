@@ -21,9 +21,11 @@ import {
 import type { CommentEntry, JsonObject } from '@dossier/contracts/bridge'
 import {
   MARKDOWN_VERSION,
+  SEARCH_TEXT_VERSION,
   toMarkdown,
   type FormSchema,
   type HtmlAnalysis,
+  type SearchEntry,
 } from '@dossier/html'
 import { and, eq, isNull, sql, type SQL } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
@@ -462,6 +464,12 @@ export interface ChangeSet {
     /** Takes from what a shared page carried: close every socket. */
     narrowed?: boolean,
   ) => void
+  /**
+   * Indexes these pages for search with the texts stored beside their
+   * blobs, and drops the pages the change took away. Its statements follow
+   * the change's other writes, so the versions they read are the new ones.
+   */
+  readonly indexPages: (entries: readonly SearchEntry[]) => void
   /** Required: a change with no event never commits. */
   readonly event: (e: NewEvent) => void
 }
@@ -634,6 +642,9 @@ export class TreeStore extends Context.Tag('TreeStore')<
   TreeStore,
   TreeStoreService
 >() {}
+
+/** Search entries per statement pair; each pair is two statements. */
+const SEARCH_INDEX_CHUNK = 500
 
 /** The R2 key of a page's generated agent version, never a visible file. */
 export const markdownKey = (sha256: string): string =>
@@ -2053,6 +2064,8 @@ export const TreeStoreLive: Layer.Layer<
           readonly condition: Statement
         }[] = []
         const events: NewEvent[] = []
+        /** The search index's statements, after every other write. */
+        const searchWrites: Statement[] = []
         /** That each person mentioned still reads the page. */
         const mentionGuards: Statement[] = []
         /** Mentions rows, each keyed by the seq of the event at `event`. */
@@ -3206,6 +3219,58 @@ export const TreeStoreLive: Layer.Layer<
             })
           },
 
+          indexPages: (entries) => {
+            const t = tid()
+            for (let at = 0; at < entries.length; at += SEARCH_INDEX_CHUNK) {
+              const chunk = JSON.stringify(
+                entries.slice(at, at + SEARCH_INDEX_CHUNK),
+              )
+              searchWrites.push(
+                {
+                  sql: `delete from search_docs where node_id in (
+                          select n.id from json_each(?2) j join nodes n on n.tree_id = ?1
+                            and n.path = json_extract(j.value, '$.path'))`,
+                  binds: [t, chunk],
+                },
+                {
+                  // The entries travel as one parameter: a statement binds
+                  // at most 100.
+                  sql: `insert into search_docs (node_id, tree_id, version_id,
+                          companion_node_id, companion_version_id, title, path,
+                          search_title, search_path, search_body, search_companion)
+                        select n.id, n.tree_id, v.id, cv.node_id, cv.id,
+                          coalesce(json_extract(pa.json, '$.title'),
+                            json_extract(j.value, '$.fallbackTitle')),
+                          n.path,
+                          coalesce(json_extract(pa.json, '$.titleSearch'),
+                            json_extract(j.value, '$.fallbackTitleSearch')),
+                          json_extract(j.value, '$.pathSearch'),
+                          json_extract(pa.json, '$.body'),
+                          coalesce(json_extract(ca.json, '$.body'), '')
+                        from json_each(?2) j
+                        join nodes n on n.tree_id = ?1
+                          and n.path = json_extract(j.value, '$.path')
+                          and n.deleted_at is null and n.origin = 'authored'
+                          and n.kind = 'file'
+                        join node_versions v on v.id = n.current_version_id
+                          and v.state = 'live'
+                        join analyses pa on pa.sha256 = v.blob_sha256
+                          and pa.analyzer = 'search' and pa.version = ?3
+                        left join nodes cn on cn.tree_id = ?1
+                          and cn.path = json_extract(j.value, '$.companion')
+                          and cn.deleted_at is null and cn.origin = 'authored'
+                          and cn.kind = 'file'
+                        left join node_versions cv on cv.id = cn.current_version_id
+                          and cv.state = 'live'
+                        left join analyses ca on ca.sha256 = cv.blob_sha256
+                          and ca.analyzer = 'search-text' and ca.version = ?3
+                        where coalesce(json_extract(j.value, '$.drop'), 0) = 0`,
+                  binds: [t, chunk, SEARCH_TEXT_VERSION],
+                },
+              )
+            }
+          },
+
           event: (e) => {
             events.push(e)
           },
@@ -3249,6 +3314,7 @@ export const TreeStoreLive: Layer.Layer<
             ],
           },
           ...writes,
+          ...searchWrites,
           ...(outcomes.length === 0
             ? []
             : [guardRow(`${guardId}:after`, 'state', allOf(outcomes))]),

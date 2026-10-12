@@ -25,6 +25,7 @@ export type {
   BaseLibraries,
 } from './base.ts'
 export * from './comments.ts'
+export * from './search.ts'
 
 export type Json =
   | null

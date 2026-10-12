@@ -15,6 +15,7 @@ import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
 import { Purge, PurgeLive } from './purge.ts'
 import { Push, PushLive } from './push.ts'
+import { Search, SearchLive } from './search.ts'
 import { Settings, SettingsLive } from './settings.ts'
 import { Shares, SharesLive } from './shares.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
@@ -43,6 +44,7 @@ export type CoreServices =
   | LookSettings
   | Shares
   | Purge
+  | Search
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -88,6 +90,7 @@ export const makeLayer = (
     PagesLive.pipe(Layer.provideMerge(files), Layer.provide(data)),
     data,
     WatchLive,
+    SearchLive,
   ).pipe(Layer.provideMerge(auth))
 }
 

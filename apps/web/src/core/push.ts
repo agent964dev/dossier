@@ -44,6 +44,7 @@ import { Config } from './config.ts'
 import { newId } from './ids.ts'
 import { Limits } from './limits.ts'
 import { jsAnalysisOf } from './lookup.ts'
+import { indexEntries, searchKindOf, searchTextOf } from './search-index.ts'
 import { pageNeedsOf, type PageNeed, type PageNeedRow } from './page-needs.ts'
 import { Shares } from './shares.ts'
 import { ancestorPaths, type TreeRow, type WorkspaceRow } from './rows.ts'
@@ -990,6 +991,20 @@ export const PushLive: Layer.Layer<
             Effect.provideService(Bindings, bindings),
           )
         }
+        // What search reads of a page or a companion, kept beside the blob
+        // so a commit joins it and never reads the bytes again.
+        const kinds = new Set(
+          listed.results.flatMap((f) =>
+            f.path.split('/').some(isKitName) ? [] : [searchKindOf(f.path)],
+          ),
+        )
+        for (const kind of ['html', 'text'] as const) {
+          if (kinds.has(kind)) {
+            yield* searchTextOf(i.sha256, kind).pipe(
+              Effect.provideService(Bindings, bindings),
+            )
+          }
+        }
         // A page's generated agent version is made as it arrives; a failure
         // here only means the first read makes it.
         if (
@@ -1236,6 +1251,26 @@ export const PushLive: Layer.Layer<
         return { heldBy, before }
       })
 
+    /** Pages at these paths whose current version search does not hold. */
+    const unindexedPages = (treeId: TreeId, paths: readonly string[]) =>
+      Effect.gen(function* () {
+        const found: string[] = []
+        for (let at = 0; at < paths.length; at += 200) {
+          const rows = yield* query(() =>
+            DB.prepare(
+              `select n.path from json_each(?2) j join nodes n on n.tree_id = ?1
+                 and n.path = j.value and n.deleted_at is null
+               where not exists (select 1 from search_docs d
+                 where d.node_id = n.id and d.version_id = n.current_version_id)`,
+            )
+              .bind(treeId, JSON.stringify(paths.slice(at, at + 200)))
+              .all<{ path: string }>(),
+          )
+          for (const row of rows.results) found.push(row.path)
+        }
+        return found
+      })
+
     /** One try at committing; `Retry` when another push moved the tree. */
     const commitOnce = (pushId: PushId) =>
       Effect.gen(function* () {
@@ -1471,6 +1506,28 @@ export const PushLive: Layer.Layer<
         }
         const plan = { ...changes, warnings: check.warnings }
 
+        // The pages search indexes again: those this push writes or takes
+        // away, those whose companion it writes or takes away, and pushed
+        // pages the index does not hold at their version yet.
+        const unindexed =
+          tree === null
+            ? []
+            : yield* unindexedPages(
+                tree.id as TreeId,
+                [...manifest.keys()].filter(isPageFile),
+              )
+        const search = yield* indexEntries({
+          treeId: (tree?.id ?? '') as TreeId,
+          changed: [...changes.added, ...changes.changed, ...unindexed],
+          removed: changes.deleted,
+          pages: pages.map((p) => ({
+            path: p.path,
+            alternate: p.analysis.alternate,
+          })),
+          kindAt: (p) => kinds.get(p) ?? null,
+          shaAt: manifest,
+        }).pipe(Effect.provideService(Bindings, bindings))
+
         // Every form of the pushed pages and layouts, staged for the change
         // to record by the versions it leaves current.
         const pushed = new Set(manifest.keys())
@@ -1515,6 +1572,7 @@ export const PushLive: Layer.Layer<
               )
               cs.putForms(pushId)
               cs.putPageNeeds(needs, narrowed)
+              cs.indexPages(search)
               // A failed commit grants nothing: the shares are in its batch.
               for (const share of shares) cs.grant(folder, share)
               if (shares.length > 0) {

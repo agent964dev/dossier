@@ -11,6 +11,8 @@ export * from './markdown.ts'
 export * from './move.ts'
 export * from './paths.ts'
 export * from './preview.ts'
+export * from './search-entries.ts'
+export * from './search-text.ts'
 export * from './theme.ts'
 export {
   isRelativeUrl,

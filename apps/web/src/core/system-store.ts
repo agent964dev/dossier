@@ -284,6 +284,8 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
           'page_views',
           'path_aliases',
           'view_handle_nodes',
+          // Its search row, and through the trigger its words in the index.
+          'search_docs',
         ].map((table) => ({
           sql: `${DOOMED_NODES} delete from ${table} where ${inDoomed('node_id')}`,
           binds,
@@ -325,9 +327,9 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
       ])
       return {
         ...ZERO,
-        keysRevoked: changes[8] ?? 0,
-        versions: changes[10] ?? 0,
-        nodes: changes[11] ?? 0,
+        keysRevoked: changes[9] ?? 0,
+        versions: changes[11] ?? 0,
+        nodes: changes[12] ?? 0,
       }
     })
 
@@ -358,6 +360,7 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
         byTree('path_aliases'),
         byTree('tree_aliases'),
         byTree('page_needs'),
+        byTree('search_docs'),
         byTree('forms'),
         byTree('shares'),
         {

@@ -10,6 +10,7 @@ import { push } from './push.ts'
 import { read } from './read.ts'
 import { restore } from './restore.ts'
 import { rm } from './rm.ts'
+import { search } from './search.ts'
 import { share } from './share.ts'
 import { update } from './update.ts'
 import { watch } from './watch.ts'
@@ -29,6 +30,7 @@ export const verbs = [
   ls,
   read,
   exportPage,
+  search,
   watch,
   log,
   diff,

@@ -186,6 +186,7 @@ describe('the agent guide', () => {
       'ls',
       'read',
       'export',
+      'search',
       'watch',
       'log',
       'diff',

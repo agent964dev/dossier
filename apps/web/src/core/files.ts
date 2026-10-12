@@ -386,7 +386,8 @@ export const FilesLive: Layer.Layer<
         return { folder, items }
       })
 
-    const { DB, BLOBS } = yield* Bindings
+    const bindings = yield* Bindings
+    const { DB, BLOBS } = bindings
     const settings = yield* Settings
     const config = yield* Config
     const history = makeHistory({ DB, BLOBS })
@@ -399,6 +400,7 @@ export const FilesLive: Layer.Layer<
       data: yield* Data,
       feed: yield* ChangeFeed,
       history,
+      bindings,
     })
 
     /**

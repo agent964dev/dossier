@@ -37,7 +37,9 @@ import type { ChangeResult, MoveResult, RestorePoint } from './files.ts'
 import type { makeHistory } from './history.ts'
 import { getBlob } from './blob-keys.ts'
 import { newId, sha256Hex } from './ids.ts'
+import { Bindings } from './bindings.ts'
 import { formRowsOf } from './push.ts'
+import { indexEntries } from './search-index.ts'
 import {
   neededAfter,
   type HtmlAfter,
@@ -91,6 +93,7 @@ export interface ChangesDeps {
   readonly data: DataService
   readonly feed: ChangeFeedService
   readonly history: ReturnType<typeof makeHistory>
+  readonly bindings: Env
 }
 
 type Failure = DossierError<
@@ -249,6 +252,10 @@ export const makeChanges = (deps: ChangesDeps) => {
 
   const requestId = Effect.map(CurrentCaller, (c) => c.requestId)
 
+  /** The search entries of a change, with their texts stored. */
+  const indexing = (i: Parameters<typeof indexEntries>[0]) =>
+    indexEntries(i).pipe(Effect.provideService(Bindings, deps.bindings))
+
   // ---------------------------------------------------------------- rm
 
   const rm = (i: { readonly ref: LinkRef }) =>
@@ -285,38 +292,49 @@ export const makeChanges = (deps: ChangesDeps) => {
           .filter((n) => n.kind === 'file' && gone(n))
           .map((n) => n.path)
           .sort()
-        // What pages carry changes only with authored files.
+        // What pages carry, and what search holds, change only with
+        // authored files.
         const authored = node.origin === 'authored'
+        const left = live.filter((n) => !gone(n))
+        const kinds = new Map(left.map((n) => [n.path, kindOf(n)]))
+        const standing =
+          authored && node.depth > 0
+            ? (yield* htmlFiles(tree.id)).filter((f) => !gone(f.node))
+            : []
         const needs = authored
           ? node.depth === 0
             ? { needs: [], narrowed: true }
-            : yield* (() => {
-                const left = live.filter((n) => !gone(n))
-                const kinds = new Map(left.map((n) => [n.path, kindOf(n)]))
-                return Effect.flatMap(htmlFiles(tree.id), (files) =>
-                  Effect.flatMap(requestId, (id) =>
-                    neededAfter({
-                      DB,
-                      access,
-                      store,
-                      treeId: tree.id,
-                      files: files
-                        .filter((f) => !gone(f.node))
-                        .map((f): HtmlAfter => ({
-                          path: f.node.path,
-                          analysis: f.analysis,
-                          author: f.author,
-                          was: f.node.path,
-                        })),
-                      kindAt: (p) => kinds.get(p) ?? null,
-                      oldOf: (p) => p,
-                      newOf: (p) => p,
-                      requestId: id,
-                    }),
-                  ),
-                )
-              })()
+            : yield* neededAfter({
+                DB,
+                access,
+                store,
+                treeId: tree.id,
+                files: standing.map((f): HtmlAfter => ({
+                  path: f.node.path,
+                  analysis: f.analysis,
+                  author: f.author,
+                  was: f.node.path,
+                })),
+                kindAt: (p) => kinds.get(p) ?? null,
+                oldOf: (p) => p,
+                newOf: (p) => p,
+                requestId: yield* requestId,
+              })
           : null
+        // The pages it deletes leave search, and pages whose companion it
+        // deletes are indexed again without it.
+        const search = authored
+          ? yield* indexing({
+              treeId: tree.id,
+              changed: [],
+              removed: changed,
+              pages: standing.map((f) => ({
+                path: f.node.path,
+                alternate: f.analysis.alternate,
+              })),
+              kindAt: (p) => kinds.get(p) ?? null,
+            })
+          : []
         const committed = yield* committing(
           store.change(tree.id, (cs) =>
             Effect.sync(() => {
@@ -325,6 +343,7 @@ export const makeChanges = (deps: ChangesDeps) => {
               }
               cs.markDeleted(granted, 'deleted')
               if (needs !== null) cs.putPageNeeds(needs.needs, needs.narrowed)
+              cs.indexPages(search)
               cs.event({ type: 'delete', path: node.path, node: granted })
               return {}
             }),
@@ -658,6 +677,25 @@ export const makeChanges = (deps: ChangesDeps) => {
           newOf: (p) => p,
           requestId: yield* requestId,
         })
+        // Revived pages, and pages whose companion came back or went, are
+        // indexed with what they hold after the restore; removed ones leave.
+        const search = yield* indexing({
+          treeId: tree.id,
+          changed: revive
+            .filter((r) => r.node.origin === 'authored')
+            .map((r) => r.node.path),
+          removed: remove.map((n) => n.path),
+          pages: files.map((f) => ({
+            path: f.path,
+            alternate: f.analysis.alternate,
+          })),
+          kindAt: (p) => kinds.get(p) ?? null,
+          shaAt: new Map(
+            revive
+              .filter((r) => r.node.origin === 'authored')
+              .map((r) => [r.node.path, r.from.blobSha256 as Sha256 | null]),
+          ),
+        })
         const plan: RestorePlan = {
           revive,
           remove,
@@ -672,6 +710,7 @@ export const makeChanges = (deps: ChangesDeps) => {
               cs.guardHead('', tree.authoredSeq as AuthoredSeq)
               cs.restore(granted, plan)
               cs.putPageNeeds(needs.needs, needs.narrowed)
+              cs.indexPages(search)
               cs.event({
                 type: 'restore',
                 path: node.path,
@@ -1042,6 +1081,31 @@ export const makeChanges = (deps: ChangesDeps) => {
           newOf,
           requestId: yield* requestId,
         })
+        // Search follows: what moved is indexed at its new path (and leaves
+        // its old one), and so is every file whose links were rewritten.
+        const moved = live
+          .filter((n) => n.kind === 'file' && isUnder(n.path, node.path))
+          .map((n) => n.path)
+        const search = yield* indexing({
+          treeId: tree.id,
+          changed: [
+            ...moved.map(newOf),
+            ...rewrites.map((r) => newOf(r.file.node.path)),
+          ],
+          removed: moved,
+          pages: files.map((f) => ({
+            path: f.path,
+            alternate: f.analysis.alternate,
+          })),
+          kindAt: (p) => kindsAfter.get(p) ?? null,
+          shaAt: new Map(
+            rewrites.map((r) => [
+              newOf(r.file.node.path),
+              r.sha as Sha256 | null,
+            ]),
+          ),
+          wasAt: oldOf,
+        })
         return yield* committing(
           store.change(tree.id, (cs) =>
             Effect.sync(() => {
@@ -1073,6 +1137,7 @@ export const makeChanges = (deps: ChangesDeps) => {
                 }),
               )
               cs.putPageNeeds(needs.needs, needs.narrowed)
+              cs.indexPages(search)
               cs.event({
                 type: 'move',
                 path: node.path,

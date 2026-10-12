@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router'
+import { Search } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { Route as Root } from '../routes/__root'
@@ -61,25 +62,45 @@ export function AppHeader({
           )}
         </div>
         {email === null ? null : (
-          <Link
-            to="/_/settings"
-            aria-label={`Account settings for ${email}`}
-            className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-900/60 py-1 pr-2.5 pl-1 text-neutral-200 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50 ${beside === undefined ? '' : 'max-sm:pr-1'}`}
-          >
-            <span
-              aria-hidden
-              className="flex size-6 shrink-0 items-center justify-center rounded-md bg-neutral-700 text-xs font-semibold uppercase text-neutral-100"
+          <div className="flex min-w-0 items-center gap-2">
+            <Link
+              to="/_/search"
+              aria-label="Search"
+              title="Search"
+              className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-neutral-900/60 text-neutral-300 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 hover:text-neutral-50 focus-visible:ring-[3px] focus-visible:ring-ring/50"
             >
-              {email.charAt(0)}
-            </span>
-            <span
-              className={`truncate font-mono text-xs ${beside === undefined ? '' : 'max-sm:sr-only'}`}
-            >
-              {email}
-            </span>
-          </Link>
+              <Search aria-hidden className="size-4" />
+            </Link>
+            <Account email={email} narrow={beside !== undefined} />
+          </div>
         )}
       </div>
     </header>
+  )
+}
+
+/**
+ * The account chip: the person's initial and email, to account settings.
+ * Beside another control, phones show the initial alone.
+ */
+function Account({ email, narrow }: { email: string; narrow: boolean }) {
+  return (
+    <Link
+      to="/_/settings"
+      aria-label={`Account settings for ${email}`}
+      className={`flex min-w-0 items-center gap-2 rounded-lg border border-border bg-neutral-900/60 py-1 pr-2.5 pl-1 text-neutral-200 outline-none transition-colors duration-200 ease-agent hover:border-brand-300/45 focus-visible:ring-[3px] focus-visible:ring-ring/50 ${narrow ? 'max-sm:pr-1' : ''}`}
+    >
+      <span
+        aria-hidden
+        className="flex size-6 shrink-0 items-center justify-center rounded-md bg-neutral-700 text-xs font-semibold uppercase text-neutral-100"
+      >
+        {email.charAt(0)}
+      </span>
+      <span
+        className={`truncate font-mono text-xs ${narrow ? 'max-sm:sr-only' : ''}`}
+      >
+        {email}
+      </span>
+    </Link>
   )
 }

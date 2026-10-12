@@ -817,6 +817,55 @@ export class HistoryGroup extends HttpApiGroup.make('history')
       .addSuccess(ChangeResponse),
   ) {}
 
+export const SearchModeSchema = Schema.Literal('titles', 'content')
+
+/** A run of a snippet's text, marked when it is what the query matched. */
+export const SnippetPart = Schema.Struct({
+  text: Schema.String,
+  match: Schema.Boolean,
+})
+export type SnippetPart = typeof SnippetPart.Type
+
+export const SearchResultWire = Schema.Struct({
+  kind: Schema.Literal('page', 'folder', 'attachment'),
+  /** The page's title, or the folder's or file's name. */
+  title: Schema.String,
+  workspace: Schema.String,
+  tree: Schema.String,
+  /** Inside the tree. */
+  path: Schema.String,
+  link: Schema.String,
+  /** Content mode only: the words around what matched, as text. */
+  snippet: Schema.NullOr(Schema.Array(SnippetPart)),
+})
+export type SearchResultWire = typeof SearchResultWire.Type
+
+export const SearchResponse = Schema.Struct({
+  query: Schema.String,
+  mode: SearchModeSchema,
+  results: Schema.Array(SearchResultWire),
+  /** The offset of the next page; null on the last. */
+  next: Schema.NullOr(Schema.Int),
+})
+export type SearchResponse = typeof SearchResponse.Type
+
+export class SearchGroup extends HttpApiGroup.make('search')
+  // sign_in_required | invalid
+  .add(
+    HttpApiEndpoint.get('search', '/search')
+      .setUrlParams(
+        Schema.Struct({
+          q: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(200)),
+          mode: SearchModeSchema,
+          offset: Schema.optionalWith(
+            Schema.NumberFromString.pipe(Schema.int(), Schema.between(0, 180)),
+            { default: () => 0 },
+          ),
+        }),
+      )
+      .addSuccess(SearchResponse),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -830,5 +879,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(SharesGroup)
   .add(ExportGroup)
   .add(HistoryGroup)
+  .add(SearchGroup)
   .addError(DossierError)
   .prefix('/_/api') {}
