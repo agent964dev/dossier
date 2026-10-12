@@ -744,6 +744,7 @@ JSON line per event with a `message`:
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tree event`                      | Every change to a tree: tree, sequence, type, path, actor, key, push                                                                                                  |
 | `share`                           | A share given or taken away                                                                                                                                           |
+| `refused`                         | A request refused (not found, sign in, forbidden, conflict, invalid and the rest): code, method, route, tree, path, actor, key, `via`; a frame by its tree and path   |
 | `purge`                           | A purge run starts and ends, with its counts                                                                                                                          |
 | `webhook delivery`                | Each delivery attempt and its result                                                                                                                                  |
 | `webhook sweep`                   | Each sweep run                                                                                                                                                        |

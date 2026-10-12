@@ -38,6 +38,7 @@ export const runScreen = async <A>(
   if (Option.isSome(failure) && isDossierError(failure.value)) {
     const error = failure.value
     if (error.code === 'unavailable') scope.unavailable = true
+    else scope.refused ??= { code: error.code, path: error.path }
     return {
       ok: false,
       error: {

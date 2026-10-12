@@ -13,6 +13,9 @@ import { isScreenFailure, runScreen } from '../../src/server/run.ts'
 /** The path on which this stand-in throws, as an unexpected bug would. */
 export const CRASHING_SCREEN = '/_/crash'
 
+/** The path on which this stand-in's read is refused, as a screen's can be. */
+export const REFUSING_SCREEN = '/_/refuse'
+
 export default {
   async fetch(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url)
@@ -29,6 +32,11 @@ export default {
     }
     const result = await runScreen(
       Effect.gen(function* () {
+        if (pathname === REFUSING_SCREEN) {
+          return yield* Effect.fail(
+            dossierError('forbidden', 'Not yours.', null, 'acme/plan.html'),
+          )
+        }
         const { DB } = yield* Bindings
         yield* Effect.tryPromise({
           try: () => DB.prepare('select 1').first(),

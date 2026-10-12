@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
+import type { ErrorCode } from '@dossier/contracts'
+
 import type { BackgroundService, Caller, CoreRuntime } from '../core/index.ts'
 
 /** The request a screen renders for: who asks, and the services to ask. */
@@ -12,6 +14,8 @@ export interface ScreenScope {
   unavailable: boolean
   /** Set when an action ended the session, so its cookie is cleared. */
   endSession?: boolean
+  /** The first refusal a read or action met, for the request's log line. */
+  refused?: { readonly code: ErrorCode; readonly path: string | null }
 }
 
 /** Clears the session cookie Better Auth sets on the main host. */

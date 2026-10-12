@@ -13,7 +13,7 @@ import {
 import type { LinkRef } from '@dossier/contracts'
 import type { ShellBoot } from '@dossier/contracts/bridge'
 
-import type { Served } from '../core/index.ts'
+import type { Caller, Served } from '../core/index.ts'
 import type { RequestKind } from './dispatch.ts'
 
 const NO_STORE = 'no-store'
@@ -40,6 +40,39 @@ export const codeResponse = (code: ErrorCode, requestId: string): Response =>
     status: statusFor(code),
     headers: { 'cache-control': NO_STORE, 'x-request-id': requestId },
   })
+
+/**
+ * One log line for a refused request: who asked, what they asked for (the
+ * method and route, the tree and the path), and the refusal's code. It holds
+ * no secret: a key by its id, a person by theirs, and a frame by its tree and
+ * path, never its view handle.
+ */
+export const logRefusal = (refusal: {
+  readonly requestId: string
+  readonly code: ErrorCode
+  readonly method: string
+  readonly route: string
+  readonly tree: string | null
+  readonly path: string | null
+  readonly who: Caller | null
+}): void => {
+  const { who } = refusal
+  console.log(
+    JSON.stringify({
+      message: 'refused',
+      code: refusal.code,
+      status: statusFor(refusal.code),
+      method: refusal.method,
+      route: refusal.route,
+      tree: refusal.tree,
+      path: refusal.path,
+      actor: who?.person?.id ?? null,
+      key: who?.via.kind === 'agent' ? who.via.keyId : null,
+      via: who?.via.kind ?? null,
+      requestId: refusal.requestId,
+    }),
+  )
+}
 
 const STATUS_CODES: Record<number, ErrorCode> = {
   400: 'invalid',

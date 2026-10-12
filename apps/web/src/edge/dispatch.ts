@@ -6,6 +6,8 @@ import {
   PROTOCOL_HEADER,
   treeIdForHost,
   type DossierError,
+  type ErrorBody,
+  type ErrorCode,
   type LinkRef,
   type TreeId,
 } from '@dossier/contracts'
@@ -54,6 +56,7 @@ import {
   fontResponse,
   frameResponse,
   logoResponse,
+  logRefusal,
   lookSheetResponse,
   normalizeApiError,
   notFoundPage,
@@ -218,6 +221,34 @@ export const serve = async (
   let setCookie: readonly string[] = []
   const finish = (response: Response) =>
     withCommonHeaders(response, kind, setCookie, host.kind)
+  /** Who asked, once known: for the refusal's log line. */
+  let asker: Caller | null = null
+  let refusalLogged = false
+  /**
+   * Logs the request's refusal once. The API names its tree and path in
+   * the query; a frame by the path its handle opens; anything else by its
+   * route and the path the refusal names.
+   */
+  const refused = (code: ErrorCode, named: string | null) => {
+    if (code === 'unavailable' || refusalLogged) return
+    refusalLogged = true
+    const api =
+      kind === 'api-read' || kind === 'api-write' || kind === 'upgrade'
+    logRefusal({
+      requestId,
+      code,
+      method: request.method,
+      route: kind === 'frame' ? '/_/v' : url.pathname,
+      tree:
+        host.kind === 'content'
+          ? host.treeId
+          : api
+            ? url.searchParams.get('tree')
+            : null,
+      path: (api ? url.searchParams.get('path') : null) ?? named,
+      who: asker,
+    })
+  }
   // A link asked with `Accept: text/markdown` or an agent key answers an
   // agent: never the sign-in redirect or a page, always the error body.
   const agentAsked =
@@ -230,6 +261,7 @@ export const serve = async (
     return finish(response)
   } catch (error) {
     if (isDossierError(error)) {
+      refused(error.code, error.path)
       if (isDocumentKind(kind) && !agentAsked) {
         return finish(
           error.code === 'unavailable'
@@ -258,6 +290,7 @@ export const serve = async (
       callerFor(kind!, request, config.origin.origin),
     )
     setCookie = found.setCookie
+    asker = found.caller
     return found.caller
   }
 
@@ -304,10 +337,18 @@ export const serve = async (
           )
         }
         const handler = await apiHandlerFor(runtime)
-        return normalizeApiError(
+        const response = await normalizeApiError(
           await handler(request, who, background),
           requestId,
         )
+        if (response.status >= 400 && response.status < 500) {
+          const body = (await response
+            .clone()
+            .json()
+            .catch(() => null)) as ErrorBody | null
+          if (body !== null) refused(body.error.code, body.error.path)
+        }
+        return response
       }
       case 'upgrade':
         return upgrade()
@@ -362,6 +403,9 @@ export const serve = async (
       unavailable: false,
     }
     const response = await screenScope.run(scope, () => tanstack.fetch(request))
+    if (scope.refused !== undefined) {
+      refused(scope.refused.code, scope.refused.path)
+    }
     if (scope.endSession === true) setCookie = END_SESSION_COOKIES
     if (kind !== 'screen-call' && scope.unavailable && isHtml(response)) {
       return plainErrorPage(requestId)
@@ -384,14 +428,16 @@ export const serve = async (
   async function link(): Promise<Response> {
     const who = await caller()
     const wantsAgent = agentAsked || who.via.kind === 'agent'
-    const denied = (error: DossierError) =>
-      wantsAgent
+    const denied = (error: DossierError) => {
+      refused(error.code, error.path)
+      return wantsAgent
         ? errorResponse(error, requestId)
         : error.code === 'sign_in_required'
           ? signInFirst()
           : // The one no-access page, at the asked link, for missing and
             // unreadable alike.
             screen(who, 404)
+    }
     const segments = url.pathname.slice(1).split('/')
     // `/<workspace>` and `/<workspace>/`: the workspace's home, for members.
     if (
@@ -526,13 +572,17 @@ export const serve = async (
     const ref = path === null ? null : treeRefOf(treeId, path.linkPath)
     if (path === null || ref === null) return frameFailure(404)
     try {
-      const who = await run(
+      const viewer = await run(
         runtime,
         frameCallerFor(request, path.handle, treeId),
       )
-      if (who === null) return frameFailure(404)
+      asker = viewer
+      if (viewer === null) {
+        refused('not_found', ref.path)
+        return frameFailure(404)
+      }
       const served = await runAs(
-        who,
+        viewer,
         Effect.flatMap(Pages, (pages) =>
           pages.frame({
             treeId,
@@ -548,6 +598,7 @@ export const serve = async (
         ),
       )
       if (isDossierError(served)) {
+        refused(served.code, ref.path)
         return frameFailure(served.code === 'unavailable' ? 503 : 404)
       }
       return frameResponse(served)
