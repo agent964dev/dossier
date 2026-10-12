@@ -74,6 +74,24 @@ const EXPORT_PREFIX = 'dossier-export/'
 
 const MEDIA = /^(image|video|audio)\//
 
+/** A module file a page imports as JSON, by its type or its name. */
+const isJsonModule = (reached: {
+  readonly asked: string
+  readonly version: VersionRow
+}): boolean =>
+  /\.json$/i.test(reached.asked) ||
+  (reached.version.contentType ?? '').split(';')[0]?.trim() ===
+    'application/json'
+
+/** The fragment of a located URL's query and fragment, or undefined. */
+const fragmentOf = (suffix: string): string | undefined => {
+  const at = suffix.indexOf('#')
+  return at < 0 || at === suffix.length - 1 ? undefined : suffix.slice(at)
+}
+
+/** How many stylesheets one export reads. */
+const MAX_SHEETS = 200
+
 const folderOf = (path: string): string =>
   path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
 
@@ -167,16 +185,43 @@ export const exportFilename = (path: string, treeName: string): string => {
   return `${folder === '' ? treeName : folder.slice(folder.lastIndexOf('/') + 1)}.html`
 }
 
-/** A stream of the plan's pieces: text, and files from R2 as base64. */
-const streamOf = (
+/**
+ * A stream of the plan's pieces: text, and files from R2 as base64. Each
+ * read of the body reads at most one chunk of a file, so a slow reader
+ * holds R2 back, and cancelling the body cancels the file's read.
+ */
+export const exportStream = (
   plan: ExportPlan,
   blobs: Pick<Env, 'BLOBS'>['BLOBS'],
 ): ReadableStream<Uint8Array> => {
   const encoder = new TextEncoder()
   const list = [...plan.pieces]
   let at = 0
+  let file: ReadableStreamDefaultReader<Uint8Array> | null = null
+  // Bytes of the file not yet encoded: base64 goes in 3-byte groups, so each
+  // chunk encodes on its own.
+  let carry = new Uint8Array(0)
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (file !== null) {
+        const { done, value } = await file.read()
+        if (done) {
+          file = null
+          if (carry.length > 0)
+            controller.enqueue(encoder.encode(base64(carry)))
+          carry = new Uint8Array(0)
+          return
+        }
+        const bytes = new Uint8Array(carry.length + value.length)
+        bytes.set(carry)
+        bytes.set(value, carry.length)
+        const whole = bytes.length - (bytes.length % 3)
+        carry = bytes.slice(whole)
+        if (whole > 0) {
+          controller.enqueue(encoder.encode(base64(bytes.subarray(0, whole))))
+        }
+        return
+      }
       const piece = list[at++]
       if (piece === undefined) {
         controller.close()
@@ -186,27 +231,18 @@ const streamOf = (
         controller.enqueue(encoder.encode(piece.text))
         return
       }
-      controller.enqueue(encoder.encode(`data:${piece.type};base64,`))
       const object = await blobs.get(blobKey(piece.sha256))
       if (object === null) {
         console.error('A blob is missing from R2', { sha256: piece.sha256 })
         controller.error(new Error('A file of the export is missing'))
         return
       }
-      // Base64 in 3-byte groups, so each chunk encodes on its own.
-      const reader = object.body.getReader()
-      let carry = new Uint8Array(0)
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        const bytes = new Uint8Array(carry.length + value.length)
-        bytes.set(carry)
-        bytes.set(value, carry.length)
-        const whole = bytes.length - (bytes.length % 3)
-        controller.enqueue(encoder.encode(base64(bytes.subarray(0, whole))))
-        carry = bytes.slice(whole)
-      }
-      if (carry.length > 0) controller.enqueue(encoder.encode(base64(carry)))
+      file = object.body.getReader()
+      controller.enqueue(encoder.encode(`data:${piece.type};base64,`))
+    },
+    async cancel(reason) {
+      await file?.cancel(reason)
+      file = null
     },
   })
 }
@@ -421,6 +457,11 @@ export const makeExporter = (deps: ExporterDeps) => {
           if (sha === null) return null
           const text = yield* textOf(sha)
           if (text === null) return null
+          // A JSON module is its file as written, imported as JSON.
+          if (isJsonModule(reached)) {
+            imports.set(name, { text, type: 'application/json' })
+            return name
+          }
           const analysis = yield* jsAnalysisOf(sha as Sha256).pipe(
             Effect.provide(context),
           )
@@ -453,11 +494,13 @@ export const makeExporter = (deps: ExporterDeps) => {
         CurrentCaller
       > =>
         Effect.gen(function* () {
-          // A bare specifier resolves only through the page's own map.
+          // A bare specifier resolves only through the page's own map; an
+          // absolute URL is followed when it is this tree's own.
           if (
             !specifier.startsWith('./') &&
             !specifier.startsWith('../') &&
-            !specifier.startsWith('/')
+            !specifier.startsWith('/') &&
+            !URL.canParse(specifier)
           ) {
             return null
           }
@@ -472,7 +515,34 @@ export const makeExporter = (deps: ExporterDeps) => {
 
       // Stylesheets ----------------------------------------------------------
 
+      /**
+       * Each stylesheet read once, by the tree path it was asked at. A sheet
+       * importing one still being read (a cycle) imports an empty sheet in
+       * its place, as a browser ignores the cycle; a sheet past the count
+       * stays its link.
+       */
+      const sheets = new Map<string, ExportSheet | null | 'reading'>()
+
       const sheetOf = (
+        reached: Extract<Reached, { kind: 'tree' }>,
+        depth: number,
+      ): Effect.Effect<
+        ExportSheet | 'cycle' | null,
+        DossierError<'unavailable'>,
+        CurrentCaller
+      > =>
+        Effect.gen(function* () {
+          const known = sheets.get(reached.asked)
+          if (known === 'reading') return 'cycle'
+          if (known !== undefined) return known
+          if (sheets.size >= MAX_SHEETS) return null
+          sheets.set(reached.asked, 'reading')
+          const sheet = yield* readSheet(reached, depth)
+          sheets.set(reached.asked, sheet)
+          return sheet
+        })
+
+      const readSheet = (
         reached: Extract<Reached, { kind: 'tree' }>,
         depth: number,
       ): Effect.Effect<
@@ -552,6 +622,8 @@ export const makeExporter = (deps: ExporterDeps) => {
             kind: 'link',
             href: linkOf(reached.node.path, 'file'),
           }
+          const fragment =
+            located.kind === 'tree' ? fragmentOf(located.suffix) : undefined
           switch (kind) {
             case 'module':
             case 'component': {
@@ -566,18 +638,26 @@ export const makeExporter = (deps: ExporterDeps) => {
                 : {
                     kind: 'asset',
                     asset: { ...asset, type: 'text/javascript', media: false },
+                    ...(fragment === undefined ? {} : { fragment }),
                   }
             }
             case 'stylesheet': {
               if (depth > MAX_SHEET_DEPTH) return missing
               const sheet = yield* sheetOf(reached, depth)
+              if (sheet === 'cycle') {
+                return { kind: 'text', text: '', type: 'text/css' }
+              }
               return sheet === null ? missing : { kind: 'sheet', sheet }
             }
             default: {
               const asset = assetOf(reached)
               if (asset === null) return missing
               linkedPaths.set(asset.link, reached.node.path)
-              return { kind: 'asset', asset }
+              return {
+                kind: 'asset',
+                asset,
+                ...(fragment === undefined ? {} : { fragment }),
+              }
             }
           }
         })
@@ -675,6 +755,17 @@ export const makeExporter = (deps: ExporterDeps) => {
           }
           continue
         }
+        if (ref.candidates !== undefined) {
+          // A srcset written whole: each candidate on its own.
+          const each: (ExportTarget | null)[] = []
+          for (const candidate of ref.candidates) {
+            each.push(yield* urlTarget(candidate.url, folder, ref.kind))
+          }
+          if (each.some((target) => target !== null)) {
+            targets.set(ref, { kind: 'candidates', targets: each })
+          }
+          continue
+        }
         const target = yield* urlTarget(ref.url, folder, ref.kind)
         if (target !== null) targets.set(ref, target)
       }
@@ -755,7 +846,7 @@ export const makeExporter = (deps: ExporterDeps) => {
       }
       return {
         kind: 'export',
-        html: streamOf(plan, bindings.BLOBS),
+        html: exportStream(plan, bindings.BLOBS),
         linked: plan.linked.map((link) => linkedPaths.get(link) ?? link),
         filename: exportFilename(pagePath, i.tree.name),
       } satisfies ExportServed
