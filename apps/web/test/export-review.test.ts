@@ -208,9 +208,10 @@ describe('an export, after its second review', () => {
       'b.css': '@import "a.css";.b{color:blue}',
     })
     const html = await (await exportOf(tree, 'page')).text()
-    const styles = [...html.matchAll(/<style>(.*?)<\/style>/gs)].map(
-      (m) => m[1]!,
-    )
+    // The page's own sheets, after the base layer's style.
+    const styles = [...html.matchAll(/<style>(.*?)<\/style>/gs)]
+      .map((m) => m[1]!)
+      .filter((style) => !style.startsWith('@layer dossier{'))
     expect(styles).toHaveLength(2)
     // a.css, importing b.css, whose import of a.css closes the cycle.
     expect(styles[0]).toContain('.a{color:red}')

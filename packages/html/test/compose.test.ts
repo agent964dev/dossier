@@ -79,8 +79,80 @@ const expectServedShape = (html: string): void => {
   ])
 }
 
-it('is the fifth version of the composer', () => {
-  expect(COMPOSER_VERSION).toBe(5)
+it('is the sixth version of the composer', () => {
+  expect(COMPOSER_VERSION).toBe(6)
+})
+
+describe('what every page gets for people and their tools', () => {
+  const htmlOf = (html: string) =>
+    elements(parse(html)).find((e) => e.tagName === 'html')!
+  const fragment = (source: string, folder = '') => ({
+    source,
+    analysis: analyze(source),
+    folder,
+  })
+
+  it('names the language: the base layer says English unless a page or layout says another', () => {
+    expect(attrsOf(htmlOf(composed('<p>Hello</p>'))).lang).toBe('en')
+    expect(
+      attrsOf(htmlOf(composed('<body lang="ar" dir="rtl"><p>مرحبا</p></body>')))
+        .lang,
+    ).toBe('ar')
+    const french = fragment(
+      '<!doctype html><html lang="fr"><body><slot></slot></body></html>',
+    )
+    const arabic = fragment('<body lang="ar"><p>مرحبا</p></body>', 'a')
+    const plain = fragment('<p>Bonjour</p>', 'a')
+    const html = (page: Source) =>
+      compose({ page, layouts: layoutsOf(page, [french], base), inject })
+    expect(attrsOf(htmlOf(html(plain))).lang).toBe('fr')
+    expect(attrsOf(htmlOf(html(arabic))).lang).toBe('ar')
+    // A layout that is a fragment names it on its body, as a page can.
+    const german = fragment('<body lang="de"><main><slot></slot></main></body>')
+    expect(
+      attrsOf(
+        htmlOf(
+          compose({
+            page: plain,
+            layouts: layoutsOf(plain, [german], base),
+            inject,
+          }),
+        ),
+      ).lang,
+    ).toBe('de')
+  })
+
+  it('titles a document that has no title with the name it is given', () => {
+    const page = fragment('<h1>Highlighted code</h1>')
+    const titled = compose({
+      page,
+      layouts: layoutsOf(page, [], base),
+      inject,
+      title: 'code & <more>',
+    })
+    const titles = headOf(titled).filter((e) => e.tagName === 'title')
+    expect(titles.map(textOf)).toEqual(['code & <more>'])
+    const own = fragment('<title>Plan</title><h1>Plan</h1>')
+    const kept = compose({
+      page: own,
+      layouts: layoutsOf(own, [], base),
+      inject,
+      title: 'plan',
+    })
+    expect(
+      headOf(kept)
+        .filter((e) => e.tagName === 'title')
+        .map(textOf),
+    ).toEqual(['Plan'])
+  })
+
+  it('keeps wide code blocks from widening the page, below any page style', () => {
+    const html = composed('<pre><code>a very long line</code></pre>')
+    const styles = headOf(html)
+      .filter((e) => e.tagName === 'style')
+      .map(textOf)
+    expect(styles).toContain('@layer dossier{:where(pre){overflow-x:auto}}')
+  })
 })
 
 describe('a complete document', () => {

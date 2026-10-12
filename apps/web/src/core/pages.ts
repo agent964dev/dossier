@@ -355,6 +355,13 @@ export const parseRange = (
 const folderOf = (path: string): string =>
   path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
 
+/** 'plan' for plans/plan.html, 'plans' for plans/index.html. */
+const pageNameOf = (path: string, tree: string): string => {
+  const parts = path.replace(/\.html$/, '').split('/')
+  if (parts.at(-1) === 'index') parts.pop()
+  return parts.at(-1) ?? tree
+}
+
 /**
  * The forms Dossier manages in a composed page, alike for every viewer: each
  * form of the page or a tree layout with a target, by its number.
@@ -1410,6 +1417,8 @@ export const PagesLive: Layer.Layer<
         const html = compose({
           page,
           layouts,
+          // A page without a <title> is named by its file, or its folder.
+          title: pageNameOf(i.path, i.tree.name),
           inject: ({ tags, libraries, forms }) => {
             const used = tags.filter((tag) => Object.hasOwn(urls, tag))
             const bootstrap: PageBootstrap = {

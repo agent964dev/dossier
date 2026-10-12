@@ -17,7 +17,11 @@ page's head. `<title>` and each `<meta>` keyed by `name`, `property` or
 links and `<script src>`: kept once per URL, at their first place. Inline
 `<style>` and `<script>`: all kept, in order. `<link rel="alternate">` comes
 only from the page. `<html>` and `<body>` attributes merge, the innermost
-winning, and `class` lists are joined. A push refuses `<base>`.
+winning, and `class` lists are joined. The base layer's document says
+`lang="en"`; a page or layout that is only a body names its language with
+`<body lang="ar">`, which the document's `<html>` takes too. A document
+with no `<title>` is titled by the page's file name, or its folder's for an
+`index.html`. A push refuses `<base>`.
 
 A layout's relative URLs in `href`, `src`, `srcset`, `poster` and `action` are
 rewritten to work from the page's folder. `_` URLs, absolute and root-relative

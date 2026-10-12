@@ -25,7 +25,7 @@ import {
 } from './urls.ts'
 
 /** Bumped whenever composing changes what it makes of the same input. */
-export const COMPOSER_VERSION: number = 5
+export const COMPOSER_VERSION: number = 6
 
 export interface Source {
   readonly source: string
@@ -61,9 +61,15 @@ export interface ComposeInput {
   readonly layouts: readonly Source[]
   /** Emitted right after <meta charset="utf-8">. */
   readonly inject: (found: Found) => string
+  /** The title of a document none of whose sources has a <title>. */
+  readonly title?: string
 }
 
 const CHARSET = '<meta charset="utf-8">'
+
+/** Text inside an element such as <title>. */
+const textValue = (value: string): string =>
+  value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
 
 /** An attribute value for a double-quoted attribute. */
 const attrValue = (value: string): string =>
@@ -302,6 +308,25 @@ const headOf = (owner: Source, edits: readonly Edit[]): string =>
     .map((range) => applyEdits(owner.source, range.start, range.end, edits))
     .join('')
 
+/**
+ * The <html> attributes over the chain. A source that is a fragment can say
+ * its language only on its body, so the innermost lang, on an html or a body
+ * tag, names the document's.
+ */
+const htmlAttrsOf = (chain: readonly Source[]): string => {
+  const lists = chain.map((s) => s.analysis.html.attrs)
+  for (let index = chain.length - 1; index >= 0; index--) {
+    const { html, body } = chain[index]!.analysis
+    if (html.attrs.some((attr) => attr.name === 'lang')) break
+    const lang = body.attrs.find((attr) => attr.name === 'lang')
+    if (lang !== undefined) {
+      lists.push([lang])
+      break
+    }
+  }
+  return mergeAttrs(lists)
+}
+
 /** Attributes over the chain: innermost wins, class lists joined in order. */
 const mergeAttrs = (lists: readonly (readonly Attr[])[]): string => {
   const values = new Map<string, string>()
@@ -377,6 +402,11 @@ export const compose = (input: ComposeInput): string => {
   const sealOf = (index: number): string =>
     index > 0 ? (chain[index]?.analysis.seal.body ?? '') : ''
   const inject = `${mark}inject${mark}`
+  // Browsers, tabs and screen readers name a document by its title.
+  const titleTag =
+    input.title === undefined || chain.some((s) => s.analysis.title !== null)
+      ? ''
+      : `<title>${textValue(input.title)}</title>`
 
   // Numbers the forms that made it into the document, in its order, then
   // writes the injected tags with everything found.
@@ -399,7 +429,8 @@ export const compose = (input: ComposeInput): string => {
         tags: tagsOf(chain),
         libraries: librariesOf(chain),
         forms,
-      })
+      }) +
+      titleTag
     return (
       numbered.slice(0, where) + tags + numbered.slice(where + inject.length)
     )
@@ -458,7 +489,7 @@ export const compose = (input: ComposeInput): string => {
           outer.analysis.doctype.start,
           outer.analysis.doctype.end,
         )
-  const htmlAttrs = mergeAttrs(chain.map((s) => s.analysis.html.attrs))
+  const htmlAttrs = htmlAttrsOf(chain)
   const bodyAttrs = mergeAttrs(chain.map((s) => s.analysis.body.attrs))
   return finish(
     `${doctype}<html${htmlAttrs}><head>${inject}${head}</head>` +

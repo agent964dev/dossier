@@ -247,6 +247,18 @@ describe('the frame route', () => {
     expect(await file.text()).toBe(PDF)
   })
 
+  it('names a page without a <title> by its folder, in the base layer’s language', async () => {
+    const handle = await handleOf(owner, 'notes/')
+    const html = await (await frame(owner, `/_/v/${handle}/1/notes/`)).text()
+    expect(html).toContain('<html lang="en">')
+    expect(html).toContain('<title>notes</title>')
+    const own = await (
+      await frame(owner, `/_/v/${await handleOf(owner)}/1/plan`)
+    ).text()
+    expect(own.match(/<title>/g)).toHaveLength(1)
+    expect(own).toContain('<title>Plan</title>')
+  })
+
   it('refuses a session cookie without a valid handle, and another tree’s handle', async () => {
     const handle = await handleOf(owner)
     for (const path of [
