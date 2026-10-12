@@ -3,12 +3,13 @@ import { createServerFn } from '@tanstack/react-start'
 import { homeModel } from './home-model.ts'
 import { runScreen } from './run.ts'
 
-export {
-  menuOf,
-  type HomeTree,
-  type HomeView,
-  type SharedWithMe,
-  type WorkspaceMenuItem,
+// Types only: a value from the model would bring the core into the screens'
+// client bundle.
+export type {
+  HomeTree,
+  HomeView,
+  SharedWithMe,
+  WorkspaceMenuItem,
 } from './home-model.ts'
 
 export const homeView = createServerFn({ method: 'GET' })

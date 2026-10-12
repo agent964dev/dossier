@@ -12,7 +12,7 @@ import {
   type TeamSummary,
   type WorkspaceRole,
 } from '../core/index.ts'
-import { menuOf, type WorkspaceMenuItem } from './home.ts'
+import { menuOf, type WorkspaceMenuItem } from './home-model.ts'
 import { runScreen } from './run.ts'
 
 /** What every workspace settings tab shows above itself. */
