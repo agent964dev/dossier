@@ -722,6 +722,78 @@ describe('what a handle may recover', () => {
     }
   })
 
+  it('issues a layout’s `_` files from the page’s folder, as the page loads them', async () => {
+    const w = await world()
+    const kit = {
+      '_layout.html':
+        '<!doctype html><html><head><link rel="stylesheet" href="_theme.css"><link rel="icon" href="guides/icon.svg"></head><body><slot></slot></body></html>',
+      '_theme.css': ':root { --accent: teal; }',
+      'guides/_theme.css': ':root { --accent: crimson; }',
+      'guides/icon.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+      'guides/page.html': '<title>Guide</title><p>Guide</p>',
+    }
+    await w.repush(kit)
+    const { caller: reader } = await someone()
+    const page = (await nodeAt(w.treeId, 'guides'))!
+    await share(
+      w.treeId,
+      page.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'guides/page'))
+    await w.repush({
+      ...kit,
+      'guides/_theme.css': ':root { --accent: gold; }',
+      'guides/icon.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+    })
+    // The page asks for _theme.css beside itself: guides/_theme.css answers.
+    const theme = await atTime(
+      frame(grant.handle, w.treeId, grant.seq, 'guides/_theme.css'),
+    )
+    expect(theme).toMatchObject({ kind: 'file' })
+    if (typeof theme === 'string' || theme.kind !== 'file') return
+    // The guides theme as it was, not the root's.
+    expect(await new Response(theme.body).text()).toContain('crimson')
+    // The layout's own URL reads from the layout's folder.
+    expect(
+      await atTime(frame(grant.handle, w.treeId, grant.seq, 'guides/icon.svg')),
+    ).toMatchObject({ kind: 'file' })
+  })
+
+  it('issues each srcset candidate when a separator is written as a character reference', async () => {
+    const w = await world()
+    const html =
+      '<!doctype html><title>Plan</title><img srcset="logo.svg&#44; brief.pdf 2x" alt="">'
+    await w.repush({ 'plan.html': html })
+    const { caller: reader } = await someone()
+    const root = (await nodeAt(w.treeId, ''))!
+    await share(
+      w.treeId,
+      root.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'plan'))
+    await w.repush({
+      'plan.html': html,
+      'logo.svg':
+        '<svg xmlns="http://www.w3.org/2000/svg"><circle r="3"/></svg>',
+      'brief.pdf': '%PDF-1.7 changed again',
+    })
+    for (const path of ['logo.svg', 'brief.pdf']) {
+      expect(
+        await atTime(frame(grant.handle, w.treeId, grant.seq, path)),
+        path,
+      ).toMatchObject({ kind: 'file' })
+    }
+  })
+
   it('answers an old redirect only when its target may be opened at that sequence', async () => {
     const w = await world()
     const { caller: reader } = await someone()

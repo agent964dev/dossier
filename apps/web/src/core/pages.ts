@@ -529,35 +529,46 @@ export const PagesLive: Layer.Layer<
         for (const link of chain) ids.add(link.node.id)
         let looked = 0
         const references = [
-          { folder, analysis },
+          { folder, analysis, isLayout: false },
           ...chain.map((link) => ({
             folder: link.folder,
             analysis: link.analysis,
+            isLayout: true,
           })),
         ]
+        const urlBase = (at: string) =>
+          `https://tree.invalid/${linkPathOf(at, true)}`
         for (const source of references) {
-          const from = `https://tree.invalid/${linkPathOf(source.folder, true)}`
           for (const url of source.analysis.urls) {
+            // As composed: a layout's `_` URL keeps reading from the page's
+            // folder, so the closest `_` file answers; its other URLs read
+            // from the layout's own folder.
+            const from = urlBase(
+              source.isLayout && url.underscore ? folder : source.folder,
+            )
             const loads =
               url.relative &&
               (url.attr === 'src' ||
                 url.attr === 'srcset' ||
                 url.attr === 'poster' ||
                 (url.attr === 'href' && url.inHead))
-            if (!loads || looked >= MAX_LOADED) continue
-            looked += 1
-            let target: URL
-            try {
-              // What the browser requests: character references decoded.
-              target = new URL(url.decoded, from)
-            } catch {
-              continue
+            if (!loads) continue
+            // What the browser requests: character references decoded.
+            for (const requested of url.requests) {
+              if (looked >= MAX_LOADED) break
+              looked += 1
+              let target: URL
+              try {
+                target = new URL(requested, from)
+              } catch {
+                continue
+              }
+              if (target.origin !== 'https://tree.invalid') continue
+              const ref = treeRefOf(treeId, target.pathname.slice(1))
+              if (ref === null) continue
+              const node = yield* issuable(ref, seq)
+              if (node !== null) ids.add(node.id)
             }
-            if (target.origin !== 'https://tree.invalid') continue
-            const ref = treeRefOf(treeId, target.pathname.slice(1))
-            if (ref === null) continue
-            const node = yield* issuable(ref, seq)
-            if (node !== null) ids.add(node.id)
           }
         }
         // The components the page may load, by the kit map it is served with.

@@ -50,8 +50,14 @@ export interface UrlRef {
   readonly attr: 'href' | 'src' | 'srcset' | 'poster' | 'action'
   /** As written, for rewriting the source at `range`. */
   readonly value: string
-  /** With character references decoded: what the browser requests. */
+  /** With character references decoded, for rewriting. */
   readonly decoded: string
+  /**
+   * The URLs the browser requests for it: [decoded], or for a srcset whose
+   * written candidates do not match its decoded ones (a separator written as
+   * a character reference), every decoded candidate on its first ref.
+   */
+  readonly requests: readonly string[]
   /** The attribute value. */
   readonly range: Range
   /** No scheme, not protocol-relative, not root-relative, not a fragment. */
@@ -360,14 +366,32 @@ export const analyze = (source: string): HtmlAnalysis => {
         const decoded = srcsetUrls(attr.value).map((c) =>
           attr.value.slice(c.start, c.end),
         )
+        if (decoded.length !== candidates.length) {
+          // A separator written as a character reference: the written
+          // candidates are not the browser's. One ref covers the whole value,
+          // so a rewrite works on the decoded candidates.
+          if (decoded.length > 0) {
+            urls.push({
+              attr: name,
+              value: raw,
+              decoded: attr.value,
+              requests: decoded,
+              range: value,
+              relative: decoded.some((url) => isRelativeUrl(url)),
+              underscore: decoded.every((url) => isUnderscoreUrl(url)),
+              inHead: place.inHead,
+            })
+          }
+          continue
+        }
         candidates.forEach((candidate, index) => {
           const url = raw.slice(candidate.start, candidate.end)
-          const plain =
-            decoded.length === candidates.length ? (decoded[index] ?? url) : url
+          const plain = decoded[index] ?? url
           urls.push({
             attr: name,
             value: url,
             decoded: plain,
+            requests: [plain],
             range: at(
               value.start + candidate.start,
               value.start + candidate.end,
@@ -382,6 +406,7 @@ export const analyze = (source: string): HtmlAnalysis => {
           attr: name,
           value: raw,
           decoded: attr.value,
+          requests: [attr.value],
           range: value,
           relative: isRelativeUrl(attr.value),
           underscore: isUnderscoreUrl(attr.value),

@@ -184,12 +184,13 @@ const droppedItems = (chain: readonly Source[]): Range[][] => {
 
 /**
  * A URL as attribute text: every character that could end the value or read
- * as a character reference is written as one.
+ * as a character reference is written as one. Whitespace stays as written
+ * when the value already holds it, so it is quoted.
  */
-const asAttributeText = (url: string): string =>
-  url
-    .replace(/[&"'<>\t\n\f\r ]/g, (char) => `&#${char.codePointAt(0)};`)
-    .replaceAll('&#38;', '&amp;')
+const asAttributeText = (url: string, quoted: boolean): string =>
+  url.replace(quoted ? /[&"'<>]/g : /[&"'<>\t\n\f\r ]/g, (char) =>
+    char === '&' ? '&amp;' : `&#${char.codePointAt(0)};`,
+  )
 
 /**
  * Every edit of one source: charset metas, dropped items, layout URLs, and
@@ -215,16 +216,18 @@ const editsOf = (
   if (role.isLayout && owner.folder !== page.folder) {
     for (const url of analysis.urls) {
       if (!url.relative || url.underscore) continue
-      // Read as the browser reads it; written back over the raw range.
-      const attr = url.attr === 'srcset' ? 'src' : url.attr
+      // Read as the browser reads it; written back over the raw range. A
+      // srcset ref is one candidate, or the whole value when its separators
+      // are written as references.
       const text = rewriteLayoutUrl(
         url.decoded,
-        attr,
+        url.attr,
         owner.folder,
         page.folder,
       )
       if (text !== url.decoded) {
-        edits.push({ ...url.range, text: asAttributeText(text) })
+        const quoted = /[\t\n\f\r ]/.test(url.value)
+        edits.push({ ...url.range, text: asAttributeText(text, quoted) })
       }
     }
   }

@@ -670,3 +670,25 @@ describe('the layout rewrite on character references', () => {
     ])
   })
 })
+
+describe('a layout srcset with a separator written as a reference', () => {
+  it('rewrites every candidate the browser reads', () => {
+    const outer = `<!doctype html><html><head></head><body><img srcset="logo.svg&#44; brief.pdf 2x" alt=""><slot></slot></body></html>`
+    const page = '<p>x</p>'
+    const html = compose({
+      page: { source: page, analysis: analyze(page), folder: 'a/b' },
+      layouts: [{ source: outer, analysis: analyze(outer), folder: '' }],
+      inject,
+    })
+    const img = elements(parse(html)).find((e) => e.tagName === 'img')!
+    expect(attrsOf(img).srcset).toBe('../../logo.svg, ../../brief.pdf 2x')
+  })
+
+  it('lists every decoded candidate as requested', () => {
+    const read = analyze('<img srcset="logo.svg&#44; brief.pdf 2x">')
+    expect(read.urls.flatMap((url) => url.requests)).toEqual([
+      'logo.svg',
+      'brief.pdf',
+    ])
+  })
+})
