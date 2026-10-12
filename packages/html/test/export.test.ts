@@ -312,3 +312,127 @@ describe('base64Of', () => {
     }
   })
 })
+
+/** A composed page around `body`, with the tags composing injects. */
+const pageOf = (head: string, body: string): string =>
+  '<!doctype html><html><head><meta charset="utf-8">' +
+  '<script type="application/json" id="dossier-bootstrap">{"kit":{}}</script>' +
+  '<script src="/_/base/v/client.js"></script>' +
+  `${head}</head><body>${body}</body></html>`
+
+const smallInput = (
+  html: string,
+  decide: (ref: ExportRef) => ExportTarget | undefined,
+): ExportInput => {
+  const analysis = analyze(html)
+  const refs = exportRefs(html, analysis)
+  const targets = new Map<ExportRef, ExportTarget>()
+  for (const ref of refs) {
+    const target = decide(ref)
+    if (target !== undefined) targets.set(ref, target)
+  }
+  return {
+    html,
+    refs,
+    targets,
+    imports: new Map(),
+    injected: injectedTags(html, analysis)!.range,
+    bootstrap: '{}',
+    data: () => '{}',
+    client: '',
+    header: { link: LINK, by: 'sara@acme.com', at: '2026-10-11T12:00:00Z' },
+  }
+}
+
+describe('review fixes', () => {
+  test('escapes a stylesheet imported by an imported stylesheet once per level', () => {
+    const inner = '.x { background: url(y.png) } .x::after { content: "q" }'
+    const outer = '@import "b.css";\n.a { color: red }'
+    const href = 'https://ex.test/it\'s (1) "q".png'
+    const html = pageOf('<style>@import "a.css";</style>', '')
+    const plan = planned(
+      smallInput(html, (ref) =>
+        ref.url === 'a.css'
+          ? {
+              kind: 'sheet',
+              sheet: {
+                text: outer,
+                refs: [
+                  {
+                    range: { start: 9, end: 14 },
+                    kind: 'import',
+                    target: {
+                      kind: 'sheet',
+                      sheet: {
+                        text: inner,
+                        refs: [
+                          {
+                            range: { start: 21, end: 26 },
+                            kind: 'url',
+                            target: { kind: 'link', href },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                ],
+              },
+            }
+          : undefined,
+      ),
+    )
+    const text = shown(plan.pieces)
+    const first = /@import "data:text\/css,([^"]*)"/.exec(text)
+    expect(first).not.toBeNull()
+    // One decoding gives the first sheet, whole, with its own import.
+    const a = decodeURIComponent(first![1]!)
+    const second =
+      /@import "data:text\/css,([^"]*)";\n\.a \{ color: red \}$/.exec(a)
+    expect(second).not.toBeNull()
+    // Another gives the second sheet, its link escaped for CSS.
+    expect(decodeURIComponent(second![1]!)).toBe(
+      '.x { background: url(https://ex.test/it\\27 s\\20 \\28 1\\29 \\20 \\22 q\\22 .png) } .x::after { content: "q" }',
+    )
+  })
+
+  test('keeps a fragment after an inlined file', () => {
+    const html = pageOf('', '<svg><use href="icons.svg#tick"></use></svg>')
+    const plan = planned(
+      smallInput(html, (ref) =>
+        ref.url === 'icons.svg#tick'
+          ? {
+              kind: 'asset',
+              asset: asset('icons.svg', 40, 'image/svg+xml'),
+              fragment: '#tick',
+            }
+          : undefined,
+      ),
+    )
+    expect(shown(plan.pieces)).toContain(
+      '<use href="{{data:image/svg+xml iconssvg 40}}#tick">',
+    )
+  })
+
+  test('rewrites a srcset whose separators are written as character references', () => {
+    const html = pageOf('', '<img srcset="a.png 1x&#44; b.png 2x">')
+    const refs = exportRefs(html, analyze(html))
+    const ref = refs.find((r) => r.kind === 'image')
+    expect(ref?.candidates?.map((c) => c.url)).toEqual(['a.png', 'b.png'])
+    const plan = planned(
+      smallInput(html, (r) =>
+        r.kind === 'image'
+          ? {
+              kind: 'candidates',
+              targets: [
+                { kind: 'asset', asset: asset('a.png', 3, 'image/png') },
+                { kind: 'link', href: `${LINK}/b.png` },
+              ],
+            }
+          : undefined,
+      ),
+    )
+    expect(shown(plan.pieces)).toContain(
+      `<img srcset="{{data:image/png apng0000 3}} 1x, ${LINK}/b.png 2x">`,
+    )
+  })
+})

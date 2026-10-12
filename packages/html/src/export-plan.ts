@@ -12,6 +12,7 @@ import type { HtmlAnalysis, Range } from './analyze.ts'
 import { analyzeJs, type JsImport } from './js.ts'
 import { HTML_NS, isElement, isTemplate, parseDocument } from './parse.ts'
 import type { Element, Node } from './parse.ts'
+import { srcsetUrls } from './urls.ts'
 
 /** The most an exported file may hold: 50 MiB. */
 export const EXPORT_LIMIT_BYTES = 52_428_800
@@ -65,6 +66,16 @@ export interface ExportRef {
   readonly attr?: string
   /** An attribute value written inside quotes. */
   readonly quoted?: boolean
+  /**
+   * A srcset whose separators are written as character references, as one
+   * reference over its whole value: each candidate's URL and where it is in
+   * `url`, the decoded value.
+   */
+  readonly candidates?: readonly {
+    readonly url: string
+    readonly start: number
+    readonly end: number
+  }[]
 }
 
 /** A file whose bytes are streamed into the export as a data: URL. */
@@ -93,8 +104,15 @@ export interface ExportSheet {
 
 /** What a reference becomes in the exported file. */
 export type ExportTarget =
-  /** A file's bytes as a data: URL; its canonical link once media are linked. */
-  | { readonly kind: 'asset'; readonly asset: ExportAsset }
+  /**
+   * A file's bytes as a data: URL; its canonical link once media are
+   * linked. A fragment the URL named (`#tick`, `#t=10,20`) follows it.
+   */
+  | {
+      readonly kind: 'asset'
+      readonly asset: ExportAsset
+      readonly fragment?: string
+    }
   /** A URL written in its place: a canonical link. */
   | { readonly kind: 'link'; readonly href: string }
   /**
@@ -115,6 +133,14 @@ export type ExportTarget =
   | { readonly kind: 'script'; readonly source: string }
   /** The element goes. */
   | { readonly kind: 'drop' }
+  /**
+   * A srcset written whole (its separators as character references): what
+   * each of its candidates becomes, in order; null keeps one as written.
+   */
+  | {
+      readonly kind: 'candidates'
+      readonly targets: readonly (ExportTarget | null)[]
+    }
 
 export interface ExportInput {
   /** The composed page. */
@@ -466,8 +492,9 @@ export const exportRefs = (
 
   for (const url of analysis.urls) {
     if (!outside(url.range.start)) continue
-    // A srcset whose candidates do not match as written is left alone.
-    if (url.requests.length !== 1) continue
+    // A srcset whose separators are written as character references is one
+    // reference over the whole value, with its candidates.
+    const whole = url.requests.length !== 1
     const owner = elementAt(url.range.start)
     if (owner === null) continue
     const { element } = owner
@@ -492,7 +519,16 @@ export const exportRefs = (
           })
     const quote = value === null ? undefined : html[value.start - 1]
     refs.push({
-      url: url.decoded.trim(),
+      url: whole ? url.decoded : url.decoded.trim(),
+      ...(whole
+        ? {
+            candidates: srcsetUrls(url.decoded).map((c) => ({
+              url: url.decoded.slice(c.start, c.end),
+              start: c.start,
+              end: c.end,
+            })),
+          }
+        : {}),
       range: url.range,
       kind,
       element: element.tagName,
@@ -726,6 +762,7 @@ const writeUrl = (r: Render, target: ExportTarget, escape: Escape): void => {
       if (target.asset.media && r.linked.has(target.asset.sha256)) {
         r.out.text(escape(target.asset.link))
       } else r.out.data(target.asset)
+      r.out.text(escape(target.fragment ?? ''))
       return
     case 'link':
       r.out.text(escape(target.href))
@@ -762,11 +799,13 @@ const writeUrl = (r: Render, target: ExportTarget, escape: Escape): void => {
       )
       return
     case 'sheet':
-      // An @import of it: the sheet's own text, its files inside it.
-      r.out.text('data:text/css,')
-      writeSheet(r, target.sheet, urlText)
+      // An @import of it: the sheet's own text, its files inside it, each
+      // level escaped for the data: URL it sits in and for every one around.
+      r.out.text(escape('data:text/css,'))
+      writeSheet(r, target.sheet, (text) => escape(urlText(text)))
       return
     case 'drop':
+    case 'candidates':
       return
   }
 }
@@ -913,6 +952,22 @@ const writeRef = (
   }
   if (target.kind === 'drop') return
   const range = ref.range!
+  if (target.kind === 'candidates' && ref.candidates !== undefined) {
+    // The value rewritten whole, its separators as plain commas now.
+    const quotedValue = ref.quoted === true
+    if (!quotedValue) r.out.text('"')
+    let at = 0
+    ref.candidates.forEach((candidate, index) => {
+      r.out.text(escape(ref.url.slice(at, candidate.start)))
+      const each = target.targets[index]
+      if (each === null || each === undefined) r.out.text(escape(candidate.url))
+      else writeUrl(r, each, escape)
+      at = candidate.end
+    })
+    r.out.text(escape(ref.url.slice(at)))
+    if (!quotedValue) r.out.text('"')
+    return
+  }
   // An attribute written without quotes gets them, and so does a new one.
   const quoted = ref.in !== 'attribute' || ref.quoted === true
   const empty = range.start === range.end && ref.attr !== undefined
@@ -927,11 +982,13 @@ const collectAssets = (
   input: ExportInput,
   into: Map<string, ExportAsset>,
 ): void => {
-  const fromTarget = (target: ExportTarget): void => {
+  const fromTarget = (target: ExportTarget | null): void => {
+    if (target === null) return
     if (target.kind === 'asset') into.set(target.asset.sha256, target.asset)
     if (target.kind === 'sheet') {
       for (const ref of target.sheet.refs) fromTarget(ref.target)
     }
+    if (target.kind === 'candidates') target.targets.forEach(fromTarget)
   }
   for (const target of input.targets.values()) fromTarget(target)
 }
