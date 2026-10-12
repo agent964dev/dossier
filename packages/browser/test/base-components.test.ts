@@ -87,24 +87,48 @@ const place = (html: string) => {
   return document.body.firstElementChild as HTMLElement
 }
 
-/** Every style rule's selector in a sheet, outside nested rules. */
+/** A selector list split at its top-level commas. */
+const splitList = (list: string): string[] => {
+  const parts: string[] = []
+  let depth = 0
+  let start = 0
+  for (let at = 0; at < list.length; at += 1) {
+    const char = list[at]
+    if (char === '(' || char === '[') depth += 1
+    else if (char === ')' || char === ']') depth -= 1
+    else if (char === ',' && depth === 0) {
+      parts.push(list.slice(start, at).trim())
+      start = at + 1
+    }
+  }
+  parts.push(list.slice(start).trim())
+  return parts
+}
+
+/** Every style rule's selector in a sheet, nested rules included. */
 const selectors = (css: string): string[] => {
   const found: string[] = []
   const walk = (text: string) => {
     let depth = 0
     let start = 0
     let open = -1
+    let quote: string | null = null
     for (let at = 0; at < text.length; at += 1) {
       const char = text[at]
-      if (char === '{') {
+      if (quote !== null) {
+        if (char === '\\') at += 1
+        else if (char === quote) quote = null
+      } else if (char === '"' || char === "'") {
+        quote = char
+      } else if (char === '{') {
         if (depth === 0) open = at
         depth += 1
       } else if (char === '}') {
         depth -= 1
         if (depth === 0) {
           const prelude = text.slice(start, open).trim()
-          if (prelude.startsWith('@')) walk(text.slice(open + 1, at))
-          else found.push(...prelude.split(',').map((s) => s.trim()))
+          if (!prelude.startsWith('@')) found.push(...splitList(prelude))
+          walk(text.slice(open + 1, at))
           start = at + 1
         }
       } else if (char === ';' && depth === 0) {
@@ -114,6 +138,16 @@ const selectors = (css: string): string[] => {
   }
   walk(css.replace(/\/\*[\s\S]*?\*\//g, ''))
   return found
+}
+
+/** Base styles sit in the dossier layer, which the head declares first. */
+const expectBaseLayerFirst = () => {
+  const order = document.head.firstElementChild
+  expect(order?.getAttribute('data-dossier-base-order')).toBe('')
+  expect(order?.textContent).toBe('@layer dossier;')
+  for (const sheet of document.querySelectorAll('style[data-dossier-base]')) {
+    expect(sheet.textContent!.startsWith('@layer dossier{')).toBe(true)
+  }
 }
 
 /** Physical sides a layout that follows dir must not use. */
@@ -216,6 +250,9 @@ describe('<dossier-copy>', () => {
 
   test('renders into the page’s DOM with zero-specificity styles that follow dir', () => {
     document.documentElement.setAttribute('dir', 'rtl')
+    const author = document.createElement('style')
+    author.textContent = '@layer tree { .dossier-copy-button { color: red } }'
+    document.head.append(author)
     const copy = place('<dossier-copy></dossier-copy>')
     expect(copy.shadowRoot).toBeNull()
     expect(copy.hasAttribute('dir')).toBe(false)
@@ -230,6 +267,8 @@ describe('<dossier-copy>', () => {
     for (const selector of list)
       expect(selector.startsWith(':where(')).toBe(true)
     expect(css).not.toMatch(PHYSICAL)
+    // The author's layer comes after the base layer, so it wins.
+    expectBaseLayerFirst()
     // A second copy button adds no second stylesheet.
     document.body.append(document.createElement('dossier-copy'))
     expect(document.querySelectorAll('style[data-dossier-base]')).toHaveLength(
@@ -413,7 +452,10 @@ describe('<dossier-diff>', () => {
     const library = sheets.find(
       (s) => s.getAttribute('data-dossier-base') === 'dossier-diff-code',
     )!
-    expect(library.textContent!.startsWith('@layer dossier-diff{')).toBe(true)
+    expect(library.textContent!.startsWith('@layer dossier{@layer diff{')).toBe(
+      true,
+    )
+    expectBaseLayerFirst()
     expect(library.textContent).not.toContain(':host')
   }, 20_000)
 })

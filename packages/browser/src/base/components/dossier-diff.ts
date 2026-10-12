@@ -2,7 +2,8 @@
 // diff file, rendered with @pierre/diffs and the shared Shiki into the page's
 // own DOM. Its lower-level renderers make the markup without the shadow root
 // its own component attaches; the stylesheet the markup needs is nested in a
-// :where() scope inside a cascade layer, so any page or kit CSS wins. Code
+// :where() scope, with zero specificity, inside the base layer, so any page
+// or kit CSS wins. Code
 // colours come from the --dossier-code- variables, like highlighted code.
 import {
   DiffHunksRenderer,
@@ -81,7 +82,7 @@ const libraryStyles = (core: string, themeStyles: string): string =>
       `--diffs-deletion-color-override:${codeVariable('token-deleted')};` +
       `--diffs-modified-color-override:${codeVariable('token-changed')}}}`,
     '.dossier-diff-code',
-    'dossier-diff',
+    'diff',
   )
 
 let themed = false
