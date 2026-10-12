@@ -250,6 +250,10 @@ export class DossierComments extends HTMLElement {
   /** Own sends under way: watch values wait for the read after them. */
   #busy = 0
   #missed = false
+  /** Reads in flight: a watch value meanwhile may be older than they are. */
+  #reloading = 0
+  /** A resolve, reopen or delete pressed while its thread was still sending. */
+  readonly #queued = new Map<StatusLine, Send>()
   readonly #uis = new Map<string, ThreadUi>()
   readonly #editing = new Map<string, Composer>()
   readonly #confirming = new Set<string>()
@@ -531,7 +535,7 @@ export class DossierComments extends HTMLElement {
   #fromWatch(value: unknown): void {
     const docs = Array.isArray(value) ? (value as unknown[]) : []
     // Our own send is under way: the read after it brings this and more.
-    if (this.#busy > 0) {
+    if (this.#busy > 0 || this.#reloading > 0) {
       this.#missed = true
       return
     }
@@ -551,14 +555,19 @@ export class DossierComments extends HTMLElement {
     const generation = ++this.#generation
     const session = this.#session
     let docs: unknown
+    this.#reloading += 1
     try {
       docs = await dossier.read(this.#folder() as `${string}/`)
     } catch {
       // The watch brings the next change; nothing was lost.
       return
+    } finally {
+      this.#reloading -= 1
     }
     if (generation !== this.#generation || session !== this.#session) return
     this.#take(Array.isArray(docs) ? (docs as unknown[]) : [])
+    // A change came while this read was out: read once more for it.
+    if (this.#missed && this.#busy === 0) void this.#reload()
   }
 
   #take(docs: readonly unknown[]): void {
@@ -1200,7 +1209,11 @@ export class DossierComments extends HTMLElement {
   /** One send from one place, never two at once and never again by itself. */
   #send(send: Send): void {
     const { status, composer } = send
-    if (status.busy) return
+    if (status.busy) {
+      // It goes once the send before it is answered, never twice.
+      this.#queued.set(status, send)
+      return
+    }
     status.busy = true
     composer?.setBusy(true)
     composer?.setInvalid(false)
@@ -1221,7 +1234,7 @@ export class DossierComments extends HTMLElement {
         const stored = doc ?? null
         this.#emit('saved', null, stored)
         send.done?.(stored)
-        this.#settle(true)
+        this.#settle(true, status)
       },
       (error: unknown) => {
         status.busy = false
@@ -1230,13 +1243,18 @@ export class DossierComments extends HTMLElement {
         this.#fail(failure, status, composer, send.again)
         this.#emit('failed', failure, null)
         send.failed?.()
-        this.#settle(false)
+        this.#settle(false, status)
       },
     )
   }
 
-  #settle(wrote: boolean): void {
+  #settle(wrote: boolean, status: StatusLine): void {
     this.#busy -= 1
+    const next = this.#queued.get(status)
+    if (next !== undefined) {
+      this.#queued.delete(status)
+      this.#send(next)
+    }
     // After a write, read at once rather than wait for the watch.
     if (wrote || this.#missed) void this.#reload()
   }

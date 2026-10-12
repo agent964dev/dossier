@@ -1117,3 +1117,69 @@ describe('what stays on this device, and who may change what', () => {
     expect(mainComposer(element).hidden).toBe(true)
   })
 })
+
+describe('changes that cross each other', () => {
+  test('sends a resolve pressed while a reply to the thread is still sending, after it', async () => {
+    const root = comment(LEE, 'Price?')
+    peer.threads = [thread(root)]
+    const element = await mount()
+    let finish: (() => void) | null = null
+    const write = fake.write.bind(fake)
+    const spy = vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path: string, patch: JsonObject) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }) as never,
+    )
+    const item = threadOf(element, root.path)
+    buttonNamed(item, TEXT.reply)!.click()
+    await settle()
+    const form = q<HTMLFormElement>(item, '.dossier-comments-composer')
+    type(q<HTMLTextAreaElement>(form, 'textarea'), 'Per truck.')
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    buttonNamed(threadOf(element, root.path), TEXT.resolve)!.click()
+    await settle()
+    // Only the reply has gone; the resolve waits for its answer.
+    expect(spy).toHaveBeenCalledTimes(1)
+    finish!()
+    await settle()
+    expect(peer.sends().map((s) => s.patch)).toEqual([
+      expect.objectContaining({ text: 'Per truck.', replyTo: root.path }),
+      { resolves: root.path },
+    ])
+  })
+
+  test('never lets a watch value from before a read replace what the read brought', async () => {
+    const root = comment(LEE, 'Price?')
+    peer.threads = [thread(root)]
+    const element = await mount()
+    const older = [thread(root)]
+    // The read after a resolve brings the resolved thread, slowly.
+    let answer: (() => void) | null = null
+    vi.spyOn(fake, 'read').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = () =>
+            resolve([
+              thread(root, [], {
+                resolved: true,
+                resolvedBy: SARA.email,
+                resolvedAt: root.at,
+              }),
+            ] as never)
+        }) as never,
+    )
+    buttonNamed(threadOf(element, root.path), TEXT.resolve)!.click()
+    await settle()
+    // A watch value read before the resolve lands while the read is out.
+    for (const watcher of peer.watchers) watcher(older)
+    answer!()
+    await settle()
+    answer!()
+    await settle()
+    const toggle = byKey(element, 'show-resolved')!
+    expect(toggle.hidden).toBe(false)
+    expect(toggle.textContent).toBe(`${TEXT.showResolved} (1)`)
+  })
+})
