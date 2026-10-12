@@ -32,6 +32,16 @@ const BOOT = {
   link: 'https://main.test/acme/plans/a/plan',
 }
 
+const keptFor = (text: string, replyTo: string | null = null) => ({
+  text,
+  anchor: null,
+  label: null,
+  pin: null,
+  replyTo,
+  stance: null,
+  mentions: [],
+})
+
 interface Call {
   readonly op: 'read' | 'watch' | 'unwatch' | 'write' | 'withdraw'
   readonly path: string
@@ -692,38 +702,99 @@ describe('<dossier-comments>', () => {
       replyTo: null,
       stance: null,
       mentions: [],
+      // When the press started the round trip to sign-in.
+      keptAt: expect.any(Number),
     })
     expect(element.querySelector('a[target="_top"]')).toBeNull()
     expect(statusOf(element)).toBe(TEXT.signingIn)
   })
 
-  test('gives a kept comment back to whoever signs in, to send it themselves, once', async () => {
-    const kept = {
-      text: 'Hello from outside',
-      anchor: null,
-      label: null,
-      pin: null,
-      replyTo: null,
-      stance: null,
-      mentions: [],
-    }
-    sessionStorage.setItem(keptKey(PAGE), JSON.stringify(kept))
-    const element = await mount()
-    // Nothing goes as this person until they say so.
-    expect(peer.sends()).toEqual([])
-    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
-    expect(area.value).toBe('Hello from outside')
-    expect(statusOf(element)).toBe(claimText(SARA.email))
-    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+  test('sends a comment kept by its own sign-in round trip once, as the person who signed in', async () => {
+    peer.me = null
+    let element = await mount(
+      `<script type="application/json" id="dossier-bootstrap">${JSON.stringify(BOOT)}</script>`,
+    )
+    type(
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea'),
+      'Hello from outside',
+    )
     q<HTMLButtonElement>(mainComposer(element), 'button[type="submit"]').click()
     await settle()
-    expect(peer.sends()).toEqual([{ op: 'write', path: FOLDER, patch: kept }])
+    expect(peer.sends()).toEqual([])
+    element.remove()
+    // Back from sign-in, in the same tab.
+    peer.me = SARA
+    element = await mount()
+    expect(peer.sends()).toEqual([
+      {
+        op: 'write',
+        path: FOLDER,
+        patch: {
+          text: 'Hello from outside',
+          anchor: null,
+          label: null,
+          pin: null,
+          replyTo: null,
+          stance: null,
+          mentions: [],
+        },
+      },
+    ])
+    expect(statusOf(element)).toBe(TEXT.saved)
+    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+    // Never again: the round trip is spent.
     element.remove()
     document.body.append(element)
     await settle()
     expect(peer.sends()).toHaveLength(1)
-    expect(area.value).toBe('')
   })
+
+  test('puts a comment kept by the round trip back in the composer when its send fails', async () => {
+    sessionStorage.setItem(
+      keptKey(PAGE),
+      JSON.stringify({ ...keptFor('Lost?'), keptAt: Date.now() }),
+    )
+    peer.failures.push(
+      new DossierError({
+        code: 'offline',
+        message: 'x',
+        fix: null,
+        path: null,
+      }),
+    )
+    const element = await mount()
+    expect(peer.sends()).toHaveLength(1)
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea').value,
+    ).toBe('Lost?')
+    expect(statusOf(element)).toBe(TEXT.offline)
+    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+  })
+
+  test.each([
+    ['kept longer ago than its round trip allows', Date.now() - 16 * 60_000],
+    ['kept without a round trip of its own', undefined],
+  ])(
+    'gives a comment %s back to whoever signs in, to send themselves',
+    async (_, keptAt) => {
+      sessionStorage.setItem(
+        keptKey(PAGE),
+        JSON.stringify({ ...keptFor('Hello from outside'), keptAt }),
+      )
+      const element = await mount()
+      expect(peer.sends()).toEqual([])
+      const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+      expect(area.value).toBe('Hello from outside')
+      expect(statusOf(element)).toBe(claimText(SARA.email))
+      expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+      q<HTMLButtonElement>(
+        mainComposer(element),
+        'button[type="submit"]',
+      ).click()
+      await settle()
+      expect(peer.sends()).toHaveLength(1)
+    },
+  )
 
   test('gives a kept reply back in its thread’s composer', async () => {
     const root = comment(LEE, 'Price?')

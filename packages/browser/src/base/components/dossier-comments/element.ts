@@ -78,7 +78,7 @@ export const TEXT = {
   cancelPin: 'Cancel pin',
   removePin: 'Remove pin',
   visitor:
-    'Commenting asks you to sign in first. What you write is kept for you to send after.',
+    'Commenting asks you to sign in first. What you write is kept and sent after.',
   signingIn: 'Taking you to sign in…',
   signInToComment: 'Sign in to comment.',
   saving: 'Saving…',
@@ -108,6 +108,12 @@ export const keptKey = (pagePath: string): string => `${TAG}:${pagePath}`
  */
 export const draftKey = (pagePath: string, viewer: string | null): string =>
   `${TAG}-draft:${viewer === null ? 'visitor' : `person:${viewer.toLowerCase()}`}:${pagePath}`
+
+/**
+ * How long a comment kept for sign-in goes on its own once its person is
+ * back: the round trip its Comment press started, and no later visit.
+ */
+export const ROUND_TRIP_MS = 15 * 60_000
 
 /** What a person who signs in reads beside a comment kept before it. */
 export const claimText = (email: string): string =>
@@ -1535,7 +1541,8 @@ export class DossierComments extends HTMLElement {
     try {
       this.#storage()?.setItem(
         keptKey(dossier.page.path),
-        JSON.stringify(entryJson(entry)),
+        // When the press started the round trip to sign-in, spent once.
+        JSON.stringify({ ...entryJson(entry), keptAt: Date.now() }),
       )
       // The text now waits as the kept comment, never also as a draft.
       if (entry.replyTo === null) {
@@ -1590,7 +1597,10 @@ export class DossierComments extends HTMLElement {
   }
 
   /** The comment a visitor kept before signing in, taken out once. */
-  #takeKept(): CommentEntry | null {
+  #takeKept(): {
+    readonly entry: CommentEntry
+    readonly keptAt: number | null
+  } | null {
     const storage = this.#storage()
     const key = keptKey(this.#dossier!.page.path)
     let raw: string | null = null
@@ -1602,22 +1612,38 @@ export class DossierComments extends HTMLElement {
     }
     if (raw === null) return null
     try {
-      return keptEntry(JSON.parse(raw))
+      const value: unknown = JSON.parse(raw)
+      const entry = keptEntry(value)
+      if (entry === null) return null
+      const at = isRecord(value) ? value.keptAt : null
+      return { entry, keptAt: typeof at === 'number' ? at : null }
     } catch {
       return null
     }
   }
 
   /**
-   * Back from sign-in: the comment kept before it returns to its composer,
-   * once, for whoever signed in to send themselves. It never goes on its
-   * own, since the person signing in may not be the one who wrote it.
+   * Back from sign-in: the comment kept before it. Straight back from the
+   * round trip its own press started, it goes once, as the person signed
+   * in now; any other time it returns to its composer for whoever signed
+   * in to send themselves, since they may not be the one who wrote it.
    */
   #claimKept(): void {
     const me = this.#me()
     if (me === null || this.#dossier === null) return
-    const entry = this.#takeKept()
-    if (entry === null) return
+    const kept = this.#takeKept()
+    if (kept === null) return
+    const { entry, keptAt } = kept
+    const since = keptAt === null ? null : Date.now() - keptAt
+    if (since !== null && since >= 0 && since <= ROUND_TRIP_MS) {
+      this.#sendKept(entry)
+      return
+    }
+    this.#restoreKept(entry, claimText(me.email))
+  }
+
+  /** The kept comment in its composer, with `note` in its status line. */
+  #restoreKept(entry: CommentEntry, note: string | null): void {
     const parts = this.#parts!
     const root = entry.replyTo
     if (root === null || this.#thread(root) === null) {
@@ -1631,7 +1657,7 @@ export class DossierComments extends HTMLElement {
           : null
       this.#keepDraft()
       this.#render()
-      parts.status.say(claimText(me.email))
+      if (note !== null) parts.status.say(note)
       parts.composer.textarea.focus({ preventScroll: true })
       return
     }
@@ -1642,8 +1668,26 @@ export class DossierComments extends HTMLElement {
     if (ui.stance !== null && entry.stance !== null) {
       ui.stance.value = entry.stance
     }
-    ui.status.say(claimText(me.email))
+    if (note !== null) ui.status.say(note)
     composer.focus()
+  }
+
+  /** The round trip's comment, sent once; on failure back in its composer. */
+  #sendKept(entry: CommentEntry): void {
+    const parts = this.#parts!
+    const root =
+      entry.replyTo !== null && this.#thread(entry.replyTo) !== null
+        ? entry.replyTo
+        : null
+    const status = root === null ? parts.status : this.#ui(root).status
+    this.#send({
+      status,
+      composer: root === null ? parts.composer : null,
+      again: () =>
+        root === null ? this.#submitMain() : this.#submitReply(root),
+      run: () => this.#dossier!.write(this.#folder(), entryJson(entry)),
+      failed: () => this.#restoreKept(entry, null),
+    })
   }
 }
 
