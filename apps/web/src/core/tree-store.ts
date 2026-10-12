@@ -558,9 +558,12 @@ export interface TreeStoreService {
   readonly markdown: (
     sha256: Sha256,
   ) => Effect.Effect<string, DossierError<'unavailable'>>
-  /** Every file below the folder the caller can read, at any depth, by path. */
+  /**
+   * Every file below the folder the caller can read, at any depth, by path;
+   * each is checked on its own, so the folder need not be readable.
+   */
   readonly docs: (
-    folder: Granted<'read'>,
+    folder: Pick<NodeRow, 'treeId' | 'path'>,
     opts: { readonly origin: 'data' | 'any' },
   ) => Effect.Effect<readonly DocRow[], never, CurrentCaller>
   /**
@@ -1687,7 +1690,9 @@ export const TreeStoreLive: Layer.Layer<
 
     const resolve: TreeStoreService['resolve'] = (ref, at) =>
       Effect.gen(function* () {
-        const split = underscoreSplit(ref.path)
+        // A `_` file is answered by the closest `_` file the lookup reaches;
+        // a `_` folder is a folder, as `ls` lists it.
+        const split = ref.folder ? null : underscoreSplit(ref.path)
         let found: TreeRow | null
         // A tree known by ID is read together with what the path names in it.
         let prefetched: Effect.Effect.Success<
@@ -1748,7 +1753,6 @@ export const TreeStoreLive: Layer.Layer<
         })
         if (found === null) return missing()
         const t = found
-        // A `_` path is answered by the closest `_` file the lookup reaches.
         if (split !== null) {
           const candidates =
             candidatesAt ??
@@ -1928,7 +1932,7 @@ export const TreeStoreLive: Layer.Layer<
       })
 
     const docs = (
-      folder: Granted<'read'>,
+      folder: Pick<NodeRow, 'treeId' | 'path'>,
       opts: { readonly origin: 'data' | 'any' },
     ) =>
       Effect.gen(function* () {

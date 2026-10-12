@@ -85,12 +85,17 @@ export interface ListingView {
    * at this folder, closest first. Null when there are none.
    */
   readonly kit: { readonly names: readonly string[] } | null
-  /** Only when the folder holds nothing; the hint is for write holders. */
+  /**
+   * Only when the folder shows nothing: empty, or holding only data files,
+   * which their page's responses show. The hint is for write holders.
+   */
   readonly empty: {
-    readonly text: 'Nothing here yet.'
+    readonly text: 'Nothing here yet.' | typeof ONLY_DATA
     readonly hint: string | null
   } | null
 }
+
+const ONLY_DATA = "Only data files are here, shown in their page's responses."
 
 const stamp = (push: Entry['push']): PushStamp | null =>
   push === null
@@ -245,13 +250,15 @@ export const listingModel = (data: {
       folders,
       files,
       kit: kit.length === 0 ? null : { names: kit },
-      empty: nothing
-        ? {
-            text: 'Nothing here yet.',
-            hint: writer
-              ? `dossier push <folder> ${ref.workspace}/${ref.tree}/${folderPath}`
-              : null,
-          }
-        : null,
+      empty: !nothing
+        ? null
+        : entries.some((e) => e.kind === 'data')
+          ? { text: ONLY_DATA, hint: null }
+          : {
+              text: 'Nothing here yet.',
+              hint: writer
+                ? `dossier push <folder> ${ref.workspace}/${ref.tree}/${folderPath}`
+                : null,
+            },
     } satisfies ListingView
   })

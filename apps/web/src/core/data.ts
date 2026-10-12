@@ -2671,16 +2671,20 @@ export const DataLive: Layer.Layer<
         const row = yield* folderOrFile(i.treeId, path)
         if (folder) {
           if (row === null || row.kind !== 'folder') return { files: [] }
-          const granted = yield* access.require('read', row).pipe(Effect.option)
-          if (granted._tag === 'None') return { files: [] }
           // A page's comments come back as its threads, one Doc each.
           if (pageOfCommentsFolder(path) !== null) {
+            const granted = yield* access
+              .require('read', row)
+              .pipe(Effect.option)
+            if (granted._tag === 'None') return { files: [] }
             return {
               files: yield* readThreads(bindings, access, i.treeId, path),
             }
           }
+          // Each file the caller reads, as reading it alone would answer: a
+          // respondent reads their own answers in a folder they cannot list.
           const prefix = path === '' ? '' : `${path}/`
-          const docs = (yield* store.docs(granted.value, {
+          const docs = (yield* store.docs(row, {
             origin: 'any',
           })).filter(
             (doc) =>
