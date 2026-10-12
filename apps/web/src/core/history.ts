@@ -30,6 +30,15 @@ const DAY = 86_400_000
 
 const LOGGED = `('push', 'delete', 'restore', 'move', 'withdrawal')`
 
+/**
+ * A version `v` the push `v.push_id` wrote itself, at its own sequence: a
+ * restore or a move's rewrite keeps the push of the content it copies, at a
+ * later sequence.
+ */
+const OWN_SEQ = `v.authored_seq = coalesce((select pp.authored_seq from pushes pp
+    where pp.id = v.push_id), (select min(v3.authored_seq) from node_versions v3
+    where v3.push_id = v.push_id))`
+
 /** Event types written by people's data, which always name the writer. */
 const DATA_EVENTS = new Set(['submission', 'entry', 'withdrawal', 'data_write'])
 
@@ -159,9 +168,10 @@ export const makeHistory = (deps: HistoryDeps) => {
         : `(e.path = ?2 or e.node_id = ?3)`
       const changedHere = folder
         ? `(select count(*) from node_versions v join nodes x on x.id = v.node_id
-             where v.push_id = e.push_id and ${underParam('x.path', 2)})`
+             where v.push_id = e.push_id and ${OWN_SEQ}
+               and ${underParam('x.path', 2)})`
         : `(select count(*) from node_versions v where v.push_id = e.push_id
-             and v.node_id = ?3)`
+             and ${OWN_SEQ} and v.node_id = ?3)`
       const rows = yield* query(() =>
         DB.prepare(
           `select e.seq, e.type, e.path, e.node_id as nodeId, e.created_at as at,
@@ -299,7 +309,7 @@ export const makeHistory = (deps: HistoryDeps) => {
       : Effect.map(
           query(() =>
             DB.prepare(
-              'select max(authored_seq) as seq from node_versions where push_id = ?',
+              'select min(authored_seq) as seq from node_versions where push_id = ?',
             )
               .bind(push.id)
               .first<{ seq: number | null }>(),
@@ -308,11 +318,12 @@ export const makeHistory = (deps: HistoryDeps) => {
         )
 
   /** The version before this one of its node, by revision. */
-  const previousOf = (version: VersionRow) =>
+  const previousOf = (version: VersionRow, live = false) =>
     Effect.map(
       query(() =>
         DB.prepare(
           `select * from node_versions where node_id = ? and revision < ?
+             ${live ? "and state = 'live'" : ''}
            order by revision desc limit 1`,
         )
           .bind(version.nodeId, version.revision)
@@ -347,7 +358,8 @@ export const makeHistory = (deps: HistoryDeps) => {
         DB.prepare(
           `select v.*, n.path as nodePath, n.name as nodeName from node_versions v
              join nodes n on n.id = v.node_id
-           where v.push_id = ?1 and ${folder ? underParam('n.path', 2) : 'n.id = ?3'}
+           where v.push_id = ?1 and ${OWN_SEQ}
+             and ${folder ? underParam('n.path', 2) : 'n.id = ?3'}
            order by n.path`,
         )
           .bind(

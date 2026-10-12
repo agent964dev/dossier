@@ -119,14 +119,7 @@ function HistoryRoute() {
   }
   return (
     <div className="min-h-dvh">
-      <AppHeader
-        email={loaded.view.me.email}
-        beside={
-          <span className="font-mono text-[0.6875rem] tracking-[0.2em] whitespace-nowrap text-neutral-400 uppercase max-sm:hidden">
-            History
-          </span>
-        }
-      />
+      <AppHeader email={loaded.view.me.email} label="History" />
       <HistoryScreen
         view={loaded.view}
         at={{

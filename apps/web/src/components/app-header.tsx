@@ -18,10 +18,13 @@ export interface HeaderBrand {
 export function AppHeader({
   email,
   beside,
+  label,
   brand,
 }: {
   email: string | null
   beside?: ReactNode
+  /** A mono micro-label after the name, such as "History"; wider screens only. */
+  label?: string
   brand?: HeaderBrand
 }) {
   const saved = Root.useLoaderData() as HeaderBrand | undefined
@@ -43,6 +46,11 @@ export function AppHeader({
             )}
             <span className="truncate">{name}</span>
           </Link>
+          {label === undefined ? null : (
+            <span className="ml-1.5 font-mono text-[0.6875rem] tracking-[0.2em] whitespace-nowrap text-neutral-400 uppercase max-sm:hidden">
+              {label}
+            </span>
+          )}
           {beside === undefined ? null : (
             <>
               <span aria-hidden className="text-neutral-600">

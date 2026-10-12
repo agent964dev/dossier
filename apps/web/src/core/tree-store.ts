@@ -2675,12 +2675,12 @@ export const TreeStoreLive: Layer.Layer<
                         case when n.origin = 'authored'
                           then (select authored_seq from trees where id = ?1) end,
                         'live', pv.blob_sha256, pv.json_value, pv.size, pv.content_type,
-                        pv.author_id, pv.key_id, null, pv.seen_push_number, null, ?3
+                        pv.author_id, pv.key_id, pv.push_id, pv.seen_push_number, null, ?3
                       from json_each(?2) j
                         join nodes n on n.id = json_extract(j.value, '$.node')
                         join node_versions pv on pv.id = json_extract(j.value, '$.from')`,
-                // The content stays its writer's: the restore event names
-                // who restored it.
+                // The content stays its writer's, and the push that wrote
+                // it stays its push: the restore event names who restored it.
                 binds: [t, revive, now],
               },
               {
@@ -2859,10 +2859,11 @@ export const TreeStoreLive: Layer.Layer<
                         (select authored_seq from trees where id = ?3), 'live', ?4, null,
                         (select size from blobs where sha256 = ?4), ?5,
                         (select author_id from node_versions where id = ?6),
-                        (select key_id from node_versions where id = ?6), null,
+                        (select key_id from node_versions where id = ?6),
+                        (select push_id from node_versions where id = ?6),
                         null, null, ?7`,
-                // Only its links changed: the page stays its pusher's, and
-                // the move event names who moved it.
+                // Only its links changed: the page stays its pusher's and
+                // its push's, and the move event names who moved it.
                 binds: [
                   versionId,
                   file.id,

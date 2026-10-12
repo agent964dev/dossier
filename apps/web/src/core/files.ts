@@ -534,11 +534,13 @@ export const FilesLive: Layer.Layer<
           to === null
             ? yield* history.current(node)
             : yield* history.versionAtSeq(node.id, yield* seqOf(to))
+        // Without a push to start from: the version before, the last one
+        // with content when this one has some.
         const fromVersion =
           from === null
             ? toVersion === null
               ? null
-              : yield* history.previousOf(toVersion)
+              : yield* history.previousOf(toVersion, toVersion.state === 'live')
             : yield* history.versionAtSeq(node.id, yield* seqOf(from))
         return yield* history.fileDiff({
           node,
