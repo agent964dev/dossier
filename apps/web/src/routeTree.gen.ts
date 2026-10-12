@@ -16,6 +16,7 @@ import { Route as Char91_Char93NoAccessRouteImport } from './routes/[_]/no-acces
 import { Route as Char91_Char93SettingsRouteImport } from './routes/[_]/settings'
 import { Route as Char91_Char93SignInRouteImport } from './routes/[_]/sign-in'
 import { Route as WorkspaceTreeSplatRouteImport } from './routes/$workspace/$tree/$'
+import { Route as Char91_Char93ResponsesWorkspaceTreeSplatRouteImport } from './routes/[_]/responses/$workspace/$tree/$'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -52,6 +53,12 @@ const WorkspaceTreeSplatRoute = WorkspaceTreeSplatRouteImport.update({
   path: '/$workspace/$tree/$',
   getParentRoute: () => rootRouteImport,
 } as any)
+const Char91_Char93ResponsesWorkspaceTreeSplatRoute =
+  Char91_Char93ResponsesWorkspaceTreeSplatRouteImport.update({
+    id: '/_/responses/$workspace/$tree/$',
+    path: '/_/responses/$workspace/$tree/$',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -61,6 +68,7 @@ export interface FileRoutesByFullPath {
   '/_/sign-in': typeof Char91_Char93SignInRoute
   '/$workspace/': typeof WorkspaceIndexRoute
   '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
+  '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -70,6 +78,7 @@ export interface FileRoutesByTo {
   '/_/sign-in': typeof Char91_Char93SignInRoute
   '/$workspace': typeof WorkspaceIndexRoute
   '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
+  '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -80,6 +89,7 @@ export interface FileRoutesById {
   '/_/sign-in': typeof Char91_Char93SignInRoute
   '/$workspace/': typeof WorkspaceIndexRoute
   '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
+  '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -91,6 +101,7 @@ export interface FileRouteTypes {
     | '/_/sign-in'
     | '/$workspace/'
     | '/$workspace/$tree/$'
+    | '/_/responses/$workspace/$tree/$'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -100,6 +111,7 @@ export interface FileRouteTypes {
     | '/_/sign-in'
     | '/$workspace'
     | '/$workspace/$tree/$'
+    | '/_/responses/$workspace/$tree/$'
   id:
     | '__root__'
     | '/'
@@ -109,6 +121,7 @@ export interface FileRouteTypes {
     | '/_/sign-in'
     | '/$workspace/'
     | '/$workspace/$tree/$'
+    | '/_/responses/$workspace/$tree/$'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -119,6 +132,7 @@ export interface RootRouteChildren {
   Char91_Char93SignInRoute: typeof Char91_Char93SignInRoute
   WorkspaceIndexRoute: typeof WorkspaceIndexRoute
   WorkspaceTreeSplatRoute: typeof WorkspaceTreeSplatRoute
+  Char91_Char93ResponsesWorkspaceTreeSplatRoute: typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -172,6 +186,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceTreeSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_/responses/$workspace/$tree/$': {
+      id: '/_/responses/$workspace/$tree/$'
+      path: '/_/responses/$workspace/$tree/$'
+      fullPath: '/_/responses/$workspace/$tree/$'
+      preLoaderRoute: typeof Char91_Char93ResponsesWorkspaceTreeSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -183,6 +204,8 @@ const rootRouteChildren: RootRouteChildren = {
   Char91_Char93SignInRoute: Char91_Char93SignInRoute,
   WorkspaceIndexRoute: WorkspaceIndexRoute,
   WorkspaceTreeSplatRoute: WorkspaceTreeSplatRoute,
+  Char91_Char93ResponsesWorkspaceTreeSplatRoute:
+    Char91_Char93ResponsesWorkspaceTreeSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

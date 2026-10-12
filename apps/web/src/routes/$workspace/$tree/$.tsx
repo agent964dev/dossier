@@ -134,13 +134,19 @@ function Meta({ first, second }: { first: ReactNode; second: string | null }) {
   )
 }
 
+/** Pages with a response column, when any page here collects answers. */
+const PAGE_COLUMNS =
+  'min-w-0 flex-1 md:grid md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)] md:items-center md:gap-4'
+
 function ColumnHeads({
   name,
   first,
+  middle,
   second,
 }: {
   name: string
   first: string
+  middle?: string
   second: string
 }) {
   return (
@@ -149,13 +155,37 @@ function ColumnHeads({
       className="hidden items-center gap-3 border-b border-border/80 px-3.5 py-2 md:flex"
     >
       <span className="size-8 shrink-0" />
-      <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)] gap-4 font-mono text-[0.6875rem] tracking-[0.2em] text-neutral-500 uppercase">
+      <div
+        className={`grid min-w-0 flex-1 gap-4 font-mono text-[0.6875rem] tracking-[0.2em] text-neutral-500 uppercase ${
+          middle === undefined
+            ? 'grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)]'
+            : 'grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1fr)]'
+        }`}
+      >
         <span>{name}</span>
         <span>{first}</span>
+        {middle === undefined ? null : <span>{middle}</span>}
         <span>{second}</span>
       </div>
       <span className="size-8 shrink-0" />
     </div>
+  )
+}
+
+/** "3 responses": opens the page's responses. */
+function ResponsesBadge({
+  responses,
+}: {
+  responses: { count: number; link: string }
+}) {
+  return (
+    <a
+      href={responses.link}
+      className="inline-flex w-fit items-center gap-1.5 rounded-md border border-brand-300/30 bg-brand-300/10 px-2 py-0.5 text-xs whitespace-nowrap text-brand-100 outline-none hover:bg-brand-300/15 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+    >
+      <span aria-hidden className="size-1.5 rounded-full bg-brand-300" />
+      {responses.count === 1 ? '1 response' : `${responses.count} responses`}
+    </a>
   )
 }
 
@@ -206,6 +236,7 @@ function SharingLine({ text }: { text: string }) {
 
 function Listing({ view }: { view: ListingView }) {
   const [seen, setSeen] = useState<{ title: string; link: string } | null>(null)
+  const answered = view.pages.some((page) => page.responses !== null)
   return (
     <div className="min-h-dvh">
       <AppHeader email={view.me.email} />
@@ -246,7 +277,12 @@ function Listing({ view }: { view: ListingView }) {
                 label="Pages"
                 count={view.pages.length}
                 heads={
-                  <ColumnHeads name="Title" first="Path" second="Last push" />
+                  <ColumnHeads
+                    name="Title"
+                    first="Path"
+                    {...(answered ? { middle: 'Responses' } : {})}
+                    second="Last push"
+                  />
                 }
               >
                 {view.pages.map((page) => (
@@ -254,15 +290,46 @@ function Listing({ view }: { view: ListingView }) {
                     <RowIcon>
                       <FileText />
                     </RowIcon>
-                    <div className={COLUMNS}>
+                    <div className={answered ? PAGE_COLUMNS : COLUMNS}>
                       {/* A page opens in the shell: a whole new document. */}
                       <a href={page.link} className={NAME_LINK}>
                         {page.title}
                       </a>
-                      <Meta first={page.path} second={pushLabel(page.push)} />
+                      {answered ? (
+                        <>
+                          <span className={META}>
+                            <span className="md:truncate">{page.path}</span>
+                            {page.push === null ? null : (
+                              <span aria-hidden className="md:hidden">
+                                {' · '}
+                              </span>
+                            )}
+                            <span className="md:hidden">
+                              {pushLabel(page.push)}
+                            </span>
+                          </span>
+                          {page.responses === null ? (
+                            <span aria-hidden className="hidden md:block" />
+                          ) : (
+                            <span className="mt-1.5 block md:mt-0">
+                              <ResponsesBadge responses={page.responses} />
+                            </span>
+                          )}
+                          <span className="hidden truncate font-mono text-xs text-neutral-400 md:block">
+                            {pushLabel(page.push)}
+                          </span>
+                        </>
+                      ) : (
+                        <Meta first={page.path} second={pushLabel(page.push)} />
+                      )}
                     </div>
                     <RowMenu label={`More for ${page.title}`}>
                       <MenuLink href={page.link}>Open</MenuLink>
+                      {page.responses === null ? null : (
+                        <MenuLink href={page.responses.link}>
+                          Responses
+                        </MenuLink>
+                      )}
                       {view.can.seenBy ? (
                         <MenuButton
                           onSelect={() =>

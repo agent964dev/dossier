@@ -3,8 +3,10 @@ import { createServerFn } from '@tanstack/react-start'
 import { Effect } from 'effect'
 
 import {
+  Access,
   Config,
   CurrentCaller,
+  Data,
   Files,
   Pages,
   People,
@@ -42,6 +44,8 @@ export interface ListingView {
     readonly path: string
     readonly link: string
     readonly push: PushStamp | null
+    /** Pages with forms, for people who read their answers. */
+    readonly responses: { readonly count: number; readonly link: string } | null
   }[]
   readonly folders: readonly {
     readonly name: string
@@ -160,15 +164,26 @@ export const listingView = createServerFn({ method: 'GET' })
             kind,
           })
         const entries = listing.entries
+        const granted = yield* (yield* Access).require('read', listing.folder)
+        const forms = yield* (yield* Data).pageForms(granted)
         const pages = entries
           .filter((e) => e.kind === 'page')
           .map((e) => {
             const folder = e.node.kind === 'folder'
+            const link = folder ? at(e.path, 'folder') : at(e.path, 'page')
+            const answered = forms.get(e.node.id)?.people ?? null
             return {
               title: e.title ?? e.name,
               path: folder ? `${e.name}/` : e.name,
-              link: folder ? at(e.path, 'folder') : at(e.path, 'page'),
+              link,
               push: stamp(e.push),
+              responses:
+                answered === null
+                  ? null
+                  : {
+                      count: answered,
+                      link: `/_/responses${new URL(link).pathname}`,
+                    },
             }
           })
         const folders = entries
