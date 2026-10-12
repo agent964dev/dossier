@@ -1,5 +1,6 @@
-import { runtimeFor } from './core/index.ts'
+import { runtimeFor, type WebhookMessage } from './core/index.ts'
 import { dispatch } from './edge/dispatch.ts'
+import { queue } from './jobs/queue.ts'
 import { runScheduled } from './jobs/scheduled.ts'
 
 export { TreeHub } from './hub/tree-hub.ts'
@@ -10,4 +11,5 @@ export { TreeHub } from './hub/tree-hub.ts'
 export default {
   fetch: dispatch,
   scheduled: (controller, env) => runScheduled(controller, runtimeFor(env)),
-} satisfies ExportedHandler<Env>
+  queue,
+} satisfies ExportedHandler<Env, WebhookMessage>

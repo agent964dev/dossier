@@ -47,6 +47,7 @@
     "auth": "1.7.7",
     "drizzle-kit": "0.31.10",
     "happy-dom": "20.14.6",
+    "standardwebhooks": "1.1.1",
     "vite": "8.3.0",
     "vitest": "4.1.11",
     "wrangler": "4.131.1"

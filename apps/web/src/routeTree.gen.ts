@@ -23,6 +23,7 @@ import { Route as Char91_Char93WWorkspaceSettingsRouteRouteImport } from './rout
 import { Route as Char91_Char93HistoryWorkspaceTreeSplatRouteImport } from './routes/[_]/history/$workspace/$tree/$'
 import { Route as Char91_Char93ResponsesWorkspaceTreeSplatRouteImport } from './routes/[_]/responses/$workspace/$tree/$'
 import { Route as Char91_Char93WWorkspaceSettingsIndexRouteImport } from './routes/[_]/w/$workspace/settings/index'
+import { Route as Char91_Char93WWorkspaceSettingsWebhooksRouteImport } from './routes/[_]/w/$workspace/settings/webhooks'
 import { Route as Char91_Char93WWorkspaceSettingsWorkspaceRouteImport } from './routes/[_]/w/$workspace/settings/workspace'
 import { Route as Char91_Char93WWorkspaceSettingsTeamsIndexRouteImport } from './routes/[_]/w/$workspace/settings/teams.index'
 import { Route as Char91_Char93WWorkspaceSettingsTeamsTeamRouteImport } from './routes/[_]/w/$workspace/settings/teams.$team'
@@ -101,6 +102,12 @@ const Char91_Char93WWorkspaceSettingsIndexRoute =
     path: '/',
     getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
   } as any)
+const Char91_Char93WWorkspaceSettingsWebhooksRoute =
+  Char91_Char93WWorkspaceSettingsWebhooksRouteImport.update({
+    id: '/webhooks',
+    path: '/webhooks',
+    getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
+  } as any)
 const Char91_Char93WWorkspaceSettingsWorkspaceRoute =
   Char91_Char93WWorkspaceSettingsWorkspaceRouteImport.update({
     id: '/workspace',
@@ -134,6 +141,7 @@ export interface FileRoutesByFullPath {
   '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
   '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
+  '/_/w/$workspace/settings/webhooks': typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
   '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   '/_/w/$workspace/settings/': typeof Char91_Char93WWorkspaceSettingsIndexRoute
   '/_/w/$workspace/settings/teams/$team': typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
@@ -152,6 +160,7 @@ export interface FileRoutesByTo {
   '/_/admin': typeof Char91_Char93AdminIndexRoute
   '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
+  '/_/w/$workspace/settings/webhooks': typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
   '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsIndexRoute
   '/_/w/$workspace/settings/teams/$team': typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
@@ -172,6 +181,7 @@ export interface FileRoutesById {
   '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
   '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
+  '/_/w/$workspace/settings/webhooks': typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
   '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   '/_/w/$workspace/settings/': typeof Char91_Char93WWorkspaceSettingsIndexRoute
   '/_/w/$workspace/settings/teams/$team': typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
@@ -193,6 +203,7 @@ export interface FileRouteTypes {
     | '/_/w/$workspace/settings'
     | '/_/history/$workspace/$tree/$'
     | '/_/responses/$workspace/$tree/$'
+    | '/_/w/$workspace/settings/webhooks'
     | '/_/w/$workspace/settings/workspace'
     | '/_/w/$workspace/settings/'
     | '/_/w/$workspace/settings/teams/$team'
@@ -211,6 +222,7 @@ export interface FileRouteTypes {
     | '/_/admin'
     | '/_/history/$workspace/$tree/$'
     | '/_/responses/$workspace/$tree/$'
+    | '/_/w/$workspace/settings/webhooks'
     | '/_/w/$workspace/settings/workspace'
     | '/_/w/$workspace/settings'
     | '/_/w/$workspace/settings/teams/$team'
@@ -230,6 +242,7 @@ export interface FileRouteTypes {
     | '/_/w/$workspace/settings'
     | '/_/history/$workspace/$tree/$'
     | '/_/responses/$workspace/$tree/$'
+    | '/_/w/$workspace/settings/webhooks'
     | '/_/w/$workspace/settings/workspace'
     | '/_/w/$workspace/settings/'
     | '/_/w/$workspace/settings/teams/$team'
@@ -352,6 +365,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsIndexRouteImport
       parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
     }
+    '/_/w/$workspace/settings/webhooks': {
+      id: '/_/w/$workspace/settings/webhooks'
+      path: '/webhooks'
+      fullPath: '/_/w/$workspace/settings/webhooks'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsWebhooksRouteImport
+      parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
+    }
     '/_/w/$workspace/settings/workspace': {
       id: '/_/w/$workspace/settings/workspace'
       path: '/workspace'
@@ -377,6 +397,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface Char91_Char93WWorkspaceSettingsRouteRouteChildren {
+  Char91_Char93WWorkspaceSettingsWebhooksRoute: typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
   Char91_Char93WWorkspaceSettingsWorkspaceRoute: typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   Char91_Char93WWorkspaceSettingsIndexRoute: typeof Char91_Char93WWorkspaceSettingsIndexRoute
   Char91_Char93WWorkspaceSettingsTeamsTeamRoute: typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
@@ -385,6 +406,8 @@ interface Char91_Char93WWorkspaceSettingsRouteRouteChildren {
 
 const Char91_Char93WWorkspaceSettingsRouteRouteChildren: Char91_Char93WWorkspaceSettingsRouteRouteChildren =
   {
+    Char91_Char93WWorkspaceSettingsWebhooksRoute:
+      Char91_Char93WWorkspaceSettingsWebhooksRoute,
     Char91_Char93WWorkspaceSettingsWorkspaceRoute:
       Char91_Char93WWorkspaceSettingsWorkspaceRoute,
     Char91_Char93WWorkspaceSettingsIndexRoute:

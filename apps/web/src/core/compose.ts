@@ -21,6 +21,7 @@ import { Shares, SharesLive } from './shares.ts'
 import { SignIn, SignInLive } from './sign-in.ts'
 import { TreeStore, TreeStoreLive } from './tree-store.ts'
 import { Watch, WatchLive } from './watch.ts'
+import { Webhooks, WebhooksLive } from './webhooks.ts'
 
 /** Every service the edge and the screens reach. */
 export type CoreServices =
@@ -45,6 +46,7 @@ export type CoreServices =
   | Shares
   | Purge
   | Search
+  | Webhooks
 
 /** The seams a test may replace. */
 export interface Overrides {
@@ -91,6 +93,7 @@ export const makeLayer = (
     data,
     WatchLive,
     SearchLive,
+    WebhooksLive,
   ).pipe(Layer.provideMerge(auth))
 }
 

@@ -72,7 +72,23 @@
       "durable_objects": {
         "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
       },
-      "triggers": { "crons": ["17 3 * * SUN"] },
+      // Webhooks: commits send to the Queue, and this Worker consumes it.
+      // A Queue has one consumer Worker, so each environment has its own.
+      // max_retries is above a delivery's nine attempts: the consumer decides
+      // when one has failed for good, and D1 holds every delivery's state.
+      "queues": {
+        "producers": [{ "binding": "WEBHOOKS", "queue": "dossier-next-dev" }],
+        "consumers": [
+          {
+            "queue": "dossier-next-dev",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 10,
+          },
+        ],
+      },
+      // The weekly purge, and the webhook sweep every five minutes.
+      "triggers": { "crons": ["17 3 * * SUN", "*/5 * * * *"] },
     },
   },
 }

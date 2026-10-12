@@ -7,6 +7,11 @@ interface Env {
   HANDLE_SECRET: string
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
+  /**
+   * The webhook Queue, producer and consumer. A deployment without one
+   * delivers no webhooks.
+   */
+  WEBHOOKS?: Queue<import('./core/webhooks.ts').WebhookMessage>
 }
 
 declare namespace Cloudflare {
@@ -16,5 +21,6 @@ declare namespace Cloudflare {
     HANDLE_SECRET: string
     GOOGLE_CLIENT_ID?: string
     GOOGLE_CLIENT_SECRET?: string
+    WEBHOOKS?: Queue<import('./core/webhooks.ts').WebhookMessage>
   }
 }

@@ -736,6 +736,8 @@ export const events = sqliteTable(
   (t) => [
     primaryKey({ columns: [t.treeId, t.seq] }),
     check('events_type_check', sql`${t.type} in (${EVENT_TYPES_SQL})`),
+    // The webhook sweep reads the last day's events of every tree.
+    index('events_created_idx').on(t.createdAt),
   ],
 )
 
@@ -1186,4 +1188,74 @@ export const searchNames = sqliteTable(
     name: text('name').notNull(),
   },
   (t) => [index('search_names_tree_idx').on(t.treeId)],
+)
+
+// Webhooks.
+
+/**
+ * A URL a workspace admin registered for chosen events. The secret is kept
+ * as written, because signing needs it; the admin sees it once.
+ */
+export const webhooks = sqliteTable(
+  'webhooks',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /**
+     * https, no credentials, at most 2,048 characters, not this deployment's
+     * main host or content domain, and no local or private address.
+     */
+    url: text('url').notNull(),
+    /** A JSON array of event types, at least one. */
+    eventsJson: text('events_json').notNull(),
+    /** whsec_ and the base64 of 24 random bytes. */
+    secret: text('secret').notNull(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer('created_at').notNull(),
+    /** The first failure of the current run of failures. */
+    failingSince: integer('failing_since'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    /** "HTTP 500", "timed out after 10 s", "redirect not followed". */
+    lastError: text('last_error'),
+    lastErrorAt: integer('last_error_at'),
+    lastSuccessAt: integer('last_success_at'),
+  },
+  (t) => [index('webhooks_workspace_idx').on(t.workspaceId)],
+)
+
+/** One event for one webhook: delivered, failed for good, skipped or due. */
+export const webhookDeliveries = sqliteTable(
+  'webhook_deliveries',
+  {
+    eventTreeId: text('event_tree_id').notNull(),
+    eventSeq: integer('event_seq').notNull(),
+    webhookId: text('webhook_id')
+      .notNull()
+      .references(() => webhooks.id, { onDelete: 'cascade' }),
+    state: text('state').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    /** When the next attempt is due. */
+    nextAt: integer('next_at').notNull(),
+    /** The running attempt: only it records a result, until its lease ends. */
+    claimId: text('claim_id'),
+    claimedUntil: integer('claimed_until'),
+    lastStatus: integer('last_status'),
+    lastError: text('last_error'),
+    createdAt: integer('created_at').notNull(),
+    deliveredAt: integer('delivered_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.eventTreeId, t.eventSeq, t.webhookId] }),
+    index('webhook_deliveries_state_next_idx').on(t.state, t.nextAt),
+    index('webhook_deliveries_created_idx').on(t.createdAt),
+    index('webhook_deliveries_webhook_idx').on(t.webhookId),
+    check(
+      'webhook_deliveries_state_check',
+      sql`${t.state} in ('pending', 'delivered', 'failed', 'skipped')`,
+    ),
+  ],
 )

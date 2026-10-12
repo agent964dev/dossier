@@ -4,10 +4,18 @@
 // hand: everything below deletes.
 import {
   dossierError,
+  isPageFile,
   type DossierError,
+  type EventSeq,
+  type EventType,
+  type LinkKind,
   type Sha256,
+  type TreeId,
+  type WorkspaceId,
 } from '@dossier/contracts'
 import { Clock, Context, Effect } from 'effect'
+
+import type { EventRow, TreeRow, WorkspaceRow } from './rows.ts'
 
 /** A job the Worker runs itself: a purge run, a webhook sweep, a delivery. */
 export class SystemJob extends Context.Tag('SystemJob')<
@@ -22,6 +30,21 @@ export interface PurgeCounts {
   readonly workspaces: number
   /** Keys scoped to a purged node, revoked with their scope cleared. */
   readonly keysRevoked: number
+}
+
+/** An event with the workspace its tree is in now. */
+export type EventInWorkspace = EventRow & { readonly workspaceId: WorkspaceId }
+
+/** What a webhook delivery says about one event, read as it goes out. */
+export interface DeliveryFacts {
+  readonly event: EventRow
+  readonly tree: TreeRow
+  /** The workspace the tree is in now. */
+  readonly workspace: WorkspaceRow
+  /** Null where the event hides its actor. */
+  readonly actorEmail: string | null
+  /** What the event's path names, for its link. */
+  readonly linkKind: LinkKind
 }
 
 export interface SystemStore {
@@ -72,6 +95,26 @@ export interface SystemStore {
   readonly releaseClaim: (
     sha256: Sha256,
   ) => Effect.Effect<void, DossierError<'unavailable'>>
+  /** One commit's events, `from` to `to`, oldest first. */
+  readonly eventsInRange: (
+    treeId: TreeId,
+    from: EventSeq,
+    to: EventSeq,
+  ) => Effect.Effect<readonly EventInWorkspace[], DossierError<'unavailable'>>
+  /**
+   * Events created at or after `since` that a webhook of their tree's
+   * workspace takes and has no delivery for yet, oldest first, `limit` at
+   * most.
+   */
+  readonly eventsSince: (
+    since: number,
+    limit: number,
+  ) => Effect.Effect<readonly EventInWorkspace[], DossierError<'unavailable'>>
+  /** The event, its tree and workspace now, or null once it is purged. */
+  readonly eventForDelivery: (
+    treeId: TreeId,
+    seq: EventSeq,
+  ) => Effect.Effect<DeliveryFacts | null, DossierError<'unavailable'>>
 }
 
 /** Nodes one call removes at most: one batch. */
@@ -86,7 +129,7 @@ export const RECORD_BATCH = 2000
  */
 export const SYSTEM_STATEMENTS = {
   expireStagedPushes: 8,
-  purgeDeletedNodes: 13 + 18 + 11,
+  purgeDeletedNodes: 13 + 18 + 13,
   purgeRecords: 7,
   claimBlobs: 1,
   finishBlob: 2,
@@ -435,6 +478,16 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
           binds,
         },
         {
+          sql: `${DOOMED_WORKSPACES} delete from webhook_deliveries where webhook_id in
+                  (select id from webhooks where workspace_id in (select id from doomed))`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_WORKSPACES} delete from webhooks
+                where workspace_id in (select id from doomed)`,
+          binds,
+        },
+        {
           sql: `${DOOMED_WORKSPACES} delete from team_members where team_id in
                   (select id from teams where workspace_id in (select id from doomed))`,
           binds,
@@ -572,6 +625,114 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
         .run(),
     ).pipe(Effect.asVoid)
 
+  // The webhook jobs' reads.
+
+  const read = <A>(what: string, run: () => Promise<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (error) => {
+        console.error(`A webhook job could not ${what}`, error)
+        return dossierError('unavailable')
+      },
+    })
+
+  const EVENT_COLUMNS = `e.tree_id as treeId, e.seq as seq, e.type as type,
+    e.node_id as nodeId, e.path as path, e.actor_id as actorId,
+    e.push_id as pushId, e.detail as detail, e.created_at as createdAt`
+
+  const eventsInRange: SystemStore['eventsInRange'] = (treeId, from, to) =>
+    read('read a commit’s events', () =>
+      DB.prepare(
+        `select ${EVENT_COLUMNS}, t.workspace_id as workspaceId
+         from events e join trees t on t.id = e.tree_id
+         where e.tree_id = ? and e.seq between ? and ? order by e.seq`,
+      )
+        .bind(treeId, from, to)
+        .all<EventInWorkspace>(),
+    ).pipe(Effect.map((rows) => rows.results))
+
+  const eventsSince: SystemStore['eventsSince'] = (since, limit) =>
+    read('read the last day’s events', () =>
+      DB.prepare(
+        `select ${EVENT_COLUMNS}, t.workspace_id as workspaceId
+         from events e join trees t on t.id = e.tree_id
+         where e.created_at >= ?1 and exists (
+           select 1 from webhooks w
+           where w.workspace_id = t.workspace_id and w.created_at <= e.created_at
+             and exists (select 1 from json_each(w.events_json) j where j.value = e.type)
+             and not exists (select 1 from webhook_deliveries d
+               where d.event_tree_id = e.tree_id and d.event_seq = e.seq
+                 and d.webhook_id = w.id))
+         order by e.created_at, e.tree_id, e.seq limit ?2`,
+      )
+        .bind(since, limit)
+        .all<EventInWorkspace>(),
+    ).pipe(Effect.map((rows) => rows.results))
+
+  const eventForDelivery: SystemStore['eventForDelivery'] = (treeId, seq) =>
+    Effect.gen(function* () {
+      const row = yield* read('read an event to deliver', () =>
+        DB.prepare(
+          `select ${EVENT_COLUMNS},
+             t.id as t_id, t.workspace_id as t_workspaceId, t.name as t_name,
+             t.root_node_id as t_rootNodeId, t.created_by as t_createdBy,
+             t.authored_seq as t_authoredSeq, t.event_seq as t_eventSeq,
+             t.push_count as t_pushCount, t.created_at as t_createdAt,
+             t.deleted_at as t_deletedAt,
+             w.id as w_id, w.name as w_name, w.created_by as w_createdBy,
+             w.created_at as w_createdAt, w.suspended_at as w_suspendedAt,
+             w.deleted_at as w_deletedAt, w.purged_at as w_purgedAt,
+             u.email as actorEmail,
+             coalesce(n.kind, (select k.kind from nodes k
+               where k.tree_id = e.tree_id and k.path = e.path
+               order by k.deleted_at is not null, k.created_at desc limit 1)) as nodeKind
+           from events e
+             join trees t on t.id = e.tree_id
+             join workspaces w on w.id = t.workspace_id
+             left join "user" u on u.id = e.actor_id
+             left join nodes n on n.id = e.node_id
+           where e.tree_id = ? and e.seq = ?`,
+        )
+          .bind(treeId, seq)
+          .first<Record<string, unknown>>(),
+      )
+      if (row === null) return null
+      const pick = (prefix: string) =>
+        Object.fromEntries(
+          Object.entries(row)
+            .filter(([key]) => key.startsWith(prefix))
+            .map(([key, value]) => [key.slice(prefix.length), value]),
+        )
+      const event = {
+        treeId: row.treeId,
+        seq: row.seq,
+        type: row.type,
+        nodeId: row.nodeId,
+        path: row.path,
+        actorId: row.actorId,
+        pushId: row.pushId,
+        detail: row.detail,
+        createdAt: row.createdAt,
+      } as EventRow
+      const kind = row.nodeKind as 'folder' | 'file' | null
+      const path = String(row.path)
+      const linkKind: LinkKind =
+        kind === 'folder' ||
+        path === '' ||
+        (kind === null && (row.type as EventType) === 'push')
+          ? 'folder'
+          : isPageFile(path)
+            ? 'page'
+            : 'file'
+      return {
+        event,
+        tree: pick('t_') as TreeRow,
+        workspace: pick('w_') as WorkspaceRow,
+        actorEmail: (row.actorEmail as string | null) ?? null,
+        linkKind,
+      } satisfies DeliveryFacts
+    })
+
   return {
     expireStagedPushes,
     purgeDeletedNodes,
@@ -580,5 +741,8 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
     finishBlob,
     staleClaims,
     releaseClaim,
+    eventsInRange,
+    eventsSince,
+    eventForDelivery,
   }
 }

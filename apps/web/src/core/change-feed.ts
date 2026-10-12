@@ -13,6 +13,7 @@ import { db } from '../db/client.ts'
 
 import type { Subscriber } from '../hub/tree-hub.ts'
 import { Background } from './background.ts'
+import type { WebhookMessage } from './webhooks.ts'
 import { Bindings } from './bindings.ts'
 import {
   callersCte,
@@ -66,6 +67,21 @@ export class ChangeFeed extends Context.Tag('ChangeFeed')<
   ChangeFeed,
   ChangeFeedService
 >() {}
+
+/**
+ * The Queue message a commit sends: its events' range. Null for a change
+ * that wrote no event.
+ */
+export const webhookMessageOf = (c: Committed): WebhookMessage | null => {
+  if (c.events.length === 0) return null
+  const seqs = c.events.map((e) => e.seq)
+  return {
+    kind: 'events',
+    treeId: c.treeId,
+    fromSeq: Math.min(...seqs) as EventSeq,
+    toSeq: Math.max(...seqs) as EventSeq,
+  }
+}
 
 const logged = (what: string, detail: Record<string, unknown>) =>
   Effect.catchAllCause((cause) =>
@@ -231,15 +247,37 @@ export const ChangeFeedLive: Layer.Layer<ChangeFeed, never, Bindings> =
               (rows) => rows.results.map((r) => r.id),
             )
 
+      /**
+       * The webhook Queue hears of the commit. A message lost here is found
+       * by the next sweep.
+       */
+      const enqueue = (c: Committed) =>
+        Effect.gen(function* () {
+          const message = webhookMessageOf(c)
+          const queue = env.WEBHOOKS
+          if (message === null || queue === undefined) return
+          yield* Effect.tryPromise(() => queue.send(message))
+        })
+
       return {
         published: (c) =>
           Effect.flatMap(Background, (background) =>
-            background.run(
-              address(c).pipe(
-                logged('A change hint was lost', {
-                  tree: c.treeId,
-                  seq: c.seq,
-                }),
+            Effect.zipRight(
+              background.run(
+                address(c).pipe(
+                  logged('A change hint was lost', {
+                    tree: c.treeId,
+                    seq: c.seq,
+                  }),
+                ),
+              ),
+              background.run(
+                enqueue(c).pipe(
+                  logged('A webhook message was not queued', {
+                    tree: c.treeId,
+                    seq: c.seq,
+                  }),
+                ),
               ),
             ),
           ),
@@ -260,10 +298,14 @@ export const ChangeFeedLive: Layer.Layer<ChangeFeed, never, Bindings> =
     }),
   )
 
-/** Tests: records what was published and invalidated, in order. */
+/**
+ * Tests: records what was published and invalidated, in order, and the
+ * Queue message each commit would send.
+ */
 export const ChangeFeedRecorder = (): {
   readonly layer: Layer.Layer<ChangeFeed>
   readonly published: () => readonly Committed[]
+  readonly queued: () => readonly WebhookMessage[]
   readonly invalidated: () => readonly {
     readonly scope: InvalidationScope
     readonly close: CloseSockets
@@ -283,6 +325,11 @@ export const ChangeFeedRecorder = (): {
         ),
     }),
     published: () => [...seen],
+    queued: () =>
+      seen.flatMap((c) => {
+        const message = webhookMessageOf(c)
+        return message === null ? [] : [message]
+      }),
     invalidated: () => [...closed],
   }
 }

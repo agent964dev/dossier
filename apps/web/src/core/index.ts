@@ -11,12 +11,23 @@ export {
   ChangeFeed,
   ChangeFeedLive,
   ChangeFeedRecorder,
+  webhookMessageOf,
   type ChangeFeedService,
   type CloseSockets,
   type Committed,
   type InvalidationScope,
 } from './change-feed.ts'
 export { Watch, WATCH_PATHS, type WatchService } from './watch.ts'
+export {
+  FAILING_AFTER,
+  RETRY_DELAYS_SECONDS,
+  WEBHOOK_EVENTS,
+  Webhooks,
+  type WebhookId,
+  type WebhookMessage,
+  type WebhookView,
+  type WebhooksService,
+} from './webhooks.ts'
 export { Config, type DeploymentConfig } from './config.ts'
 export { CurrentCaller, visitor, type Caller, type Via } from './caller.ts'
 export {

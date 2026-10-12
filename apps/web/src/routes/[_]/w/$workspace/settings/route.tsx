@@ -119,6 +119,13 @@ function WorkspaceSettings() {
             Teams
           </Link>
           <Link
+            to="/_/w/$workspace/settings/webhooks"
+            params={params}
+            className={TAB}
+          >
+            Webhooks
+          </Link>
+          <Link
             to="/_/w/$workspace/settings/workspace"
             params={params}
             className={TAB}
