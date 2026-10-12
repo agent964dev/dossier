@@ -223,7 +223,9 @@ describe('dossier login', () => {
     )
     expect(polls).toHaveLength(240)
     expect(cli.stderr()).toContain('dossier: The sign-in code expired')
-  })
+    // 240 polls through the CLI's real request path take several seconds when
+    // the workspace's suites run in parallel.
+  }, 30_000)
 
   it('fails with exit 4 when the person denies', async () => {
     const { cli } = await setUp(deviceRoute([errorResponse('access_denied')]))
