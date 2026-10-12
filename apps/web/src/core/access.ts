@@ -1071,7 +1071,7 @@ const neededArms = (
           or (${N}.path = rp.path and not exists (select 1 from nodes y
             where y.tree_id = ${lit(treeId)} and y.path = rp.path || '.html'
               and y.deleted_at is null and y.origin = 'authored')))
-      
+      ${arm.joins}
       where ${N}.id <> p.id and ${f.within(sql`${N}.path`)}`
   })
 
