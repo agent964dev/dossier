@@ -1011,8 +1011,9 @@ export const PagesLive: Layer.Layer<
           return yield* Effect.fail(notFound(i.path))
         }
         if (resolved.kind === 'kit') {
-          // The first candidate the handle may open; the base layer's own
-          // files are the same for everyone.
+          // The closest candidate the caller reads decides: one this handle
+          // may not open at this sequence answers not_found, never a farther
+          // file. The base layer's own files are the same for everyone.
           for (const found of resolved.found) {
             if (found.kind === 'base') {
               return {
@@ -1030,7 +1031,7 @@ export const PagesLive: Layer.Layer<
                 { node: found.node, version: found.version },
               ]))
             ) {
-              continue
+              return yield* Effect.fail(notFound(i.path))
             }
             return yield* serveFile(i.path, found.version, i)
           }

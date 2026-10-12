@@ -764,6 +764,44 @@ describe('what a handle may recover', () => {
     ).toMatchObject({ kind: 'file' })
   })
 
+  it('answers not_found at an old sequence when the closest `_` file may not be opened, never a farther one', async () => {
+    const w = await world()
+    const kit = {
+      '_theme.css': ':root { --accent: teal; }',
+      'guides/_theme.css': ':root { --accent: crimson; }',
+      // The page loads no theme, so the view issues none.
+      'guides/page.html': '<title>Guide</title><p>Guide</p>',
+    }
+    await w.repush(kit)
+    const { caller: reader } = await someone()
+    const guides = (await nodeAt(w.treeId, 'guides'))!
+    await share(
+      w.treeId,
+      guides.id,
+      'email',
+      reader.person!.email,
+      'read',
+      w.owner.person!,
+    )
+    const grant = await atTime(view(reader, w.treeId, 'guides/page'))
+    await w.repush({ ...kit, 'guides/_theme.css': ':root { --accent: gold; }' })
+    expect(
+      await atTime(
+        frame(grant.handle, w.treeId, grant.seq, 'guides/_theme.css'),
+      ),
+    ).toBe('not_found')
+    // From a folder below, guides/_theme.css is still the closest.
+    expect(
+      await atTime(
+        frame(grant.handle, w.treeId, grant.seq, 'guides/deeper/_theme.css'),
+      ),
+    ).toBe('not_found')
+    // Asked where the root's is the closest, the unchanged root theme opens.
+    expect(
+      await atTime(frame(grant.handle, w.treeId, grant.seq, '_theme.css')),
+    ).toMatchObject({ kind: 'file' })
+  })
+
   it('issues each srcset candidate when a separator is written as a character reference', async () => {
     const w = await world()
     const html =
