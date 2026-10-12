@@ -1,11 +1,22 @@
 import type { FormSummary, HtmlAnalysis } from './analyze.ts'
 import { closingTime, resolveFormAction } from './forms.ts'
-import { MAX_DEPTH, isKitName, isNodeName, isPageFile } from './paths.ts'
+import {
+  MAX_DEPTH,
+  isKitName,
+  isNodeName,
+  isPageFile,
+  parentOf,
+} from './paths.ts'
 import { decodeSegment, trimUrl } from './urls.ts'
 
 /** The tree as it will be after the push. */
 export interface TreeView {
   readonly kindAt: (path: string) => 'page' | 'file' | 'folder' | 'data' | null
+  /**
+   * A live `_components/<tag>.js` at the folder or above, or a base
+   * component of that tag.
+   */
+  readonly componentAt: (folder: string, tag: string) => boolean
 }
 /** Every HTML file the push writes, with its path inside the tree. */
 export interface PushFile {
@@ -40,11 +51,22 @@ export interface PushProblem {
   readonly message: string
   readonly fix: string
 }
+export type PushWarningCode =
+  /** A page or layout uses a tag no component file above it defines. */
+  | 'component_missing'
+  /** parse5 had to repair a layout's structure. */
+  | 'layout_repaired'
+  /** A layout without a <slot>: pages below go at the end of its body. */
+  | 'layout_without_slot'
 export interface PushWarning {
-  readonly code: string
+  readonly code: PushWarningCode
   readonly path: string
   readonly line: number | null
   readonly message: string
+}
+export interface CheckOptions {
+  /** The paths the push adds or changes; warnings name only these. */
+  readonly warnFor: ReadonlySet<string>
 }
 export interface PushCheck {
   readonly problems: readonly PushProblem[]
@@ -213,20 +235,81 @@ const formProblems = (
   return { problems: found, target }
 }
 
+const isLayoutFile = (path: string): boolean =>
+  path === '_layout.html' || path.endsWith('/_layout.html')
+
+/** A page outside every `_` folder, or a layout. */
+const usesComponents = (path: string): boolean =>
+  isLayoutFile(path) ||
+  !path
+    .split('/')
+    .slice(0, -1)
+    .some((segment) => isKitName(segment))
+
+/**
+ * What a push warns about and still commits: a tag with no component file
+ * above the page or layout that uses it, and a layout parse5 had to repair
+ * or that has no slot.
+ */
+const warningsOf = (
+  path: string,
+  analysis: HtmlAnalysis,
+  tree: TreeView,
+): PushWarning[] => {
+  const found: PushWarning[] = []
+  const folder = parentOf(path)
+  if (usesComponents(path)) {
+    for (const tag of analysis.tags) {
+      if (tree.componentAt(folder, tag)) continue
+      found.push({
+        code: 'component_missing',
+        path,
+        line: null,
+        message: `${path} uses <${tag}>, but no _components/${tag}.js is above it.`,
+      })
+    }
+  }
+  if (isLayoutFile(path)) {
+    for (const repair of analysis.repaired) {
+      found.push({
+        code: 'layout_repaired',
+        path,
+        line: repair.line,
+        message: `${path}: ${repair.message}.`,
+      })
+    }
+    if (analysis.slot === null) {
+      found.push({
+        code: 'layout_without_slot',
+        path,
+        line: null,
+        message: `${path} has no <slot>, so pages below it go at the end of its <body>.`,
+      })
+    }
+  }
+  return found
+}
+
 /**
  * Every problem that stops a push, one HTML file at a time: the file's path,
  * a <base> element, each form's action and closing time, two forms with one
  * target and no ids to tell them apart, and a page that clashes with a
- * folder's index page.
+ * folder's index page. Then the warnings, for the files in `warnFor` (every
+ * file without options).
  */
 export const checkPush = (
   files: readonly PushFile[],
   tree: TreeView,
+  options?: CheckOptions,
 ): PushCheck => {
   const problems: Problem[] = []
+  const warnings: PushWarning[] = []
   const clashes = new Set<string>()
 
   for (const { path, analysis } of files) {
+    if (options === undefined || options.warnFor.has(path)) {
+      warnings.push(...warningsOf(path, analysis, tree))
+    }
     problems.push(...pathProblems(path))
 
     if (analysis.base !== null) {
@@ -284,7 +367,7 @@ export const checkPush = (
       )
     }
   }
-  return { problems, warnings: [] }
+  return { problems, warnings }
 }
 
 /** `a/b.html` against `a/b/index.html`, either way round. */

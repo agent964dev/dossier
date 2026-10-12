@@ -65,6 +65,26 @@ export {
   type Served,
 } from './pages.ts'
 export {
+  BASE_COMPLETE,
+  BaseLayer,
+  BaseLayerFrom,
+  BaseLayerLive,
+  baseKey,
+  type BaseFile,
+  type BaseLayerService,
+  type BaseManifest,
+} from './base-layer.ts'
+export {
+  composedKeyUrl,
+  PageCache,
+  PageCacheLive,
+  PageCacheMemory,
+  type ComposedKey,
+  type PageCacheService,
+} from './page-cache.ts'
+// The lookup itself stays inside core; its answers' shapes do not.
+export type { KitComponent, KitFound, KitItem, LayoutLink } from './lookup.ts'
+export {
   DEFAULT_LIMITS,
   Limits,
   type LimitsService,

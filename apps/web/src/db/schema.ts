@@ -344,6 +344,18 @@ export const nodes = sqliteTable(
     currentVersionId: text('current_version_id'),
     createdAt: integer('created_at').notNull(),
     deletedAt: integer('deleted_at'),
+    /**
+     * The folder where the path's `_` part starts: '' for '_x…', 'a/b' for
+     * 'a/b/_x…', null when no segment starts with '_'. Read by Access, so
+     * the `_` files a readable node reaches are readable in SQL too.
+     */
+    underscoreFrom: text('underscore_from').generatedAlwaysAs(
+      sql`case
+    when substr(path, 1, 1) = '_' then ''
+    when instr(path, '/_') > 0 then substr(path, 1, instr(path, '/_') - 1)
+    else null end`,
+      { mode: 'virtual' },
+    ),
   },
   (t) => [
     uniqueIndex('nodes_live_path_unique')

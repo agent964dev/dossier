@@ -14,6 +14,7 @@ import { Cause, Effect, Exit, Option } from 'effect'
 
 import {
   Access,
+  BaseLayer,
   Config,
   CurrentCaller,
   Pages,
@@ -35,6 +36,7 @@ import {
   requestIdOf,
 } from './caller.ts'
 import {
+  baseResponse,
   codeResponse,
   errorResponse,
   frameFailure,
@@ -236,11 +238,8 @@ export const serve = async (
         return frame()
       case 'static':
         return env.ASSETS.fetch(request)
-      case 'base': {
-        const version = url.pathname.split('/')[3]
-        if (version !== config.baseVersion) return plainNotFound()
-        return env.ASSETS.fetch(request)
-      }
+      case 'base':
+        return baseFile()
       case 'link':
         return link()
       case 'screen':
@@ -331,6 +330,24 @@ export const serve = async (
     }
   }
 
+  /**
+   * /_/base/<version>/<path>: this build's version from Static Assets, any
+   * older one from the copy each deploy keeps in R2.
+   */
+  async function baseFile(): Promise<Response> {
+    const [, , , version = '', ...rest] = url.pathname.split('/')
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return plainNotFound()
+    }
+    if (version === config.baseVersion) return env.ASSETS.fetch(request)
+    const file = await run(
+      runtime,
+      Effect.flatMap(BaseLayer, (base) => base.file(version, rest.join('/'))),
+    )
+    if (file === null) return plainNotFound()
+    return baseResponse(file, request.method === 'HEAD')
+  }
+
   /** A tree's content host: only what the view handle in the path opens. */
   async function frame(): Promise<Response> {
     if (host?.kind !== 'content') return frameFailure(404)
@@ -357,6 +374,7 @@ export const serve = async (
             folder: ref.folder,
             range: request.headers.get('range'),
             ifNoneMatch: request.headers.get('if-none-match'),
+            host: url.host,
           }),
         ),
       )

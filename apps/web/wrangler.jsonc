@@ -17,6 +17,8 @@
   "assets": {
     "binding": "ASSETS",
     "run_worker_first": ["/_/app/*", "/_/base/*"],
+    // Base-layer files keep their names: _layout.html is never a pretty URL.
+    "html_handling": "none",
   },
   // Secrets in every environment: BETTER_AUTH_SECRET, HANDLE_SECRET,
   // SUPER_ADMINS, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.

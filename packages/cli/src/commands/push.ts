@@ -2,7 +2,6 @@ import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 import { Args, Command, Options } from '@effect/cli'
-import type { PushWarning } from '@dossier/html'
 import { Effect, Option } from 'effect'
 
 import { Cli } from '../io.ts'
@@ -13,7 +12,7 @@ import { resolveTarget } from '../target.ts'
 /** The longest message a push may carry. */
 const MESSAGE_LIMIT = 500
 
-const warningText = (warning: PushWarning): string =>
+const warningText = (warning: PushOutcome['warnings'][number]): string =>
   warning.message.startsWith(warning.path)
     ? warning.message
     : `${warning.path}: ${warning.message}`

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import type { Range } from '../src/index.ts'
+import { analyze, type Range } from '../src/index.ts'
 
 /** A fixture page as written, with LF line endings. */
 export const fixture = (name: string): string =>
@@ -14,3 +14,12 @@ export const slicer =
   (source: string) =>
   (range: Range | null): string | null =>
     range === null ? null : source.slice(range.start, range.end)
+
+/** The base layer's own layout, from @dossier/browser. */
+export const baseLayout = () => {
+  const source = readFileSync(
+    new URL('../../browser/src/base/_layout.html', import.meta.url),
+    'utf8',
+  )
+  return { source, analysis: analyze(source), folder: '' }
+}

@@ -12,7 +12,7 @@ import {
   type ShareId,
   type TreeId,
 } from '@dossier/contracts'
-import { analyze, ANALYZER_VERSION, type HtmlAnalysis } from '@dossier/html'
+import type { HtmlAnalysis } from '@dossier/html'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
 
@@ -24,9 +24,16 @@ import {
   type Membership,
   type Role,
 } from './access.ts'
+import type { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { newId, newTreeId } from './ids.ts'
+import {
+  analysisOf,
+  lookupUnderscore,
+  underscoreSplit,
+  type KitFound,
+} from './lookup.ts'
 import type {
   MissingNode,
   NodeRow,
@@ -78,6 +85,17 @@ export type Resolved =
       readonly tree: TreeRow
       /** The link's path inside the tree, encoded. */
       readonly to: string
+    }
+  /**
+   * A `_` path: every candidate the lookup reaches, closest first. The
+   * caller takes the first it may read.
+   */
+  | {
+      readonly kind: 'kit'
+      readonly tree: TreeRow
+      /** Where the path's `_` part starts; it need not exist. */
+      readonly folder: string
+      readonly found: readonly KitFound[]
     }
 
 export interface FileBody {
@@ -306,6 +324,9 @@ const basisHolds = (basis: Basis, personId: string): Statement => {
                 where m.workspace_id = ? and m.user_id = ? and w.deleted_at is null)`,
         binds: [basis.workspaceId, basis.userId],
       }
+    // Reach gives read only, which no change rests on.
+    case 'reach':
+      return { sql: '0', binds: [] }
   }
 }
 
@@ -534,55 +555,206 @@ export const linkPathOf = (path: string, folder: boolean): string => {
   return folder || path.endsWith('/') ? `${encoded}/` : encoded
 }
 
-export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
-  Layer.effect(
-    TreeStore,
-    Effect.gen(function* () {
-      const bindings = yield* Bindings
-      const access = yield* Access
-      const { DB, BLOBS } = bindings
-      const database = db(bindings)
+export const TreeStoreLive: Layer.Layer<
+  TreeStore,
+  never,
+  Bindings | Access | BaseLayer
+> = Layer.effect(
+  TreeStore,
+  Effect.gen(function* () {
+    const context = yield* Effect.context<Bindings | BaseLayer>()
+    const bindings = yield* Bindings
+    const access = yield* Access
+    const { DB, BLOBS } = bindings
+    const database = db(bindings)
 
-      const read = <A>(run: () => Promise<A>) =>
-        Effect.tryPromise({ try: run, catch: unavailable })
+    const read = <A>(run: () => Promise<A>) =>
+      Effect.tryPromise({ try: run, catch: unavailable })
 
-      const workspace = (name: string) =>
-        read(() =>
+    const workspace = (name: string) =>
+      read(() =>
+        database
+          .select()
+          .from(schema.workspaces)
+          .where(
+            and(
+              eq(schema.workspaces.name, name),
+              isNull(schema.workspaces.deletedAt),
+            ),
+          )
+          .get(),
+      ).pipe(
+        Effect.map((row) => (row ?? null) as WorkspaceRow | null),
+        Effect.orDie,
+      )
+
+    const tree = (ws: WorkspaceRow, name: string) =>
+      read(() =>
+        database
+          .select()
+          .from(schema.trees)
+          .where(
+            and(
+              eq(schema.trees.workspaceId, ws.id),
+              eq(schema.trees.name, name),
+              isNull(schema.trees.deletedAt),
+            ),
+          )
+          .get(),
+      ).pipe(
+        Effect.map((row) => (row ?? null) as TreeRow | null),
+        Effect.orDie,
+      )
+
+    const liveNode = (treeId: TreeId, path: string) =>
+      read(() =>
+        database
+          .select()
+          .from(schema.nodes)
+          .where(
+            and(
+              eq(schema.nodes.treeId, treeId),
+              eq(schema.nodes.path, path),
+              isNull(schema.nodes.deletedAt),
+            ),
+          )
+          .get(),
+      ).pipe(Effect.map((row) => (row ?? null) as NodeRow | null))
+
+    /** The node's current version, when it is live. */
+    const versionOf = (node: NodeRow) => {
+      const id = node.currentVersionId
+      return id === null
+        ? Effect.succeed(null)
+        : read(() =>
+            database
+              .select()
+              .from(schema.nodeVersions)
+              .where(eq(schema.nodeVersions.id, id))
+              .get(),
+          ).pipe(
+            Effect.map((row) =>
+              row === undefined || row.state !== 'live'
+                ? null
+                : (row as VersionRow),
+            ),
+          )
+    }
+
+    const locate = (ref: LinkRef) =>
+      Effect.gen(function* () {
+        const missing = (treeId: TreeId | null): MissingNode => ({
+          missing: true,
+          treeId,
+          path: ref.path,
+        })
+        const ws = yield* workspace(ref.workspace)
+        if (ws === null) return missing(null)
+        const found = yield* tree(ws, ref.tree)
+        if (found === null) return missing(null)
+        // `a/b` names the folder a/b, the file a/b, or the page a/b.html.
+        const candidates =
+          ref.folder || ref.path === ''
+            ? [ref.path]
+            : [ref.path, `${ref.path}.html`]
+        for (const path of candidates) {
+          const node = yield* liveNode(found.id, path)
+          if (node === null) continue
+          if (node.kind === 'folder') {
+            return { kind: 'folder', node, tree: found } satisfies Located
+          }
+          if (ref.folder) continue
+          const version = yield* versionOf(node)
+          if (version === null) continue
+          return {
+            kind: 'file',
+            node,
+            version,
+            tree: found,
+          } satisfies Located
+        }
+        return missing(found.id)
+      })
+
+    const treeById = (treeId: TreeId) =>
+      read(() =>
+        database
+          .select({ tree: schema.trees, workspace: schema.workspaces })
+          .from(schema.trees)
+          .innerJoin(
+            schema.workspaces,
+            eq(schema.workspaces.id, schema.trees.workspaceId),
+          )
+          .where(
+            and(
+              eq(schema.trees.id, treeId),
+              isNull(schema.trees.deletedAt),
+              isNull(schema.workspaces.deletedAt),
+            ),
+          )
+          .get(),
+      ).pipe(
+        Effect.map((row) =>
+          row === undefined
+            ? null
+            : {
+                tree: row.tree as TreeRow,
+                workspace: row.workspace as WorkspaceRow,
+              },
+        ),
+      )
+
+    /** An authored or data file's live version now, or at a sequence. */
+    const fileAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
+      Effect.gen(function* () {
+        if (at === undefined) {
+          const node = yield* liveNode(treeId, path)
+          if (node === null || node.kind !== 'file') return null
+          const version = yield* versionOf(node)
+          return version === null ? null : { node, version }
+        }
+        const row = yield* read(() =>
           database
-            .select()
-            .from(schema.workspaces)
+            .select({ node: schema.nodes, version: schema.nodeVersions })
+            .from(schema.nodeVersions)
+            .innerJoin(
+              schema.nodes,
+              eq(schema.nodes.id, schema.nodeVersions.nodeId),
+            )
             .where(
               and(
-                eq(schema.workspaces.name, name),
-                isNull(schema.workspaces.deletedAt),
+                eq(schema.nodes.treeId, treeId),
+                eq(schema.nodes.path, path),
+                eq(schema.nodes.kind, 'file'),
+                eq(schema.nodes.origin, 'authored'),
+                sql`${schema.nodeVersions.authoredSeq} <= ${at}`,
               ),
             )
-            .get(),
-        ).pipe(
-          Effect.map((row) => (row ?? null) as WorkspaceRow | null),
-          Effect.orDie,
-        )
-
-      const tree = (ws: WorkspaceRow, name: string) =>
-        read(() =>
-          database
-            .select()
-            .from(schema.trees)
-            .where(
-              and(
-                eq(schema.trees.workspaceId, ws.id),
-                eq(schema.trees.name, name),
-                isNull(schema.trees.deletedAt),
-              ),
+            .orderBy(
+              sql`${schema.nodeVersions.authoredSeq} desc`,
+              sql`${schema.nodeVersions.revision} desc`,
             )
+            .limit(1)
             .get(),
-        ).pipe(
-          Effect.map((row) => (row ?? null) as TreeRow | null),
-          Effect.orDie,
         )
+        if (row === undefined || row.version.state !== 'live') return null
+        return {
+          node: row.node as NodeRow,
+          version: row.version as VersionRow,
+        }
+      })
 
-      const liveNode = (treeId: TreeId, path: string) =>
-        read(() =>
+    /**
+     * A folder now, or at a sequence: the folder's node, when it holds a
+     * file live at that sequence (the root always exists).
+     */
+    const folderAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
+      Effect.gen(function* () {
+        if (at === undefined) {
+          const node = yield* liveNode(treeId, path)
+          return node !== null && node.kind === 'folder' ? node : null
+        }
+        const node = yield* read(() =>
           database
             .select()
             .from(schema.nodes)
@@ -590,577 +762,412 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
               and(
                 eq(schema.nodes.treeId, treeId),
                 eq(schema.nodes.path, path),
-                isNull(schema.nodes.deletedAt),
+                eq(schema.nodes.kind, 'folder'),
               ),
             )
+            .orderBy(
+              sql`${schema.nodes.deletedAt} is not null`,
+              sql`${schema.nodes.createdAt} desc`,
+            )
+            .limit(1)
             .get(),
-        ).pipe(Effect.map((row) => (row ?? null) as NodeRow | null))
-
-      /** The node's current version, when it is live. */
-      const versionOf = (node: NodeRow) => {
-        const id = node.currentVersionId
-        return id === null
-          ? Effect.succeed(null)
-          : read(() =>
-              database
-                .select()
-                .from(schema.nodeVersions)
-                .where(eq(schema.nodeVersions.id, id))
-                .get(),
-            ).pipe(
-              Effect.map((row) =>
-                row === undefined || row.state !== 'live'
-                  ? null
-                  : (row as VersionRow),
-              ),
-            )
-      }
-
-      const locate = (ref: LinkRef) =>
-        Effect.gen(function* () {
-          const missing = (treeId: TreeId | null): MissingNode => ({
-            missing: true,
-            treeId,
-            path: ref.path,
-          })
-          const ws = yield* workspace(ref.workspace)
-          if (ws === null) return missing(null)
-          const found = yield* tree(ws, ref.tree)
-          if (found === null) return missing(null)
-          // `a/b` names the folder a/b, the file a/b, or the page a/b.html.
-          const candidates =
-            ref.folder || ref.path === ''
-              ? [ref.path]
-              : [ref.path, `${ref.path}.html`]
-          for (const path of candidates) {
-            const node = yield* liveNode(found.id, path)
-            if (node === null) continue
-            if (node.kind === 'folder') {
-              return { kind: 'folder', node, tree: found } satisfies Located
-            }
-            if (ref.folder) continue
-            const version = yield* versionOf(node)
-            if (version === null) continue
-            return {
-              kind: 'file',
-              node,
-              version,
-              tree: found,
-            } satisfies Located
-          }
-          return missing(found.id)
-        })
-
-      const treeById = (treeId: TreeId) =>
-        read(() =>
-          database
-            .select({ tree: schema.trees, workspace: schema.workspaces })
-            .from(schema.trees)
-            .innerJoin(
-              schema.workspaces,
-              eq(schema.workspaces.id, schema.trees.workspaceId),
-            )
-            .where(
-              and(
-                eq(schema.trees.id, treeId),
-                isNull(schema.trees.deletedAt),
-                isNull(schema.workspaces.deletedAt),
-              ),
-            )
-            .get(),
-        ).pipe(
-          Effect.map((row) =>
-            row === undefined
-              ? null
-              : {
-                  tree: row.tree as TreeRow,
-                  workspace: row.workspace as WorkspaceRow,
-                },
-          ),
         )
-
-      /** An authored or data file's live version now, or at a sequence. */
-      const fileAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
-        Effect.gen(function* () {
-          if (at === undefined) {
-            const node = yield* liveNode(treeId, path)
-            if (node === null || node.kind !== 'file') return null
-            const version = yield* versionOf(node)
-            return version === null ? null : { node, version }
-          }
-          const row = yield* read(() =>
-            database
-              .select({ node: schema.nodes, version: schema.nodeVersions })
-              .from(schema.nodeVersions)
-              .innerJoin(
-                schema.nodes,
-                eq(schema.nodes.id, schema.nodeVersions.nodeId),
-              )
-              .where(
-                and(
-                  eq(schema.nodes.treeId, treeId),
-                  eq(schema.nodes.path, path),
-                  eq(schema.nodes.kind, 'file'),
-                  eq(schema.nodes.origin, 'authored'),
-                  sql`${schema.nodeVersions.authoredSeq} <= ${at}`,
-                ),
-              )
-              .orderBy(
-                sql`${schema.nodeVersions.authoredSeq} desc`,
-                sql`${schema.nodeVersions.revision} desc`,
-              )
-              .limit(1)
-              .get(),
-          )
-          if (row === undefined || row.version.state !== 'live') return null
-          return {
-            node: row.node as NodeRow,
-            version: row.version as VersionRow,
-          }
-        })
-
-      /**
-       * A folder now, or at a sequence: the folder's node, when it holds a
-       * file live at that sequence (the root always exists).
-       */
-      const folderAt = (treeId: TreeId, path: string, at?: AuthoredSeq) =>
-        Effect.gen(function* () {
-          if (at === undefined) {
-            const node = yield* liveNode(treeId, path)
-            return node !== null && node.kind === 'folder' ? node : null
-          }
-          const node = yield* read(() =>
-            database
-              .select()
-              .from(schema.nodes)
-              .where(
-                and(
-                  eq(schema.nodes.treeId, treeId),
-                  eq(schema.nodes.path, path),
-                  eq(schema.nodes.kind, 'folder'),
-                ),
-              )
-              .orderBy(
-                sql`${schema.nodes.deletedAt} is not null`,
-                sql`${schema.nodes.createdAt} desc`,
-              )
-              .limit(1)
-              .get(),
-          )
-          if (node === undefined) return null
-          if (path === '') return node as NodeRow
-          const held = yield* read(() =>
-            DB.prepare(
-              `select 1 as held from nodes n
+        if (node === undefined) return null
+        if (path === '') return node as NodeRow
+        const held = yield* read(() =>
+          DB.prepare(
+            `select 1 as held from nodes n
                where n.tree_id = ?1 and n.kind = 'file' and n.origin = 'authored'
                  and substr(n.path, 1, length(?2) + 1) = ?2 || '/'
                  and (select v.state from node_versions v
                         where v.node_id = n.id and v.authored_seq <= ?3
                         order by v.authored_seq desc, v.revision desc limit 1) = 'live'
                limit 1`,
-            )
-              .bind(treeId, path, at)
-              .first<{ held: number }>(),
           )
-          return held === null ? null : (node as NodeRow)
-        })
+            .bind(treeId, path, at)
+            .first<{ held: number }>(),
+        )
+        return held === null ? null : (node as NodeRow)
+      })
 
-      const resolve = (ref: LinkRef | TreeRef, at?: AuthoredSeq) =>
-        Effect.gen(function* () {
-          let found: TreeRow | null
-          if ('treeId' in ref) {
-            found = (yield* treeById(ref.treeId))?.tree ?? null
-          } else {
-            const ws = yield* workspace(ref.workspace)
-            found = ws === null ? null : yield* tree(ws, ref.tree)
-          }
-          const missing = (): MissingNode => ({
-            missing: true,
-            treeId: found?.id ?? null,
-            path: ref.path,
-          })
-          if (found === null) return missing()
-          const t = found
-          const asked = linkPathOf(ref.path, ref.folder || ref.path === '')
-          const page = (file: { node: NodeRow; version: VersionRow }) => {
-            const linkPath = linkPathOf(pageLinkPath(file.node.path), false)
-            return linkPath === asked
-              ? ({
-                  kind: 'page',
-                  ...file,
-                  tree: t,
-                  linkPath,
-                } satisfies Resolved)
-              : ({
-                  kind: 'redirect',
-                  node: file.node,
-                  tree: t,
-                  to: linkPath,
-                } satisfies Resolved)
-          }
-          if (ref.folder || ref.path === '') {
-            const folder = yield* folderAt(t.id, ref.path, at)
-            if (folder === null) return missing()
-            const index = yield* fileAt(
-              t.id,
-              joinPath(ref.path, 'index.html'),
-              at,
-            )
-            if (index !== null) return page(index)
-            return { kind: 'folder', node: folder, tree: t } satisfies Resolved
-          }
-          const html = yield* fileAt(t.id, `${ref.path}.html`, at)
-          if (html !== null) return page(html)
+    const resolve = (ref: LinkRef | TreeRef, at?: AuthoredSeq) =>
+      Effect.gen(function* () {
+        let found: TreeRow | null
+        if ('treeId' in ref) {
+          found = (yield* treeById(ref.treeId))?.tree ?? null
+        } else {
+          const ws = yield* workspace(ref.workspace)
+          found = ws === null ? null : yield* tree(ws, ref.tree)
+        }
+        const missing = (): MissingNode => ({
+          missing: true,
+          treeId: found?.id ?? null,
+          path: ref.path,
+        })
+        if (found === null) return missing()
+        const t = found
+        // A `_` path is answered by the closest `_` file the lookup reaches.
+        const split = underscoreSplit(ref.path)
+        if (split !== null) {
+          const candidates = yield* lookupUnderscore({
+            treeId: t.id,
+            folder: split.from,
+            rest: split.rest,
+            at: at ?? (t.authoredSeq as AuthoredSeq),
+          }).pipe(Effect.provide(context))
+          return {
+            kind: 'kit',
+            tree: t,
+            folder: split.from,
+            found: candidates,
+          } satisfies Resolved
+        }
+        const asked = linkPathOf(ref.path, ref.folder || ref.path === '')
+        const page = (file: { node: NodeRow; version: VersionRow }) => {
+          const linkPath = linkPathOf(pageLinkPath(file.node.path), false)
+          return linkPath === asked
+            ? ({
+                kind: 'page',
+                ...file,
+                tree: t,
+                linkPath,
+              } satisfies Resolved)
+            : ({
+                kind: 'redirect',
+                node: file.node,
+                tree: t,
+                to: linkPath,
+              } satisfies Resolved)
+        }
+        if (ref.folder || ref.path === '') {
           const folder = yield* folderAt(t.id, ref.path, at)
-          if (folder !== null) {
-            return {
-              kind: 'redirect',
-              node: folder,
-              tree: t,
-              to: linkPathOf(ref.path, true),
-            } satisfies Resolved
-          }
-          const file = yield* fileAt(t.id, ref.path, at)
-          if (file === null) return missing()
-          if (file.node.name.endsWith('.html')) return page(file)
-          return { kind: 'file', ...file, tree: t } satisfies Resolved
-        })
-
-      const analysis = (sha256: Sha256) =>
-        Effect.gen(function* () {
-          const stored = yield* read(() =>
-            DB.prepare(
-              `select json from analyses where sha256 = ? and analyzer = 'html' and version = ?`,
-            )
-              .bind(sha256, ANALYZER_VERSION)
-              .first<{ json: string }>(),
+          if (folder === null) return missing()
+          const index = yield* fileAt(
+            t.id,
+            joinPath(ref.path, 'index.html'),
+            at,
           )
-          if (stored !== null) return JSON.parse(stored.json) as HtmlAnalysis
-          const object = yield* read(() => BLOBS.get(blobKey(sha256)))
-          if (object === null) return null
-          const source = yield* read(() => object.text())
-          const result = analyze(source)
-          const at = yield* Clock.currentTimeMillis
-          yield* read(() =>
-            DB.prepare(
-              `insert into analyses (sha256, analyzer, version, json, created_at)
-               values (?, 'html', ?, ?, ?) on conflict do nothing`,
-            )
-              .bind(sha256, ANALYZER_VERSION, JSON.stringify(result), at)
-              .run(),
-          )
-          return result
-        }).pipe(Effect.orDie)
+          if (index !== null) return page(index)
+          return { kind: 'folder', node: folder, tree: t } satisfies Resolved
+        }
+        const html = yield* fileAt(t.id, `${ref.path}.html`, at)
+        if (html !== null) return page(html)
+        const folder = yield* folderAt(t.id, ref.path, at)
+        if (folder !== null) {
+          return {
+            kind: 'redirect',
+            node: folder,
+            tree: t,
+            to: linkPathOf(ref.path, true),
+          } satisfies Resolved
+        }
+        const file = yield* fileAt(t.id, ref.path, at)
+        if (file === null) return missing()
+        if (file.node.name.endsWith('.html')) return page(file)
+        return { kind: 'file', ...file, tree: t } satisfies Resolved
+      })
 
-      const holdBlob = (
-        holder: { readonly kind: HoldKind; readonly id: string },
-        sha256: Sha256,
-        size: number,
-      ) =>
-        Effect.gen(function* () {
-          const at = yield* Clock.currentTimeMillis
-          const results = yield* read(() =>
-            DB.batch([
-              DB.prepare(
-                `insert into blobs (sha256, size, ref_count, state, first_seen_at)
+    const analysis = (sha256: Sha256) =>
+      analysisOf(sha256).pipe(Effect.provide(context))
+
+    const holdBlob = (
+      holder: { readonly kind: HoldKind; readonly id: string },
+      sha256: Sha256,
+      size: number,
+    ) =>
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis
+        const results = yield* read(() =>
+          DB.batch([
+            DB.prepare(
+              `insert into blobs (sha256, size, ref_count, state, first_seen_at)
                  values (?, ?, 0, 'live', ?) on conflict do nothing`,
-              ).bind(sha256, size, at),
-              DB.prepare(
-                `insert into blob_holds (holder_kind, holder_id, sha256, verified, created_at)
+            ).bind(sha256, size, at),
+            DB.prepare(
+              `insert into blob_holds (holder_kind, holder_id, sha256, verified, created_at)
                  select ?, ?, ?, 0, ? where exists
                    (select 1 from blobs where sha256 = ? and state = 'live')
                  on conflict do nothing`,
-              ).bind(holder.kind, holder.id, sha256, at, sha256),
-              DB.prepare('select state from blobs where sha256 = ?').bind(
-                sha256,
-              ),
-            ]),
-          ).pipe(Effect.orDie)
-          const state = (
-            results[2]?.results[0] as { state?: string } | undefined
-          )?.state
-          if (state !== 'live') {
-            return yield* Effect.fail(
-              dossierError(
-                'blob_reclaiming',
-                'This file is being cleaned up. Upload it again shortly.',
-                'Push again in a minute.',
+            ).bind(holder.kind, holder.id, sha256, at, sha256),
+            DB.prepare('select state from blobs where sha256 = ?').bind(sha256),
+          ]),
+        ).pipe(Effect.orDie)
+        const state = (results[2]?.results[0] as { state?: string } | undefined)
+          ?.state
+        if (state !== 'live') {
+          return yield* Effect.fail(
+            dossierError(
+              'blob_reclaiming',
+              'This file is being cleaned up. Upload it again shortly.',
+              'Push again in a minute.',
+            ),
+          )
+        }
+      })
+
+    const confirmHold = (
+      holder: { readonly kind: HoldKind; readonly id: string },
+      sha256: Sha256,
+      size: number,
+    ) =>
+      read(() =>
+        DB.batch([
+          // Verified bytes fix the blob's size, whatever row came first.
+          DB.prepare('update blobs set size = ? where sha256 = ?').bind(
+            size,
+            sha256,
+          ),
+          DB.prepare(
+            `update blob_holds set verified = 1
+               where holder_kind = ? and holder_id = ? and sha256 = ?`,
+          ).bind(holder.kind, holder.id, sha256),
+        ]),
+      ).pipe(Effect.asVoid, Effect.orDie)
+
+    const dropHold = (
+      holder: { readonly kind: HoldKind; readonly id: string },
+      sha256: Sha256,
+    ) =>
+      read(() =>
+        DB.prepare(
+          `delete from blob_holds where holder_kind = ? and holder_id = ?
+               and sha256 = ? and verified = 0`,
+        )
+          .bind(holder.kind, holder.id, sha256)
+          .run(),
+      ).pipe(Effect.asVoid, Effect.orDie)
+
+    const list = (folder: Granted<'read'>, depth: 'one' | 'all') =>
+      Effect.gen(function* () {
+        const readable = yield* access.readable(folder.treeId)
+        const below =
+          folder.path === ''
+            ? sql`${schema.nodes.depth} > 0`
+            : sql`substr(${schema.nodes.path}, 1, length(${folder.path}) + 1) = ${`${folder.path}/`}`
+        const rows = yield* read(() =>
+          database
+            .select({
+              node: schema.nodes,
+              sha256: schema.nodeVersions.blobSha256,
+              size: schema.nodeVersions.size,
+              contentType: schema.nodeVersions.contentType,
+              pushNumber: schema.pushes.number,
+              pushAt: schema.pushes.committedAt,
+              // Any analyzer's title: a new analyzer reads titles alike.
+              title: sql<string | null>`(select json_extract(a.json, '$.title')
+                  from analyses a where a.sha256 = ${schema.nodeVersions.blobSha256}
+                  and a.analyzer = 'html' order by a.version desc limit 1)`,
+            })
+            .from(schema.nodes)
+            .leftJoin(
+              schema.nodeVersions,
+              eq(schema.nodeVersions.id, schema.nodes.currentVersionId),
+            )
+            .leftJoin(
+              schema.pushes,
+              eq(schema.pushes.id, schema.nodeVersions.pushId),
+            )
+            .where(
+              and(
+                eq(schema.nodes.treeId, folder.treeId),
+                isNull(schema.nodes.deletedAt),
+                below,
+                readable.where,
               ),
             )
+            .all(),
+        ).pipe(Effect.orDie)
+        const files = new Set(
+          rows.filter((r) => r.node.kind === 'file').map((r) => r.node.path),
+        )
+        const entries = rows.map((row): Entry => {
+          const node = row.node as NodeRow
+          const isFile = node.kind === 'file'
+          const kind: Entry['kind'] =
+            node.origin === 'data'
+              ? 'data'
+              : isKitPath(node.path)
+                ? 'kit'
+                : isFile
+                  ? node.name.endsWith('.html')
+                    ? 'page'
+                    : 'attachment'
+                  : files.has(`${node.path}/index.html`)
+                    ? 'page'
+                    : 'folder'
+          return {
+            name: node.name,
+            path: node.path,
+            kind,
+            node,
+            size: isFile ? row.size : null,
+            sha256: isFile ? (row.sha256 as Sha256 | null) : null,
+            contentType: isFile ? row.contentType : null,
+            title: row.title ?? null,
+            push:
+              row.pushNumber === null || row.pushAt === null
+                ? null
+                : { number: row.pushNumber as PushNumber, at: row.pushAt },
+            pages: null,
           }
         })
-
-      const confirmHold = (
-        holder: { readonly kind: HoldKind; readonly id: string },
-        sha256: Sha256,
-        size: number,
-      ) =>
-        read(() =>
-          DB.batch([
-            // Verified bytes fix the blob's size, whatever row came first.
-            DB.prepare('update blobs set size = ? where sha256 = ?').bind(
-              size,
-              sha256,
-            ),
-            DB.prepare(
-              `update blob_holds set verified = 1
-               where holder_kind = ? and holder_id = ? and sha256 = ?`,
-            ).bind(holder.kind, holder.id, sha256),
-          ]),
-        ).pipe(Effect.asVoid, Effect.orDie)
-
-      const dropHold = (
-        holder: { readonly kind: HoldKind; readonly id: string },
-        sha256: Sha256,
-      ) =>
-        read(() =>
-          DB.prepare(
-            `delete from blob_holds where holder_kind = ? and holder_id = ?
-               and sha256 = ? and verified = 0`,
-          )
-            .bind(holder.kind, holder.id, sha256)
-            .run(),
-        ).pipe(Effect.asVoid, Effect.orDie)
-
-      const list = (folder: Granted<'read'>, depth: 'one' | 'all') =>
-        Effect.gen(function* () {
-          const readable = yield* access.readable(folder.treeId)
-          const below =
-            folder.path === ''
-              ? sql`${schema.nodes.depth} > 0`
-              : sql`substr(${schema.nodes.path}, 1, length(${folder.path}) + 1) = ${`${folder.path}/`}`
-          const rows = yield* read(() =>
-            database
-              .select({
-                node: schema.nodes,
-                sha256: schema.nodeVersions.blobSha256,
-                size: schema.nodeVersions.size,
-                contentType: schema.nodeVersions.contentType,
-                pushNumber: schema.pushes.number,
-                pushAt: schema.pushes.committedAt,
-                title: sql<
-                  string | null
-                >`(select json_extract(a.json, '$.title')
-                  from analyses a where a.sha256 = ${schema.nodeVersions.blobSha256}
-                  and a.analyzer = 'html' and a.version = ${ANALYZER_VERSION})`,
-              })
-              .from(schema.nodes)
-              .leftJoin(
-                schema.nodeVersions,
-                eq(schema.nodeVersions.id, schema.nodes.currentVersionId),
-              )
-              .leftJoin(
-                schema.pushes,
-                eq(schema.pushes.id, schema.nodeVersions.pushId),
-              )
-              .where(
-                and(
-                  eq(schema.nodes.treeId, folder.treeId),
-                  isNull(schema.nodes.deletedAt),
-                  below,
-                  readable.where,
-                ),
-              )
-              .all(),
-          ).pipe(Effect.orDie)
-          const files = new Set(
-            rows.filter((r) => r.node.kind === 'file').map((r) => r.node.path),
-          )
-          const entries = rows.map((row): Entry => {
-            const node = row.node as NodeRow
-            const isFile = node.kind === 'file'
-            const kind: Entry['kind'] =
-              node.origin === 'data'
-                ? 'data'
-                : isKitPath(node.path)
-                  ? 'kit'
-                  : isFile
-                    ? node.name.endsWith('.html')
-                      ? 'page'
-                      : 'attachment'
-                    : files.has(`${node.path}/index.html`)
-                      ? 'page'
-                      : 'folder'
+        if (depth === 'all') return entries.sort(byListingOrder)
+        return entries
+          .filter((entry) => entry.node.depth === folder.depth + 1)
+          .map((entry): Entry => {
+            if (entry.node.kind !== 'folder') return entry
+            const prefix = `${entry.path}/`
+            const inside = entries.filter((e) => e.path.startsWith(prefix))
+            const latest = inside.reduce<Entry['push']>(
+              (best, e) =>
+                e.push !== null &&
+                (best === null || e.push.number > best.number)
+                  ? e.push
+                  : best,
+              null,
+            )
+            const index = entries.find(
+              (e) => e.path === `${entry.path}/index.html`,
+            )
             return {
-              name: node.name,
-              path: node.path,
-              kind,
-              node,
-              size: isFile ? row.size : null,
-              sha256: isFile ? (row.sha256 as Sha256 | null) : null,
-              contentType: isFile ? row.contentType : null,
-              title: row.title ?? null,
-              push:
-                row.pushNumber === null || row.pushAt === null
-                  ? null
-                  : { number: row.pushNumber as PushNumber, at: row.pushAt },
-              pages: null,
+              ...entry,
+              push: latest,
+              title: index?.title ?? null,
+              pages: inside.filter(
+                (e) => e.node.kind === 'file' && e.name.endsWith('.html'),
+              ).length,
             }
           })
-          if (depth === 'all') return entries.sort(byListingOrder)
-          return entries
-            .filter((entry) => entry.node.depth === folder.depth + 1)
-            .map((entry): Entry => {
-              if (entry.node.kind !== 'folder') return entry
-              const prefix = `${entry.path}/`
-              const inside = entries.filter((e) => e.path.startsWith(prefix))
-              const latest = inside.reduce<Entry['push']>(
-                (best, e) =>
-                  e.push !== null &&
-                  (best === null || e.push.number > best.number)
-                    ? e.push
-                    : best,
-                null,
-              )
-              const index = entries.find(
-                (e) => e.path === `${entry.path}/index.html`,
-              )
-              return {
-                ...entry,
-                push: latest,
-                title: index?.title ?? null,
-                pages: inside.filter(
-                  (e) => e.node.kind === 'file' && e.name.endsWith('.html'),
-                ).length,
-              }
-            })
-            .sort(byListingOrder)
-        })
+          .sort(byListingOrder)
+      })
 
-      const readFile = (file: Granted<'read'>) =>
-        Effect.gen(function* () {
-          const gone = dossierError(
-            'not_found',
-            'Nothing is here, or you cannot open it.',
-            null,
-            file.path,
-          )
-          const version = yield* versionOf(file).pipe(Effect.orDie)
-          const sha = version?.blobSha256 ?? null
-          if (version === null || sha === null) {
-            return yield* Effect.fail(gone)
-          }
-          const object = yield* read(() => BLOBS.get(blobKey(sha))).pipe(
-            Effect.orDie,
-          )
-          if (object === null) {
-            console.error('A blob is missing from R2', { sha256: sha })
-            return yield* Effect.fail(gone)
-          }
-          return {
-            version,
-            body: object.body,
-            size: object.size,
-            etag: sha,
-          } satisfies FileBody
-        })
+    const readFile = (file: Granted<'read'>) =>
+      Effect.gen(function* () {
+        const gone = dossierError(
+          'not_found',
+          'Nothing is here, or you cannot open it.',
+          null,
+          file.path,
+        )
+        const version = yield* versionOf(file).pipe(Effect.orDie)
+        const sha = version?.blobSha256 ?? null
+        if (version === null || sha === null) {
+          return yield* Effect.fail(gone)
+        }
+        const object = yield* read(() => BLOBS.get(blobKey(sha))).pipe(
+          Effect.orDie,
+        )
+        if (object === null) {
+          console.error('A blob is missing from R2', { sha256: sha })
+          return yield* Effect.fail(gone)
+        }
+        return {
+          version,
+          body: object.body,
+          size: object.size,
+          etag: sha,
+        } satisfies FileBody
+      })
 
-      const change = <A, E>(
-        startTree: TreeId | null,
-        plan: (cs: ChangeSet) => Effect.Effect<A, E>,
-      ) =>
-        Effect.gen(function* () {
-          const caller = yield* CurrentCaller
-          const person = caller.person
-          if (person === null) {
-            return yield* Effect.die(new Error('a change needs a person'))
-          }
-          const now = yield* Clock.currentTimeMillis
-          const guardId = newId()
-          const keyId = caller.via.kind === 'agent' ? caller.via.keyId : null
-          let treeId = startTree
-          const tid = (): TreeId => {
-            if (treeId === null) throw new Error('the change has no tree yet')
-            return treeId
-          }
-          const creates: Statement[] = []
-          const writes: Statement[] = []
-          const heads: Statement[] = []
-          const blobGuards: Statement[] = []
-          const stateGuards: Statement[] = []
-          /** Checked after the writes: the tree came out as the change meant. */
-          const outcomes: Statement[] = []
-          const bases: Statement[] = []
-          const events: NewEvent[] = []
-          let authored = 0
-          let pushCount = 0
+    const change = <A, E>(
+      startTree: TreeId | null,
+      plan: (cs: ChangeSet) => Effect.Effect<A, E>,
+    ) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const person = caller.person
+        if (person === null) {
+          return yield* Effect.die(new Error('a change needs a person'))
+        }
+        const now = yield* Clock.currentTimeMillis
+        const guardId = newId()
+        const keyId = caller.via.kind === 'agent' ? caller.via.keyId : null
+        let treeId = startTree
+        const tid = (): TreeId => {
+          if (treeId === null) throw new Error('the change has no tree yet')
+          return treeId
+        }
+        const creates: Statement[] = []
+        const writes: Statement[] = []
+        const heads: Statement[] = []
+        const blobGuards: Statement[] = []
+        const stateGuards: Statement[] = []
+        /** Checked after the writes: the tree came out as the change meant. */
+        const outcomes: Statement[] = []
+        const bases: Statement[] = []
+        const events: NewEvent[] = []
+        let authored = 0
+        let pushCount = 0
 
-          const cs: ChangeSet = {
-            guardHead: (path, base) => {
-              heads.push({
-                sql: `not exists (select 1 from node_versions v join nodes n on n.id = v.node_id
+        const cs: ChangeSet = {
+          guardHead: (path, base) => {
+            heads.push({
+              sql: `not exists (select 1 from node_versions v join nodes n on n.id = v.node_id
                         where v.tree_id = ? and n.origin = 'authored' and v.authored_seq > ?
                           and ${under('n.path', '?')})`,
-                binds: [tid(), base, path, path, path, path],
-              })
-            },
+              binds: [tid(), base, path, path, path, path],
+            })
+          },
 
-            createTree: (member, name) => {
-              if (treeId !== null) {
-                throw new Error('createTree in a change that has its tree')
-              }
-              const id = newTreeId()
-              const rootId = newId() as NodeId
-              treeId = id
-              creates.push(
-                {
-                  sql: `insert into trees (id, workspace_id, name, root_node_id, created_by,
+          createTree: (member, name) => {
+            if (treeId !== null) {
+              throw new Error('createTree in a change that has its tree')
+            }
+            const id = newTreeId()
+            const rootId = newId() as NodeId
+            treeId = id
+            creates.push(
+              {
+                sql: `insert into trees (id, workspace_id, name, root_node_id, created_by,
                           authored_seq, event_seq, push_count, created_at, deleted_at)
                         values (?, ?, ?, ?, ?, 0, 0, 0, ?, null)`,
-                  binds: [
-                    id,
-                    member.workspace.id,
-                    name,
-                    rootId,
-                    person.id,
-                    now,
-                  ],
-                },
-                {
-                  sql: `insert into nodes (id, tree_id, parent_id, name, path, depth, kind,
+                binds: [id, member.workspace.id, name, rootId, person.id, now],
+              },
+              {
+                sql: `insert into nodes (id, tree_id, parent_id, name, path, depth, kind,
                           origin, owner_id, current_version_id, created_at, deleted_at)
                         values (?, ?, null, '', '', 0, 'folder', 'authored', null, null, ?, null)`,
-                  binds: [rootId, id, now],
-                },
-                {
-                  sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
+                binds: [rootId, id, now],
+              },
+              {
+                sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
                           created_by, created_at)
                         values (?, ?, ?, 'email', ?, 'write', ?, ?)`,
-                  binds: [
-                    newId(),
-                    id,
-                    rootId,
-                    person.email.toLowerCase(),
-                    person.id,
-                    now,
-                  ],
-                },
-              )
-              bases.push(
-                everyBasis([member.basis], person.id),
-                createsTrees(caller),
-              )
-              return makeHandle(rootId)
-            },
+                binds: [
+                  newId(),
+                  id,
+                  rootId,
+                  person.email.toLowerCase(),
+                  person.id,
+                  now,
+                ],
+              },
+            )
+            bases.push(
+              everyBasis([member.basis], person.id),
+              createsTrees(caller),
+            )
+            return makeHandle(rootId)
+          },
 
-            putStaged: (target, pushId) => {
-              const t = tid()
-              authored += 1
-              pushCount += 1
-              if (!isHandle(target)) {
-                bases.push(everyBasis(target.basis, person.id))
-                stateGuards.push({
-                  sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
-                  binds: [target.id],
-                })
-              }
+          putStaged: (target, pushId) => {
+            const t = tid()
+            authored += 1
+            pushCount += 1
+            if (!isHandle(target)) {
+              bases.push(everyBasis(target.basis, person.id))
               stateGuards.push({
-                sql: `exists (select 1 from pushes where id = ? and state = 'staged'
-                        and expires_at > ?)`,
-                binds: [pushId, now],
+                sql: 'exists (select 1 from nodes where id = ? and deleted_at is null)',
+                binds: [target.id],
               })
-              blobGuards.push({
-                sql: `not exists (select 1 from push_files f where f.push_id = ? and (
+            }
+            stateGuards.push({
+              sql: `exists (select 1 from pushes where id = ? and state = 'staged'
+                        and expires_at > ?)`,
+              binds: [pushId, now],
+            })
+            blobGuards.push({
+              sql: `not exists (select 1 from push_files f where f.push_id = ? and (
                         not exists (select 1 from blobs b where b.sha256 = f.sha256
                                       and b.state = 'live')
                         or (not exists (select 1 from blob_holds h where h.holder_kind = 'push'
@@ -1168,192 +1175,190 @@ export const TreeStoreLive: Layer.Layer<TreeStore, never, Bindings | Access> =
                                           and h.verified = 1)
                             and not exists (select 1 from node_versions v
                                               where v.tree_id = ? and v.blob_sha256 = f.sha256))))`,
-                binds: [pushId, t],
-              })
-              outcomes.push(
-                {
-                  // Every staged file is live at its path with its bytes.
-                  sql: `not exists (select 1 from push_files f where f.push_id = ?
+              binds: [pushId, t],
+            })
+            outcomes.push(
+              {
+                // Every staged file is live at its path with its bytes.
+                sql: `not exists (select 1 from push_files f where f.push_id = ?
                           and not exists (select 1 from nodes n
                             join node_versions v on v.id = n.current_version_id
                             where n.tree_id = ? and n.path = f.path and n.deleted_at is null
                               and n.kind = 'file' and v.state = 'live'
                               and v.blob_sha256 = f.sha256))`,
-                  binds: [pushId, t],
-                },
-                {
-                  sql: `not exists (select 1 from push_folders f where f.push_id = ?
+                binds: [pushId, t],
+              },
+              {
+                sql: `not exists (select 1 from push_folders f where f.push_id = ?
                           and not exists (select 1 from nodes n where n.tree_id = ?
                             and n.path = f.path and n.deleted_at is null
                             and n.kind = 'folder'))`,
-                  binds: [pushId, t],
-                },
-                {
-                  // Nothing live sits under a file or a deleted folder.
-                  sql: `not exists (select 1 from nodes c join nodes p on p.id = c.parent_id
+                binds: [pushId, t],
+              },
+              {
+                // Nothing live sits under a file or a deleted folder.
+                sql: `not exists (select 1 from nodes c join nodes p on p.id = c.parent_id
                           where c.tree_id = ? and c.deleted_at is null
                             and (p.kind <> 'folder' or p.deleted_at is not null))`,
-                  binds: [t],
-                },
-              )
-              writes.push(
-                ...stagedWrites({
-                  treeId: t,
-                  pushId,
-                  now,
-                  authorId: person.id,
-                  keyId,
-                }),
-              )
-            },
+                binds: [t],
+              },
+            )
+            writes.push(
+              ...stagedWrites({
+                treeId: t,
+                pushId,
+                now,
+                authorId: person.id,
+                keyId,
+              }),
+            )
+          },
 
-            grant: (on, share) => {
-              const t = tid()
-              const nodeId = isHandle(on) ? handleId(on) : on.id
-              if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
-              writes.push({
-                sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
+          grant: (on, share) => {
+            const t = tid()
+            const nodeId = isHandle(on) ? handleId(on) : on.id
+            if (!isHandle(on)) bases.push(everyBasis(on.basis, person.id))
+            writes.push({
+              sql: `insert into shares (id, tree_id, node_id, target_kind, target, role,
                         created_by, created_at)
                       values (?, ?, ?, ?, ?, ?, ?, ?)
                       on conflict (node_id, target_kind, target) do update set role = excluded.role`,
-                binds: [
-                  newId(),
-                  t,
-                  nodeId,
-                  share.targetKind,
-                  share.target,
-                  share.role,
-                  person.id,
-                  now,
-                ],
-              })
-            },
+              binds: [
+                newId(),
+                t,
+                nodeId,
+                share.targetKind,
+                share.target,
+                share.role,
+                person.id,
+                now,
+              ],
+            })
+          },
 
-            revoke: (on, shareId) => {
-              bases.push(everyBasis(on.basis, person.id))
-              writes.push({
-                sql: 'delete from shares where id = ? and node_id = ?',
-                binds: [shareId, on.id],
-              })
-            },
+          revoke: (on, shareId) => {
+            bases.push(everyBasis(on.basis, person.id))
+            writes.push({
+              sql: 'delete from shares where id = ? and node_id = ?',
+              binds: [shareId, on.id],
+            })
+          },
 
-            event: (e) => {
-              events.push(e)
-            },
-          }
+          event: (e) => {
+            events.push(e)
+          },
+        }
 
-          const result = yield* plan(cs)
-          if (events.length === 0) {
-            return yield* Effect.die(new Error('a change without an event'))
-          }
-          const t = tid()
-          const statements: Statement[] = [
-            ...creates,
-            // Each guard row has its own id, so a change may hold several of
-            // one kind; they all share the change's prefix.
-            ...heads.map((g, i) => guardRow(`${guardId}:head${i}`, 'head', g)),
-            guardRow(
-              `${guardId}:basis`,
-              'basis',
-              allOf([callerLive(caller, now), ...bases]),
-            ),
-            ...(blobGuards.length === 0
-              ? []
-              : [guardRow(`${guardId}:blob`, 'blob', allOf(blobGuards))]),
-            ...(stateGuards.length === 0
-              ? []
-              : [guardRow(`${guardId}:state`, 'state', allOf(stateGuards))]),
-            {
-              sql: `update trees set authored_seq = authored_seq + ?, event_seq = event_seq + ?,
+        const result = yield* plan(cs)
+        if (events.length === 0) {
+          return yield* Effect.die(new Error('a change without an event'))
+        }
+        const t = tid()
+        const statements: Statement[] = [
+          ...creates,
+          // Each guard row has its own id, so a change may hold several of
+          // one kind; they all share the change's prefix.
+          ...heads.map((g, i) => guardRow(`${guardId}:head${i}`, 'head', g)),
+          guardRow(
+            `${guardId}:basis`,
+            'basis',
+            allOf([callerLive(caller, now), ...bases]),
+          ),
+          ...(blobGuards.length === 0
+            ? []
+            : [guardRow(`${guardId}:blob`, 'blob', allOf(blobGuards))]),
+          ...(stateGuards.length === 0
+            ? []
+            : [guardRow(`${guardId}:state`, 'state', allOf(stateGuards))]),
+          {
+            sql: `update trees set authored_seq = authored_seq + ?, event_seq = event_seq + ?,
                       push_count = push_count + ? where id = ?`,
-              binds: [authored, events.length, pushCount, t],
-            },
-            ...writes,
-            ...(outcomes.length === 0
-              ? []
-              : [guardRow(`${guardId}:after`, 'state', allOf(outcomes))]),
-            ...events.map((e, i) => ({
-              sql: `insert into events (tree_id, seq, type, node_id, path, actor_id, push_id,
+            binds: [authored, events.length, pushCount, t],
+          },
+          ...writes,
+          ...(outcomes.length === 0
+            ? []
+            : [guardRow(`${guardId}:after`, 'state', allOf(outcomes))]),
+          ...events.map((e, i) => ({
+            sql: `insert into events (tree_id, seq, type, node_id, path, actor_id, push_id,
                       created_at)
                     values (?1, (select event_seq from trees where id = ?1) - ?2, ?3,
                       coalesce(?4, (select id from nodes where tree_id = ?1 and path = ?5
                                       and deleted_at is null)),
                       ?5, ?6, ?7, ?8)`,
-              binds: [
-                t,
-                events.length - 1 - i,
-                e.type,
-                e.node === undefined
-                  ? null
-                  : isHandle(e.node)
-                    ? handleId(e.node)
-                    : e.node.id,
-                e.path,
-                person.id,
-                e.pushId ?? null,
-                now,
-              ],
-            })),
-            {
-              sql: 'delete from change_guards where substr(id, 1, ?) = ?',
-              binds: [guardId.length + 1, `${guardId}:`],
-            },
-            {
-              sql: `select authored_seq as authoredSeq, event_seq as eventSeq
+            binds: [
+              t,
+              events.length - 1 - i,
+              e.type,
+              e.node === undefined
+                ? null
+                : isHandle(e.node)
+                  ? handleId(e.node)
+                  : e.node.id,
+              e.path,
+              person.id,
+              e.pushId ?? null,
+              now,
+            ],
+          })),
+          {
+            sql: 'delete from change_guards where substr(id, 1, ?) = ?',
+            binds: [guardId.length + 1, `${guardId}:`],
+          },
+          {
+            sql: `select authored_seq as authoredSeq, event_seq as eventSeq
                     from trees where id = ?`,
-              binds: [t],
-            },
-          ]
-          const results = yield* Effect.tryPromise({
-            try: () =>
-              DB.batch(
-                statements.map((s) => DB.prepare(s.sql).bind(...s.binds)),
-              ),
-            catch: failureOf,
-          })
-          const last = results[results.length - 1]?.results[0] as
-            | { authoredSeq: number; eventSeq: number }
-            | undefined
-          if (last === undefined) {
-            return yield* Effect.die(new Error('the change read nothing back'))
-          }
-          // One line per event, naming who, what and which node; no secrets.
-          events.forEach((e, i) => {
-            console.log(
-              JSON.stringify({
-                message: 'tree event',
-                tree: t,
-                seq: last.eventSeq - (events.length - 1 - i),
-                type: e.type,
-                path: e.path,
-                actor: person.id,
-                key: keyId,
-                push: e.pushId ?? null,
-                requestId: caller.requestId,
-              }),
-            )
-          })
-          return {
-            ...result,
-            seq: last.eventSeq as EventSeq,
-            authoredSeq: last.authoredSeq as AuthoredSeq,
-            treeId: t,
-          }
+            binds: [t],
+          },
+        ]
+        const results = yield* Effect.tryPromise({
+          try: () =>
+            DB.batch(statements.map((s) => DB.prepare(s.sql).bind(...s.binds))),
+          catch: failureOf,
         })
+        const last = results[results.length - 1]?.results[0] as
+          | { authoredSeq: number; eventSeq: number }
+          | undefined
+        if (last === undefined) {
+          return yield* Effect.die(new Error('the change read nothing back'))
+        }
+        // One line per event, naming who, what and which node; no secrets.
+        events.forEach((e, i) => {
+          console.log(
+            JSON.stringify({
+              message: 'tree event',
+              tree: t,
+              seq: last.eventSeq - (events.length - 1 - i),
+              type: e.type,
+              path: e.path,
+              actor: person.id,
+              key: keyId,
+              push: e.pushId ?? null,
+              requestId: caller.requestId,
+            }),
+          )
+        })
+        return {
+          ...result,
+          seq: last.eventSeq as EventSeq,
+          authoredSeq: last.authoredSeq as AuthoredSeq,
+          treeId: t,
+        }
+      })
 
-      return {
-        workspace,
-        tree,
-        locate,
-        resolve,
-        treeById,
-        list,
-        read: readFile,
-        analysis,
-        holdBlob,
-        confirmHold,
-        dropHold,
-        change,
-      } satisfies TreeStoreService
-    }),
-  )
+    return {
+      workspace,
+      tree,
+      locate,
+      resolve,
+      treeById,
+      list,
+      read: readFile,
+      analysis,
+      holdBlob,
+      confirmHold,
+      dropHold,
+      change,
+    } satisfies TreeStoreService
+  }),
+)

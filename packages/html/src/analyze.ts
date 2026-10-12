@@ -7,11 +7,12 @@ import {
   isTemplate,
   parseDocument,
 } from './parse.ts'
+import { isCustomElementName } from './kit.ts'
 import { type BodyClose, findRepairs } from './repairs.ts'
-import { isRelativeUrl, isUnderscoreUrl, srcsetUrls, trimUrl } from './urls.ts'
+import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 1
+export const ANALYZER_VERSION: number = 2
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -34,10 +35,14 @@ export type HeadItemKind =
 export interface HeadItem {
   readonly kind: HeadItemKind
   /**
-   * meta: its name, property or http-equiv · link: rel + href · script-src:
-   * src · title: 'title' · otherwise null.
+   * meta: 'name:<v>', 'property:<v>' or 'http-equiv:<v>', lower-cased ·
+   * title: 'title' · otherwise null.
    */
   readonly key: string | null
+  /** link: its rel tokens, lower-cased and space-separated. */
+  readonly rel: string | null
+  /** A link's href or a script's src, as written. */
+  readonly url: string | null
   readonly range: Range
 }
 export interface UrlRef {
@@ -93,7 +98,10 @@ export interface HtmlAnalysis {
   }
   /** Dropped when composing. */
   readonly charsetMetas: readonly Range[]
-  /** The first <slot> in the body, for layouts. */
+  /**
+   * The whole first <slot> element in the body without a name attribute,
+   * outside any <template>: where a layout takes in the page below it.
+   */
   readonly slot: Range | null
   readonly title: string | null
   /** Refused at push. */
@@ -111,24 +119,6 @@ export interface HtmlAnalysis {
 }
 
 const URL_ATTRS = new Set(['href', 'src', 'srcset', 'poster', 'action'])
-
-/** Hyphenated names the HTML standard keeps for SVG and MathML. */
-const RESERVED_NAMES = new Set([
-  'annotation-xml',
-  'color-profile',
-  'font-face',
-  'font-face-src',
-  'font-face-uri',
-  'font-face-format',
-  'font-face-name',
-  'missing-glyph',
-])
-const CUSTOM_NAME =
-  /^[a-z][-.0-9_a-z\u00B7\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u037D\u037F-\u1FFF\u200C-\u200D\u203F\u2040\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}]*$/u
-
-/** A valid custom element name: lower case, a hyphen, not reserved. */
-export const isCustomElementName = (name: string): boolean =>
-  name.includes('-') && CUSTOM_NAME.test(name) && !RESERVED_NAMES.has(name)
 
 const at = (start: number, end: number): Range => ({ start, end })
 
@@ -210,39 +200,46 @@ const relTokens = (element: Element): readonly string[] =>
     .split(/[\t\n\f\r ]+/)
     .filter((token) => token !== '')
 
+/** A meta's key: which of name, property or http-equiv it sets, and to what. */
+const metaKey = (element: Element): string | null => {
+  for (const name of ['name', 'property', 'http-equiv']) {
+    const value = attrOf(element, name)
+    if (value !== null) return `${name}:${value.trim().toLowerCase()}`
+  }
+  return null
+}
+
 const headItem = (element: Element, length: number): HeadItem | null => {
   const range = outerRange(element, length)
   if (range === null) return null
+  const item = (
+    kind: HeadItemKind,
+    key: string | null = null,
+    rel: string | null = null,
+    url: string | null = null,
+  ): HeadItem => ({ kind, key, rel, url, range })
   switch (element.namespaceURI === HTML_NS ? element.tagName : '') {
     case 'title':
-      return { kind: 'title', key: 'title', range }
-    case 'meta': {
-      const key =
-        attrOf(element, 'name') ??
-        attrOf(element, 'property') ??
-        attrOf(element, 'http-equiv')
-      return { kind: 'meta', key: key?.trim().toLowerCase() ?? null, range }
-    }
-    case 'link': {
-      const href = trimUrl(attrOf(element, 'href') ?? '')
-      return {
-        kind: 'link',
-        key: `${relTokens(element).join(' ')} ${href}`,
-        range,
-      }
-    }
+      return item('title', 'title')
+    case 'meta':
+      return item('meta', metaKey(element))
+    case 'link':
+      return item(
+        'link',
+        null,
+        relTokens(element).join(' '),
+        attrOf(element, 'href'),
+      )
     case 'script': {
       const src = attrOf(element, 'src')
-      return src === null
-        ? { kind: 'script', key: null, range }
-        : { kind: 'script-src', key: trimUrl(src), range }
+      return src === null ? item('script') : item('script-src', null, null, src)
     }
     case 'style':
-      return { kind: 'style', key: null, range }
+      return item('style')
     case 'base':
-      return { kind: 'base', key: null, range }
+      return item('base')
     default:
-      return { kind: 'other', key: null, range }
+      return item('other')
   }
 }
 
@@ -375,7 +372,8 @@ export const analyze = (source: string): HtmlAnalysis => {
           name === 'slot' &&
           slot === null &&
           place.inBody &&
-          !place.inTemplate
+          !place.inTemplate &&
+          attrOf(node, 'name') === null
         ) {
           slot = outerRange(node, source.length)
         } else if (name === 'title' && title === null && !place.inTemplate) {
@@ -422,6 +420,20 @@ export const analyze = (source: string): HtmlAnalysis => {
       : 'endOffset' in headClose
         ? headClose.endOffset
         : headClose.end
+
+  // A head whose </head> was never written ends after its last element:
+  // parse5 ends such a head where the token that closed it began, which can
+  // be inside that element.
+  let headContentEnd = headLoc?.startTag?.endOffset ?? 0
+  if (headLoc?.endTag) {
+    headContentEnd = headLoc.endTag.startOffset
+  } else {
+    for (const node of head?.childNodes ?? []) {
+      if (node.nodeName === '#text') continue
+      const end = outerRange(node, source.length)?.end
+      if (end !== undefined) headContentEnd = Math.max(headContentEnd, end)
+    }
+  }
 
   // The body's content, as an exact slice of the source that a layout's slot
   // or a complete document can take in.
@@ -507,10 +519,7 @@ export const analyze = (source: string): HtmlAnalysis => {
         ? at(headLoc.startTag.startOffset, headLoc.startTag.endOffset)
         : null,
       content: headLoc?.startTag
-        ? at(
-            headLoc.startTag.endOffset,
-            headLoc.endTag ? headLoc.endTag.startOffset : headLoc.endOffset,
-          )
+        ? at(headLoc.startTag.endOffset, headContentEnd)
         : null,
       items,
     },

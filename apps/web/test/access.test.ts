@@ -334,6 +334,8 @@ describe('who may do what on a node', () => {
 
 // The point check and the list check agree on random trees, shares and callers.
 
+// `_` files and folders at several depths, so read through reach is part of
+// what the two checks must agree on.
 const PATHS = [
   'a',
   'a/b',
@@ -344,6 +346,12 @@ const PATHS = [
   'f/g.txt',
   'f/h',
   'f/h/i.html',
+  '_layout.html',
+  'a/_theme.css',
+  'a/b/_components',
+  'a/b/_components/x-y.js',
+  'f/_old',
+  'f/_old/_z.txt',
 ]
 
 interface Scenario {
@@ -433,7 +441,7 @@ const plantTree = async (
     const parent = path.includes('/')
       ? path.slice(0, path.lastIndexOf('/'))
       : ''
-    const file = path.includes('.')
+    const file = path.slice(path.lastIndexOf('/') + 1).includes('.')
     statements.push(
       env.DB.prepare(
         `insert into nodes (id, tree_id, parent_id, name, path, depth, kind, origin, created_at,
@@ -541,7 +549,7 @@ describe('the list check', () => {
           )
         }
       }),
-      { numRuns: 40 },
+      { numRuns: 60 },
     )
   })
 })

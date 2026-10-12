@@ -6,6 +6,7 @@ import {
   type Me,
   type PageBootstrap,
 } from '@dossier/contracts/bridge'
+import { startKit } from './kit.ts'
 import { trackLocation } from './location.ts'
 
 export interface Dossier {
@@ -36,6 +37,8 @@ export const createPageClient = (deps: {
   readonly window: Window
 }): Dossier => {
   const { bootstrap, port, window: win } = deps
+  // Components start loading before any author script runs.
+  startKit({ window: win, kit: bootstrap.kit, used: bootstrap.used })
   const embedded = win.parent !== win.top
   const alone = win.top === win
 

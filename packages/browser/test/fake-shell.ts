@@ -18,6 +18,7 @@ export const BOOTSTRAP: PageBootstrap = {
   seq: 3,
   base: 'b1',
   kit: {},
+  used: [],
 }
 
 export const SARA: Me = { email: 'sara@acme.com', name: 'Sara', role: 'write' }

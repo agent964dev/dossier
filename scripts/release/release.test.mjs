@@ -238,7 +238,12 @@ test('migration failure stops deployment; deploy failure never reverses migratio
       '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\ncase "$*" in\n  *"migrations apply"*) exit "$MIGRATION_EXIT";;\n  *"wrangler deploy"*) exit "$DEPLOY_EXIT";;\nesac\n',
       { mode: 0o755 },
     )
-    const run = (migrationExit, deployExit) => {
+    writeFileSync(
+      join(directory, 'bin/bun'),
+      '#!/bin/sh\nprintf "bun %s\\n" "$*" >> "$CALLS"\nexit "$COPY_EXIT"\n',
+      { mode: 0o755 },
+    )
+    const run = (migrationExit, deployExit, copyExit = 0) => {
       const calls = join(directory, 'calls')
       writeFileSync(calls, '')
       const result = spawnSync('bash', [resolve('scripts/release/deploy.sh')], {
@@ -249,6 +254,7 @@ test('migration failure stops deployment; deploy failure never reverses migratio
           CALLS: calls,
           MIGRATION_EXIT: String(migrationExit),
           DEPLOY_EXIT: String(deployExit),
+          COPY_EXIT: String(copyExit),
         },
       })
       return {
@@ -265,13 +271,21 @@ test('migration failure stops deployment; deploy failure never reverses migratio
     )
     const failedDeploy = run(0, 23)
     assert.equal(failedDeploy.status, 23)
-    assert.equal(failedDeploy.calls.length, 2)
-    for (const call of failedDeploy.calls)
+    assert.equal(failedDeploy.calls.length, 3)
+    for (const call of [failedDeploy.calls[0], failedDeploy.calls[2]])
       assert.match(call, /--no-x-provision/)
+    // The base layer is copied into R2 after migrations and before deploy.
     assert.match(
       failedDeploy.calls[1],
+      /^bun scripts\/copy-base.ts --bucket \S+ --env production$/,
+    )
+    assert.match(
+      failedDeploy.calls[2],
       /deploy --config dist\/server\/wrangler.json/,
     )
+    const failedCopy = run(0, 0, 9)
+    assert.equal(failedCopy.status, 9)
+    assert.equal(failedCopy.calls.length, 2)
     assert.equal(run(0, 0).status, 0)
   } finally {
     rmSync(directory, { recursive: true, force: true })

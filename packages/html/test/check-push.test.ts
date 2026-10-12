@@ -13,8 +13,12 @@ import { fixture } from './helpers.ts'
 
 type Kind = ReturnType<TreeView['kindAt']>
 
-const treeOf = (kinds: Record<string, Kind> = {}): TreeView => ({
+const treeOf = (
+  kinds: Record<string, Kind> = {},
+  components: (folder: string, tag: string) => boolean = () => true,
+): TreeView => ({
   kindAt: (path) => kinds[path] ?? null,
+  componentAt: components,
 })
 
 const file = (path: string, source: string): PushFile => ({
@@ -407,5 +411,103 @@ describe('describeProblems', () => {
       fix: 'Fix each file above, then push again.',
       path: 'plan.html',
     })
+  })
+})
+
+describe('the push warnings', () => {
+  /** acme-card lives in guides/_components/, dossier-copy in the base layer. */
+  const components = (folder: string, tag: string): boolean =>
+    tag === 'dossier-copy' ||
+    (tag === 'acme-card' &&
+      (folder === 'guides' || folder.startsWith('guides/')))
+  const tree = treeOf({}, components)
+  const card = '<h1>Delivery plan</h1><acme-card>Erbil depot</acme-card>'
+
+  it('name a page using a component with no file above it, in B-13’s words', () => {
+    const check = checkPush([file('plan.html', card)], tree)
+    expect(check.problems).toEqual([])
+    expect(check.warnings).toEqual([
+      {
+        code: 'component_missing',
+        path: 'plan.html',
+        line: null,
+        message:
+          'plan.html uses <acme-card>, but no _components/acme-card.js is above it.',
+      },
+    ])
+  })
+
+  it('name a layout the same way', () => {
+    const check = checkPush(
+      [
+        file(
+          '_layout.html',
+          `<header><acme-card></acme-card></header><slot></slot>`,
+        ),
+      ],
+      tree,
+    )
+    expect(check.warnings.map((w) => w.message)).toEqual([
+      '_layout.html uses <acme-card>, but no _components/acme-card.js is above it.',
+    ])
+  })
+
+  it('say nothing when a component file above or the base layer provides the tag', () => {
+    const check = checkPush(
+      [
+        file('guides/setup/install.html', card),
+        file('plan.html', '<dossier-copy></dossier-copy>'),
+      ],
+      tree,
+    )
+    expect(check.warnings).toEqual([])
+  })
+
+  it('name a layout parse5 repaired, with the line', () => {
+    const layout =
+      '<header>\n<p>Acme</p>\n<main>\n<div class="wide">\n<slot></slot>\n</main>\n'
+    const check = checkPush([file('guides/_layout.html', layout)], tree)
+    const repaired = check.warnings.filter((w) => w.code === 'layout_repaired')
+    expect(repaired.length).toBeGreaterThan(0)
+    for (const warning of repaired) {
+      expect(warning.path).toBe('guides/_layout.html')
+      expect(warning.message.startsWith('guides/_layout.html: ')).toBe(true)
+      expect(warning.message.endsWith('.')).toBe(true)
+    }
+    expect(repaired.map((w) => w.line)).toContain(4)
+    expect(repaired.find((w) => w.line === 4)?.message).toBe(
+      'guides/_layout.html: the <div> on line 4 has no end tag where it should, so it was closed early.',
+    )
+  })
+
+  it('name a layout without a slot, and only a layout', () => {
+    const check = checkPush(
+      [
+        file('guides/_layout.html', '<header>Acme</header>'),
+        file('guides/page.html', '<p>No slot here.</p>'),
+      ],
+      tree,
+    )
+    expect(check.warnings).toEqual([
+      {
+        code: 'layout_without_slot',
+        path: 'guides/_layout.html',
+        line: null,
+        message:
+          'guides/_layout.html has no <slot>, so pages below it go at the end of its <body>.',
+      },
+    ])
+  })
+
+  it('name only the paths in warnFor', () => {
+    const files = [file('plan.html', card), file('other.html', card)]
+    const check = checkPush(files, tree, { warnFor: new Set(['other.html']) })
+    expect(check.warnings.map((w) => w.path)).toEqual(['other.html'])
+    expect(checkPush(files, tree, { warnFor: new Set() }).warnings).toEqual([])
+  })
+
+  it('never warn for pages inside a `_` folder, which are kit files', () => {
+    const check = checkPush([file('_components/demo.html', card)], tree)
+    expect(check.warnings).toEqual([])
   })
 })

@@ -17,15 +17,33 @@ import type {
   RoleName,
   ShellBoot,
 } from '@dossier/contracts/bridge'
-import { bootstrapTags, compose } from '@dossier/html'
+import {
+  ANALYZER_VERSION,
+  bootstrapTags,
+  compose,
+  COMPOSER_VERSION,
+  layoutsOf,
+  relativeFrom,
+  type HtmlAnalysis,
+  type Source,
+} from '@dossier/html'
+import { sql } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer, Redacted } from 'effect'
 
+import { db, schema } from '../db/client.ts'
 import { Access, type RoleSet } from './access.ts'
+import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { Config } from './config.ts'
 import { hmacSha256, sha256Hex } from './ids.ts'
-import type { MissingNode, TreeRow, VersionRow } from './rows.ts'
+import { composedLayouts, kitAt, kitMap, type LayoutLink } from './lookup.ts'
+import {
+  composedKeyUrl as composedKeyText,
+  PageCache,
+  type ComposedKey,
+} from './page-cache.ts'
+import type { MissingNode, NodeRow, TreeRow, VersionRow } from './rows.ts'
 import {
   blobKey,
   linkPathOf,
@@ -98,6 +116,8 @@ export interface PagesService {
     readonly folder: boolean
     readonly range: string | null
     readonly ifNoneMatch: string | null
+    /** The content host the edge matched, for the composed-page cache. */
+    readonly host: string
   }) => Effect.Effect<
     Served,
     DossierError<'not_found' | 'unavailable'>,
@@ -237,14 +257,18 @@ const folderOf = (path: string): string =>
 export const PagesLive: Layer.Layer<
   Pages,
   never,
-  TreeStore | Access | Bindings | Config
+  TreeStore | Access | Bindings | Config | BaseLayer | PageCache
 > = Layer.effect(
   Pages,
   Effect.gen(function* () {
     const store = yield* TreeStore
     const access = yield* Access
-    const { DB, BLOBS } = yield* Bindings
+    const bindings = yield* Bindings
+    const { DB, BLOBS } = bindings
     const config = yield* Config
+    const base = yield* BaseLayer
+    const cache = yield* PageCache
+    const context = yield* Effect.context<Bindings | BaseLayer>()
 
     const query = <A>(run: () => Promise<A>) =>
       Effect.tryPromise({
@@ -264,11 +288,80 @@ export const PagesLive: Layer.Layer<
     const linkOf = (workspace: string, tree: string, linkPath: string) =>
       `${config.origin.origin}/${encodeURIComponent(workspace)}/${encodeURIComponent(tree)}/${linkPath}`
 
+    /** Whether the caller may read some live node at or below `folder`. */
+    const readsBelow = (treeId: TreeId, folder: string) =>
+      Effect.gen(function* () {
+        const readable = yield* access.readable(treeId)
+        const below =
+          folder === ''
+            ? sql`1`
+            : sql`(${schema.nodes.path} = ${folder} or substr(${schema.nodes.path}, 1, length(${folder}) + 1) = ${`${folder}/`})`
+        const rows = yield* query(() =>
+          db(bindings)
+            .select({ id: schema.nodes.id })
+            .from(schema.nodes)
+            .where(
+              sql`${schema.nodes.treeId} = ${treeId} and ${schema.nodes.deletedAt} is null and ${below} and ${readable.where}`,
+            )
+            .limit(1)
+            .all(),
+        )
+        return rows.length > 0
+      })
+
+    /**
+     * The `_` file a request takes: the first tree candidate the caller may
+     * read (or, with `write`, write), else the base layer's when the caller
+     * reads something the lookup started from, else null.
+     */
+    const kitChoice = (
+      kit: Extract<Resolved, { readonly kind: 'kit' }>,
+      needs: 'read' | 'write',
+    ) =>
+      Effect.gen(function* () {
+        for (const found of kit.found) {
+          if (found.kind === 'base') {
+            const reaches = yield* readsBelow(kit.tree.id, kit.folder)
+            return reaches ? found : null
+          }
+          const granted = yield* access
+            .require(needs, found.node)
+            .pipe(Effect.isSuccess)
+          if (granted) return found
+        }
+        return null
+      })
+
     const open: PagesService['open'] = ({ ref }) =>
       Effect.gen(function* () {
-        const resolved = yield* store.resolve(ref)
+        let resolved = yield* store.resolve(ref)
         if ('missing' in resolved) return yield* denied(resolved)
-        yield* asDenied(access.require('read', resolved.node))
+        if (resolved.kind === 'kit') {
+          const chosen = yield* kitChoice(resolved, 'read')
+          if (chosen === null) {
+            return yield* denied({
+              missing: true,
+              treeId: resolved.tree.id,
+              path: ref.path,
+            })
+          }
+          if (chosen.kind === 'base') {
+            return {
+              kind: 'redirect',
+              to: base.url(chosen.path),
+              status: 302,
+            } satisfies Served
+          }
+          // The frame looks the same `_` path up again, at the shell's push.
+          resolved = {
+            kind: 'file',
+            node: { ...chosen.node, path: ref.path },
+            version: chosen.version,
+            tree: resolved.tree,
+          }
+        } else {
+          yield* asDenied(access.require('read', resolved.node))
+        }
         const caller = yield* CurrentCaller
         switch (resolved.kind) {
           case 'redirect':
@@ -362,6 +455,19 @@ export const PagesLive: Layer.Layer<
           resolved = next === null ? missing : yield* store.resolve(next)
         }
         if ('missing' in resolved) return yield* denied(resolved)
+        if (resolved.kind === 'kit') {
+          // A `_` file opens as the file its lookup gives this viewer.
+          const chosen = yield* kitChoice(resolved, 'read')
+          if (chosen === null || chosen.kind === 'base') {
+            return yield* denied(missing)
+          }
+          resolved = {
+            kind: 'file',
+            node: chosen.node,
+            version: chosen.version,
+            tree: resolved.tree,
+          }
+        }
         yield* asDenied(access.require('read', resolved.node))
         // A folder without index.html is a listing, which no frame shows.
         if (resolved.kind !== 'page' && resolved.kind !== 'file') {
@@ -442,6 +548,164 @@ export const PagesLive: Layer.Layer<
               .first<{ number: number | null }>(),
           ).pipe(Effect.map((row) => row?.number ?? 0))
 
+    /** A file's bytes at a pinned sequence, with ranges and ETags. */
+    const serveFile = (
+      path: string,
+      version: VersionRow,
+      i: { readonly range: string | null; readonly ifNoneMatch: string | null },
+    ) =>
+      Effect.gen(function* () {
+        const sha = version.blobSha256
+        if (sha === null) return yield* Effect.fail(notFound(path))
+        if (etagMatches(i.ifNoneMatch, sha)) {
+          return { kind: 'notModified', etag: sha } satisfies Served
+        }
+        const size = version.size ?? 0
+        const range = parseRange(i.range, size)
+        if (range === 'unsatisfiable') {
+          return { kind: 'unsatisfiable', size } satisfies Served
+        }
+        const object = yield* query(() =>
+          BLOBS.get(
+            blobKey(sha),
+            range === null
+              ? {}
+              : { range: { offset: range.offset, length: range.length } },
+          ),
+        )
+        if (object === null || !('body' in object)) {
+          console.error('A blob is missing from R2', { sha256: sha })
+          return yield* Effect.fail(notFound(path))
+        }
+        return {
+          kind: 'file',
+          body: object.body,
+          size,
+          etag: sha,
+          contentType: version.contentType ?? 'application/octet-stream',
+          range,
+          download: false,
+          cache: 'pinned',
+        } satisfies Served
+      })
+
+    /** A blob's text from R2, or not found when its bytes are missing. */
+    const textOf = (path: string, version: VersionRow) =>
+      Effect.gen(function* () {
+        const sha = version.blobSha256
+        const object =
+          sha === null ? null : yield* query(() => BLOBS.get(blobKey(sha)))
+        if (object === null) {
+          console.error('A blob is missing from R2', { sha256: sha })
+          return yield* Effect.fail(notFound(path))
+        }
+        return yield* query(() => object.text())
+      })
+
+    /**
+     * Whether the handle may open a node at a sequence: the sequence was
+     * issued to it, or the caller holds write on every node given (for a
+     * page: the page and every tree layout composed into it at that
+     * sequence). History is for write holders.
+     */
+    const opensAt = (
+      handleHash: string,
+      seq: AuthoredSeq,
+      nodes: readonly NodeRow[],
+    ) =>
+      Effect.gen(function* () {
+        const issued = yield* query(() =>
+          DB.prepare(
+            'select 1 as issued from view_handle_seqs where handle_hash = ? and seq = ?',
+          )
+            .bind(handleHash, seq)
+            .first<{ issued: number }>(),
+        )
+        if (issued !== null) return true
+        for (const node of nodes) {
+          const writes = yield* access
+            .require('write', node)
+            .pipe(Effect.isSuccess)
+          if (!writes) return false
+        }
+        return true
+      })
+
+    /** The composed page: from the cache, or composed and stored. */
+    const composedPage = (i: {
+      readonly key: ComposedKey
+      readonly tree: {
+        readonly id: TreeId
+        readonly workspace: string
+        readonly name: string
+      }
+      readonly node: NodeRow
+      readonly version: VersionRow
+      readonly analysis: HtmlAnalysis
+      readonly chain: readonly LayoutLink[]
+      readonly linkPath: string
+    }) =>
+      Effect.gen(function* () {
+        const hit = yield* cache.get(i.key)
+        if (hit !== null) return hit
+        const folder = folderOf(i.node.path)
+        const page: Source = {
+          source: yield* textOf(i.node.path, i.version),
+          analysis: i.analysis,
+          folder,
+        }
+        const tree: Source[] = []
+        for (const link of i.chain) {
+          tree.push({
+            source: yield* textOf(i.node.path, link.version),
+            analysis: link.analysis,
+            folder: link.folder,
+          })
+        }
+        const layouts = page.analysis.complete
+          ? []
+          : layoutsOf(page, [...tree].reverse(), yield* base.layout())
+        const items = yield* kitAt({
+          treeId: i.key.treeId,
+          folder,
+          at: i.key.seq,
+        }).pipe(Effect.provide(context))
+        const urls: Record<string, string> = {}
+        for (const [tag, found] of Object.entries(kitMap(items))) {
+          urls[tag] =
+            found.from === 'tree'
+              ? relativeFrom(folder, found.path)
+              : base.url(found.path)
+        }
+        const push = yield* pushNumberOf(i.version)
+        const html = compose({
+          page,
+          layouts,
+          inject: ({ tags }) => {
+            const used = tags.filter((tag) => Object.hasOwn(urls, tag))
+            const bootstrap: PageBootstrap = {
+              v: 1,
+              origin: config.origin.origin,
+              tree: i.tree,
+              path: `/${i.node.path}`,
+              link: linkOf(i.tree.workspace, i.tree.name, i.linkPath),
+              push,
+              seq: i.key.seq,
+              base: base.version,
+              kit: urls,
+              used,
+            }
+            return bootstrapTags(
+              JSON.stringify(bootstrap),
+              base.url('client.js'),
+              used.map((tag) => urls[tag]!),
+            )
+          },
+        })
+        yield* cache.put(i.key, html)
+        return html
+      })
+
     const frame: PagesService['frame'] = (i) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
@@ -457,6 +721,26 @@ export const PagesLive: Layer.Layer<
         if ('missing' in resolved || resolved.kind === 'folder') {
           return yield* Effect.fail(notFound(i.path))
         }
+        if (resolved.kind === 'kit') {
+          // The first candidate the handle may open; the base layer's own
+          // files are the same for everyone.
+          for (const found of resolved.found) {
+            if (found.kind === 'base') {
+              return {
+                kind: 'redirect',
+                to: base.url(found.path),
+                status: 302,
+              } satisfies Served
+            }
+            const readable = yield* access
+              .require('read', found.node)
+              .pipe(Effect.isSuccess)
+            if (!readable) continue
+            if (!(yield* opensAt(via.handleHash, i.seq, [found.node]))) continue
+            return yield* serveFile(i.path, found.version, i)
+          }
+          return yield* Effect.fail(notFound(i.path))
+        }
         const roles = yield* access.roleOn(resolved.node)
         const reads =
           roles.caps.has('read') ||
@@ -470,95 +754,56 @@ export const PagesLive: Layer.Layer<
             status: 301,
           } satisfies Served
         }
-        // A sequence never issued to this handle opens only for write
-        // holders: history is theirs.
-        const issued = yield* query(() =>
-          DB.prepare(
-            'select 1 as issued from view_handle_seqs where handle_hash = ? and seq = ?',
-          )
-            .bind(via.handleHash, i.seq)
-            .first<{ issued: number }>(),
-        )
-        if (issued === null && !roles.caps.has('write')) {
-          return yield* Effect.fail(notFound(i.path))
-        }
-        const sha = resolved.version.blobSha256
-        if (sha === null) return yield* Effect.fail(notFound(i.path))
-        if (resolved.kind === 'page') {
-          const object = yield* query(() => BLOBS.get(blobKey(sha)))
-          if (object === null) {
-            console.error('A blob is missing from R2', { sha256: sha })
+        if (resolved.kind === 'file') {
+          if (!(yield* opensAt(via.handleHash, i.seq, [resolved.node]))) {
             return yield* Effect.fail(notFound(i.path))
           }
-          const source = yield* query(() => object.text())
-          const analysis = yield* store.analysis(sha as Sha256)
-          if (analysis === null) return yield* Effect.fail(notFound(i.path))
-          const found = yield* store.treeById(i.treeId)
-          if (found === null) return yield* Effect.fail(notFound(i.path))
-          const bootstrap: PageBootstrap = {
-            v: 1,
-            origin: config.origin.origin,
-            tree: {
-              id: found.tree.id,
-              workspace: found.workspace.name,
-              name: found.tree.name,
-            },
-            path: `/${resolved.node.path}`,
-            link: linkOf(
-              found.workspace.name,
-              found.tree.name,
-              resolved.linkPath,
-            ),
-            push: yield* pushNumberOf(resolved.version),
-            seq: i.seq,
-            base: config.baseVersion,
-            kit: {},
-          }
-          const html = compose({
-            page: { source, analysis, folder: folderOf(resolved.node.path) },
-            layouts: [],
-            inject: bootstrapTags(
-              JSON.stringify(bootstrap),
-              `/_/base/${config.baseVersion}/client.js`,
-            ),
-          })
-          const etag = yield* Effect.promise(() => sha256Hex(html))
-          if (etagMatches(i.ifNoneMatch, etag)) {
-            return { kind: 'notModified', etag } satisfies Served
-          }
-          return { kind: 'framePage', html, etag } satisfies Served
+          return yield* serveFile(i.path, resolved.version, i)
         }
-        if (etagMatches(i.ifNoneMatch, sha)) {
-          return { kind: 'notModified', etag: sha } satisfies Served
+        // A page, with the tree layouts composed into it at this sequence.
+        const sha = resolved.version.blobSha256
+        const analysis =
+          sha === null ? null : yield* store.analysis(sha as Sha256)
+        if (analysis === null) return yield* Effect.fail(notFound(i.path))
+        const chain = yield* composedLayouts({
+          treeId: i.treeId,
+          page: { node: resolved.node, version: resolved.version, analysis },
+          at: i.seq,
+        }).pipe(Effect.provide(context))
+        const opens = yield* opensAt(via.handleHash, i.seq, [
+          resolved.node,
+          ...chain.map((link) => link.node),
+        ])
+        if (!opens) return yield* Effect.fail(notFound(i.path))
+        const found = yield* store.treeById(i.treeId)
+        if (found === null) return yield* Effect.fail(notFound(i.path))
+        const key: ComposedKey = {
+          host: i.host,
+          treeId: i.treeId,
+          seq: i.seq,
+          path: resolved.node.path,
+          composer: `${COMPOSER_VERSION}.${ANALYZER_VERSION}`,
+          base: base.version,
         }
-        const size = resolved.version.size ?? 0
-        const range = parseRange(i.range, size)
-        if (range === 'unsatisfiable') {
-          return { kind: 'unsatisfiable', size } satisfies Served
+        // One ETag per key: the composed page is the same for every viewer.
+        const etag = `c-${yield* Effect.promise(() => sha256Hex(composedKeyText(key)))}`
+        if (etagMatches(i.ifNoneMatch, etag)) {
+          return { kind: 'notModified', etag } satisfies Served
         }
-        const object = yield* query(() =>
-          BLOBS.get(
-            blobKey(sha),
-            range === null
-              ? {}
-              : { range: { offset: range.offset, length: range.length } },
-          ),
-        )
-        if (object === null || !('body' in object)) {
-          console.error('A blob is missing from R2', { sha256: sha })
-          return yield* Effect.fail(notFound(i.path))
-        }
-        return {
-          kind: 'file',
-          body: object.body,
-          size,
-          etag: sha,
-          contentType:
-            resolved.version.contentType ?? 'application/octet-stream',
-          range,
-          download: false,
-          cache: 'pinned',
-        } satisfies Served
+        const html = yield* composedPage({
+          key,
+          tree: {
+            id: found.tree.id,
+            workspace: found.workspace.name,
+            name: found.tree.name,
+          },
+          node: resolved.node,
+          version: resolved.version,
+          analysis,
+          chain,
+          linkPath: resolved.linkPath,
+        })
+        return { kind: 'framePage', html, etag } satisfies Served
       })
 
     const seenBy: PagesService['seenBy'] = (ref) =>
@@ -566,7 +811,15 @@ export const PagesLive: Layer.Layer<
         const resolved = yield* store.resolve(ref)
         if ('missing' in resolved) return yield* denied(resolved)
         if (resolved.kind !== 'page') {
-          yield* asDenied(access.require('read', resolved.node))
+          if (resolved.kind !== 'kit') {
+            yield* asDenied(access.require('read', resolved.node))
+          } else if ((yield* kitChoice(resolved, 'read')) === null) {
+            return yield* denied({
+              missing: true,
+              treeId: resolved.tree.id,
+              path: ref.path,
+            })
+          }
           return yield* Effect.fail(notFound(ref.path))
         }
         yield* access.require('read-history', resolved.node)

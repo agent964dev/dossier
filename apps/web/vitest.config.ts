@@ -1,7 +1,25 @@
-import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin'
 import { defineConfig } from 'vitest/config'
+
+const BASE_LAYOUT = path.join(
+  import.meta.dirname,
+  '../../packages/browser/src/base/_layout.html',
+)
+
+/** The test build's base layer: stand-in scripts and the real layout. */
+const testManifest = () => ({
+  version: 'test',
+  files: {
+    'shell.js': { type: 'text/javascript; charset=utf-8', size: 0 },
+    'client.js': { type: 'text/javascript; charset=utf-8', size: 0 },
+    '_layout.html': {
+      type: 'text/html; charset=utf-8',
+      size: statSync(BASE_LAYOUT).size,
+    },
+  },
+})
 
 /**
  * Static Assets for the test Worker: the real public/_headers and a
@@ -24,6 +42,7 @@ const testAssets = (): string => {
       `// the test build's stand-in ${name}\n`,
     )
   }
+  copyFileSync(BASE_LAYOUT, path.join(directory, '_/base/test/_layout.html'))
   return directory
 }
 
@@ -36,6 +55,7 @@ export default defineConfig(async () => {
     define: {
       __DOSSIER_BUILD_VERSION__: JSON.stringify('test'),
       __BASE_VERSION__: JSON.stringify('test'),
+      __BASE_MANIFEST__: JSON.stringify(testManifest()),
     },
     resolve: {
       alias: {

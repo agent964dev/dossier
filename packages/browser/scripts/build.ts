@@ -1,10 +1,14 @@
-// Builds the shell and the page client as separate static bundles in dist/,
-// each with the bundler's metafile beside it.
-import { rm } from 'node:fs/promises'
+// Builds the base layer into dist/base/: the shell and the page client as
+// separate static bundles, the base layer's _layout.html, and every file of
+// src/base/_components/. Each bundle's metafile goes to dist/meta/, outside
+// the base layer, so it is never served.
+import { cp, mkdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const root = join(import.meta.dir, '..')
 const dist = join(root, 'dist')
+const base = join(dist, 'base')
+const meta = join(dist, 'meta')
 
 const bundles = [
   // The shell document loads it with <script type="module">.
@@ -14,11 +18,12 @@ const bundles = [
 ] as const
 
 await rm(dist, { recursive: true, force: true })
+await mkdir(meta, { recursive: true })
 
 for (const bundle of bundles) {
   const result = await Bun.build({
     entrypoints: [join(root, bundle.entry)],
-    outdir: dist,
+    outdir: base,
     naming: `${bundle.name}.js`,
     target: 'browser',
     format: bundle.format,
@@ -29,9 +34,15 @@ for (const bundle of bundles) {
     for (const log of result.logs) console.error(log)
     process.exit(1)
   }
-  const meta = result.metafile
+  const info = result.metafile
   await Bun.write(
-    join(dist, `${bundle.name}.meta.json`),
-    typeof meta === 'string' ? meta : JSON.stringify(meta, null, 2),
+    join(meta, `${bundle.name}.meta.json`),
+    typeof info === 'string' ? info : JSON.stringify(info, null, 2),
   )
+}
+
+await cp(join(root, 'src/base/_layout.html'), join(base, '_layout.html'))
+const components = join(root, 'src/base/_components')
+if (await stat(components).catch(() => null)) {
+  await cp(components, join(base, '_components'), { recursive: true })
 }

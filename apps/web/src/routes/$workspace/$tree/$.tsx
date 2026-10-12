@@ -349,9 +349,42 @@ function Listing({ view }: { view: ListingView }) {
             )}
           </>
         )}
+        {view.kit === null ? null : <KitRow names={view.kit.names} />}
       </main>
       <SeenBySheet page={seen} onClose={() => setSeen(null)} />
     </div>
+  )
+}
+
+/** The `_` files pages here inherit; only write holders ever see them. */
+function KitRow({ names }: { names: readonly string[] }) {
+  return (
+    <section
+      aria-labelledby="kit-label"
+      className="flex flex-col gap-2.5 rounded-xl border border-dashed border-neutral-500/45 px-4 py-3.5"
+    >
+      <div className="flex items-center justify-between gap-3 text-xs text-neutral-400">
+        <h2
+          id="kit-label"
+          className="rounded-md border border-neutral-400/30 bg-neutral-400/12 px-2 py-1 font-mono text-[0.6875rem] leading-none tracking-[0.16em] text-neutral-400 uppercase"
+        >
+          Kit
+        </h2>
+        <span className="inline-flex items-center gap-1.5 [&_svg]:size-3.5">
+          <Lock aria-hidden />
+          Write holders only
+        </span>
+      </div>
+      <ul className="flex flex-wrap gap-1.5">
+        {names.map((name) => (
+          <li key={name}>
+            <code className="rounded-md border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.75rem] text-neutral-300">
+              {name}
+            </code>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

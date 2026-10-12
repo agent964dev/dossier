@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(1)
+    expect(page.v).toBe(2)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })
@@ -29,41 +29,75 @@ describe('a complete document', () => {
     expect(head.endsWith('</noscript>\n  ')).toBe(true)
   })
 
-  it('lists each head element with its kind, key and whole markup', () => {
+  it('lists each head element with its kind, key, rel, URL and whole markup', () => {
     expect(
-      page.head.items.map((item) => [item.kind, item.key, text(item.range)]),
+      page.head.items.map((item) => [
+        item.kind,
+        item.key,
+        item.rel,
+        item.url,
+        text(item.range),
+      ]),
     ).toEqual([
-      ['meta', null, '<meta charset="utf-8">'],
+      ['meta', null, null, null, '<meta charset="utf-8">'],
       [
         'meta',
-        'viewport',
+        'name:viewport',
+        null,
+        null,
         '<meta name="Viewport" content="width=device-width">',
       ],
-      ['meta', 'og:title', '<meta property="og:title" content="Plan">'],
       [
         'meta',
-        'content-type',
+        'property:og:title',
+        null,
+        null,
+        '<meta property="og:title" content="Plan">',
+      ],
+      [
+        'meta',
+        'http-equiv:content-type',
+        null,
+        null,
         '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">',
       ],
-      ['title', 'title', '<title>  Quarterly plan  </title>'],
+      ['title', 'title', null, null, '<title>  Quarterly plan  </title>'],
       [
         'link',
-        'stylesheet _theme.css',
+        null,
+        'stylesheet',
+        '_theme.css',
         '<link rel="stylesheet" href="_theme.css">',
       ],
       [
         'link',
-        'alternate plan.md',
+        null,
+        'alternate',
+        'plan.md',
         '<link rel="alternate" type="text/markdown" href="plan.md">',
       ],
       [
         'script-src',
+        null,
+        null,
         'https://cdn.example.com/chart.js',
         '<script src="https://cdn.example.com/chart.js"></script>',
       ],
-      ['script', null, `<script type="module">import './_kit/app.js'</script>`],
-      ['style', null, '<style>body { margin: 0 }</style>'],
-      ['other', null, '<noscript><p>Turn on scripts.</p></noscript>'],
+      [
+        'script',
+        null,
+        null,
+        null,
+        `<script type="module">import './_kit/app.js'</script>`,
+      ],
+      ['style', null, null, null, '<style>body { margin: 0 }</style>'],
+      [
+        'other',
+        null,
+        null,
+        null,
+        '<noscript><p>Turn on scripts.</p></noscript>',
+      ],
     ])
   })
 
@@ -164,12 +198,12 @@ describe('a page with head elements and body content', () => {
       page.head.items.map((item) => [item.kind, item.key, text(item.range)]),
     ).toEqual([
       ['title', 'title', '<title>Retro</title>'],
+      ['link', null, '<link rel="stylesheet" href="_retro.css">'],
       [
-        'link',
-        'stylesheet _retro.css',
-        '<link rel="stylesheet" href="_retro.css">',
+        'meta',
+        'name:description',
+        '<meta name="description" content="Team retro">',
       ],
-      ['meta', 'description', '<meta name="description" content="Team retro">'],
     ])
     expect(page.title).toBe('Retro')
   })
@@ -564,5 +598,33 @@ describe('repairs', () => {
     expect(
       messages('<head><title>T</title></head>\n<meta name="a">\n<p>x</p>'),
     ).toEqual(['a <meta> after </head> was moved into the head'])
+  })
+})
+
+describe('a head whose </head> was never written', () => {
+  const source = fixture('head-unclosed-title.html')
+  const page = analyze(source)
+  const text = slicer(source)
+
+  it('ends its content after its last element, not inside it', () => {
+    expect(text(page.head.content)).toBe(
+      '\n<link rel="stylesheet" href="_theme.css">\n<title>Draft</title>',
+    )
+    expect(page.head.content!.end).toBeLessThanOrEqual(page.body.content.start)
+    expect(text(page.body.content)).toBe('\nDraft notes\n')
+    expect(page.title).toBe('Draft')
+  })
+})
+
+describe('the slot of a layout', () => {
+  it('skips a named slot and takes the first one without a name', () => {
+    const source =
+      '<header><slot name="nav"></slot></header><main><slot>Fallback</slot></main>'
+    const page = analyze(source)
+    expect(slicer(source)(page.slot)).toBe('<slot>Fallback</slot>')
+  })
+
+  it('has none when every slot has a name', () => {
+    expect(analyze('<main><slot name="a"></slot></main>').slot).toBeNull()
   })
 })

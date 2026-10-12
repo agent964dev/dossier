@@ -16,5 +16,7 @@
     "upstream/**",
     "packages/policy/test/fixtures/**",
     "docs/**/*.html",
+    // The base layout goes into every page as written; tests pin its bytes.
+    "packages/browser/src/base/_layout.html",
   ],
 }

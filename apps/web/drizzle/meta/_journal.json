@@ -36,6 +36,13 @@
       "when": 1791761050055,
       "tag": "0004_strong_omega_sentinel",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791763299158,
+      "tag": "0005_kit_reach",
+      "breakpoints": true
     }
   ]
 }

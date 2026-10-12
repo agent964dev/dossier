@@ -12,6 +12,7 @@ import {
 import {
   ANALYZER_VERSION as ANALYZER,
   checkPush,
+  componentPath,
   describeProblems,
   isPageFile,
   pathProblems,
@@ -24,6 +25,7 @@ import {
 import { Clock, Context, Data, Effect, Layer, Random } from 'effect'
 
 import { Access, type Granted } from './access.ts'
+import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
 import { Config } from './config.ts'
@@ -261,12 +263,13 @@ interface LiveFile {
 export const PushLive: Layer.Layer<
   Push,
   never,
-  TreeStore | Access | Limits | Bindings | Config
+  TreeStore | Access | Limits | Bindings | Config | BaseLayer
 > = Layer.effect(
   Push,
   Effect.gen(function* () {
     const store = yield* TreeStore
     const access = yield* Access
+    const baseLayer = yield* BaseLayer
     const limits = yield* Limits
     const config = yield* Config
     const { DB, BLOBS } = yield* Bindings
@@ -1061,7 +1064,22 @@ export const PushLive: Layer.Layer<
         // Every page of the tree as it will be, not only the pushed ones: a
         // push elsewhere can break a form that targets its path.
         const pages = yield* pagesAfter(push, tree, manifestRows.results)
-        const check = checkPush(pages, { kindAt: (p) => kinds.get(p) ?? null })
+        const live = tree === null ? [] : yield* liveUnder(tree.id, push.path)
+        const changes = planOf(live, manifest, tree === null)
+        const baseComponents = baseLayer.components()
+        const check = checkPush(
+          pages,
+          {
+            kindAt: (p) => kinds.get(p) ?? null,
+            componentAt: (folder, tag) =>
+              Object.hasOwn(baseComponents, tag) ||
+              ancestorPaths(folder).some(
+                (at) => kinds.get(componentPath(at, tag)) === 'file',
+              ),
+          },
+          // Warnings name only the files this push adds or changes.
+          { warnFor: new Set([...changes.added, ...changes.changed]) },
+        )
         if (check.problems.length > 0) {
           // The reads above may straddle another push: refuse only what the
           // tree as it stands still shows, and check again otherwise.
@@ -1075,20 +1093,16 @@ export const PushLive: Layer.Layer<
           )
         }
 
-        const live = tree === null ? [] : yield* liveUnder(tree.id, push.path)
-        const base = push.base_seq ?? 0
+        const baseSeq = push.base_seq ?? 0
         if (tree !== null && push.force === 0) {
-          const since = yield* pushedSince(tree.id, push.path, base)
+          const since = yield* pushedSince(tree.id, push.path, baseSeq)
           if (since.length > 0) {
             return yield* Effect.fail(
               staleHead(ws.name, tree.name, push.path, since),
             )
           }
         }
-        const plan = {
-          ...planOf(live, manifest, tree === null),
-          warnings: check.warnings,
-        }
+        const plan = { ...changes, warnings: check.warnings }
 
         const committed = yield* store
           .change(tree?.id ?? null, (cs) =>
@@ -1102,7 +1116,7 @@ export const PushLive: Layer.Layer<
                 // fails the batch, and the commit checks again.
                 cs.guardHead('', tree.authoredSeq as AuthoredSeq)
                 if (push.force === 0) {
-                  cs.guardHead(push.path, base as AuthoredSeq)
+                  cs.guardHead(push.path, baseSeq as AuthoredSeq)
                 }
               }
               cs.putStaged(root ?? (target as Granted<'write'>), pushId)
@@ -1163,8 +1177,23 @@ export const PushLive: Layer.Layer<
             path: problem.path,
             folder: false,
           })
+          // A `_` path names its own file here, not the lookup's choice.
+          const node =
+            'missing' in resolved
+              ? resolved
+              : resolved.kind === 'kit'
+                ? (resolved.found.flatMap((found) =>
+                    found.kind === 'tree' && found.node.path === problem.path
+                      ? [found.node]
+                      : [],
+                  )[0] ?? {
+                    missing: true as const,
+                    treeId: tree.id,
+                    path: problem.path,
+                  })
+                : resolved.node
           const readable = yield* access
-            .require('read', 'missing' in resolved ? resolved : resolved.node)
+            .require('read', node)
             .pipe(Effect.isSuccess)
           if (readable) {
             shown.push(problem)

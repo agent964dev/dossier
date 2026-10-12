@@ -393,6 +393,30 @@ export const frameResponse = (served: Served): Response => {
   }
 }
 
+/**
+ * An older base-layer version's file from R2, with the headers
+ * public/_headers gives the current version's. No CORS header: a page loads
+ * these files from its own origin.
+ */
+export const baseResponse = (
+  file: {
+    readonly body: ReadableStream<Uint8Array>
+    readonly type: string
+    readonly size: number
+  },
+  head: boolean,
+): Response => {
+  const headers = contentHeaders('public, max-age=31536000, immutable')
+  headers.delete('accept-ranges')
+  headers.set('content-type', file.type)
+  headers.set('content-length', String(file.size))
+  if (head) {
+    file.body.cancel().catch(() => {})
+    return new Response(null, { status: 200, headers })
+  }
+  return new Response(file.body, { status: 200, headers })
+}
+
 /** A redirect on the main host. */
 export const redirectTo = (location: string, status: 301 | 302): Response =>
   new Response(null, {

@@ -64,8 +64,14 @@ export interface PageBootstrap {
   readonly push: number
   readonly seq: number
   readonly base: string
-  /** Custom element name → component URL. */
+  /**
+   * Every component available at the page's folder: custom element name →
+   * its URL relative to the page, or `/_/base/<version>/_components/<tag>.js`
+   * on the page's own content host for a base component.
+   */
   readonly kit: Readonly<Record<string, string>>
+  /** The kit tags the composed page uses, which the client imports at once. */
+  readonly used: readonly string[]
 }
 
 /** In a top page's window.name, after WINDOW_NAME_PREFIX. */

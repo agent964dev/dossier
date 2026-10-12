@@ -2,10 +2,12 @@ import { Layer, ManagedRuntime } from 'effect'
 
 import { Auth, AuthLive } from '../ports/auth.ts'
 import { Access, AccessLive } from './access.ts'
+import { BaseLayer, BaseLayerLive } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { Config, ConfigLive } from './config.ts'
 import { Files, FilesLive } from './files.ts'
 import { Limits, LimitsLive } from './limits.ts'
+import { PageCache, PageCacheLive } from './page-cache.ts'
 import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
 import { Push, PushLive } from './push.ts'
@@ -25,10 +27,14 @@ export type CoreServices =
   | Files
   | People
   | Pages
+  | BaseLayer
+  | PageCache
 
 /** The seams a test may replace. */
 export interface Overrides {
   readonly auth?: Layer.Layer<Auth, never, Bindings | Config>
+  readonly base?: Layer.Layer<BaseLayer>
+  readonly pageCache?: Layer.Layer<PageCache>
 }
 
 /** The one composition, for production and tests alike. */
@@ -36,12 +42,14 @@ export const makeLayer = (
   env: Env,
   overrides: Overrides = {},
 ): Layer.Layer<CoreServices> => {
-  const config = ConfigLive.pipe(
-    Layer.provideMerge(Layer.succeed(Bindings, env)),
-  )
+  const bindings = Layer.succeed(Bindings, env)
+  const config = ConfigLive.pipe(Layer.provideMerge(bindings))
+  const base = overrides.base ?? BaseLayerLive.pipe(Layer.provide(bindings))
   const trees = TreeStoreLive.pipe(
     Layer.provideMerge(AccessLive),
     Layer.provideMerge(LimitsLive),
+    Layer.provideMerge(base),
+    Layer.provideMerge(overrides.pageCache ?? PageCacheLive),
     Layer.provideMerge(config),
   )
   const auth = (overrides.auth ?? AuthLive).pipe(Layer.provideMerge(trees))

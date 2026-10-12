@@ -1,0 +1,49 @@
+:root {
+  --accent: #1f4e79;
+  --accent-ink: #ffffff;
+  --page: #f6f8fb;
+  --ink: #14212b;
+  --card: #ffffff;
+  --font-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.5 var(--font-body);
+}
+.site-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.site-header .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+.site-body {
+  padding: 20px;
+}
+.site-footer {
+  padding: 12px 20px;
+  font-size: 14px;
+  opacity: 0.7;
+}
+.sidebar {
+  border-left: 4px solid var(--accent);
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  background: var(--card);
+}
+/* A page framed inside another keeps only its content. */
+html[data-dossier-embedded] .site-header,
+html[data-dossier-embedded] .site-footer {
+  display: none;
+}

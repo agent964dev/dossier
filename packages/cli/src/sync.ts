@@ -35,7 +35,6 @@ import {
   pathProblems,
   type PushCheck,
   type PushFile,
-  type PushWarning,
   type TreeView,
 } from '@dossier/html'
 import { Context, Effect, Either, Layer, Schema } from 'effect'
@@ -113,7 +112,8 @@ export interface PushOutcome {
   readonly dryRun: boolean
   /** False for a dry run and for a push with nothing to change. */
   readonly committed: boolean
-  readonly warnings: readonly PushWarning[]
+  /** As the deployment sent them: a newer deployment may add codes. */
+  readonly warnings: readonly PushPlanWire['warnings'][number][]
 }
 
 export interface PullOutcome {
@@ -291,7 +291,12 @@ const localTree = (paths: readonly string[], at: string): TreeView => {
       slash = path.lastIndexOf('/', slash - 1)
     }
   }
-  return { kindAt: (path) => kinds.get(path) ?? null }
+  // The CLI cannot see the tree above the folder or the base layer, so every
+  // component counts as found; the deployment's warnings are the ones shown.
+  return {
+    kindAt: (path) => kinds.get(path) ?? null,
+    componentAt: () => true,
+  }
 }
 
 const readLocal = (found: Found): Effect.Effect<LocalFile, CliProblem> =>
@@ -546,7 +551,9 @@ const pushWith = (
     )
     // The local check runs on the folder alone; the deployment's runs on the
     // tree as it will be, so its warnings come first.
-    const warningsOf = (plan: PushPlanWire): readonly PushWarning[] =>
+    const warningsOf = (
+      plan: PushPlanWire,
+    ): readonly PushPlanWire['warnings'][number][] =>
       plan.warnings.length > 0 ? plan.warnings : local.check.warnings
     if (i.dryRun) {
       return {

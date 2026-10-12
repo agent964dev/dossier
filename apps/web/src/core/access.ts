@@ -10,9 +10,11 @@ import {
 import { sql, type SQL } from 'drizzle-orm'
 import { Context, Effect, Layer } from 'effect'
 
+import { db } from '../db/client.ts'
 import { nodes } from '../db/schema.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
+import { underscoreSplit } from './lookup.ts'
 import {
   ancestorPaths,
   isMissing,
@@ -51,6 +53,11 @@ export type Basis =
       readonly workspaceId: WorkspaceId
       readonly userId: PersonId
     }
+  /**
+   * Read on a `_` node through a readable node at or below `from`, where the
+   * node's `_` part starts. Never a basis for a change.
+   */
+  | { readonly kind: 'reach'; readonly from: string }
 
 export type Capability = 'read' | 'read-authored' | 'respond' | 'write'
 
@@ -162,6 +169,7 @@ const basisFor = (action: Action, roles: RoleSet): readonly Basis[] => {
       : basis.kind === 'admin'
         ? 'write'
         : 'read'
+  // Reach is never part of a role set; it is granted beside one.
   return roles.basis.filter((basis) =>
     allows(action, roleSetOf([{ basis, role: gives(basis) }])),
   )
@@ -329,7 +337,12 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         const reads =
           roles.caps.has('read') ||
           (roles.caps.has('read-authored') && node.origin === 'authored')
-        if (!reads) return yield* denied(caller, node.path)
+        if (!reads) {
+          // A `_` file is read through any node it is reached from.
+          const reach = action === 'read' ? yield* reached(node) : null
+          if (reach === null) return yield* denied(caller, node.path)
+          return { ...node, basis: [reach] } as unknown as Granted<A>
+        }
         if (
           caller.via.kind === 'agent' &&
           caller.via.readOnly &&
@@ -355,19 +368,22 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         } as unknown as Granted<A>
       })
 
-    const readable = (treeId: TreeId) =>
+    /**
+     * Phase 2's condition for the nodes of a tree the caller may read, over
+     * the table `column` names: the caller's grants, without reach.
+     */
+    const grantedWhere = (treeId: TreeId) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
-        const nothing: ReadableNodes = { where: sql`0` }
         if (
           caller.via.kind === 'system' ||
           (caller.via.kind === 'handle' && caller.via.treeId !== treeId)
         ) {
-          return nothing
+          return null
         }
         const facts = yield* treeFacts(caller, treeId)
-        if (facts === null) return nothing
-        let scope: SQL = sql`1`
+        if (facts === null) return null
+        let scopePath: string | null = null
         if (caller.via.kind === 'agent' && caller.via.scope !== null) {
           const scopeNode = yield* query(() =>
             DB.prepare(
@@ -376,23 +392,80 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
               .bind(caller.via.kind === 'agent' ? caller.via.scope : '', treeId)
               .first<{ path: string }>(),
           )
-          if (scopeNode === null) return nothing
-          scope = under(sql`${scopeNode.path}`)
+          if (scopeNode === null) return null
+          scopePath = scopeNode.path
         }
-        const inTree = sql`${nodes.treeId} = ${treeId} and ${scope}`
-        if (facts.memberRole === 'admin') return { where: inTree }
         const email = caller.person?.email.toLowerCase() ?? null
         const member = facts.memberRole === null ? 0 : 1
-        return {
-          where: sql`${inTree} and exists (
+        const admin = facts.memberRole === 'admin'
+        return (column: (name: 'tree_id' | 'path' | 'origin') => SQL): SQL => {
+          const scope =
+            scopePath === null
+              ? sql`1`
+              : underColumn(column('path'), sql`${scopePath}`)
+          const inTree = sql`${column('tree_id')} = ${treeId} and ${scope}`
+          if (admin) return inTree
+          return sql`${inTree} and exists (
             select 1 from shares s join nodes a on a.id = s.node_id and a.deleted_at is null
             where s.tree_id = ${treeId}
               and (s.target_kind = 'anyone'
                 or (s.target_kind = 'email' and s.target = ${email})
                 or (s.target_kind = 'workspace' and s.target = ${facts.workspaceId} and ${member} = 1))
-              and ${under(sql`a.path`)}
-              and (s.role <> 'respond' or ${nodes.origin} = 'authored'))`,
+              and ${underColumn(column('path'), sql`a.path`)}
+              and (s.role <> 'respond' or ${column('origin')} = 'authored'))`
         }
+      })
+
+    /** The live nodes of the tree at or below `from` the caller may read. */
+    const reachFrom = (
+      grants: (column: (name: 'tree_id' | 'path' | 'origin') => SQL) => SQL,
+      treeId: TreeId,
+      from: SQL,
+    ): SQL => {
+      const r = (name: 'tree_id' | 'path' | 'origin') => sql.raw(`r.${name}`)
+      return sql`exists (select 1 from nodes r
+        where r.tree_id = ${treeId} and r.deleted_at is null
+          and ${underColumn(sql`r.path`, from)}
+          and ${grants(r)})`
+    }
+
+    /** Read on an authored `_` node through a node it is reached from. */
+    const reached = (node: NodeRow) =>
+      Effect.gen(function* () {
+        const split = underscoreSplit(node.path)
+        if (split === null || node.origin !== 'authored') return null
+        const grants = yield* grantedWhere(node.treeId)
+        if (grants === null) return null
+        const condition = reachFrom(grants, node.treeId, sql`${split.from}`)
+        const found = yield* query(() =>
+          db({ DB })
+            .select({ one: sql<number>`1` })
+            .from(nodes)
+            .where(sql`${nodes.id} = ${node.id} and ${condition}`)
+            .limit(1)
+            .all(),
+        )
+        return found.length === 0
+          ? null
+          : ({ kind: 'reach', from: split.from } satisfies Basis)
+      })
+
+    const readable = (treeId: TreeId) =>
+      Effect.gen(function* () {
+        const grants = yield* grantedWhere(treeId)
+        if (grants === null) return { where: sql`0` } satisfies ReadableNodes
+        const own = grants((name) =>
+          name === 'tree_id'
+            ? sql`${nodes.treeId}`
+            : name === 'path'
+              ? sql`${nodes.path}`
+              : sql`${nodes.origin}`,
+        )
+        return {
+          where: sql`${nodes.treeId} = ${treeId} and ((${own}) or (
+            ${nodes.origin} = 'authored' and ${nodes.underscoreFrom} is not null
+            and ${reachFrom(grants, treeId, sql`${nodes.underscoreFrom}`)}))`,
+        } satisfies ReadableNodes
       })
 
     const member = (workspace: WorkspaceRow | null) =>
@@ -444,6 +517,6 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
   }),
 )
 
-/** `nodes.path` is `prefix` or lies below it. */
-const under = (prefix: SQL): SQL =>
-  sql`(${prefix} = '' or ${nodes.path} = ${prefix} or substr(${nodes.path}, 1, length(${prefix}) + 1) = ${prefix} || '/')`
+/** `column` is the path `prefix` or lies below it. */
+const underColumn = (column: SQL, prefix: SQL): SQL =>
+  sql`(${prefix} = '' or ${column} = ${prefix} or substr(${column}, 1, length(${prefix}) + 1) = ${prefix} || '/')`

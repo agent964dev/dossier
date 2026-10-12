@@ -479,3 +479,57 @@ describe('a push', () => {
     expect(await treeOf(ws.name, 'acme')).toBeUndefined()
   })
 })
+
+describe('the push warnings', () => {
+  it('carry B-13’s warning in the plan and still commit', async () => {
+    const { ws, key } = await setUp()
+    const first = committed(
+      await pushAll(key, `${ws.name}/kit`, {
+        'guides/_components/acme-card.js':
+          'customElements.define("acme-card", class extends HTMLElement {})',
+        'guides/page.html': '<acme-card>Inside guides</acme-card>',
+      }),
+    )
+    expect(first.plan.warnings).toEqual([])
+    const second = committed(
+      await pushAll(key, `${ws.name}/kit/b13`, {
+        'plan.html':
+          '<h1>Delivery plan</h1><acme-card>Erbil depot</acme-card><p>Rates.</p>',
+      }),
+    )
+    expect(second.plan.added).toEqual(['b13/plan.html'])
+    expect(second.plan.warnings).toEqual([
+      {
+        code: 'component_missing',
+        path: 'b13/plan.html',
+        line: null,
+        message:
+          'b13/plan.html uses <acme-card>, but no _components/acme-card.js is above it.',
+      },
+    ])
+    expect((await nodeAt(second.treeId, 'b13/plan.html'))?.kind).toBe('file')
+  })
+
+  it('name only files the push adds or changes, and layouts without a slot', async () => {
+    const { ws, key } = await setUp()
+    const files = {
+      'old.html': '<other-tag>Old</other-tag>',
+      '_layout.html': '<header>Acme</header>',
+    }
+    const first = committed(await pushAll(key, `${ws.name}/warn`, files))
+    expect(first.plan.warnings.map((w) => [w.code, w.path])).toEqual([
+      ['layout_without_slot', '_layout.html'],
+      ['component_missing', 'old.html'],
+    ])
+    const again = committed(
+      await pushAll(
+        key,
+        `${ws.name}/warn`,
+        { ...files, 'new.html': '<p>New</p>' },
+        { force: true },
+      ),
+    )
+    expect(again.plan.added).toEqual(['new.html'])
+    expect(again.plan.warnings).toEqual([])
+  })
+})

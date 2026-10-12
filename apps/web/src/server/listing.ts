@@ -9,6 +9,7 @@ import {
   Pages,
   People,
   type Entry,
+  type KitItem,
   type SeenByRow,
 } from '../core/index.ts'
 import { runScreen, type ScreenFailure } from './run.ts'
@@ -58,6 +59,11 @@ export interface ListingView {
     readonly size: number
     readonly push: PushStamp | null
   }[]
+  /**
+   * Write holders only: the `_` files and folders the tree makes available
+   * at this folder, closest first. Null when there are none.
+   */
+  readonly kit: { readonly names: readonly string[] } | null
   /** Only when the folder holds nothing; the hint is for write holders. */
   readonly empty: {
     readonly text: 'Nothing here yet.'
@@ -106,6 +112,21 @@ const sharingLine = (
   return `Shared with ${first} and ${count - 1} ${count === 2 ? 'other' : 'others'}`
 }
 
+/**
+ * The names a kit row shows: each `_` file or folder of the tree, by its
+ * first name ('_components/' for a component), closest first, once each.
+ */
+const kitNames = (items: readonly KitItem[]): string[] => {
+  const names: string[] = []
+  for (const item of items) {
+    if (item.from === null) continue
+    const slash = item.path.indexOf('/')
+    const name = slash < 0 ? item.path : `${item.path.slice(0, slash)}/`
+    if (!names.includes(name)) names.push(name)
+  }
+  return names
+}
+
 const notFound = () =>
   dossierError('not_found', 'Nothing is here, or you cannot open it.')
 
@@ -142,6 +163,9 @@ export const listingView = createServerFn({ method: 'GET' })
           return yield* Effect.fail(notFound())
         }
         const writer = listing.roles.caps.has('write')
+        const kit = writer
+          ? kitNames((yield* (yield* Files).kit(ref)).items)
+          : []
         const shares = yield* (yield* People).sharedWith(listing.folder)
         const at = (path: string, kind: 'page' | 'folder' | 'file') =>
           linkFor(config.origin, {
@@ -209,6 +233,7 @@ export const listingView = createServerFn({ method: 'GET' })
           pages,
           folders,
           files,
+          kit: kit.length === 0 ? null : { names: kit },
           empty: nothing
             ? {
                 text: 'Nothing here yet.',

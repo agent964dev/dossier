@@ -119,6 +119,7 @@ const frame = (
         folder,
         range: null,
         ifNoneMatch: null,
+        host: `${treeId}.content.test`,
       })
       .pipe(
         Effect.provideService(CurrentCaller, caller),
