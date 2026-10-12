@@ -107,6 +107,9 @@ export const LOGO_BYTES = 512 * 1024
 
 const GOOGLE_CSS = 'https://fonts.googleapis.com/css2'
 const GOOGLE_FILES = 'https://fonts.gstatic.com/'
+/** Google's stylesheet for one family, even one of many scripts, is far less. */
+export const GOOGLE_CSS_BYTES = 512 * 1024
+const MAX_REDIRECTS = 3
 /** Google lists WOFF2 files only to browsers it knows read them. */
 const CHROME =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
@@ -196,8 +199,9 @@ export const googleFaces = (css: string): readonly GoogleFace[] => {
     const url = /url\(\s*['"]?([^'")\s]+)['"]?\s*\)/.exec(src)?.[1]
     if (url === undefined || !url.startsWith(GOOGLE_FILES)) continue
     const token = /format\(\s*['"]?([a-z0-9]+)/i.exec(src)?.[1] ?? 'woff2'
-    const format = FORMAT_OF_TOKEN[token.toLowerCase()]
-    if (format === undefined) continue
+    const key = token.toLowerCase()
+    if (!Object.hasOwn(FORMAT_OF_TOKEN, key)) continue
+    const format = FORMAT_OF_TOKEN[key]!
     const style = read('font-style') === 'italic' ? 'italic' : 'normal'
     const weight = (read('font-weight') ?? '400').replace(/\s+/g, ' ')
     faces.push({
@@ -346,67 +350,116 @@ export const LookSettingsLive: Layer.Layer<
 
     const tooLargeFont = () =>
       dossierError('too_large', 'A font file is at most 2 MiB.')
+    const tooLargeFamily = () =>
+      dossierError(
+        'too_large',
+        'This family is more than 20 MiB of font files. Upload the faces you need instead.',
+      )
+    const googleDown = () =>
+      dossierError('unavailable', 'Google Fonts did not answer. Try again.')
+
+    /**
+     * A GET to one of Google's hosts. Redirects are followed by hand, at
+     * most three, and only while they stay on that host over HTTPS.
+     */
+    const fromGoogle = (url: string, headers: Record<string, string>) =>
+      Effect.tryPromise({
+        try: async () => {
+          let at = new URL(url)
+          const host = at.host
+          for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+            if (at.protocol !== 'https:' || at.host !== host) {
+              console.error('Google Fonts redirected off its host', {
+                from: url,
+                to: at.href,
+              })
+              throw new Error('redirected off Google')
+            }
+            const response = await fetch(at.href, {
+              headers,
+              redirect: 'manual',
+            })
+            const location = response.headers.get('location')
+            if (
+              response.status < 300 ||
+              response.status >= 400 ||
+              location === null
+            ) {
+              return response
+            }
+            await response.body?.cancel()
+            at = new URL(location, at)
+          }
+          throw new Error('too many redirects')
+        },
+        catch: googleDown,
+      })
+
+    /**
+     * The body, read only up to `limit` bytes: past it the stream is
+     * cancelled and `tooLarge` answers, whatever length Google declared.
+     */
+    const readUpTo = <E>(
+      response: Response,
+      limit: number,
+      tooLarge: () => E,
+    ): Effect.Effect<Uint8Array, E | ReturnType<typeof googleDown>> =>
+      Effect.tryPromise({
+        try: async () => {
+          const declared = Number(response.headers.get('content-length') ?? NaN)
+          if (declared > limit) {
+            await response.body?.cancel()
+            return null
+          }
+          if (response.body === null) return new Uint8Array(0)
+          const reader = response.body.getReader()
+          const chunks: Uint8Array[] = []
+          let total = 0
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            total += value.byteLength
+            if (total > limit) {
+              await reader.cancel()
+              return null
+            }
+            chunks.push(value)
+          }
+          const bytes = new Uint8Array(total)
+          let at = 0
+          for (const chunk of chunks) {
+            bytes.set(chunk, at)
+            at += chunk.byteLength
+          }
+          return bytes
+        },
+        catch: googleDown,
+      }).pipe(
+        Effect.flatMap((bytes) =>
+          bytes === null ? Effect.fail(tooLarge()) : Effect.succeed(bytes),
+        ),
+      )
 
     const download = (url: string, budget: { left: number }) =>
       Effect.gen(function* () {
-        const response = yield* Effect.tryPromise({
-          try: () => fetch(url, { headers: { 'user-agent': CHROME } }),
-          catch: () =>
-            dossierError(
-              'unavailable',
-              'Google Fonts did not answer. Try again.',
-            ),
-        })
+        const response = yield* fromGoogle(url, { 'user-agent': CHROME })
         if (!response.ok) {
           yield* Effect.promise(async () => response.body?.cancel())
-          return yield* Effect.fail(
-            dossierError(
-              'unavailable',
-              'Google Fonts did not answer. Try again.',
-            ),
-          )
+          return yield* Effect.fail(googleDown())
         }
-        const declared = Number(response.headers.get('content-length') ?? NaN)
-        if (declared > FONT_FILE_BYTES) {
-          yield* Effect.promise(async () => response.body?.cancel())
-          return yield* Effect.fail(tooLargeFont())
-        }
-        const bytes = new Uint8Array(
-          yield* Effect.tryPromise({
-            try: () => response.arrayBuffer(),
-            catch: () =>
-              dossierError(
-                'unavailable',
-                'Google Fonts did not answer. Try again.',
-              ),
-          }),
+        // Never more than the file limit, nor than the family has left.
+        const limit = Math.min(FONT_FILE_BYTES, budget.left)
+        const bytes = yield* readUpTo(response, limit, () =>
+          limit < FONT_FILE_BYTES ? tooLargeFamily() : tooLargeFont(),
         )
-        if (bytes.byteLength > FONT_FILE_BYTES) {
-          return yield* Effect.fail(tooLargeFont())
-        }
         budget.left -= bytes.byteLength
-        if (budget.left < 0) {
-          return yield* Effect.fail(
-            dossierError(
-              'too_large',
-              'This family is more than 20 MiB of font files. Upload the faces you need instead.',
-            ),
-          )
-        }
         return bytes
       })
 
     const googleCss = (query: string) =>
-      Effect.tryPromise({
-        try: () =>
-          fetch(`${GOOGLE_CSS}?${query}`, {
-            headers: { 'user-agent': CHROME, accept: 'text/css' },
-          }),
-        catch: () =>
-          dossierError(
-            'unavailable',
-            'Google Fonts did not answer. Try again.',
-          ),
+      fromGoogle(`${GOOGLE_CSS}?${query}`, {
+        'user-agent': CHROME,
+        accept: 'text/css',
       })
 
     const fetchGoogleFont: LookSettingsService['fetchGoogleFont'] = (input) =>
@@ -450,14 +503,14 @@ export const LookSettingsLive: Layer.Layer<
             ),
           )
         }
-        const css = yield* Effect.tryPromise({
-          try: () => response.text(),
-          catch: () =>
+        const css = new TextDecoder().decode(
+          yield* readUpTo(response, GOOGLE_CSS_BYTES, () =>
             dossierError(
-              'unavailable',
-              'Google Fonts did not answer. Try again.',
+              'too_large',
+              `Google Fonts sent more for "${family}" than this deployment reads.`,
             ),
-        })
+          ),
+        )
         const faces = googleFaces(css)
         if (faces.length === 0) {
           return yield* Effect.fail(
@@ -576,9 +629,13 @@ export const LookSettingsLive: Layer.Layer<
         return { sha256, type }
       })
 
-    const stored = (key: string) =>
+    /** The deployment holds the file, as the format or type the Look names. */
+    const storedAs = (key: string, holds: (found: R2Object) => boolean) =>
       Effect.tryPromise({
-        try: async () => (await BLOBS.head(key)) !== null,
+        try: async () => {
+          const found = await BLOBS.head(key)
+          return found !== null && holds(found)
+        },
         catch: unavailable('Checking a Look file failed'),
       })
 
@@ -595,15 +652,28 @@ export const LookSettingsLive: Layer.Layer<
           return yield* Effect.fail(
             dossierError(
               'invalid',
-              `${low.pair} is ${ratioText(low.ratio)}; it needs at least ${MIN_CONTRAST}:1.`,
+              `${low.pair} is ${ratioText(low.ratio)} (${low.worst}); it needs at least ${MIN_CONTRAST}:1.`,
             ),
           )
         }
         const files = filesOf(look)
         const present = yield* Effect.all(
           [
-            ...files.fonts.map((sha) => stored(`fonts/${sha}`)),
-            ...(files.logo === null ? [] : [stored(`looks/${files.logo}`)]),
+            ...files.fonts.map(({ sha256, format }) =>
+              storedAs(
+                `fonts/${sha256}`,
+                (found) => found.customMetadata?.format === format,
+              ),
+            ),
+            ...(files.logo === null
+              ? []
+              : [
+                  storedAs(
+                    `looks/${files.logo.sha256}`,
+                    (found) =>
+                      found.httpMetadata?.contentType === files.logo?.type,
+                  ),
+                ]),
           ],
           { concurrency: 6 },
         )
@@ -611,7 +681,7 @@ export const LookSettingsLive: Layer.Layer<
           return yield* Effect.fail(
             dossierError(
               'invalid',
-              'A font or the logo of this Look is not on this deployment. Fetch or upload it again.',
+              'A font or the logo of this Look is not on this deployment as named. Fetch or upload it again.',
             ),
           )
         }

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import golden from './look-agent964.golden.txt?raw'
+import golden from './fixtures/look-agent964.golden.txt?raw'
 import {
   AGENT964_LOOK,
+  CHECKED_TEXT,
   checkLook,
   contrast,
   contrastChecks,
@@ -12,8 +13,9 @@ import {
   PRESETS,
   scaleFrom,
   STEPS,
+  TEXT_EXEMPT,
   type Look,
-} from './look.ts'
+} from '../src/lib/look.ts'
 
 describe('parseColor', () => {
   it('reads OKLCH as written, with a percentage or a number for lightness', () => {
@@ -96,13 +98,29 @@ describe('scaleFrom', () => {
 
 describe('lookVersion', () => {
   it('is stable for equal Looks, whatever their key order', async () => {
-    const reordered = JSON.parse(
-      JSON.stringify(AGENT964_LOOK, Object.keys(AGENT964_LOOK).reverse()),
-    ) as Look
+    // Every object's keys in reverse order, at every depth.
+    const reversed = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(reversed)
+        : typeof value === 'object' && value !== null
+          ? Object.fromEntries(
+              Object.keys(value)
+                .reverse()
+                .map((key) => [
+                  key,
+                  reversed((value as Record<string, unknown>)[key]),
+                ]),
+            )
+          : value
+    const reordered = reversed(AGENT964_LOOK) as Look
+    // The copy really is written in another order, nested objects included.
+    expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(AGENT964_LOOK))
+    expect(Object.keys(reordered.palette)[0]).toBe('error')
+    expect(Object.keys(reordered.fonts)[0]).toBe('arabic')
     const a = await lookVersion(AGENT964_LOOK)
     expect(a).toMatch(/^[0-9a-f]{16}$/)
+    expect(await lookVersion(reordered)).toBe(a)
     expect(await lookVersion(structuredClone(AGENT964_LOOK))).toBe(a)
-    expect(await lookVersion({ ...reordered, ...AGENT964_LOOK })).toBe(a)
   })
 
   it('changes with any value', async () => {
@@ -212,5 +230,109 @@ describe('checkLook', () => {
         },
       }),
     ).toHaveProperty('problem')
+  })
+})
+
+describe('what the contrast checks cover', () => {
+  it('fails a Look whose roles pass while the headings match the cards', () => {
+    const white = 'oklch(99.24% 0 0)'
+    // The roles name their colours outright, so they pass; the screens'
+    // headings use neutral-50, set here to the card's own colour.
+    const look: Look = {
+      ...AGENT964_LOOK,
+      palette: {
+        ...AGENT964_LOOK.palette,
+        neutral: {
+          ...AGENT964_LOOK.palette.neutral,
+          50: AGENT964_LOOK.palette.neutral[900],
+        },
+      },
+      roles: {
+        ...AGENT964_LOOK.roles,
+        foreground: { color: white },
+        'card-foreground': { color: white },
+        'popover-foreground': { color: white },
+        'accent-foreground': { color: white },
+        'destructive-foreground': { color: white },
+      },
+    }
+    const failing = contrastChecks(look).filter((check) => !check.ok)
+    expect(failing.length).toBeGreaterThan(0)
+    expect(failing.map((check) => check.worst)).toContain('neutral-50 on cards')
+    expect(Math.min(...failing.map((check) => check.ratio))).toBeLessThan(1.1)
+  })
+
+  it('covers every text colour the screens use', () => {
+    const sources = import.meta.glob('../src/**/*.{ts,tsx}', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>
+    const used = new Set<string>()
+    const pattern =
+      /\btext-((?:neutral|brand|accent|complement|success|warning|error)-\d+|foreground|muted-foreground|primary|primary-foreground|card-foreground|popover-foreground|secondary-foreground|accent-foreground|destructive|destructive-foreground)\b/g
+    for (const [path, text] of Object.entries(sources)) {
+      if (path.endsWith('.test.ts')) continue
+      for (const match of text.matchAll(pattern)) used.add(match[1]!)
+    }
+    expect(used.size).toBeGreaterThan(10)
+    const unchecked = [...used].filter(
+      (name) => !CHECKED_TEXT.includes(name) && !(name in TEXT_EXEMPT),
+    )
+    expect(unchecked).toEqual([])
+  })
+})
+
+describe('system fonts', () => {
+  it('takes only the three named families, never a property every object has', () => {
+    for (const family of [
+      'constructor',
+      'toString',
+      '__proto__',
+      'hasOwnProperty',
+    ]) {
+      expect(
+        checkLook({
+          ...AGENT964_LOOK,
+          fonts: {
+            ...AGENT964_LOOK.fonts,
+            display: { kind: 'system', family },
+          },
+        }),
+        family,
+      ).toHaveProperty('problem')
+    }
+    const odd = {
+      ...AGENT964_LOOK,
+      fonts: {
+        ...AGENT964_LOOK.fonts,
+        display: { kind: 'system', family: 'constructor' },
+      },
+    } as unknown as Look
+    expect(() => lookCss(odd)).not.toThrow()
+    expect(lookCss(odd)).not.toMatch(/undefined|function/)
+  })
+
+  it('writes no face whose format is a property every object has', () => {
+    const css = lookCss({
+      ...AGENT964_LOOK,
+      fonts: {
+        ...AGENT964_LOOK.fonts,
+        body: {
+          kind: 'upload',
+          family: 'Odd',
+          faces: [
+            {
+              sha256: 'c'.repeat(64),
+              format: 'constructor' as never,
+              weight: '400',
+              style: 'normal',
+              unicodeRange: null,
+            },
+          ],
+        },
+      },
+    })
+    expect(css).not.toContain('c'.repeat(64))
   })
 })

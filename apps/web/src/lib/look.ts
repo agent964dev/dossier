@@ -611,42 +611,148 @@ export const roleColor = (look: Look, role: RoleName): ParsedColor => {
     : { ...base, alpha, css: oklchText(base.oklch, alpha) }
 }
 
+/** A colour as the screens name it: a role, or a step of the palette. */
+type TextColour = RoleName | StepName
+
+/** Where text sits: the surfaces the screens put text on. */
+type Surface = 'background' | 'card' | 'popover' | 'primary' | 'secondary'
+
+const SURFACE_NAMES: Readonly<Record<Surface, string>> = {
+  background: 'background',
+  card: 'cards',
+  popover: 'menus',
+  primary: 'primary',
+  secondary: 'secondary buttons',
+}
+
+/** Steps the screens use for text, from headings to quiet labels. */
+const TEXT_STEPS: readonly StepName[] = [
+  'neutral-50',
+  'neutral-100',
+  'neutral-200',
+  'neutral-300',
+  'neutral-400',
+]
+/** Links, badges and messages: coloured text on the page and on cards. */
+const COLOURED_TEXT: readonly TextColour[] = [
+  'primary',
+  'brand-100',
+  'brand-200',
+  'brand-300',
+  'error-200',
+  'error-300',
+  'success-300',
+  'warning-100',
+  'warning-300',
+  'complement-400',
+]
+
+const on = (
+  colours: readonly TextColour[],
+  surfaces: readonly Surface[],
+): readonly (readonly [TextColour, Surface])[] =>
+  surfaces.flatMap((surface) =>
+    colours.map((colour) => [colour, surface] as const),
+  )
+
+/**
+ * The lines of the contrast check. Each holds every pair of a text colour
+ * and the surface the screens put it on, roles and palette steps alike, so
+ * a Look that passes is readable wherever the screens use it.
+ */
 const CHECKS: readonly {
   readonly pair: string
-  readonly fg: RoleName
-  readonly bg: RoleName
+  readonly members: readonly (readonly [TextColour, Surface])[]
 }[] = [
-  { pair: 'Text on background', fg: 'foreground', bg: 'background' },
-  { pair: 'Text on cards', fg: 'card-foreground', bg: 'card' },
-  { pair: 'Text on primary', fg: 'primary-foreground', bg: 'primary' },
   {
-    pair: 'Muted text on background',
-    fg: 'muted-foreground',
-    bg: 'background',
+    pair: 'Text on background',
+    members: [['foreground', 'background'], ...on(TEXT_STEPS, ['background'])],
+  },
+  {
+    pair: 'Text on cards',
+    members: [
+      ['card-foreground', 'card'],
+      ['popover-foreground', 'popover'],
+      ...on(TEXT_STEPS, ['card', 'popover']),
+    ],
+  },
+  {
+    pair: 'Text on buttons',
+    members: [
+      ['primary-foreground', 'primary'],
+      ['secondary-foreground', 'secondary'],
+    ],
+  },
+  {
+    pair: 'Muted text',
+    members: on(['muted-foreground', 'neutral-500'], ['background', 'card']),
+  },
+  {
+    pair: 'Links and status text',
+    members: on(COLOURED_TEXT, ['background', 'card']),
   },
 ]
 
-/** The four pairs Dossier's screens must keep readable (WCAG 2.2 AA). */
+/** Every text colour the contrast check covers. */
+export const CHECKED_TEXT: readonly string[] = [
+  ...new Set(CHECKS.flatMap((check) => check.members.map(([fg]) => fg))),
+]
+
+/** Text colours the screens use where contrast does not apply, and why. */
+export const TEXT_EXEMPT: Readonly<Record<string, string>> = {
+  'neutral-600':
+    'separators hidden from assistive technology, and the dash of an empty answer',
+  'neutral-950':
+    'text of the solid success and warning buttons, which no screen uses',
+}
+
+const colourOf = (look: Look, name: TextColour): ParsedColor => {
+  if ((ROLES as readonly string[]).includes(name)) {
+    return roleColor(look, name as RoleName)
+  }
+  const at = stepOf(name)
+  return (
+    (at === null ? null : parseColor(look.palette[at.scale][at.step])) ??
+    FALLBACK
+  )
+}
+
+/**
+ * The contrast check, line by line: the lowest ratio among the line's
+ * pairs and which pair it is (WCAG 2.2 AA asks 4.5:1 of each).
+ */
 export const contrastChecks = (
   look: Look,
 ): readonly {
   readonly pair: string
   readonly ratio: number
   readonly ok: boolean
+  /** The pair with the lowest ratio, such as "neutral-50 on cards". */
+  readonly worst: string
 }[] => {
   const background = over(roleColor(look, 'background'), BLACK)
-  return CHECKS.map(({ pair, fg, bg }) => {
-    const under =
-      bg === 'background' ? background : over(roleColor(look, bg), background)
-    const value = ratio(
-      luminance(over(roleColor(look, fg), under)),
-      luminance(under),
-    )
+  const surface = (name: Surface) =>
+    name === 'background' ? background : over(roleColor(look, name), background)
+  return CHECKS.map(({ pair, members }) => {
+    let lowest = Number.POSITIVE_INFINITY
+    let worst = ''
+    for (const [fg, bg] of members) {
+      const under = surface(bg)
+      const value = ratio(
+        luminance(over(colourOf(look, fg), under)),
+        luminance(under),
+      )
+      if (value < lowest) {
+        lowest = value
+        worst = `${fg} on ${SURFACE_NAMES[bg]}`
+      }
+    }
     // Shown rounded down, so a pair just below the bar never reads 4.5:1.
     return {
       pair,
-      ratio: Math.floor(value * 10) / 10,
-      ok: value >= MIN_CONTRAST,
+      ratio: Math.floor(lowest * 10) / 10,
+      ok: lowest >= MIN_CONTRAST,
+      worst,
     }
   })
 }
@@ -753,6 +859,12 @@ export const SYSTEM_STACKS: Readonly<
   },
 }
 
+/** A system family's stack, never a property every object has. */
+const systemStack = (family: string) =>
+  Object.hasOwn(SYSTEM_STACKS, family)
+    ? SYSTEM_STACKS[family as SystemFamily]
+    : SYSTEM_STACKS['sans-serif']
+
 const EXTENSIONS: Readonly<Record<FontFaceFile['format'], string>> = {
   woff2: 'woff2',
   woff: 'woff',
@@ -774,7 +886,7 @@ export const familyOf = (role: FontRole, choice: FontChoice): string => {
     case 'agent964':
       return BUILT_IN[choice.face ?? role].family
     case 'system':
-      return SYSTEM_STACKS[choice.family].label
+      return systemStack(choice.family).label
     default:
       return choice.family
   }
@@ -867,7 +979,7 @@ const facesOf = (role: FontRole, choice: FontChoice, family: string) => {
         .filter(
           (face) =>
             SHA256.test(face.sha256) &&
-            face.format in EXTENSIONS &&
+            Object.hasOwn(EXTENSIONS, face.format) &&
             WEIGHT.test(face.weight) &&
             (face.style === 'normal' || face.style === 'italic') &&
             (face.unicodeRange === null ||
@@ -903,7 +1015,7 @@ export const lookCss = (look: Look, options: LookCssOptions = {}): string => {
     const { also, generic } = FALLBACKS[role]
     const first =
       choice.kind === 'system'
-        ? SYSTEM_STACKS[choice.family].families.split(/,\s*/)
+        ? systemStack(choice.family).families.split(/,\s*/)
         : [`"${family(role)}"`]
     const tail =
       choice.kind === 'system' ? [first.pop()!] : generic.split(/,\s*/)
@@ -1030,7 +1142,8 @@ const checkFont = (choice: unknown): FontChoice | null => {
           ? { kind: 'agent964', face: choice.face as FontRole }
           : null
     case 'system':
-      return typeof choice.family === 'string' && choice.family in SYSTEM_STACKS
+      return typeof choice.family === 'string' &&
+        Object.hasOwn(SYSTEM_STACKS, choice.family)
         ? { kind: 'system', family: choice.family as SystemFamily }
         : null
     case 'google':
@@ -1158,19 +1271,23 @@ export const checkLook = (
 export const headerName = (look: Pick<Look, 'name'>) =>
   look.name.trim() === '' ? 'Dossier' : look.name.trim()
 
-/** Every font and logo file a Look names, for checking they are stored. */
+/**
+ * Every font file a Look names, with the format it names it in, and its
+ * logo, for checking the deployment holds each as named.
+ */
 export const filesOf = (
   look: Look,
-): { readonly fonts: readonly string[]; readonly logo: string | null } => ({
-  fonts: [
-    ...new Set(
-      FONT_ROLES.flatMap((role) => {
-        const choice = look.fonts[role]
-        return choice.kind === 'google' || choice.kind === 'upload'
-          ? choice.faces.map((face) => face.sha256)
-          : []
-      }),
-    ),
-  ],
-  logo: look.logo?.sha256 ?? null,
-})
+): {
+  readonly fonts: readonly Pick<FontFaceFile, 'sha256' | 'format'>[]
+  readonly logo: Look['logo']
+} => {
+  const fonts = new Map<string, Pick<FontFaceFile, 'sha256' | 'format'>>()
+  for (const role of FONT_ROLES) {
+    const choice = look.fonts[role]
+    if (choice.kind !== 'google' && choice.kind !== 'upload') continue
+    for (const { sha256, format } of choice.faces) {
+      fonts.set(`${sha256}.${format}`, { sha256, format })
+    }
+  }
+  return { fonts: [...fonts.values()], logo: look.logo }
+}

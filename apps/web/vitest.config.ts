@@ -167,6 +167,17 @@ export default defineConfig(async () => {
           extends: true as const,
           test: { name: 'hub', include: ['test/hub/**/*.test.ts'] },
         },
+        // Screen components in a DOM, outside the Worker.
+        {
+          resolve: {
+            alias: { '@': path.join(import.meta.dirname, 'src') },
+          },
+          test: {
+            name: 'dom',
+            include: ['test/dom/**/*.test.tsx'],
+            environment: 'happy-dom',
+          },
+        },
       ],
     },
   }
