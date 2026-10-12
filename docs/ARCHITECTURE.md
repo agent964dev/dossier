@@ -273,7 +273,9 @@ A frame URL is `/_/v/<handle>/<seq>/<link path>`. The handle is an HMAC under
 and a generation number. D1 stores only its SHA-256 and an expiry of 24 hours.
 Every tab of one session shares the handle of a tree, the shell renews it, and
 a lapsed handle is replaced by a new generation, so a leaked handle never works
-again after it lapses. A handle is never a credential for the API.
+again after it lapses. A handle made under an earlier `HANDLE_SECRET` is
+replaced the same way at its session's next view. A handle is never a
+credential for the API.
 
 The sequence in the path pins the tree as it was. A caller without write opens
 a node at a sequence only if the view issued it to the handle at that sequence
