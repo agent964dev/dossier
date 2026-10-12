@@ -15,9 +15,10 @@ import {
   type CurrentCaller,
   type PeopleService,
 } from '../src/core/index.ts'
-import { signedIn } from './support/browser.ts'
+import { Browser, signedIn } from './support/browser.ts'
 import {
   beforeBatch,
+  beforeRead,
   count,
   exec,
   failingStatements,
@@ -925,9 +926,11 @@ describe('deleting an account', () => {
   })
 
   it('brings the person back with nothing at a new sign-in with the same email', async () => {
-    for (const domain of ['gmail.com', 'example.com']) {
+    for (const domain of ['gmail.com', 'workspace.example']) {
       const identity = {
         ...fresh(domain, 'back'),
+        // Google is the authority for a Gmail address and a Workspace one.
+        ...(domain === 'gmail.com' ? {} : { hd: 'workspace.example' }),
         email_verified: true,
       }
       const first = await signedIn(identity)
@@ -1274,6 +1277,8 @@ describe('configured super admins', () => {
       sub: `sub-root-${Date.now()}`,
       email: 'root@example.com',
       email_verified: true,
+      // A Workspace account, so Google vouches for the address.
+      hd: 'example.com',
     }
     const root = await callerOf(await signedIn(identity))
     expect(await count('super_admins', 'user_id = ?', root.person!.id)).toBe(1)
@@ -1286,5 +1291,146 @@ describe('configured super admins', () => {
     )
     expect(back.person?.id).toBe(root.person?.id)
     expect(await count('super_admins', 'user_id = ?', root.person!.id)).toBe(1)
+  })
+})
+
+describe('review: requests that outlive what they rested on', () => {
+  it('never lets an older deletion request close the account of a person who came back', async () => {
+    const identity = {
+      ...fresh('gmail.com', 'delete-twice'),
+      email_verified: true,
+    }
+    const oldCaller = await callerOf(await signedIn(identity))
+    const id = oldCaller.person!.id
+    const owner = await person('other-owner')
+    const ws = await workspace(owner)
+    raceBefore(
+      (sql) => sql.startsWith('delete from session where user_id'),
+      async () => {
+        // Another press finishes first, and the person comes back and joins.
+        await as(oldCaller, (p) => p.deleteAccount())
+        const back = await callerOf(
+          await signedIn({ ...identity, sub: `${identity.sub}-back` }),
+        )
+        await join(ws, back.person!)
+      },
+    )
+    const failed = await refusal(oldCaller, (p) => p.deleteAccount())
+    harness.reset()
+    expect(failed.code).toBe('sign_in_required')
+    expect(await count('session', 'user_id = ?', id)).toBe(1)
+    expect(await roleIn(ws, id)).toBe('member')
+    const [row] = await rows<{ deleted_at: number | null }>(
+      'select deleted_at from people where user_id = ?',
+      id,
+    )
+    expect(row?.deleted_at).toBeNull()
+  })
+
+  it('makes no workspace for a person whose account closes before its batch', async () => {
+    const chief = await person('chief')
+    await superAdmin(chief)
+    await as(await sessionFor(chief), (p) => p.setWorkspaceCreation('anyone'))
+    const who = await person('creating')
+    const caller = await sessionFor(who)
+    const name = `p8-${crypto.randomUUID().slice(0, 8)}`
+    raceBefore(
+      (sql) => /insert into "?workspaces"?/.test(sql),
+      async () => {
+        await as(caller, (p) => p.deleteAccount())
+      },
+    )
+    await refusal(caller, (p) => p.createWorkspace({ name }))
+    harness.reset()
+    expect(await count('workspaces', 'name = ?', name)).toBe(0)
+    expect(await count('workspace_members', 'user_id = ?', who.id)).toBe(0)
+  })
+
+  it('makes no workspace for a super admin removed before its batch under super-admins-only creation', async () => {
+    const chief = await person('chief')
+    await superAdmin(chief)
+    await as(await sessionFor(chief), (p) =>
+      p.setWorkspaceCreation('super_admins'),
+    )
+    const who = await person('creating-policy')
+    await superAdmin(who)
+    const caller = await sessionFor(who)
+    const name = `p8-${crypto.randomUUID().slice(0, 8)}`
+    raceBefore(
+      (sql) => /insert into "?workspaces"?/.test(sql),
+      async () => {
+        await exec('delete from super_admins where user_id = ?', who.id)
+      },
+    )
+    const failed = await refusal(caller, (p) => p.createWorkspace({ name }))
+    harness.reset()
+    expect(failed.code).toBe('forbidden')
+    expect(await count('workspaces', 'name = ?', name)).toBe(0)
+  })
+
+  it('revokes no team share for an admin demoted before the shares are read, though they created the tree', async () => {
+    const { admin, ws, browser } = await adminWorld()
+    const other = await person('other')
+    await join(ws, other, 'admin')
+    const pushed = await pushAll(await agent(admin), `${ws.name}/tree`, {
+      'index.html': '<p>Hi</p>',
+    })
+    if (!('treeId' in pushed)) throw new Error('no tree')
+    const root = (await nodeAt(pushed.treeId, ''))!
+    const design = await as(browser, (p) =>
+      p.createTeam({ workspace: ws.name, name: 'Design' }),
+    )
+    await share(pushed.treeId, root.id, 'team', design.id, 'read', admin)
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeRead(
+            env.DB,
+            (sql) => sql.includes('select s.id, s.node_id as nodeId'),
+            async () => {
+              await exec(
+                "update workspace_members set role = 'member' where workspace_id = ? and user_id = ?",
+                ws.id,
+                admin.id,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    const failed = await refusal(browser, (p) =>
+      p.deleteTeam({ workspace: ws.name, teamId: design.id }),
+    )
+    harness.reset()
+    expect(failed.code).toBe('not_found')
+    expect(
+      await count('shares', "target_kind = 'team' and target = ?", design.id),
+    ).toBe(1)
+  })
+
+  it('brings a person back only through the guarded linking of any sign-in', async () => {
+    // Google is not the authority for this address: a new account cannot
+    // join the person who holds it, deleted or not.
+    const identity = {
+      ...fresh('example.com', 'unvouched'),
+      email_verified: true,
+    }
+    const caller = await callerOf(await signedIn(identity))
+    const id = caller.person!.id
+    await as(caller, (p) => p.deleteAccount())
+    const browser = new Browser()
+    const response = await browser.signIn({
+      ...identity,
+      sub: `${identity.sub}-again`,
+    })
+    expect(response.headers.get('location')).toContain(
+      'error=email_unconfirmed',
+    )
+    expect(browser.sessionToken()).toBeUndefined()
+    const [row] = await rows<{ deleted_at: number | null }>(
+      'select deleted_at from people where user_id = ?',
+      id,
+    )
+    expect(row?.deleted_at).not.toBeNull()
   })
 })

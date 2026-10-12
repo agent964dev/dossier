@@ -716,26 +716,69 @@ export const PeopleLive: Layer.Layer<
           suspendedAt: null,
           deletedAt: null,
         } satisfies WorkspaceRow
+        // Decided again as the batch commits: the credential still works,
+        // the person has not deleted their account, and the deployment
+        // still lets them create workspaces.
+        const credential =
+          via.kind === 'browser'
+            ? {
+                sql: 'exists (select 1 from session where id = ?2 and user_id = ?1 and expires_at > ?3)',
+                id: via.sessionId as string,
+              }
+            : via.kind === 'agent'
+              ? {
+                  sql: `exists (select 1 from agent_keys where id = ?2 and user_id = ?1
+                          and revoked_at is null and read_only = 0)`,
+                  id: via.keyId as string,
+                }
+              : { sql: '0', id: '' }
+        const creation = `coalesce((select json_extract(value_json, '$') from deployment_settings
+          where key = 'workspace_creation'), 'listed')`
+        const guardId = newId()
+        const notAllowed = () =>
+          dossierError(
+            'forbidden',
+            'Only the people this deployment allows can create workspaces.',
+            'Ask a super admin of this deployment.',
+          )
         yield* Effect.tryPromise({
           try: () =>
-            database.batch([
-              database.insert(schema.workspaces).values(workspace),
-              database.insert(schema.workspaceMembers).values({
-                workspaceId: workspace.id,
-                userId: me.id,
-                role: 'admin',
-                createdAt: at,
-              }),
+            DB.batch([
+              DB.prepare(
+                `insert into change_guards (id, reason, ok)
+                 select ?4, 'basis', coalesce((${credential.sql}
+                   and exists (select 1 from people where user_id = ?1 and deleted_at is null)
+                   and (exists (select 1 from super_admins where user_id = ?1)
+                     or ${creation} = 'anyone'
+                     or (${creation} = 'listed' and exists (
+                       select 1 from workspace_creators c join "user" u on u.id = ?1
+                       where (c.kind = 'email' and c.entry = lower(u.email))
+                         or (c.kind = 'domain'
+                           and c.entry = substr(lower(u.email), instr(u.email, '@') + 1)))))), 0)`,
+              ).bind(me.id, credential.id, at, guardId),
+              DB.prepare(
+                `insert into workspaces (id, name, created_by, created_at)
+                 values (?, ?, ?, ?)`,
+              ).bind(workspace.id, workspace.name, me.id, at),
+              DB.prepare(
+                `insert into workspace_members (workspace_id, user_id, role, created_at)
+                 values (?, ?, 'admin', ?)`,
+              ).bind(workspace.id, me.id, at),
+              DB.prepare('delete from change_guards where id = ?').bind(
+                guardId,
+              ),
             ]),
           catch: (error) =>
-            isUnique(error)
-              ? dossierError(
-                  'conflict',
-                  `The name ${trimmed} is taken.`,
-                  'Choose another name.',
-                  'name',
-                )
-              : unavailable(error),
+            isBasisGuard(error)
+              ? notAllowed()
+              : isUnique(error)
+                ? dossierError(
+                    'conflict',
+                    `The name ${trimmed} is taken.`,
+                    'Choose another name.',
+                    'name',
+                  )
+                : unavailable(error),
         })
         return workspace
       })
@@ -1311,6 +1354,11 @@ export const PeopleLive: Layer.Layer<
           const on = yield* access
             .require('share', node as NodeRow)
             .pipe(Effect.mapError(() => notFound(workspace.name)))
+          // The revocation rests on the caller's workspace admin role, which
+          // the commit checks again, never on a share they happen to hold.
+          if (!on.basis.some((b) => b.kind === 'admin')) {
+            return yield* Effect.fail(notFound(workspace.name))
+          }
           granted.push({ on, shareId: share.id })
         }
         if (granted.length === 0) return 0
@@ -1620,9 +1668,19 @@ export const PeopleLive: Layer.Layer<
           )
           const adminsId = newId()
           const leftId = newId()
+          const askedId = newId()
           const outcome = yield* Effect.tryPromise({
             try: () =>
               DB.batch([
+                // Only the account that asked, as it still is: an older
+                // request from before the person came back closes nothing.
+                DB.prepare(
+                  `insert into change_guards (id, reason, ok)
+                   select ?1, 'basis', exists (select 1 from session
+                       where id = ?2 and user_id = ?3)
+                     and exists (select 1 from people where user_id = ?3
+                       and deleted_at is null)`,
+                ).bind(askedId, via.sessionId, me.id),
                 // Read before the person goes: every live workspace they
                 // administer keeps another admin, and the deployment another
                 // super admin if they are one.
@@ -1658,20 +1716,33 @@ export const PeopleLive: Layer.Layer<
                   keys: held?.keys ?? 0,
                   sessions: held?.sessions ?? 0,
                 }),
-                DB.prepare('delete from change_guards where id in (?, ?)').bind(
-                  adminsId,
-                  leftId,
-                ),
+                DB.prepare(
+                  'delete from change_guards where id in (?, ?, ?)',
+                ).bind(adminsId, leftId, askedId),
               ]),
             catch: (error) => error,
           }).pipe(
             Effect.as('closed' as const),
-            Effect.catchAll((error) =>
-              isAdminsGuard(error)
-                ? Effect.succeed('blocked' as const)
-                : String(error).includes('change_guard_state')
-                  ? Effect.succeed('answered' as const)
-                  : Effect.fail(unavailable(error)),
+            Effect.catchAll(
+              (
+                error,
+              ): Effect.Effect<
+                'blocked' | 'answered',
+                DossierError<'sign_in_required'> | DossierError<'unavailable'>
+              > =>
+                isBasisGuard(error)
+                  ? Effect.fail(
+                      dossierError(
+                        'sign_in_required',
+                        'This session has ended.',
+                        'Sign in with Google again.',
+                      ),
+                    )
+                  : isAdminsGuard(error)
+                    ? Effect.succeed('blocked' as const)
+                    : String(error).includes('change_guard_state')
+                      ? Effect.succeed('answered' as const)
+                      : Effect.fail(unavailable(error)),
             ),
           )
           if (outcome === 'closed') return

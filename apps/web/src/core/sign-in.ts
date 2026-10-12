@@ -319,18 +319,6 @@ export const SignInLive: Layer.Layer<
         }
         if (action === 'link-account') {
           const existing = await accountsOf(existingUserId)
-          // A person who deleted their account has nothing left to guard:
-          // they come back as a new person would, with nothing.
-          if (existing.length === 0) {
-            const gone = await database
-              .select({ deletedAt: schema.people.deletedAt })
-              .from(schema.people)
-              .where(eq(schema.people.userId, existingUserId))
-              .get()
-            if (gone !== undefined && gone.deletedAt !== null) {
-              return { allow: true }
-            }
-          }
           const decision = decideLink(
             authorityOf(claims),
             existing.map((a) => ({
