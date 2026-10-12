@@ -36,6 +36,7 @@ import {
   requestIdOf,
 } from './caller.ts'
 import {
+  agentResponse,
   baseResponse,
   codeResponse,
   errorResponse,
@@ -124,6 +125,18 @@ const forbiddenServiceWorker = () =>
     },
   })
 
+/**
+ * `Accept` names text/markdown with a q above 0: an agent asking a link for
+ * the page's agent version.
+ */
+export const acceptsMarkdown = (accept: string | null): boolean =>
+  (accept ?? '').split(',').some((part) => {
+    const [type = '', ...params] = part.split(';').map((p) => p.trim())
+    if (type.toLowerCase() !== 'text/markdown') return false
+    const q = params.find((p) => p.toLowerCase().startsWith('q='))
+    return q === undefined || Number(q.slice(2)) > 0
+  })
+
 const isHtml = (response: Response) =>
   response.headers.get('content-type')?.includes('text/html') === true
 
@@ -164,13 +177,19 @@ export const serve = async (
   let setCookie: readonly string[] = []
   const finish = (response: Response) =>
     withCommonHeaders(response, kind, setCookie, host.kind)
+  // A link asked with `Accept: text/markdown` or an agent key answers an
+  // agent: never the sign-in redirect or a page, always the error body.
+  const agentAsked =
+    kind === 'link' &&
+    (acceptsMarkdown(request.headers.get('accept')) ||
+      /^Bearer\s/i.test(request.headers.get('authorization') ?? ''))
 
   try {
     const response = await route()
     return finish(response)
   } catch (error) {
     if (isDossierError(error)) {
-      if (isDocumentKind(kind)) {
+      if (isDocumentKind(kind) && !agentAsked) {
         return finish(
           error.code === 'unavailable'
             ? plainErrorPage(requestId)
@@ -186,7 +205,7 @@ export const serve = async (
       error,
     })
     return finish(
-      isDocumentKind(kind)
+      isDocumentKind(kind) && !agentAsked
         ? plainErrorPage(requestId)
         : codeResponse('unavailable', requestId),
     )
@@ -273,12 +292,15 @@ export const serve = async (
   /** Who may open what is decided before anything is said about a path. */
   async function link(): Promise<Response> {
     const who = await caller()
+    const wantsAgent = agentAsked || who.via.kind === 'agent'
     const denied = (error: DossierError) =>
-      error.code === 'sign_in_required'
-        ? signInFirst()
-        : // The one no-access page, at the asked link, for missing and
-          // unreadable alike.
-          screen(who, 404)
+      wantsAgent
+        ? errorResponse(error, requestId)
+        : error.code === 'sign_in_required'
+          ? signInFirst()
+          : // The one no-access page, at the asked link, for missing and
+            // unreadable alike.
+            screen(who, 404)
     const segments = url.pathname.slice(1).split('/')
     // `/<workspace>` and `/<workspace>/`: the workspace's home, for members.
     if (
@@ -304,12 +326,14 @@ export const serve = async (
       )
     const served = await runAs(
       who,
-      Effect.flatMap(Pages, (pages) => pages.open({ ref, wantsAgent: false })),
+      Effect.flatMap(Pages, (pages) => pages.open({ ref, wantsAgent })),
     )
     if (isDossierError(served)) {
       if (served.code === 'unavailable') throw served
       return denied(served)
     }
+    // An agent's read follows the link's redirects itself.
+    if (wantsAgent) return agentResponse(served, ref)
     // `/<workspace>/<tree>` gains its slash, once the root may be opened.
     if (segments.length === 2) {
       return redirectTo(`${url.pathname}/${url.search}`, 301)

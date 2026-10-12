@@ -8,6 +8,7 @@ import {
   type ErrorCode,
   type LinkRef,
   type PersonId,
+  type ReadResult,
   type SessionId,
   type Sha256,
   type TreeId,
@@ -33,10 +34,12 @@ import { Clock, Context, Effect, Layer, Redacted } from 'effect'
 
 import { db, schema } from '../db/client.ts'
 import { Access, type RoleSet } from './access.ts'
+import { makeReader, type AgentServed } from './agent-version.ts'
 import { BaseLayer } from './base-layer.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller, type Caller } from './caller.ts'
 import { Config } from './config.ts'
+import { Files } from './files.ts'
 import { hmacSha256, sha256Hex } from './ids.ts'
 import { composedLayouts, kitAt, kitMap, type LayoutLink } from './lookup.ts'
 import {
@@ -81,6 +84,8 @@ export type Served =
   | { readonly kind: 'notModified'; readonly etag: string }
   /** A range the file cannot satisfy. */
   | { readonly kind: 'unsatisfiable'; readonly size: number }
+  /** An agent's answer on the main host: the agent version, or a download. */
+  | AgentServed
 
 export interface SeenByRow {
   readonly email: string
@@ -131,6 +136,18 @@ export interface PagesService {
     DossierError<
       'not_found' | 'sign_in_required' | 'forbidden' | 'unavailable'
     >,
+    CurrentCaller
+  >
+  /**
+   * What a link gives an agent and `dossier read` prints: a page's agent
+   * version, a folder's listing (with the kit for write holders), a data
+   * folder's files, or a file.
+   */
+  readonly read: (
+    ref: LinkRef,
+  ) => Effect.Effect<
+    ReadResult,
+    DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
   /** The edge's frame rule: null for an unknown, expired or other tree's handle. */
@@ -284,7 +301,7 @@ const folderOf = (path: string): string =>
 export const PagesLive: Layer.Layer<
   Pages,
   never,
-  TreeStore | Access | Bindings | Config | BaseLayer | PageCache
+  TreeStore | Access | Bindings | Config | BaseLayer | PageCache | Files
 > = Layer.effect(
   Pages,
   Effect.gen(function* () {
@@ -295,6 +312,7 @@ export const PagesLive: Layer.Layer<
     const config = yield* Config
     const base = yield* BaseLayer
     const cache = yield* PageCache
+    const files = yield* Files
     const context = yield* Effect.context<Bindings | BaseLayer>()
 
     const query = <A>(run: () => Promise<A>) =>
@@ -359,87 +377,101 @@ export const PagesLive: Layer.Layer<
         return null
       })
 
-    const open: PagesService['open'] = ({ ref }) =>
-      askedAs(
-        ref.path,
-        Effect.gen(function* () {
-          let resolved = yield* store.resolve(ref)
-          if ('missing' in resolved) return yield* denied(resolved)
-          if (resolved.kind === 'kit') {
-            const chosen = yield* kitChoice(resolved, 'read')
-            if (chosen === null) {
-              return yield* denied({
-                missing: true,
-                treeId: resolved.tree.id,
-                path: ref.path,
-              })
-            }
-            if (chosen.kind === 'base') {
-              return {
-                kind: 'redirect',
-                to: base.url(chosen.path),
-                status: 302,
-              } satisfies Served
-            }
-            // The frame looks the same `_` path up again, at the shell's push.
-            resolved = {
-              kind: 'file',
-              node: { ...chosen.node, path: ref.path },
-              version: chosen.version,
-              tree: resolved.tree,
-            }
-          } else {
-            yield* asDenied(access.require('read', resolved.node))
-          }
-          const caller = yield* CurrentCaller
-          switch (resolved.kind) {
-            case 'redirect':
-              return {
-                kind: 'redirect',
-                to: `/${encodeURIComponent(ref.workspace)}/${encodeURIComponent(ref.tree)}/${resolved.to}`,
-                status: 301,
-              } satisfies Served
-            case 'folder':
-              return { kind: 'listing', ref } satisfies Served
-            case 'page':
-            case 'file': {
-              const linkPath =
-                resolved.kind === 'page'
-                  ? resolved.linkPath
-                  : linkPathOf(resolved.node.path, false)
-              const person = caller.person
-              return {
-                kind: 'shell',
-                boot: {
-                  v: 1,
-                  deployment: {
-                    origin: config.origin.origin,
-                    name: config.deploymentName,
-                  },
-                  tree: {
-                    id: resolved.tree.id,
-                    workspace: ref.workspace,
-                    name: ref.tree,
-                  },
-                  contentOrigin: contentOrigin(
-                    config.contentHost,
-                    resolved.tree.id,
-                  ),
-                  path: resolved.node.path,
-                  link: linkOf(ref.workspace, ref.tree, linkPath),
-                  linkPath,
-                  seq: resolved.tree.authoredSeq as AuthoredSeq,
-                  base: config.baseVersion,
-                  me:
-                    person === null
-                      ? null
-                      : { email: person.email, name: person.name },
-                },
-              } satisfies Served
-            }
-          }
-        }),
-      )
+    const reader = makeReader({
+      store,
+      access,
+      files,
+      bindings,
+      context,
+      treeRefOf,
+      kitChoice,
+      linkOf,
+    })
+
+    // An agent gets the agent version; anyone else the shell or listing.
+    const open: PagesService['open'] = ({ ref, wantsAgent }) =>
+      wantsAgent
+        ? reader.served(ref)
+        : askedAs(
+            ref.path,
+            Effect.gen(function* () {
+              let resolved = yield* store.resolve(ref)
+              if ('missing' in resolved) return yield* denied(resolved)
+              if (resolved.kind === 'kit') {
+                const chosen = yield* kitChoice(resolved, 'read')
+                if (chosen === null) {
+                  return yield* denied({
+                    missing: true,
+                    treeId: resolved.tree.id,
+                    path: ref.path,
+                  })
+                }
+                if (chosen.kind === 'base') {
+                  return {
+                    kind: 'redirect',
+                    to: base.url(chosen.path),
+                    status: 302,
+                  } satisfies Served
+                }
+                // The frame looks the same `_` path up again, at the shell's push.
+                resolved = {
+                  kind: 'file',
+                  node: { ...chosen.node, path: ref.path },
+                  version: chosen.version,
+                  tree: resolved.tree,
+                }
+              } else {
+                yield* asDenied(access.require('read', resolved.node))
+              }
+              const caller = yield* CurrentCaller
+              switch (resolved.kind) {
+                case 'redirect':
+                  return {
+                    kind: 'redirect',
+                    to: `/${encodeURIComponent(ref.workspace)}/${encodeURIComponent(ref.tree)}/${resolved.to}`,
+                    status: 301,
+                  } satisfies Served
+                case 'folder':
+                  return { kind: 'listing', ref } satisfies Served
+                case 'page':
+                case 'file': {
+                  const linkPath =
+                    resolved.kind === 'page'
+                      ? resolved.linkPath
+                      : linkPathOf(resolved.node.path, false)
+                  const person = caller.person
+                  return {
+                    kind: 'shell',
+                    boot: {
+                      v: 1,
+                      deployment: {
+                        origin: config.origin.origin,
+                        name: config.deploymentName,
+                      },
+                      tree: {
+                        id: resolved.tree.id,
+                        workspace: ref.workspace,
+                        name: ref.tree,
+                      },
+                      contentOrigin: contentOrigin(
+                        config.contentHost,
+                        resolved.tree.id,
+                      ),
+                      path: resolved.node.path,
+                      link: linkOf(ref.workspace, ref.tree, linkPath),
+                      linkPath,
+                      seq: resolved.tree.authoredSeq as AuthoredSeq,
+                      base: config.baseVersion,
+                      me:
+                        person === null
+                          ? null
+                          : { email: person.email, name: person.name },
+                    },
+                  } satisfies Served
+                }
+              }
+            }),
+          )
 
     /**
      * The node a reference names at a sequence, when the caller may read it
@@ -1143,6 +1175,13 @@ export const PagesLive: Layer.Layer<
         } satisfies Caller
       })
 
-    return { open, view, frame, seenBy, handleCaller } satisfies PagesService
+    return {
+      open,
+      view,
+      frame,
+      seenBy,
+      read: reader.read,
+      handleCaller,
+    } satisfies PagesService
   }),
 )

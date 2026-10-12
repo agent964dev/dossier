@@ -1,27 +1,9 @@
-import { DossierApi, type EntryWire } from '@dossier/contracts'
+import { DossierApi } from '@dossier/contracts'
 import { HttpApiBuilder, HttpServerResponse } from '@effect/platform'
 import { Effect } from 'effect'
 
-import { Files, type Entry } from '../../core/index.ts'
+import { entryWire, Files } from '../../core/index.ts'
 import { targetOf } from './target.ts'
-
-const toWire = (entry: Entry): EntryWire => ({
-  name: entry.name,
-  path: entry.path,
-  kind: entry.kind,
-  folder: entry.node.kind === 'folder',
-  size: entry.size,
-  sha256: entry.sha256,
-  contentType: entry.contentType,
-  title: entry.title,
-  push:
-    entry.push === null
-      ? null
-      : {
-          number: entry.push.number,
-          at: new Date(entry.push.at).toISOString(),
-        },
-})
 
 /** RFC 6266's filename*, so any name survives the header. */
 const attachment = (name: string) =>
@@ -42,7 +24,7 @@ export const FilesLive = HttpApiBuilder.group(DossierApi, 'files', (handlers) =>
           },
           path: listing.folder.path,
           seq: listing.seq,
-          entries: listing.entries.map(toWire),
+          entries: listing.entries.map(entryWire),
         }
       }),
     )

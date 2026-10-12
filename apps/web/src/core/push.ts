@@ -14,6 +14,7 @@ import {
   checkPush,
   componentPath,
   describeProblems,
+  isKitName,
   isPageFile,
   pathProblems,
   type HtmlAnalysis,
@@ -904,6 +905,24 @@ export const PushLive: Layer.Layer<
         }).pipe(Effect.tapError(() => store.dropHold(holder, i.sha256)))
         if (listed.results.some((f) => isPageFile(f.path))) {
           yield* store.analysis(i.sha256)
+        }
+        // A page's generated agent version is made as it arrives; a failure
+        // here only means the first read makes it.
+        if (
+          listed.results.some(
+            (f) => isPageFile(f.path) && !f.path.split('/').some(isKitName),
+          )
+        ) {
+          yield* store.markdown(i.sha256).pipe(
+            Effect.catchAll((error) =>
+              Effect.sync(() =>
+                console.warn('A page could not be converted to Markdown', {
+                  sha256: i.sha256,
+                  error: error.code,
+                }),
+              ),
+            ),
+          )
         }
         yield* store.confirmHold(holder, i.sha256, i.size)
       })

@@ -7,7 +7,7 @@ import {
   isPageFile,
   parentOf,
 } from './paths.ts'
-import { decodeSegment, trimUrl } from './urls.ts'
+import { decodeSegment, resolveFrom, trimUrl } from './urls.ts'
 
 /** The tree as it will be after the push. */
 export interface TreeView {
@@ -58,6 +58,8 @@ export type PushWarningCode =
   | 'layout_repaired'
   /** A layout without a <slot>: pages below go at the end of its body. */
   | 'layout_without_slot'
+  /** A page's <link rel="alternate"> names a file the tree does not hold. */
+  | 'companion_missing'
 export interface PushWarning {
   readonly code: PushWarningCode
   readonly path: string
@@ -235,6 +237,28 @@ const formProblems = (
   return { problems: found, target }
 }
 
+/**
+ * The tree path a page's <link rel="alternate"> names as its companion, or
+ * null when it names none or points outside the tree. Layouts and other `_`
+ * files have no agent version.
+ */
+export const companionOf = (
+  path: string,
+  analysis: HtmlAnalysis,
+): string | null => {
+  if (analysis.alternate === null) return null
+  if (path.split('/').some(isKitName)) return null
+  const target = resolveFrom(parentOf(path), analysis.alternate)
+  return target === null || target === '' || target.endsWith('/')
+    ? null
+    : target
+}
+
+const hasFile = (tree: TreeView, path: string): boolean => {
+  const kind = tree.kindAt(path)
+  return kind === 'file' || kind === 'page' || kind === 'data'
+}
+
 const isLayoutFile = (path: string): boolean =>
   path === '_layout.html' || path.endsWith('/_layout.html')
 
@@ -268,6 +292,15 @@ const warningsOf = (
         message: `${path} uses <${tag}>, but no _components/${tag}.js is above it.`,
       })
     }
+  }
+  const companion = companionOf(path, analysis)
+  if (companion !== null && !hasFile(tree, companion)) {
+    found.push({
+      code: 'companion_missing',
+      path,
+      line: null,
+      message: `${path} names ${companion} as its agent version, but ${companion} is not in the tree.`,
+    })
   }
   if (isLayoutFile(path)) {
     for (const repair of analysis.repaired) {

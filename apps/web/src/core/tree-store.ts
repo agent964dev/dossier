@@ -12,7 +12,7 @@ import {
   type ShareId,
   type TreeId,
 } from '@dossier/contracts'
-import type { HtmlAnalysis } from '@dossier/html'
+import { MARKDOWN_VERSION, toMarkdown, type HtmlAnalysis } from '@dossier/html'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer } from 'effect'
 
@@ -122,6 +122,21 @@ export interface Entry {
   readonly pages: number | null
 }
 
+/** A file as a read names it: who wrote it, when, and the push behind it. */
+export interface DocRow {
+  readonly node: NodeRow
+  readonly version: VersionRow
+  /**
+   * A data file's writer by email. An authored file's pusher by email to
+   * members of the tree's workspace and to the pusher, by name to anyone else.
+   */
+  readonly by: string
+  /** Data: the push the writer saw. Authored: the push that wrote it. */
+  readonly push: PushNumber
+  /** The parsed value of a JSON data version, else null. */
+  readonly value: unknown | null
+}
+
 declare const handle: unique symbol
 /** A node created in this change, named before it has a row. */
 export type NodeHandle = { readonly [handle]: 'NodeHandle' }
@@ -198,6 +213,18 @@ export interface TreeStoreService {
   /** Rebuilt from the bytes when no analysis of this analyzer exists. */
   readonly analysis: (sha256: Sha256) => Effect.Effect<HtmlAnalysis | null>
   /**
+   * A page's generated agent version, by its blob: stored for this converter
+   * version, or generated from the page's bytes and stored.
+   */
+  readonly markdown: (
+    sha256: Sha256,
+  ) => Effect.Effect<string, DossierError<'unavailable'>>
+  /** Every file below the folder the caller can read, at any depth, by path. */
+  readonly docs: (
+    folder: Granted<'read'>,
+    opts: { readonly origin: 'data' | 'any' },
+  ) => Effect.Effect<readonly DocRow[], never, CurrentCaller>
+  /**
    * Holds a blob before its bytes are written, so a purge leaves it alone.
    * The hold counts for a commit only once `confirmHold` verifies it.
    */
@@ -239,6 +266,10 @@ export class TreeStore extends Context.Tag('TreeStore')<
 
 /** The R2 key of a blob's bytes. */
 export const blobKey = (sha256: string): string => `blobs/${sha256}`
+
+/** The R2 key of a page's generated agent version, never a visible file. */
+export const markdownKey = (sha256: string): string =>
+  `derived/markdown/${MARKDOWN_VERSION}/${sha256}.md`
 
 const unavailable = (error: unknown) => {
   console.error('A tree read failed', error)
@@ -870,6 +901,110 @@ export const TreeStoreLive: Layer.Layer<
     const analysis = (sha256: Sha256) =>
       analysisOf(sha256).pipe(Effect.provide(context))
 
+    const markdown = (sha256: Sha256) =>
+      Effect.gen(function* () {
+        const stored = yield* read(() => BLOBS.get(markdownKey(sha256)))
+        if (stored !== null) return yield* read(() => stored.text())
+        const page = yield* read(() => BLOBS.get(blobKey(sha256)))
+        if (page === null) {
+          console.error('A blob is missing from R2', { sha256 })
+          return yield* Effect.fail(dossierError('unavailable'))
+        }
+        const source = yield* read(() => page.text())
+        const text = yield* Effect.try({
+          try: () => toMarkdown(source),
+          catch: unavailable,
+        })
+        yield* read(() =>
+          BLOBS.put(markdownKey(sha256), text, {
+            httpMetadata: { contentType: 'text/markdown; charset=utf-8' },
+          }),
+        )
+        return text
+      })
+
+    const docs = (
+      folder: Granted<'read'>,
+      opts: { readonly origin: 'data' | 'any' },
+    ) =>
+      Effect.gen(function* () {
+        const caller = yield* CurrentCaller
+        const readable = yield* access.readable(folder.treeId)
+        const n = schema.nodes
+        const below =
+          folder.path === ''
+            ? sql`${n.depth} > 0`
+            : sql`substr(${n.path}, 1, length(${folder.path}) + 1) = ${`${folder.path}/`}`
+        const origin =
+          opts.origin === 'data' ? sql`${n.origin} = 'data'` : sql`1`
+        // Members of the tree's workspace see who pushed by email.
+        const member = sql`exists (select 1 from workspace_members m
+          join trees t on t.workspace_id = m.workspace_id
+          where t.id = ${folder.treeId} and m.user_id = ${caller.person?.id ?? ''})`
+        const rows = yield* read(() =>
+          database
+            .select({
+              node: schema.nodes,
+              version: schema.nodeVersions,
+              email: schema.user.email,
+              name: schema.user.name,
+              pushNumber: schema.pushes.number,
+              member: sql<number>`${member}`,
+            })
+            .from(schema.nodes)
+            .innerJoin(
+              schema.nodeVersions,
+              eq(schema.nodeVersions.id, schema.nodes.currentVersionId),
+            )
+            .innerJoin(
+              schema.user,
+              eq(schema.user.id, schema.nodeVersions.authorId),
+            )
+            .leftJoin(
+              schema.pushes,
+              eq(schema.pushes.id, schema.nodeVersions.pushId),
+            )
+            .where(
+              and(
+                eq(n.treeId, folder.treeId),
+                isNull(n.deletedAt),
+                eq(n.kind, 'file'),
+                eq(schema.nodeVersions.state, 'live'),
+                below,
+                origin,
+                readable.where,
+              ),
+            )
+            .orderBy(n.path)
+            .all(),
+        ).pipe(Effect.orDie)
+        return rows.map((row): DocRow => {
+          const node = row.node as NodeRow
+          const version = row.version as VersionRow
+          const data = node.origin === 'data'
+          const named =
+            data ||
+            row.member === 1 ||
+            (caller.person !== null && caller.person.id === version.authorId)
+          let value: unknown | null = null
+          if (data && version.jsonValue !== null) {
+            try {
+              value = JSON.parse(version.jsonValue)
+            } catch {
+              value = null
+            }
+          }
+          return {
+            node,
+            version,
+            by: named ? row.email : row.name,
+            push: ((data ? version.seenPushNumber : row.pushNumber) ??
+              0) as PushNumber,
+            value,
+          }
+        })
+      })
+
     const holdBlob = (
       holder: { readonly kind: HoldKind; readonly id: string },
       sha256: Sha256,
@@ -1356,6 +1491,8 @@ export const TreeStoreLive: Layer.Layer<
       list,
       read: readFile,
       analysis,
+      markdown,
+      docs,
       holdBlob,
       confirmHold,
       dropHold,

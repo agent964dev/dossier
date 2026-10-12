@@ -9,7 +9,7 @@ describe('a complete document', () => {
 
   it('is complete, with its doctype and the version of the analysis', () => {
     expect(page.v).toBe(ANALYZER_VERSION)
-    expect(page.v).toBe(3)
+    expect(page.v).toBe(4)
     expect(page.complete).toBe(true)
     expect(text(page.doctype)).toBe('<!DOCTYPE html>')
   })
@@ -641,5 +641,60 @@ describe('the slot of a layout', () => {
 
   it('has none when every slot has a name', () => {
     expect(analyze('<main><slot name="a"></slot></main>').slot).toBeNull()
+  })
+})
+
+describe('the companion a page names', () => {
+  const alternateOf = (links: string) =>
+    analyze(`<!doctype html><html><head>${links}</head><body></body></html>`)
+      .alternate
+
+  it('is the first <link rel="alternate"> with a companion type, or none', () => {
+    expect(alternateOf('<link rel="alternate" href="glossary.json">')).toBe(
+      'glossary.json',
+    )
+    expect(
+      alternateOf(
+        '<link rel="alternate" type="application/json" href="data/terms.json">',
+      ),
+    ).toBe('data/terms.json')
+    expect(
+      alternateOf(
+        '<link rel="alternate" type="text/markdown; charset=utf-8" href="plan.md">',
+      ),
+    ).toBe('plan.md')
+    expect(
+      alternateOf('<link rel="alternate" type="text/plain" href="plan.txt">'),
+    ).toBe('plan.txt')
+  })
+
+  it('ignores translations, media variants, feeds and other sites', () => {
+    expect(
+      alternateOf(
+        [
+          '<link rel="alternate" hreflang="ar" href="ar/plan.md">',
+          '<link rel="alternate" media="print" href="print.md">',
+          '<link rel="alternate" type="application/rss+xml" href="feed.xml">',
+          '<link rel="alternate" type="application/atom+xml" href="atom.xml">',
+          '<link rel="alternate" href="https://example.com/plan.md">',
+          '<link rel="alternate" href="/plan.md">',
+          '<link rel="alternate" href="">',
+          '<link rel="alternate stylesheet" type="text/css" href="dark.css">',
+        ].join(''),
+      ),
+    ).toBeNull()
+    expect(
+      alternateOf(
+        '<link rel="alternate" type="application/rss+xml" href="feed.xml"><link rel="alternate" href="plan.json">',
+      ),
+    ).toBe('plan.json')
+  })
+
+  it('is read only from the head', () => {
+    expect(
+      analyze(
+        '<!doctype html><html><head></head><body><link rel="alternate" href="x.md"></body></html>',
+      ).alternate,
+    ).toBeNull()
   })
 })

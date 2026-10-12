@@ -35,6 +35,7 @@ export {
 // ChangeSet stays inside core: only TreeStore.change hands one out.
 export {
   TreeStore,
+  type DocRow,
   type Entry,
   type FileBody,
   type NewEvent,
@@ -54,7 +55,14 @@ export {
   type StageInput,
   type StageResult,
 } from './push.ts'
-export { Files, type FilesService, type Listing } from './files.ts'
+export { entryWire, Files, type FilesService, type Listing } from './files.ts'
+export {
+  dataText,
+  folderText,
+  pointerLine,
+  type AgentServed,
+  type AgentType,
+} from './agent-version.ts'
 export { People, type PeopleService, type TreeSharing } from './people.ts'
 export {
   Pages,

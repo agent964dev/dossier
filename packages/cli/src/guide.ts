@@ -2,6 +2,14 @@ import { CliConfig, CommandDescriptor, HelpDoc, Usage } from '@effect/cli'
 import type { ExitCode } from '@dossier/contracts'
 
 import { verbs } from './commands/index.ts'
+import agentVersions from './guide/agent-versions.md' with { type: 'text' }
+import components from './guide/components.md' with { type: 'text' }
+import embedding from './guide/embedding.md' with { type: 'text' }
+import kitFiles from './guide/kit-files.md' with { type: 'text' }
+import layouts from './guide/layouts.md' with { type: 'text' }
+import reading from './guide/reading.md' with { type: 'text' }
+import themes from './guide/themes.md' with { type: 'text' }
+import treeAndLinks from './guide/tree-and-links.md' with { type: 'text' }
 import { VERSION } from './io.ts'
 import { EXIT_MEANINGS, helpText, spanText } from './render.ts'
 
@@ -12,10 +20,42 @@ export interface GuideVerb {
   readonly summary: string
 }
 
-/** What an agent needs to drive the CLI, read off the command declarations. */
+export interface GuideSection {
+  readonly title: string
+  readonly markdown: string
+}
+
+/**
+ * What an agent needs to drive the CLI: the verbs and exit codes read off the
+ * command declarations, and the conventions the CLI carries as Markdown.
+ */
 export interface Guide {
   readonly verbs: readonly GuideVerb[]
   readonly exitCodes: Readonly<Record<ExitCode, string>>
+  /** In order; the first says what Dossier is and comes before the verbs. */
+  readonly conventions: readonly GuideSection[]
+}
+
+/** The conventions, in the order the guide gives them. */
+const CONVENTIONS: readonly string[] = [
+  treeAndLinks,
+  kitFiles,
+  layouts,
+  themes,
+  components,
+  embedding,
+  agentVersions,
+  reading,
+]
+
+/** A convention file: its `## Title` line, then its Markdown. */
+export const sectionOf = (text: string): GuideSection => {
+  const [first = '', ...rest] = text.replace(/\r\n/g, '\n').split('\n')
+  const title = /^## (.+)$/.exec(first)?.[1]?.trim()
+  if (title === undefined) {
+    throw new Error(`A guide section must start with "## <title>": ${first}`)
+  }
+  return { title, markdown: rest.join('\n').trim() }
 }
 
 const blocks = (doc: HelpDoc.HelpDoc): HelpDoc.HelpDoc[] => {
@@ -66,6 +106,7 @@ const describeVerb = (verb: CommandDescriptor.Command<unknown>): GuideVerb => {
 export const guide = (): Guide => ({
   verbs: verbs.map((verb) => describeVerb(verb.descriptor)),
   exitCodes: EXIT_MEANINGS,
+  conventions: CONVENTIONS.map(sectionOf),
 })
 
 /** The guide as Markdown, for `dossier --agent-info`. */
@@ -87,6 +128,8 @@ export const guideMarkdown = (g: Guide): string => {
   const exitRows = Object.entries(g.exitCodes).map(
     ([code, meaning]) => `| ${code} | ${meaning} |`,
   )
+  const section = (c: GuideSection) => [`## ${c.title}`, '', c.markdown, '']
+  const [about, ...rest] = g.conventions
   return [
     `# dossier ${VERSION}`,
     '',
@@ -96,6 +139,7 @@ export const guideMarkdown = (g: Guide): string => {
     'To act with an agent key from settings, set both `DOSSIER_DEPLOYMENT` ' +
       'and `DOSSIER_KEY`.',
     '',
+    ...(about === undefined ? [] : section(about)),
     '## Verbs',
     '',
     verbSections.join('\n\n'),
@@ -106,5 +150,6 @@ export const guideMarkdown = (g: Guide): string => {
     '| --- | --- |',
     ...exitRows,
     '',
+    ...rest.flatMap(section),
   ].join('\n')
 }

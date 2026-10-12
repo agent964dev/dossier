@@ -9,6 +9,7 @@ import {
   type ErrorCode,
 } from '@dossier/contracts'
 
+import type { LinkRef } from '@dossier/contracts'
 import type { ShellBoot } from '@dossier/contracts/bridge'
 
 import type { Served } from '../core/index.ts'
@@ -228,6 +229,8 @@ export const withCommonHeaders = (
     headers.set(PROTOCOL_HEADER, String(PROTOCOL))
     if (!headers.has('cache-control')) headers.set('cache-control', NO_STORE)
   }
+  // A link answers people and agents differently, by Accept.
+  if (kind === 'link') headers.append('vary', 'Accept')
   if (
     kind !== null &&
     SCREEN_KINDS.has(kind) &&
@@ -389,6 +392,7 @@ export const frameResponse = (served: Served): Response => {
     }
     case 'shell':
     case 'listing':
+    case 'agent':
       return frameFailure(404)
   }
 }
@@ -415,6 +419,42 @@ export const baseResponse = (
     return new Response(null, { status: 200, headers })
   }
   return new Response(file.body, { status: 200, headers })
+}
+
+/**
+ * A link's answer to an agent: the agent version as text, or a file as a
+ * download, never author content shown on the main host. Viewer-specific,
+ * so never stored.
+ */
+export const agentResponse = (served: Served, ref: LinkRef): Response => {
+  const headers = new Headers({
+    'cache-control': NO_STORE,
+    'content-security-policy': 'sandbox',
+    'x-content-type-options': 'nosniff',
+  })
+  switch (served.kind) {
+    case 'agent':
+      headers.set(
+        'content-type',
+        served.type === 'application/json'
+          ? 'application/json'
+          : 'text/markdown; charset=utf-8',
+      )
+      return new Response(served.body, { status: 200, headers })
+    case 'file': {
+      const name = ref.path.slice(ref.path.lastIndexOf('/') + 1)
+      headers.set('content-type', 'application/octet-stream')
+      headers.set(
+        'content-disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+      )
+      headers.set('content-length', String(served.size))
+      headers.set('etag', `"${served.etag}"`)
+      return new Response(served.body, { status: 200, headers })
+    }
+    default:
+      throw new Error(`An agent cannot be answered with ${served.kind}`)
+  }
 }
 
 /** A redirect on the main host. */

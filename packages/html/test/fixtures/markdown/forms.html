@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head><title>Delivery questions</title></head>
+<body>
+<p>Tell us what you need.</p>
+<form action="answers/" method="post" aria-label="Delivery needs">
+  <h2>Your needs</h2>
+  <label for="region">Region</label>
+  <select id="region" name="region" required>
+    <option value="">Choose one</option>
+    <option>Erbil</option>
+    <option value="basra" selected>Basra</option>
+    <option value="mosul">Mosul</option>
+  </select>
+  <label>How many trucks? <input type="number" name="trucks" value="12" required></label>
+  <fieldset>
+    <legend>Priority</legend>
+    <label><input type="radio" name="priority" value="high" checked> High</label>
+    <label><input type="radio" name="priority" value="low"> Low</label>
+  </fieldset>
+  <fieldset>
+    <legend>Days</legend>
+    <label><input type="checkbox" name="days" value="mon" checked> Monday</label>
+    <label><input type="checkbox" name="days" value="wed"> Wednesday</label>
+  </fieldset>
+  <label><input type="checkbox" name="agree" required> I agree to the terms</label>
+  <textarea name="notes" aria-label="Anything else">A value someone typed</textarea>
+  <input type="email" name="contact" placeholder="Your email">
+  <input type="hidden" name="secret" value="never shown">
+  <button type="submit">Send</button>
+</form>
+<form action="decisions.json" id="sign-off">
+  <fieldset>
+    <legend>Sign off</legend>
+    <label>Name <input name="name" value="Sara"></label>
+  </fieldset>
+  <button>Sign</button>
+</form>
+<form action="votes/" id="vote"><input type="text" name="choice" value="yes"></form>
+<p>A loose field <input value="loose value"> says nothing either.</p>
+</body>
+</html>

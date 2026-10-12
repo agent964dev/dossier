@@ -2,6 +2,7 @@ import {
   dossierError,
   type AuthoredSeq,
   type DossierError,
+  type EntryWire,
   type LinkRef,
   type Sha256,
   type TreeId,
@@ -64,6 +65,25 @@ export interface FilesService {
 }
 
 export class Files extends Context.Tag('Files')<Files, FilesService>() {}
+
+/** An entry as the API and reads give it. */
+export const entryWire = (entry: Entry): EntryWire => ({
+  name: entry.name,
+  path: entry.path,
+  kind: entry.kind,
+  folder: entry.node.kind === 'folder',
+  size: entry.size,
+  sha256: entry.sha256,
+  contentType: entry.contentType,
+  title: entry.title,
+  push:
+    entry.push === null
+      ? null
+      : {
+          number: entry.push.number,
+          at: new Date(entry.push.at).toISOString(),
+        },
+})
 
 /** Reading never asks for more than read, so forbidden cannot happen. */
 const readOnly = <A, R>(

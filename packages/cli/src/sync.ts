@@ -30,6 +30,7 @@ import {
 import {
   analyze,
   checkPush,
+  companionOf,
   describeProblems,
   type HtmlAnalysis,
   pathProblems,
@@ -352,7 +353,18 @@ export const planFolder = (
             ...files.flatMap((file) => pathProblems(inTree(file.path))),
             ...result.problems,
           ],
-          warnings: result.warnings,
+          // A companion outside the folder may well be in the tree, which
+          // only the deployment sees.
+          warnings: result.warnings.filter((warning) => {
+            if (warning.code !== 'companion_missing') return true
+            const page = pages.find((p) => p.path === warning.path)
+            const companion =
+              page === undefined ? null : companionOf(page.path, page.analysis)
+            return (
+              companion !== null &&
+              (at === '' || companion.startsWith(`${at}/`))
+            )
+          }),
         }
       },
       catch: (error) =>

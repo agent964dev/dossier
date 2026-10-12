@@ -12,7 +12,7 @@ import { type BodyClose, findRepairs } from './repairs.ts'
 import { isRelativeUrl, isUnderscoreUrl, srcsetUrls } from './urls.ts'
 
 /** Bumped whenever the analysis changes shape or meaning. */
-export const ANALYZER_VERSION: number = 3
+export const ANALYZER_VERSION: number = 4
 
 /** UTF-16 offsets into the decoded source, as string slicing uses them. */
 export interface Range {
@@ -110,7 +110,12 @@ export interface HtmlAnalysis {
   readonly base: Range | null
   /** The 1-based line of that <base>, for the push's message. */
   readonly baseLine: number | null
-  /** <link rel="alternate"> href, for companions. */
+  /**
+   * The href of the first <link rel="alternate"> in the head that names a
+   * companion: a relative href, no hreflang and no media, and a type that is
+   * absent, text/markdown, text/plain or application/json. Feeds and
+   * translations are not companions.
+   */
   readonly alternate: string | null
   /** Custom element names used, sorted, once each. */
   readonly tags: readonly string[]
@@ -243,6 +248,24 @@ const headItem = (element: Element, length: number): HeadItem | null => {
     default:
       return item('other')
   }
+}
+
+const COMPANION_TYPES: ReadonlySet<string> = new Set([
+  'text/markdown',
+  'text/plain',
+  'application/json',
+])
+
+/** A <link rel="alternate"> that names a companion beside the page. */
+const namesCompanion = (element: Element): boolean => {
+  const href = attrOf(element, 'href')
+  if (href === null || href.trim() === '' || !isRelativeUrl(href)) return false
+  if (attrOf(element, 'hreflang') !== null) return false
+  if (attrOf(element, 'media') !== null) return false
+  const type = attrOf(element, 'type')
+  if (type === null) return true
+  const essence = (type.split(';')[0] ?? '').trim().toLowerCase()
+  return COMPANION_TYPES.has(essence)
 }
 
 const isCharsetMeta = (element: Element): boolean =>
@@ -395,7 +418,8 @@ export const analyze = (source: string): HtmlAnalysis => {
           alternate === null &&
           place.inHead &&
           !place.inTemplate &&
-          relTokens(node).includes('alternate')
+          relTokens(node).includes('alternate') &&
+          namesCompanion(node)
         ) {
           alternate = attrOf(node, 'href')
         }

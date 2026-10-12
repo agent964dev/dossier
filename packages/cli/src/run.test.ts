@@ -131,6 +131,7 @@ describe('the agent guide', () => {
       'push',
       'pull',
       'ls',
+      'read',
     ]) {
       expect(markdown).toContain(`### ${verb}\n`)
       expect(markdown).toContain(`dossier ${verb} `)
@@ -171,6 +172,7 @@ describe('the agent guide', () => {
       'push',
       'pull',
       'ls',
+      'read',
     ])
     expect(Object.keys(data.exitCodes)).toEqual([
       '0',

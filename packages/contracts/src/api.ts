@@ -254,6 +254,108 @@ export class ViewGroup extends HttpApiGroup.make('view')
       .addSuccess(ViewGrantSchema),
   ) {}
 
+/**
+ * One file as a read gives it, with who wrote it and when. Every later read
+ * of a data file has this shape.
+ */
+export const DocWire = Schema.Struct({
+  /** Inside the tree: 'answers/sara@acme.com.json'. */
+  path: Schema.String,
+  /** Parsed JSON for .json, text for text files, null otherwise. */
+  data: Schema.Unknown,
+  /**
+   * A data file's writer by email. An authored file's pusher by email to the
+   * members of the tree's workspace and to the pusher, by name to anyone else.
+   */
+  by: Schema.String,
+  /** ISO 8601. */
+  at: Schema.String,
+  /** Data: the push the writer saw. Authored: the push that wrote it. */
+  push: PushNumber,
+})
+export type DocWire = typeof DocWire.Type
+
+/** Where else to look from a page: its data and its comments. */
+export const Pointer = Schema.Struct({
+  data: Schema.Array(Schema.Struct({ path: Schema.String, files: Schema.Int })),
+  comments: Schema.Int,
+})
+export type Pointer = typeof Pointer.Type
+
+/** One `_` file available at a folder, for write holders. */
+export const KitItemWire = Schema.Struct({
+  /** Relative to the folder it comes from: '_components/acme-card.js'. */
+  path: Schema.String,
+  /** That folder ('' for the root), or null for the base layer. */
+  from: Schema.NullOr(Schema.String),
+  kind: Schema.Literal('layout', 'theme', 'component', 'doc', 'file'),
+  tag: Schema.NullOr(Schema.String),
+  /** The text of _components/<tag>.md. */
+  doc: Schema.NullOr(Schema.String),
+  /** Themes: the custom properties the file declares. */
+  variables: Schema.Array(Schema.String),
+})
+export type KitItemWire = typeof KitItemWire.Type
+
+const Located = {
+  /** Inside the tree. */
+  path: Schema.String,
+  link: Schema.String,
+  /** Exactly what the link returns to an agent. */
+  text: Schema.String,
+}
+
+/** What `dossier read` and a link asked by an agent answer. */
+export const ReadResult = Schema.Union(
+  Schema.Struct({
+    kind: Schema.Literal('page'),
+    ...Located,
+    push: PushNumber,
+    source: Schema.Literal('companion', 'generated'),
+    /** The companion's path inside the tree, when there is one. */
+    companion: Schema.NullOr(Schema.String),
+    type: Schema.Literal('text/markdown', 'application/json'),
+    pointer: Pointer,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal('folder'),
+    ...Located,
+    entries: Schema.Array(EntryWire),
+    /** Write holders only. */
+    kit: Schema.NullOr(Schema.Array(KitItemWire)),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal('data'),
+    ...Located,
+    files: Schema.Array(DocWire),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal('file'),
+    path: Schema.String,
+    link: Schema.String,
+    /** Text files up to 1 MiB; null otherwise. */
+    text: Schema.NullOr(Schema.String),
+    contentType: Schema.String,
+    size: Schema.Int,
+    /** Data files only. */
+    doc: Schema.NullOr(DocWire),
+  }),
+)
+export type ReadResult = typeof ReadResult.Type
+
+export class ReadGroup extends HttpApiGroup.make('read')
+  // not_found | sign_in_required
+  .add(
+    HttpApiEndpoint.get('read', '/read')
+      .setUrlParams(
+        Schema.Struct({
+          /** '<workspace>/<tree>/<path>', or a link on this deployment. */
+          path: Schema.String,
+        }),
+      )
+      .addSuccess(ReadResult),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -261,5 +363,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(PushesGroup)
   .add(FilesGroup)
   .add(ViewGroup)
+  .add(ReadGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

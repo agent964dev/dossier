@@ -44,7 +44,7 @@ describe('checkPush', () => {
           '<form action="votes.json" data-closes="2026-10-20T18:00Z"></form>',
         ),
       ],
-      treeOf({ 'team/votes.json': 'data' }),
+      treeOf({ 'team/votes.json': 'data', 'plan.md': 'file' }),
     )
     expect(check).toEqual({ problems: [], warnings: [] })
   })
@@ -509,5 +509,58 @@ describe('the push warnings', () => {
   it('never warn for pages inside a `_` folder, which are kit files', () => {
     const check = checkPush([file('_components/demo.html', card)], tree)
     expect(check.warnings).toEqual([])
+  })
+})
+
+describe('the companion warning', () => {
+  const page = (href: string) =>
+    `<!doctype html><html><head><link rel="alternate" href="${href}"></head><body></body></html>`
+
+  it('names a page whose named companion the tree does not hold, in the product’s words', () => {
+    const check = checkPush(
+      [file('plan.html', page('plan.json'))],
+      treeOf({ 'plan.html': 'page' }),
+    )
+    expect(check.problems).toEqual([])
+    expect(check.warnings).toEqual([
+      {
+        code: 'companion_missing',
+        path: 'plan.html',
+        line: null,
+        message:
+          'plan.html names plan.json as its agent version, but plan.json is not in the tree.',
+      },
+    ])
+  })
+
+  it('resolves the companion from the page’s folder and says nothing when it is there', () => {
+    const tree = treeOf({
+      'team/plan.html': 'page',
+      'team/glossary.json': 'file',
+      'shared/terms.md': 'file',
+    })
+    expect(
+      checkPush(
+        [
+          file('team/plan.html', page('glossary.json')),
+          file('team/terms.html', page('../shared/terms.md')),
+        ],
+        tree,
+      ).warnings,
+    ).toEqual([])
+    expect(
+      checkPush([file('team/notes.html', page('notes.md'))], tree).warnings.map(
+        (warning) => warning.message,
+      ),
+    ).toEqual([
+      'team/notes.html names team/notes.md as its agent version, but team/notes.md is not in the tree.',
+    ])
+  })
+
+  it('warns only for the paths in warnFor', () => {
+    const files = [file('plan.html', page('plan.json'))]
+    expect(
+      checkPush(files, treeOf(), { warnFor: new Set(['other.html']) }).warnings,
+    ).toEqual([])
   })
 })
