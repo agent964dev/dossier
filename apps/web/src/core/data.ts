@@ -21,6 +21,7 @@ import {
 } from '@dossier/contracts'
 import type { Json, JsonObject } from '@dossier/contracts/bridge'
 import {
+  acceptsFile,
   validateSend,
   type FieldEntry,
   type FieldType,
@@ -31,6 +32,7 @@ import { Clock, Context, Effect, Layer } from 'effect'
 import { Access, type Granted } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
+import { newId } from './ids.ts'
 import { composedLayouts } from './lookup.ts'
 import { Limits } from './limits.ts'
 import type { NodeRow, TreeRow, VersionRow } from './rows.ts'
@@ -598,6 +600,14 @@ export const DataLive: Layer.Layer<
         'A super admin can raise it.',
       )
 
+    /** Whether the caller reads the live data file at a path now. */
+    const readsNow = (treeId: TreeId, path: string) =>
+      Effect.gen(function* () {
+        const found = yield* liveData(treeId, path)
+        if (found === null) return false
+        return yield* access.require('read', found.node).pipe(Effect.isSuccess)
+      })
+
     const send: DataService['send'] = (i) =>
       Effect.gen(function* () {
         const person = yield* signedIn('Sign in to send this.', i.as)
@@ -612,8 +622,13 @@ export const DataLive: Layer.Layer<
             }
             const raw = yield* versionById(first.version.id)
             const path = raw === null ? '' : versionOfRaw(raw).path
+            const doc = yield* docOf(path, first.version)
+            // Only someone who reads the file gets it back; what this send
+            // wrote is not kept apart, so a replay answers without it.
             return {
-              doc: yield* docOf(path, first.version),
+              doc: (yield* readsNow(i.treeId, path))
+                ? doc
+                : { ...doc, data: null },
               replayed: true,
             } satisfies SendResult
           })
@@ -629,7 +644,45 @@ export const DataLive: Layer.Layer<
           if (again !== null) return again
           const checked = yield* checkForm(i)
           const { tree, page, seenRow, seenPush } = checked
-          const check = validateSend(seenRow.schema, i.entries, i.submitter)
+          // Every upload a send names is one of the caller's own in their
+          // folder, recorded as the stored file is, whatever the send says.
+          const own = ownFolder(seenRow, email)
+          const entries: FieldEntry[] = []
+          for (const [field, value] of i.entries) {
+            if (typeof value === 'string') {
+              entries.push([field, value])
+              continue
+            }
+            const stored = value.file
+              .split('/')
+              .some((s) => s === '..' || s === '.' || s === '')
+              ? null
+              : yield* liveData(tree.id, `${own}/${value.file}`)
+            if (
+              stored === null ||
+              stored.node.ownerId !== person.id ||
+              stored.version.blobSha256 === null
+            ) {
+              return yield* Effect.fail(
+                dossierError(
+                  'invalid',
+                  'This file was not uploaded with this form. Choose the file again.',
+                  null,
+                  field,
+                ),
+              )
+            }
+            entries.push([
+              field,
+              {
+                file: value.file,
+                name: stored.node.name,
+                size: stored.version.size ?? 0,
+                type: stored.version.contentType ?? 'application/octet-stream',
+              },
+            ])
+          }
+          const check = validateSend(seenRow.schema, entries, i.submitter)
           if (!check.ok) {
             const [problem] = check.problems
             return yield* Effect.fail(
@@ -640,38 +693,6 @@ export const DataLive: Layer.Layer<
                 problem?.field ?? null,
               ),
             )
-          }
-          // Every upload named is one of the caller's own, in their folder.
-          const own = ownFolder(seenRow, email)
-          for (const [field, value] of Object.entries(check.values)) {
-            const uploads = Array.isArray(value)
-              ? value.filter(isUploadValue)
-              : isUploadValue(value)
-                ? [value]
-                : []
-            for (const upload of uploads) {
-              const path = `${own}/${upload.file}`
-              const node = upload.file
-                .split('/')
-                .some((s) => s === '..' || s === '.')
-                ? null
-                : yield* liveNode(tree.id, path)
-              if (
-                node === null ||
-                node.kind !== 'file' ||
-                node.origin !== 'data' ||
-                node.ownerId !== person.id
-              ) {
-                return yield* Effect.fail(
-                  dossierError(
-                    'invalid',
-                    'This file was not uploaded with this form. Choose the file again.',
-                    null,
-                    field,
-                  ),
-                )
-              }
-            }
           }
           const values = check.values as Readonly<Record<string, unknown>>
           const provenance = { seenPush, opId: i.opId }
@@ -709,6 +730,18 @@ export const DataLive: Layer.Layer<
             existing = found.node
             if (seenRow.kind !== 'shared' && found.node.ownerId !== person.id) {
               return yield* Effect.fail(notFound(path))
+            }
+            // A shared file belongs to nobody: a form never merges into
+            // someone's own answers, whatever its action names.
+            if (seenRow.kind === 'shared' && found.node.ownerId !== null) {
+              return yield* Effect.fail(
+                dossierError(
+                  'forbidden',
+                  'This form writes to someone’s own answers, so it cannot be sent.',
+                  null,
+                  path,
+                ),
+              )
             }
           } else if (i.entry !== null) {
             return yield* Effect.fail(notFound(i.entry))
@@ -781,8 +814,12 @@ export const DataLive: Layer.Layer<
           if (raw === null)
             return yield* Effect.fail(dossierError('unavailable'))
           const stored = versionOfRaw(raw)
+          const doc = yield* docOf(stored.path, stored.version)
+          // A sender who may not read the file gets back only what they wrote.
           return {
-            doc: yield* docOf(stored.path, stored.version),
+            doc: (yield* readsNow(tree.id, stored.path))
+              ? doc
+              : { ...doc, data: values as JsonObject },
             replayed: false,
           } satisfies SendResult
         })
@@ -864,11 +901,20 @@ export const DataLive: Layer.Layer<
             ),
           )
         }
+        if (rule.accept !== null && !acceptsFile(rule.accept, i)) {
+          return yield* Effect.fail(
+            dossierError(
+              'invalid',
+              'Choose a file of a type this field accepts.',
+              null,
+              field,
+            ),
+          )
+        }
         const name = safeName(i.name)
         const own = ownFolder(seenRow, email)
         const folder = uploadsFolder(seenRow, email)
-        const path = `${folder}/${name}`
-        if (!isTreePath(path)) {
+        if (!isTreePath(`${folder}/${name}`)) {
           return yield* Effect.fail(
             dossierError(
               'invalid',
@@ -878,9 +924,23 @@ export const DataLive: Layer.Layer<
             ),
           )
         }
-        const holder = { kind: 'upload', id: `${person.id}:${i.opId}` } as const
+        // A hold of this request's own: overlapping tries of one op ID never
+        // take each other's.
+        const holder = {
+          kind: 'upload',
+          id: `${person.id}:${i.opId}:${newId()}`,
+        } as const
+        const reclaiming = () =>
+          dossierError(
+            'blob_reclaiming',
+            'This file is being cleaned up. Send it again shortly.',
+            'Try again in a minute.',
+            field,
+          )
         // The hold comes first, so a purge never takes the bytes being written.
-        yield* store.holdBlob(holder, i.sha256, i.size)
+        yield* store
+          .holdBlob(holder, i.sha256, i.size)
+          .pipe(Effect.mapError(() => reclaiming()))
         yield* Effect.tryPromise({
           try: async () => {
             const sized = new FixedLengthStream(i.size)
@@ -902,17 +962,36 @@ export const DataLive: Layer.Layer<
         }).pipe(Effect.tapError(() => store.dropHold(holder, i.sha256)))
         yield* store.confirmHold(holder, i.sha256, i.size)
         const type = i.type.trim() === '' ? 'application/octet-stream' : i.type
+        /** `cv.pdf`, then `cv-2.pdf`, `cv-3.pdf`: never an earlier upload's. */
+        const named = (n: number): string => {
+          if (n === 1) return name
+          const dot = name.lastIndexOf('.')
+          return dot > 0
+            ? `${name.slice(0, dot)}-${n}${name.slice(dot)}`
+            : `${name}-${n}`
+        }
         const once = Effect.gen(function* () {
-          const found = yield* liveData(tree.id, path)
-          if (found !== null && found.node.ownerId !== person.id) {
-            return yield* Effect.fail(notFound(path))
+          // Another try of this op ID may have stored it meanwhile.
+          const stored = yield* recorded()
+          if (stored !== null) return { result: stored, mine: false }
+          let path = `${folder}/${named(1)}`
+          for (let n = 2; (yield* liveNode(tree.id, path)) !== null; n += 1) {
+            path = `${folder}/${named(n)}`
           }
-          const granted =
-            found === null ? null : yield* access.require('respond', found.node)
+          if (!isTreePath(path)) {
+            return yield* Effect.fail(
+              dossierError(
+                'invalid',
+                'This file cannot be stored under its name.',
+                null,
+                field,
+              ),
+            )
+          }
           const ownNode = yield* liveNode(tree.id, own)
           const filesNode =
             folder === own ? ownNode : yield* liveNode(tree.id, folder)
-          return yield* store.change(tree.id, (cs) =>
+          yield* store.change(tree.id, (cs) =>
             Effect.sync(() => {
               cs.guardHead('', tree.authoredSeq as AuthoredSeq)
               if (ownNode === null) {
@@ -929,9 +1008,12 @@ export const DataLive: Layer.Layer<
                   owner: person.id,
                 })
               }
-              const node =
-                granted ??
-                cs.createData(page, { path, kind: 'file', owner: person.id })
+              // Always a new file: an upload is never a version of another.
+              const node = cs.createData(page, {
+                path,
+                kind: 'file',
+                owner: person.id,
+              })
               const version = cs.putData(node, {
                 seenPush,
                 opId: i.opId,
@@ -952,17 +1034,32 @@ export const DataLive: Layer.Layer<
               return {}
             }),
           )
+          return {
+            result: {
+              path,
+              file: path.slice(own.length + 1),
+              name: path.slice(path.lastIndexOf('/') + 1),
+              size: i.size,
+              type,
+            } satisfies UploadResult,
+            mine: true,
+          }
         })
-        yield* retrying(once).pipe(
+        const outcome = yield* retrying(once).pipe(
+          Effect.catchAll((error) =>
+            // A try that lost to another of the same op ID answers with it.
+            Effect.flatMap(recorded(), (stored) =>
+              stored !== null
+                ? Effect.succeed({ result: stored, mine: false })
+                : Effect.fail(
+                    error.code === 'blob_reclaiming' ? reclaiming() : error,
+                  ),
+            ),
+          ),
           Effect.tapError(() => store.releaseHold(holder, i.sha256)),
         )
-        return {
-          path,
-          file: path.slice(own.length + 1),
-          name,
-          size: i.size,
-          type,
-        } satisfies UploadResult
+        if (!outcome.mine) yield* store.releaseHold(holder, i.sha256)
+        return outcome.result
       }) as ReturnType<DataService['upload']>
 
     /** The upload paths a data version's values name, from its own folder. */
@@ -1033,6 +1130,21 @@ export const DataLive: Layer.Layer<
           for (const path of uploadsNamed(other.json, otherOwn))
             named.delete(path)
         }
+        // And every upload of theirs in this form's folder that no other
+        // answer of theirs names: ones a failed or changed send left behind.
+        const loose = yield* query(() =>
+          DB.prepare(
+            `select path from nodes where tree_id = ? and owner_id = ?
+               and origin = 'data' and kind = 'file' and deleted_at is null
+               and substr(path, 1, length(?3) + 7) = ?3 || '/files/'`,
+          )
+            .bind(i.treeId, person.id, own)
+            .all<{ path: string }>(),
+        )
+        for (const { path } of loose.results) named.add(path)
+        for (const other of others.results) {
+          for (const path of uploadsNamed(other.json, own)) named.delete(path)
+        }
         const uploads: Granted<'withdraw-own'>[] = []
         for (const path of named) {
           const kept = yield* liveData(i.treeId, path)
@@ -1042,11 +1154,27 @@ export const DataLive: Layer.Layer<
             .pipe(Effect.option)
           if (ok._tag === 'Some') uploads.push(ok.value)
         }
+        // The writer's folders this leaves empty go too, innermost first.
+        const folders: Granted<'withdraw-own'>[] = []
+        for (const path of [`${own}/files`, own]) {
+          const row = yield* folderOrFile(i.treeId, path)
+          if (
+            row === null ||
+            row.kind !== 'folder' ||
+            row.ownerId !== person.id
+          )
+            continue
+          const ok = yield* access
+            .require('withdraw-own', row)
+            .pipe(Effect.option)
+          if (ok._tag === 'Some') folders.push(ok.value)
+        }
         yield* store
           .change(i.treeId, (cs) =>
             Effect.sync(() => {
               cs.markDeleted(granted, 'withdrawn')
               for (const kept of uploads) cs.markDeleted(kept, 'withdrawn')
+              for (const folder of folders) cs.markDeleted(folder, 'withdrawn')
               cs.operation({
                 principal: person.id,
                 scope,
@@ -1136,6 +1264,12 @@ export const DataLive: Layer.Layer<
                  and n.origin = 'data' and n.owner_id is not null
                  and substr(t.value, -1) = '/'
                  and substr(n.path, 1, length(t.value)) = t.value
+                 -- Answers only: a person's file, or an entry in their
+                 -- folder; never an upload.
+                 and n.path like '%.json'
+                 and n.depth - (length(t.value) - length(replace(t.value, '/', '')))
+                   between 1 and 2
+                 and instr(substr(n.path, length(t.value) + 1), '/files/') = 0
                union
                select v.author_id as who from nodes n
                  join node_versions v on v.node_id = n.id, json_each(?2) t

@@ -264,7 +264,8 @@ export interface ChangeSet {
   /**
    * 'withdrawn': every version's content deleted, one content-free
    * 'withdrawn' version left, the node deleted, its operations reduced to
-   * 'withdrawn', and its blobs' references counted down.
+   * 'withdrawn', and its blobs' references counted down. A folder of the
+   * writer's goes only when the change leaves it empty.
    */
   readonly markDeleted: (
     node: Granted<'withdraw-own'>,
@@ -1883,6 +1884,18 @@ export const TreeStoreLive: Layer.Layer<
             const t = tid()
             if (mode !== 'withdrawn') throw new Error(`no ${mode} mode yet`)
             bases.push(everyBasis(node.basis, person.id))
+            if (node.kind === 'folder') {
+              // A writer's own folder goes once nothing lives in it, after
+              // the files of this change.
+              writes.push({
+                sql: `update nodes set deleted_at = ?1
+                      where id = ?2 and deleted_at is null and origin = 'data'
+                        and not exists (select 1 from nodes c where c.parent_id = ?2
+                          and c.deleted_at is null)`,
+                binds: [now, node.id],
+              })
+              return
+            }
             stateGuards.push(liveDataFile(node.id))
             const versionId = newId() as VersionId
             writes.push(

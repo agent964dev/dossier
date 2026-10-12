@@ -375,7 +375,10 @@ const dateKey = (type: FieldType, text: string): string =>
   type === 'time' || type === 'datetime-local' ? fullTime(text) : text
 
 /** Whether a file matches an accept list: wildcards, MIME types, extensions. */
-const accepts = (accept: string, upload: UploadValue): boolean => {
+export const acceptsFile = (
+  accept: string,
+  upload: Pick<UploadValue, 'name' | 'type'>,
+): boolean => {
   const tokens = accept
     .split(',')
     .map((token) => token.trim().toLowerCase())
@@ -533,7 +536,7 @@ const checkField = (field: FieldRule, sent: readonly unknown[]): Outcome => {
       return field.required ? { message: 'Choose a file.' } : null
     if (
       field.accept !== null &&
-      !sent.every((file) => accepts(field.accept!, file))
+      !sent.every((file) => acceptsFile(field.accept!, file))
     ) {
       return { message: 'Choose a file of a type this field accepts.' }
     }
