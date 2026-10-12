@@ -56,6 +56,8 @@ export interface SendInput {
   /** One of the caller's entries to revise, or null. */
   readonly entry: string | null
   readonly opId: OpId
+  /** Whom the page was shown to; null or absent when it did not say. */
+  readonly as?: string | null
 }
 
 export interface UploadInput {
@@ -71,6 +73,8 @@ export interface UploadInput {
   readonly sha256: Sha256
   readonly body: ReadableStream<Uint8Array>
   readonly opId: OpId
+  /** Whom the page was shown to; null or absent when it did not say. */
+  readonly as?: string | null
 }
 
 export interface ResponseRow {
@@ -175,6 +179,7 @@ export interface DataService {
     readonly treeId: TreeId
     readonly path: string
     readonly opId: OpId
+    readonly as?: string | null
   }) => Effect.Effect<
     void,
     DossierError<
@@ -365,13 +370,27 @@ export const DataLive: Layer.Layer<
         },
       })
 
-    const signedIn = (message: string) =>
+    /**
+     * The person sending, who must be the one the page was shown to: a tab
+     * left open while someone else signed in never writes as them.
+     */
+    const signedIn = (message: string, as?: string | null) =>
       Effect.flatMap(CurrentCaller, (caller) =>
         caller.person === null
           ? Effect.fail(
               dossierError('sign_in_required', message, 'Sign in with Google.'),
             )
-          : Effect.succeed(caller.person),
+          : as !== undefined &&
+              as !== null &&
+              as.toLowerCase() !== caller.person.email.toLowerCase()
+            ? Effect.fail(
+                dossierError(
+                  'sign_in_required',
+                  'This page was opened by someone else. Sign in again to send it.',
+                  'Sign in with Google.',
+                ),
+              )
+            : Effect.succeed(caller.person),
       )
 
     const emailOf = (personId: string) =>
@@ -581,7 +600,7 @@ export const DataLive: Layer.Layer<
 
     const send: DataService['send'] = (i) =>
       Effect.gen(function* () {
-        const person = yield* signedIn('Sign in to send this.')
+        const person = yield* signedIn('Sign in to send this.', i.as)
         const scope = `${i.treeId}:${i.form.target}`
         const key = { principal: person.id, scope, opId: i.opId }
         const replay = () =>
@@ -772,7 +791,7 @@ export const DataLive: Layer.Layer<
 
     const upload: DataService['upload'] = (i) =>
       Effect.gen(function* () {
-        const person = yield* signedIn('Sign in to send this.')
+        const person = yield* signedIn('Sign in to send this.', i.as)
         if (i.form === null || i.field === null) {
           return yield* Effect.fail(
             dossierError(
@@ -961,7 +980,7 @@ export const DataLive: Layer.Layer<
 
     const withdraw: DataService['withdraw'] = (i) =>
       Effect.gen(function* () {
-        const person = yield* signedIn('Sign in to withdraw this.')
+        const person = yield* signedIn('Sign in to withdraw this.', i.as)
         const scope = `${i.treeId}:${i.path}`
         const done = yield* store.operationResult({
           principal: person.id,

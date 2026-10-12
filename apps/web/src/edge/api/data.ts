@@ -29,6 +29,7 @@ export const DataApiLive = HttpApiBuilder.group(
             submitter: payload.submitter,
             entry: payload.entry,
             opId: payload.opId,
+            as: payload.as ?? null,
           }),
         ),
       )
@@ -62,6 +63,7 @@ export const DataApiLive = HttpApiBuilder.group(
             sha256: urlParams.sha256,
             body,
             opId: urlParams.opId,
+            as: urlParams.as ?? null,
           })
           return HttpServerResponse.unsafeJson(stored, { status: 201 })
         }),
@@ -72,6 +74,7 @@ export const DataApiLive = HttpApiBuilder.group(
             treeId: payload.tree,
             path: payload.path,
             opId: payload.opId,
+            as: payload.as ?? null,
           }),
         ),
       )

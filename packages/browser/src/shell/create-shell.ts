@@ -32,6 +32,8 @@ export interface ViewGrant {
   readonly role: RoleName
   /** The tree path of the page or file the frame opens. */
   readonly path: string
+  /** Whom the grant is for; null for a visitor. */
+  readonly email: string | null
 }
 
 /** The body of a send, as the API takes it. */
@@ -45,6 +47,8 @@ export interface SendPayloadWire {
   readonly submitter: SendRequest['submitter']
   readonly entry: string | null
   readonly opId: string
+  /** Whom the page was shown to: the deployment refuses anyone else. */
+  readonly as: string | null
 }
 
 /** doc null: the answer was withdrawn since. */
@@ -68,6 +72,7 @@ export interface UploadParamsWire {
   readonly size: number
   readonly sha256: string
   readonly opId: string
+  readonly as: string | null
 }
 
 export interface UploadResultWire extends UploadRef {
@@ -81,6 +86,15 @@ export interface ShellApi {
     readonly tree: string
     readonly path: string
   }) => Promise<ViewGrant>
+  /**
+   * The page a nested page says it is, as the deployment answers for this
+   * session: its canonical tree path and the person it answers as. Rejects
+   * when the page is missing or the person may not open it.
+   */
+  readonly confirm: (i: {
+    readonly tree: string
+    readonly page: string
+  }) => Promise<{ readonly path: string; readonly email: string | null }>
   /** A file, null when it is missing or unreadable, or a folder's files. */
   readonly read: (i: {
     readonly tree: string
@@ -94,6 +108,7 @@ export interface ShellApi {
     readonly tree: string
     readonly path: string
     readonly opId: string
+    readonly as: string | null
   }) => Promise<void>
 }
 
@@ -140,6 +155,14 @@ const hashOf = (hash: string): string =>
 type Request = Extract<PageToShell, { type: 'request' }>
 
 const treePath = (path: string): string => path.replace(/^\/+/, '')
+
+/** Values as one JSON text whatever their keys' order. */
+const canonical = (values: Readonly<Record<string, unknown>>): string =>
+  JSON.stringify(
+    Object.keys(values)
+      .sort()
+      .map((key) => [key, values[key]]),
+  )
 
 /** A File or Blob value of a send, as opposed to text or a stored upload. */
 const isFile = (value: unknown): value is File =>
@@ -204,6 +227,8 @@ export const createShell = (
   let role: RoleName = 'read'
   /** The link path of the page shown now. */
   let linkPath = boot.linkPath
+  /** The tree path the grant of the page in the frame named. */
+  let framedPath: string | null = null
   let renewedAt = 0
   let loads = 0
   /** The navigation whose page the frame shows now. */
@@ -225,6 +250,15 @@ export const createShell = (
   const me = (): Me | null => (boot.me === null ? null : { ...boot.me, role })
   /** Whose drafts these are: the person's email, or '' for a visitor. */
   const viewer = (): string => boot.me?.email ?? ''
+  /** Whom this shell's pages were shown to; every send says so. */
+  const shownTo = (): string | null => boot.me?.email ?? null
+  /**
+   * The deployment answers for the person this shell booted for. Someone
+   * else signed in meanwhile (or no one is): nothing of this person's goes
+   * on, and a reload shows the page as it is for whoever is there now.
+   */
+  const samePerson = (email: string | null): boolean =>
+    (email ?? '').toLowerCase() === (shownTo() ?? '').toLowerCase()
   const tree = boot.tree.id
 
   const closePorts = (): void => {
@@ -330,13 +364,18 @@ export const createShell = (
   const deliver = async (
     page: string,
     send: SendRequest,
+    as: string | null,
   ): Promise<SendResultWire> => {
     const entries: (readonly [string, string | UploadRef])[] = []
+    /** How many files of each field are uploaded so far, for their op IDs. */
+    const files = new Map<string, number>()
     for (const [field, value] of send.entries) {
       if (!isFile(value)) {
         entries.push([field, value])
         continue
       }
+      const index = files.get(field) ?? 0
+      files.set(field, index + 1)
       const stored = await api.upload({
         tree,
         page,
@@ -349,7 +388,8 @@ export const createShell = (
         type: value.type || 'application/octet-stream',
         size: value.size,
         sha256: await sha256(value),
-        opId: `${send.opId}:${field}`,
+        opId: `${send.opId}:${field}:${index}`,
+        as,
         body: value,
       })
       entries.push([
@@ -371,16 +411,53 @@ export const createShell = (
       submitter: send.submitter,
       entry: null,
       opId: send.opId,
+      as,
     })
   }
 
-  /** After a send of a form succeeds: its draft and every kept send go. */
-  const sent = async (page: string, form: FormRef, by: string | null) => {
-    const key = formKey(form)
-    await quietly(
-      () => store.saveDraft(by ?? viewer(), tree, page, key, null),
-      undefined,
+  /** A send's text values as a draft holds them, to tell whether they match. */
+  const asDraft = (send: SendRequest): string => {
+    const out: Record<string, string | string[]> = {}
+    for (const [name, value] of send.entries) {
+      if (typeof value !== 'string') continue
+      const before = out[name]
+      out[name] =
+        before === undefined
+          ? value
+          : Array.isArray(before)
+            ? [...before, value]
+            : [before, value]
+    }
+    return canonical(out)
+  }
+
+  /**
+   * After a kept send succeeds with no page to ask: the form's draft goes
+   * only when it still holds what was sent, so later edits stay.
+   */
+  const replayed = async (page: string, send: PendingSend): Promise<void> => {
+    const key = formKey(send.form)
+    const owner = send.by ?? viewer()
+    const drafts = await quietly(
+      () => store.loadDrafts(owner, tree, page),
+      {} as Readonly<Record<string, DraftValues>>,
     )
+    const draft = drafts[key]
+    if (draft !== undefined && canonical(draft) === asDraft(send)) {
+      await quietly(
+        () => store.saveDraft(owner, tree, page, key, null),
+        undefined,
+      )
+    }
+    await sent(page, send.form)
+  }
+
+  /**
+   * After a send of a form succeeds, every kept send of it goes. Its draft
+   * is the page's to clear: only the page knows of edits since the send.
+   */
+  const sent = async (page: string, form: FormRef) => {
+    const key = formKey(form)
     const kept = await quietly(() => store.loadPending(tree, page), [])
     for (const send of kept) {
       if (formKey(send.form) === key) {
@@ -414,8 +491,8 @@ export const createShell = (
       return
     }
     try {
-      const result = await deliver(page, send)
-      await sent(page, send.form, boot.me?.email ?? null)
+      const result = await deliver(page, send, shownTo())
+      await sent(page, send.form)
       answer(port, id, { value: result })
     } catch (error) {
       const code = codeOf(error)
@@ -442,10 +519,16 @@ export const createShell = (
       for (const send of await pendingFor(page)) {
         const form = formKey(send.form)
         try {
-          const value = await deliver(page, send)
-          await sent(page, send.form, send.by)
+          const value = await deliver(page, send, send.by)
+          await replayed(page, send)
           tell(page, { type: 'resumed', form, ok: true, value })
         } catch (error) {
+          if (codeOf(error) === 'sign_in_required') {
+            // Its person is not the one signed in now, or no one is: the
+            // send stays kept, and a reload asks whoever is here.
+            if (!disposed) win.location.reload()
+            return
+          }
           tell(page, {
             type: 'resumed',
             form,
@@ -510,7 +593,7 @@ export const createShell = (
           })
           return
         }
-        api.withdraw({ tree, path, opId: request.opId }).then(
+        api.withdraw({ tree, path, opId: request.opId, as: shownTo() }).then(
           () => answer(port, request.id, { value: null }),
           (error: unknown) => answer(port, request.id, { error }),
         )
@@ -554,6 +637,10 @@ export const createShell = (
       return
     }
     if (current !== loads || disposed) return
+    if (!samePerson(grant.email)) {
+      win.location.reload()
+      return
+    }
     const state = await pageState(treePath(grant.path))
     if (current !== loads || disposed) return
     win.clearTimeout(retryTimer)
@@ -563,6 +650,7 @@ export const createShell = (
     role = grant.role
     renewedAt = Date.now()
     linkPath = path
+    framedPath = treePath(grant.path)
 
     // The sandbox comes from FRAME_ATTRIBUTES just below.
     // oxlint-disable-next-line react/iframe-missing-sandbox
@@ -589,6 +677,10 @@ export const createShell = (
       const grant = await api.view({ tree: boot.tree.id, path: linkPath })
       // A load since then holds a fresher grant.
       if (disposed || current !== loads) return
+      if (!samePerson(grant.email)) {
+        win.location.reload()
+        return
+      }
       handle = grant.handle
       role = grant.role
       renewedAt = Date.now()
@@ -655,9 +747,43 @@ export const createShell = (
     }
     const port = transferred[0]!
     const page = treePath(data.path)
-    // A new top page: the frame's previous document and its pages are gone.
-    if (!data.nested) closePorts()
-    const navigation = data.nested ? null : shown
+    if (!data.nested) {
+      // The top page is the page its grant named, whatever it says.
+      if (page !== framedPath) {
+        port.close()
+        return
+      }
+      // A new top page: the frame's previous document and its pages are gone.
+      closePorts()
+      welcome(port, page, shown)
+      return
+    }
+    // A nested page says which page it is; the deployment confirms it for
+    // this person before it gets drafts or sends anything.
+    const navigation = shown
+    api.confirm({ tree, page }).then(
+      (found) => {
+        if (
+          disposed ||
+          navigation !== shown ||
+          found.path !== page ||
+          !samePerson(found.email)
+        ) {
+          port.close()
+          return
+        }
+        welcome(port, page, null)
+      },
+      () => port.close(),
+    )
+  }
+
+  /** Takes an accepted page's port, then hands it its drafts and kept sends. */
+  const welcome = (
+    port: MessagePort,
+    page: string,
+    navigation: number | null,
+  ): void => {
     port.addEventListener('message', (message) =>
       onPageMessage(message.data, port, page, navigation),
     )

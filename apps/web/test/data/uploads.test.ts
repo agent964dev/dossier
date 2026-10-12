@@ -133,6 +133,8 @@ describe('an upload', () => {
       path: string
     }
     expect(grant.path).toBe('questions/index.html')
+    // The grant names whom it is for, so a shell never goes on as another.
+    expect((grant as unknown as { email: string }).email).toBe(owner.email)
     const framed = await ownerBrowser.fetch(
       `/_/v/${grant.handle}/${grant.seq}/questions/answers/${encodeURIComponent(email)}/files/cv.pdf`,
       { host: `${tree.treeId}.content.test`, purpose: 'none' },

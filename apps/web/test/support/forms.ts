@@ -103,6 +103,7 @@ export interface Send {
   readonly submitter?: { name: string; value: string } | null
   readonly entry?: string | null
   readonly opId?: string
+  readonly as?: string | null
 }
 
 const inputOf = async (tree: FormTree, send: Send) => ({
@@ -114,6 +115,7 @@ const inputOf = async (tree: FormTree, send: Send) => ({
   submitter: send.submitter ?? null,
   entry: send.entry ?? null,
   opId: (send.opId ?? crypto.randomUUID()) as OpId,
+  as: send.as ?? null,
 })
 
 export const sendAs = async (caller: Caller, tree: FormTree, send: Send) => {
@@ -147,6 +149,7 @@ export interface Upload {
   readonly bytes: string
   readonly size?: number
   readonly opId?: string
+  readonly as?: string | null
 }
 
 const uploadInput = async (tree: FormTree, u: Upload) => ({
@@ -163,6 +166,7 @@ const uploadInput = async (tree: FormTree, u: Upload) => ({
     encoder.encode(u.bytes),
   ]).stream() as ReadableStream<Uint8Array>,
   opId: (u.opId ?? crypto.randomUUID()) as OpId,
+  as: u.as ?? null,
 })
 
 export const uploadAs = async (caller: Caller, tree: FormTree, u: Upload) => {

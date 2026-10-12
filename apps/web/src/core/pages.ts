@@ -843,6 +843,7 @@ export const PagesLive: Layer.Layer<
               seq,
               role: highest(roles),
               path: resolved.node.path,
+              email: person.email,
             } satisfies ViewGrant
           }
           console.error('The tree kept moving while a view was issued', {

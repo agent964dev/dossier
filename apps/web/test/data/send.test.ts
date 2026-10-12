@@ -542,3 +542,57 @@ describe('a send', () => {
     expect(env).toBeDefined()
   })
 })
+
+describe('the person a page was shown to', () => {
+  it('refuses a send, an upload and a withdrawal made as someone else, and stores nothing', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const q = await questions(tree)
+    const other = 'someone-else@example.com'
+    expect(
+      await sendFailure(browser, tree, {
+        ...q,
+        entries: [['role', 'x']],
+        as: other,
+      }),
+    ).toMatchObject({ code: 'sign_in_required' })
+    expect(
+      await count('nodes', "tree_id = ? and origin = 'data'", tree.treeId),
+    ).toBe(0)
+    const { uploadFailure, withdrawAs } = await import('../support/forms.ts')
+    const { Effect } = await import('effect')
+    const { Data } = await import('../../src/core/index.ts')
+    const { failureAs } = await import('../support/trees.ts')
+    expect(
+      (
+        await failureAs(
+          browser,
+          Effect.flatMap(Data, (d) =>
+            d.withdraw({
+              treeId: tree.treeId as never,
+              path: `questions/answers/${owner.email}.json`,
+              opId: 'w1' as never,
+              as: other,
+            }),
+          ),
+        )
+      ).code,
+    ).toBe('sign_in_required')
+    expect(
+      await uploadFailure(browser, tree, {
+        ...q,
+        field: 'cv',
+        name: 'cv.pdf',
+        bytes: '%PDF cv',
+        as: other,
+      }),
+    ).toMatchObject({ code: 'sign_in_required' })
+    // The same person, in any case, goes through.
+    const sent = await sendAs(browser, tree, {
+      ...q,
+      entries: [['role', 'x']],
+      as: owner.email.toUpperCase(),
+    })
+    expect(sent.doc?.by).toBe(owner.email)
+    await withdrawAs(browser, tree, `questions/answers/${owner.email}.json`)
+  })
+})

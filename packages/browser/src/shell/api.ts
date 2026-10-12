@@ -58,6 +58,7 @@ const readGrant = (body: unknown): ViewGrant | null => {
     typeof body.expiresAt !== 'string' ||
     typeof body.seq !== 'number' ||
     typeof body.path !== 'string' ||
+    !(body.email === null || typeof body.email === 'string') ||
     !ROLES.has(body.role)
   ) {
     return null
@@ -68,7 +69,28 @@ const readGrant = (body: unknown): ViewGrant | null => {
     seq: body.seq,
     role: body.role as RoleName,
     path: body.path,
+    email: body.email as string | null,
   }
+}
+
+/**
+ * A page's tree path as its link names it: 'a/index.html' → 'a/',
+ * 'a/b.html' → 'a/b', each name encoded.
+ */
+export const linkPathOfPage = (page: string): string => {
+  const bare = page.endsWith('index.html')
+    ? page === 'index.html' || page.endsWith('/index.html')
+      ? page.slice(0, -'index.html'.length)
+      : page
+    : page.endsWith('.html')
+      ? page.slice(0, -'.html'.length)
+      : page
+  const folder = bare === '' || bare.endsWith('/')
+  const names = (folder ? bare.slice(0, -1) : bare)
+    .split('/')
+    .filter((n) => n !== '')
+  const encoded = names.map(encodeURIComponent).join('/')
+  return folder && encoded !== '' ? `${encoded}/` : encoded
 }
 
 const readError = (body: unknown): DossierError | null => {
@@ -172,27 +194,35 @@ export const shellApi = (
   ): { readonly value: T } | null =>
     value === null || value === undefined ? null : { value }
 
+  const view: ShellApi['view'] = async ({ tree, path }) => {
+    let response: Response
+    let body: unknown
+    try {
+      response = await fetch(`${origin}/_/api/view`, {
+        method: 'POST',
+        headers: writeHeaders('application/json'),
+        body: JSON.stringify({ tree, path }),
+        credentials: 'same-origin',
+      })
+      body = await response.json()
+    } catch {
+      throw unavailable()
+    }
+    if (response.ok) {
+      const grant = readGrant(body)
+      if (grant !== null) return grant
+      throw unavailable()
+    }
+    throw readError(body) ?? unavailable()
+  }
+
   return {
-    view: async ({ tree, path }) => {
-      let response: Response
-      let body: unknown
-      try {
-        response = await fetch(`${origin}/_/api/view`, {
-          method: 'POST',
-          headers: writeHeaders('application/json'),
-          body: JSON.stringify({ tree, path }),
-          credentials: 'same-origin',
-        })
-        body = await response.json()
-      } catch {
-        throw unavailable()
-      }
-      if (response.ok) {
-        const grant = readGrant(body)
-        if (grant !== null) return grant
-        throw unavailable()
-      }
-      throw readError(body) ?? unavailable()
+    view,
+    // The deployment's own answer for the page a nested page names: a view
+    // of it, as the person the session is now.
+    confirm: async ({ tree, page }) => {
+      const grant = await view({ tree, path: linkPathOfPage(page) })
+      return { path: grant.path, email: grant.email }
     },
     read: ({ tree, path }) =>
       call(
@@ -233,13 +263,13 @@ export const shellApi = (
         (body) => known(readUploadResult(body)),
       )
     },
-    withdraw: async ({ tree, path, opId }) => {
+    withdraw: async ({ tree, path, opId, as }) => {
       await call(
         `${origin}/_/api/data/withdraw`,
         {
           method: 'POST',
           headers: writeHeaders('application/json'),
-          body: JSON.stringify({ tree, path, opId }),
+          body: JSON.stringify({ tree, path, opId, as }),
         },
         () => ({ value: undefined }),
         true,

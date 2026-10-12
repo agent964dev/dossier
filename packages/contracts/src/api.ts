@@ -241,6 +241,8 @@ export const ViewGrantSchema = Schema.Struct({
   role: Schema.Literal('read', 'respond', 'write'),
   /** The tree path of the page or file the frame opens. */
   path: Schema.String,
+  /** Whom the grant is for: the shell refuses to go on as anyone else. */
+  email: Schema.NullOr(Schema.String),
 })
 export type ViewGrant = typeof ViewGrantSchema.Type
 
@@ -392,6 +394,11 @@ export const SendPayload = Schema.Struct({
   /** One of the caller's entries to revise; plain forms send null. */
   entry: Schema.NullOr(Schema.String),
   opId: OpId,
+  /**
+   * Whom the page was shown to. A send under anyone else is refused with
+   * sign_in_required, so a page never sends as the wrong person.
+   */
+  as: Schema.optional(Schema.NullOr(Schema.String)),
 })
 export type SendPayload = typeof SendPayload.Type
 
@@ -416,6 +423,8 @@ export const UploadParams = Schema.Struct({
   size: Schema.NumberFromString,
   sha256: Sha256,
   opId: OpId,
+  /** Whom the page was shown to, as in a send. */
+  as: Schema.optional(Schema.String),
 })
 export type UploadParams = typeof UploadParams.Type
 
@@ -439,6 +448,8 @@ export const WithdrawPayload = Schema.Struct({
   /** The data file's tree path. */
   path: Schema.String,
   opId: OpId,
+  /** Whom the page was shown to, as in a send. */
+  as: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
 export class DataGroup extends HttpApiGroup.make('data')

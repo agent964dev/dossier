@@ -22,6 +22,7 @@ import { memoryStore } from './memory-store.ts'
 import { FakePort, flush } from './ports.ts'
 
 const HOUR = 60 * 60 * 1000
+const PAGE_PATH = 'questions/index.html'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -80,10 +81,11 @@ describe('shellApi', () => {
     )
 
   test('posts the view request with the CSRF header and resolves the grant', async () => {
-    const fetch = answer(200, grant('h1', 7, 'read'))
+    const sara = grant('h1', 7, 'read', PAGE_PATH, 'sara@acme.com')
+    const fetch = answer(200, sara)
     const api = shellApi(fetch, 'https://main.test')
     await expect(api.view({ tree: 't1', path: 'questions/' })).resolves.toEqual(
-      grant('h1', 7, 'read'),
+      sara,
     )
     const [url, init] = fetch.spy.mock.calls[0]!
     expect(url).toBe('https://main.test/_/api/view')
@@ -511,11 +513,13 @@ describe('createShell', () => {
       () => new Promise((resolve) => (answer = resolve)),
     )
     await vi.advanceTimersByTimeAsync(HOUR)
-    it.view.mockResolvedValueOnce(grant('h3', 9))
+    it.view.mockResolvedValueOnce(
+      grant('h3', 9, 'write', PAGE_PATH, 'sara@acme.com'),
+    )
     page.postMessage({ type: 'open', path: 'plan', hash: '' })
     await vi.advanceTimersByTimeAsync(0)
     expect(it.frame().src).toBe('https://t1-dev.content.test/_/v/h3/9/plan')
-    answer(grant('h2', 7))
+    answer(grant('h2', 7, 'write', PAGE_PATH, 'sara@acme.com'))
     await vi.advanceTimersByTimeAsync(0)
     const late = it.hello({ source: it.page(), handle: 'h2' })
     expect(late.shell.closed).toBe(true)
@@ -728,6 +732,8 @@ describe('shell drafts and sends', () => {
       submitter: null,
       entry: null,
       opId: 'op-visitor',
+      // A visitor's kept send goes as whoever signed in since.
+      as: null,
     })
     expect(page.inbox[0]).toMatchObject({
       type: 'welcome',
@@ -898,12 +904,13 @@ describe('shell drafts and sends', () => {
       type: 'application/pdf',
       size: 6,
       sha256: sha,
-      opId: 'op-1:cv',
+      opId: 'op-1:cv:0',
+      as: 'sara@acme.com',
       body: undefined,
     })
     expect(it.upload.mock.calls[1]![0]).toMatchObject({
       type: 'application/octet-stream',
-      opId: 'op-1:extra',
+      opId: 'op-1:extra:0',
     })
     expect(it.send.mock.calls[0]![0].entries).toEqual([
       ['name', 'Sara'],
@@ -998,6 +1005,7 @@ describe('shell drafts and sends', () => {
       tree: 't1',
       path: 'questions/answers/sara@acme.com.json',
       opId: 'w-1',
+      as: 'sara@acme.com',
     })
     expect(page.inbox.at(-1)).toEqual({
       type: 'result',
@@ -1070,6 +1078,7 @@ describe('shellApi data calls', () => {
       submitter: null,
       entry: null,
       opId: 'op-1',
+      as: 'sara@acme.com',
     }
     await expect(
       shellApi(send, 'https://main.test').send(payload),
@@ -1106,6 +1115,7 @@ describe('shellApi data calls', () => {
         size: 3,
         sha256: 'ab',
         opId: 'op-1:cv',
+        as: 'sara@acme.com',
         body,
       }),
     ).resolves.toEqual(stored)
@@ -1124,6 +1134,7 @@ describe('shellApi data calls', () => {
       size: '3',
       sha256: 'ab',
       opId: 'op-1:cv',
+      as: 'sara@acme.com',
     })
     expect(uploadInit).toMatchObject({
       method: 'PUT',
@@ -1137,6 +1148,7 @@ describe('shellApi data calls', () => {
         tree: 't1',
         path: 'a.json',
         opId: 'w-1',
+        as: 'sara@acme.com',
       }),
     ).resolves.toBeUndefined()
     expect(withdraw.spy.mock.calls[0]![1]).toMatchObject({
@@ -1159,7 +1171,7 @@ describe('shellApi data calls', () => {
     })
     for (const fetch of [ok(502), ok(200, { nope: true })]) {
       const error = await shellApi(fetch, 'https://main.test')
-        .withdraw({ tree: 't1', path: 'a.json', opId: 'w' })
+        .withdraw({ tree: 't1', path: 'a.json', opId: 'w', as: null })
         .then(() =>
           shellApi(fetch, 'https://main.test').read({ tree: 't1', path: 'a' }),
         )
@@ -1181,8 +1193,246 @@ describe('shellApi data calls', () => {
         submitter: null,
         entry: null,
         opId: 'x',
+        as: null,
       })
       .catch((e) => e)
     expect(closed).toMatchObject({ code: 'closed', message: 'Closed.' })
+  })
+})
+
+describe('whose page it is', () => {
+  test('refuses a top page whose hello names another path than its grant', async () => {
+    const store = memoryStore()
+    await store.saveDraft('sara@acme.com', 't1', 'private.html', KEY_A, {
+      name: 'Secret',
+    })
+    const it = openShell({ store })
+    await it.shell.start()
+    const forged = it.hello({ source: it.page(), path: '/private.html' })
+    await flush()
+    expect(forged.page.inbox).toEqual([])
+    expect(forged.shell.closed).toBe(true)
+    // The page the grant opened is welcomed as before.
+    const real = it.hello({ source: it.page() })
+    await flush()
+    expect(real.page.inbox[0]).toMatchObject({ type: 'welcome' })
+    it.shell.dispose()
+  })
+
+  test('welcomes a nested page only once the deployment confirms its path', async () => {
+    const store = memoryStore()
+    await store.saveDraft('sara@acme.com', 't1', 'gone.html', KEY_A, {
+      name: 'Kept for a page since unshared',
+    })
+    await store.savePending('t1', 'gone.html', {
+      ...pendingSend('op-gone', 'sara@acme.com'),
+      page: 'gone.html',
+    })
+    const it = openShell({ store })
+    await it.shell.start()
+    const top = it.page()
+    it.hello({ source: top })
+    it.confirm.mockRejectedValueOnce(
+      new DossierError({
+        code: 'not_found',
+        message: 'Not found.',
+        fix: null,
+        path: null,
+      }),
+    )
+    const nested = it.hello({
+      source: { parent: top },
+      nested: true,
+      path: '/gone.html',
+    })
+    await flush()
+    expect(it.confirm).toHaveBeenCalledWith({ tree: 't1', page: 'gone.html' })
+    expect(nested.page.inbox).toEqual([])
+    expect(nested.shell.closed).toBe(true)
+    expect(it.send).not.toHaveBeenCalled()
+    // A path the deployment answers with another page is refused too.
+    it.confirm.mockResolvedValueOnce({
+      path: 'questions/index.html',
+      email: 'sara@acme.com',
+    })
+    const other = it.hello({
+      source: { parent: top },
+      nested: true,
+      path: '/questions/other.html',
+    })
+    await flush()
+    expect(other.page.inbox).toEqual([])
+    it.shell.dispose()
+  })
+
+  test('reloads rather than frame a page granted to someone else, with no drafts handed over', async () => {
+    const store = memoryStore()
+    await store.saveDraft('sara@acme.com', 't1', PAGE, KEY_A, { name: 'Sara' })
+    await store.savePending('t1', PAGE, pendingSend('op-sara', 'sara@acme.com'))
+    const it = openShell({
+      store,
+      grants: [grant('h1', 7, 'write', PAGE, 'omar@acme.com')],
+    })
+    await it.shell.start()
+    expect(it.reload).toHaveBeenCalledTimes(1)
+    expect(it.frame()).toBe(it.placeholder)
+    expect(it.frame().name).toBe('')
+    expect(it.send).not.toHaveBeenCalled()
+    it.shell.dispose()
+  })
+
+  test('a renewal granted to someone else reloads the shell', async () => {
+    vi.useFakeTimers()
+    const it = openShell({
+      grants: [grant('h1', 7), grant('h1', 7, 'write', PAGE, 'omar@acme.com')],
+    })
+    await it.shell.start()
+    expect(it.reload).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    await flush()
+    expect(it.reload).toHaveBeenCalledTimes(1)
+    it.shell.dispose()
+  })
+
+  test('every send, upload and withdrawal says whom the page was shown to', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    const file = new File(['%PDF'], 'cv.pdf', { type: 'application/pdf' })
+    page.postMessage(request(1, { entries: [['cv', file]] }))
+    await vi.waitFor(() => expect(it.send).toHaveBeenCalled())
+    page.postMessage({
+      type: 'request',
+      id: 2,
+      op: 'withdraw',
+      path: 'answers/~.json',
+      opId: 'w-1',
+    })
+    await flush()
+    expect(it.upload.mock.calls[0]![0].as).toBe('sara@acme.com')
+    expect(it.send.mock.calls[0]![0].as).toBe('sara@acme.com')
+    expect(it.withdraw.mock.calls[0]![0].as).toBe('sara@acme.com')
+    it.shell.dispose()
+  })
+
+  test('replays a kept send as the person who made it, and keeps it when that person is not signed in', async () => {
+    const store = memoryStore()
+    await store.savePending('t1', PAGE, pendingSend('op-sara', 'sara@acme.com'))
+    const it = openShell({ store })
+    await it.shell.start()
+    it.send.mockRejectedValueOnce(
+      new DossierError({
+        code: 'sign_in_required',
+        message: 'This page was opened by someone else.',
+        fix: null,
+        path: null,
+      }),
+    )
+    it.hello({ source: it.page() })
+    await flush()
+    expect(it.send.mock.calls[0]![0]).toMatchObject({
+      opId: 'op-sara',
+      as: 'sara@acme.com',
+    })
+    expect(store.pending.get(`t1|${PAGE}`)!.has('op-sara')).toBe(true)
+    expect(it.reload).toHaveBeenCalledTimes(1)
+    it.shell.dispose()
+  })
+})
+
+describe('drafts that outlive a send', () => {
+  test('a send that finishes leaves the draft to the page, which knows of later edits', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    let finish: (value: { doc: null; replayed: boolean }) => void = () => {}
+    it.send.mockImplementationOnce(
+      () => new Promise((resolve) => (finish = resolve)),
+    )
+    page.postMessage(request(1, { entries: [['name', 'A']] }))
+    await flush()
+    page.postMessage({ type: 'draft', form: KEY_A, values: { name: 'AB' } })
+    await flush()
+    finish({ doc: null, replayed: false })
+    await flush()
+    expect(it.store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({
+      [KEY_A]: { name: 'AB' },
+    })
+    it.shell.dispose()
+  })
+
+  test('a replayed send clears the draft only when the draft holds what it sent', async () => {
+    const store = memoryStore()
+    await store.savePending('t1', PAGE, pendingSend('op-1', 'sara@acme.com'))
+    await store.saveDraft('sara@acme.com', 't1', PAGE, KEY_A, { name: 'Sara' })
+    await store.savePending(
+      't1',
+      PAGE,
+      pendingSend('op-2', 'sara@acme.com', FORM_B),
+    )
+    await store.saveDraft('sara@acme.com', 't1', PAGE, KEY_B, {
+      name: 'Changed since',
+    })
+    const it = openShell({ store })
+    await it.shell.start()
+    it.hello({ source: it.page() })
+    await flush()
+    expect(it.send).toHaveBeenCalledTimes(2)
+    expect(store.drafts.get(`sara@acme.com|t1|${PAGE}`)).toEqual({
+      [KEY_B]: { name: 'Changed since' },
+    })
+    it.shell.dispose()
+  })
+})
+
+describe('uploads of one field', () => {
+  test('give each file its own op ID', async () => {
+    const it = openShell()
+    await it.shell.start()
+    const { page } = it.hello({ source: it.page() })
+    await flush()
+    const a = new File(['a'], 'a.pdf', { type: 'application/pdf' })
+    const b = new File(['b'], 'b.pdf', { type: 'application/pdf' })
+    page.postMessage(
+      request(1, {
+        entries: [
+          ['cv', a],
+          ['cv', b],
+        ],
+      }),
+    )
+    await vi.waitFor(() => expect(it.send).toHaveBeenCalled())
+    expect(it.upload.mock.calls.map(([i]) => i.opId)).toEqual([
+      'op-1:cv:0',
+      'op-1:cv:1',
+    ])
+    it.shell.dispose()
+  })
+})
+
+describe('confirming a nested page', () => {
+  test('asks for a view of the page’s link and answers its path and person', async () => {
+    const calls: unknown[] = []
+    const fetch = (async (_url: unknown, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)))
+      return new Response(
+        JSON.stringify(
+          grant('h9', 7, 'read', 'a b/index.html', 'sara@acme.com'),
+        ),
+      )
+    }) as typeof globalThis.fetch
+    const api = shellApi(fetch, 'https://main.test')
+    await expect(
+      api.confirm({ tree: 't1', page: 'a b/index.html' }),
+    ).resolves.toEqual({ path: 'a b/index.html', email: 'sara@acme.com' })
+    await api.confirm({ tree: 't1', page: 'notes/plan.html' })
+    await api.confirm({ tree: 't1', page: 'index.html' })
+    expect(calls).toEqual([
+      { tree: 't1', path: 'a%20b/' },
+      { tree: 't1', path: 'notes/plan' },
+      { tree: 't1', path: '' },
+    ])
   })
 })

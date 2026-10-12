@@ -28,13 +28,16 @@ export const grant = (
   seq: number,
   role: ViewGrant['role'] = 'write',
   path = 'questions/index.html',
-): ViewGrant => ({
-  handle,
-  seq,
-  role,
-  expiresAt: '2026-10-12T03:00:00.000Z',
-  path,
-})
+  email?: string | null,
+): ViewGrant =>
+  ({
+    handle,
+    seq,
+    role,
+    expiresAt: '2026-10-12T03:00:00.000Z',
+    path,
+    ...(email === undefined ? {} : { email }),
+  }) as ViewGrant
 
 /** A page window as the shell sees it: only its place among the frames. */
 export interface FakeFrameWindow {
@@ -66,8 +69,20 @@ export const openShell = (
     const next = grants.length > 1 ? grants.shift() : grants[0]
     if (next === undefined) throw new Error('no grant')
     if (next instanceof Error) throw next
-    return next
+    // A grant is for the person the shell booted for, unless a test says.
+    const given: ViewGrant = next
+    return 'email' in given
+      ? given
+      : ({
+          ...(given as object),
+          email: boot.me?.email ?? null,
+        } as ViewGrant)
   })
+  /** The deployment confirms a nested page's path for the same person. */
+  const confirm = vi.fn<ShellApi['confirm']>(async ({ page }) => ({
+    path: page,
+    email: boot.me?.email ?? null,
+  }))
   const read = vi.fn<ShellApi['read']>(async () => null)
   const send = vi.fn<ShellApi['send']>(async () => ({
     doc: null,
@@ -90,7 +105,7 @@ export const openShell = (
     window: win as unknown as Window,
     frame: placeholder,
     boot,
-    api: { view, read, send, upload, withdraw },
+    api: { view, confirm, read, send, upload, withdraw },
     store,
   })
 
@@ -143,6 +158,7 @@ export const openShell = (
     shell,
     store,
     view,
+    confirm,
     read,
     send,
     upload,
