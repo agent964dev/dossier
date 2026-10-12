@@ -146,6 +146,33 @@ function baseLayer(): {
 
 const base = baseLayer()
 
+/**
+ * The history screen's diff takes @pierre/diffs' 'shiki' from a small module
+ * of its own: the core highlighter and the few grammars it uses, so the
+ * client build holds none of Shiki's other grammars, themes or wasm.
+ */
+const historyShiki: Plugin = {
+  name: 'dossier-history-shiki',
+  enforce: 'pre',
+  resolveId(source, importer) {
+    if (importer === undefined || !importer.includes('@pierre/diffs')) {
+      return null
+    }
+    if (source === 'shiki') {
+      return fileURLToPath(
+        new URL('./src/lib/shiki-for-history.ts', import.meta.url),
+      )
+    }
+    if (source === 'shiki/wasm' || source === 'shiki/engine/oniguruma') {
+      return '\0dossier-empty'
+    }
+    return null
+  },
+  load(id) {
+    return id === '\0dossier-empty' ? 'export default {}' : null
+  },
+}
+
 export default defineConfig({
   define: {
     __DOSSIER_BUILD_VERSION__: JSON.stringify(buildVersion()),
@@ -161,6 +188,7 @@ export default defineConfig({
   build: { assetsDir: '_/app' },
   server: { port: 8787, strictPort: true },
   plugins: [
+    historyShiki,
     cloudflare({ viteEnvironment: { name: 'ssr' } }),
     tailwindcss(),
     tanstackStart(),

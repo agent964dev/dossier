@@ -8,6 +8,7 @@ import {
   CurrentCaller,
   Data,
   Files,
+  Settings,
   Shares,
   type Entry,
   mentionedOnPage,
@@ -39,12 +40,20 @@ export interface ListingView {
     readonly seenBy: boolean
     readonly kit: boolean
     readonly share: boolean
+    readonly history: boolean
+    readonly delete: boolean
   }
+  /** The folder's history screen, for write holders; null otherwise. */
+  readonly history: string | null
+  /** How long a deletion stays restorable from history. */
+  readonly retentionDays: number
   readonly pages: readonly {
     readonly title: string
     /** As the folder names it: 'plan.html', 'questions/'. */
     readonly path: string
     readonly link: string
+    /** '<workspace>/<tree>/<path>', what Delete sends. */
+    readonly target: string
     readonly push: PushStamp | null
     /** Pages with forms, for people who read their answers. */
     readonly responses: { readonly count: number; readonly link: string } | null
@@ -56,12 +65,14 @@ export interface ListingView {
   readonly folders: readonly {
     readonly name: string
     readonly link: string
+    readonly target: string
     readonly pages: number
     readonly push: PushStamp | null
   }[]
   readonly files: readonly {
     readonly name: string
     readonly link: string
+    readonly target: string
     /** Always a download. */
     readonly download: string
     /** 'PDF', 'PNG'. */
@@ -131,6 +142,9 @@ export const listingModel = (data: {
         path,
         kind,
       })
+    const targetOf = (path: string, folder: boolean) =>
+      `${ref.workspace}/${ref.tree}/${path}${folder ? '/' : ''}`
+    const { retentionDays } = yield* (yield* Settings).current()
     const entries = listing.entries
     const granted = yield* (yield* Access).require('read', listing.folder)
     const forms = yield* (yield* Data).pageForms(granted)
@@ -153,6 +167,7 @@ export const listingModel = (data: {
           title: e.title ?? e.name,
           path: folder ? `${e.name}/` : e.name,
           link,
+          target: targetOf(e.path, folder),
           push: stamp(e.push),
           responses:
             answered === null
@@ -168,6 +183,7 @@ export const listingModel = (data: {
       .map((e) => ({
         name: e.name,
         link: at(e.path, 'folder'),
+        target: targetOf(e.path, true),
         pages: e.pages ?? 0,
         push: stamp(e.push),
       }))
@@ -176,6 +192,7 @@ export const listingModel = (data: {
       .map((e) => ({
         name: e.name,
         link: at(e.path, 'file'),
+        target: targetOf(e.path, false),
         download: `/_/api/file?path=${encodeURIComponent(`${ref.workspace}/${ref.tree}/${e.path}`)}`,
         type: typeOf(e),
         size: e.size ?? 0,
@@ -211,7 +228,19 @@ export const listingModel = (data: {
         link: at(ref.path, 'folder'),
       },
       sharing,
-      can: { seenBy: writer, kit: writer, share: writer },
+      can: {
+        seenBy: writer,
+        kit: writer,
+        share: writer,
+        history: writer,
+        delete: writer,
+      },
+      history: writer
+        ? `/_/history/${[ref.workspace, ref.tree, ...segments]
+            .map(encodeURIComponent)
+            .join('/')}/`
+        : null,
+      retentionDays,
       pages,
       folders,
       files,

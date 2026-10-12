@@ -11,6 +11,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { AppHeader } from '../../../components/app-header'
 import { HostName } from '../../../components/host-name'
 import { NoAccessScreen } from '../../../components/no-access'
+import { LastPurge, PurgeNow } from '../../../components/purge-now'
 import { SectionLabel } from '../../../components/section-label'
 import {
   Initial,
@@ -116,7 +117,7 @@ function SuperAdmin({ view }: { view: AdminView }) {
           <FirstRun view={view} onChange={refresh} />
         ) : (
           <>
-            <HealthLine health={view.health} />
+            <HealthLine health={view.health} lastPurge={view.lastPurge} />
             <WhoMayCreate view={view} onChange={refresh} />
             <Limits rows={view.limitRows} onChange={refresh} />
             <Retention days={view.retentionDays} onChange={refresh} />
@@ -186,7 +187,13 @@ function checkedAgo(checkedAt: number, now: number): string {
   return `checked ${Math.floor(minutes / 60)} h ago`
 }
 
-function HealthLine({ health }: { health: Health }) {
+function HealthLine({
+  health,
+  lastPurge,
+}: {
+  health: Health
+  lastPurge: AdminView['lastPurge']
+}) {
   const [now, setNow] = useState(health.checkedAt)
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000)
@@ -196,7 +203,7 @@ function HealthLine({ health }: { health: Health }) {
   return (
     <section
       aria-label="Health"
-      className="rounded-xl border border-border bg-card"
+      className="divide-y divide-border/80 rounded-xl border border-border bg-card"
     >
       <div className={ROW}>
         <span className="min-w-0 flex-1">
@@ -235,6 +242,7 @@ function HealthLine({ health }: { health: Health }) {
         </span>
         <Badge variant={health.ok ? 'success' : 'destructive'}>Health</Badge>
       </div>
+      <LastPurge run={lastPurge} />
     </section>
   )
 }
@@ -704,6 +712,9 @@ function Retention({
           >
             Edit
           </Button>
+        </div>
+        <div className="border-t border-border/80">
+          <PurgeNow days={days} onDone={onChange} />
         </div>
       </div>
       <Modal

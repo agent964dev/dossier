@@ -6,6 +6,9 @@ import {
   bytesText,
   LookSettings,
   People,
+  Purge,
+  type PurgeOutcome,
+  type PurgeRun,
   type AdminOverview,
   type AdminWorkspaceRow,
   type LimitValues,
@@ -46,7 +49,11 @@ export type AdminView = Omit<AdminOverview, 'workspaces'> & {
   readonly limitRows: readonly LimitRow[]
   readonly workspaces: readonly AdminWorkspaceView[]
   readonly look: AdminLookRow
+  /** The newest purge, weekly or pressed, for the Health section. */
+  readonly lastPurge: PurgeRun | null
 }
+
+export type { PurgeOutcome, PurgeRun }
 
 /** The limits in the order the screen lists them. */
 const LIMITS: readonly {
@@ -81,8 +88,10 @@ export const adminView = createServerFn({ method: 'GET' }).handler(() =>
       const people = yield* People
       const overview = yield* people.adminOverview()
       const look = yield* Effect.flatMap(LookSettings, (l) => l.current())
+      const lastPurge = yield* Effect.flatMap(Purge, (p) => p.lastRun())
       return {
         ...overview,
+        lastPurge,
         limitRows: LIMITS.map(({ key, label, bytes }) => {
           const value = overview.limits[key]
           return {
@@ -227,3 +236,11 @@ export const restoreWorkspace = createServerFn({ method: 'POST' })
       Effect.flatMap(People, (people) => people.restoreWorkspace(data.id)),
     ),
   )
+
+/**
+ * "Purge now": everything past the retention period goes, as the weekly run
+ * would remove it. Super admins only; a purge already running is conflict.
+ */
+export const purgeNow = createServerFn({ method: 'POST' }).handler(() =>
+  runScreen(Effect.flatMap(Purge, (purge) => purge.runNow())),
+)

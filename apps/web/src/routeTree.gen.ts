@@ -19,6 +19,7 @@ import { Route as WorkspaceTreeSplatRouteImport } from './routes/$workspace/$tre
 import { Route as Char91_Char93AdminIndexRouteImport } from './routes/[_]/admin/index'
 import { Route as Char91_Char93AdminLookRouteImport } from './routes/[_]/admin/look'
 import { Route as Char91_Char93WWorkspaceSettingsRouteRouteImport } from './routes/[_]/w/$workspace/settings/route'
+import { Route as Char91_Char93HistoryWorkspaceTreeSplatRouteImport } from './routes/[_]/history/$workspace/$tree/$'
 import { Route as Char91_Char93ResponsesWorkspaceTreeSplatRouteImport } from './routes/[_]/responses/$workspace/$tree/$'
 import { Route as Char91_Char93WWorkspaceSettingsIndexRouteImport } from './routes/[_]/w/$workspace/settings/index'
 import { Route as Char91_Char93WWorkspaceSettingsWorkspaceRouteImport } from './routes/[_]/w/$workspace/settings/workspace'
@@ -76,6 +77,12 @@ const Char91_Char93WWorkspaceSettingsRouteRoute =
     path: '/_/w/$workspace/settings',
     getParentRoute: () => rootRouteImport,
   } as any)
+const Char91_Char93HistoryWorkspaceTreeSplatRoute =
+  Char91_Char93HistoryWorkspaceTreeSplatRouteImport.update({
+    id: '/_/history/$workspace/$tree/$',
+    path: '/_/history/$workspace/$tree/$',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const Char91_Char93ResponsesWorkspaceTreeSplatRoute =
   Char91_Char93ResponsesWorkspaceTreeSplatRouteImport.update({
     id: '/_/responses/$workspace/$tree/$',
@@ -118,6 +125,7 @@ export interface FileRoutesByFullPath {
   '/_/admin/look': typeof Char91_Char93AdminLookRoute
   '/_/admin/': typeof Char91_Char93AdminIndexRoute
   '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
+  '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
   '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   '/_/w/$workspace/settings/': typeof Char91_Char93WWorkspaceSettingsIndexRoute
@@ -134,6 +142,7 @@ export interface FileRoutesByTo {
   '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
   '/_/admin/look': typeof Char91_Char93AdminLookRoute
   '/_/admin': typeof Char91_Char93AdminIndexRoute
+  '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
   '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsIndexRoute
@@ -152,6 +161,7 @@ export interface FileRoutesById {
   '/_/admin/look': typeof Char91_Char93AdminLookRoute
   '/_/admin/': typeof Char91_Char93AdminIndexRoute
   '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
+  '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
   '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
   '/_/w/$workspace/settings/': typeof Char91_Char93WWorkspaceSettingsIndexRoute
@@ -171,6 +181,7 @@ export interface FileRouteTypes {
     | '/_/admin/look'
     | '/_/admin/'
     | '/_/w/$workspace/settings'
+    | '/_/history/$workspace/$tree/$'
     | '/_/responses/$workspace/$tree/$'
     | '/_/w/$workspace/settings/workspace'
     | '/_/w/$workspace/settings/'
@@ -187,6 +198,7 @@ export interface FileRouteTypes {
     | '/$workspace/$tree/$'
     | '/_/admin/look'
     | '/_/admin'
+    | '/_/history/$workspace/$tree/$'
     | '/_/responses/$workspace/$tree/$'
     | '/_/w/$workspace/settings/workspace'
     | '/_/w/$workspace/settings'
@@ -204,6 +216,7 @@ export interface FileRouteTypes {
     | '/_/admin/look'
     | '/_/admin/'
     | '/_/w/$workspace/settings'
+    | '/_/history/$workspace/$tree/$'
     | '/_/responses/$workspace/$tree/$'
     | '/_/w/$workspace/settings/workspace'
     | '/_/w/$workspace/settings/'
@@ -222,6 +235,7 @@ export interface RootRouteChildren {
   Char91_Char93AdminLookRoute: typeof Char91_Char93AdminLookRoute
   Char91_Char93AdminIndexRoute: typeof Char91_Char93AdminIndexRoute
   Char91_Char93WWorkspaceSettingsRouteRoute: typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
+  Char91_Char93HistoryWorkspaceTreeSplatRoute: typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
   Char91_Char93ResponsesWorkspaceTreeSplatRoute: typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
 }
 
@@ -295,6 +309,13 @@ declare module '@tanstack/react-router' {
       path: '/_/w/$workspace/settings'
       fullPath: '/_/w/$workspace/settings'
       preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/history/$workspace/$tree/$': {
+      id: '/_/history/$workspace/$tree/$'
+      path: '/_/history/$workspace/$tree/$'
+      fullPath: '/_/history/$workspace/$tree/$'
+      preLoaderRoute: typeof Char91_Char93HistoryWorkspaceTreeSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_/responses/$workspace/$tree/$': {
@@ -371,6 +392,8 @@ const rootRouteChildren: RootRouteChildren = {
   Char91_Char93AdminIndexRoute: Char91_Char93AdminIndexRoute,
   Char91_Char93WWorkspaceSettingsRouteRoute:
     Char91_Char93WWorkspaceSettingsRouteRouteWithChildren,
+  Char91_Char93HistoryWorkspaceTreeSplatRoute:
+    Char91_Char93HistoryWorkspaceTreeSplatRoute,
   Char91_Char93ResponsesWorkspaceTreeSplatRoute:
     Char91_Char93ResponsesWorkspaceTreeSplatRoute,
 }

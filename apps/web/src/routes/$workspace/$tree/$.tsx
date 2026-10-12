@@ -10,6 +10,7 @@ import {
   Folder,
   FolderOpen,
   Globe,
+  History,
   Lock,
   UserPlus,
   Users,
@@ -17,6 +18,7 @@ import {
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { AppHeader } from '../../../components/app-header'
+import { DeleteDialog, type Deleting } from '../../../components/delete-dialog'
 import { MentionedBadge } from '../../../components/mentioned-badge'
 import { NoAccessScreen } from '../../../components/no-access'
 import { MenuButton, MenuLink, RowMenu } from '../../../components/row-menu'
@@ -247,6 +249,7 @@ function Listing({ view }: { view: ListingView }) {
   const router = useRouter()
   const [seen, setSeen] = useState<{ title: string; link: string } | null>(null)
   const [sharing, setSharing] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<Deleting | null>(null)
   const answered = view.pages.some((page) => page.responses !== null)
   return (
     <div className="min-h-dvh">
@@ -276,17 +279,32 @@ function Listing({ view }: { view: ListingView }) {
             <h1 className="min-w-0 font-clash text-[2rem] leading-tight font-semibold tracking-[-0.03em] break-words text-neutral-50">
               {view.folder.name}
             </h1>
-            {view.can.share ? (
-              <Button
-                size="sm"
-                className="sm:h-10 sm:px-4 sm:text-sm"
-                aria-haspopup="dialog"
-                onClick={() => setSharing(view.folder.link)}
-              >
-                <UserPlus aria-hidden />
-                Share
-              </Button>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-2">
+              {view.can.history && view.history !== null ? (
+                <Button
+                  asChild
+                  variant="outline"
+                  size="sm"
+                  className="sm:h-10 sm:px-4 sm:text-sm"
+                >
+                  <a href={view.history}>
+                    <History aria-hidden />
+                    History
+                  </a>
+                </Button>
+              ) : null}
+              {view.can.share ? (
+                <Button
+                  size="sm"
+                  className="sm:h-10 sm:px-4 sm:text-sm"
+                  aria-haspopup="dialog"
+                  onClick={() => setSharing(view.folder.link)}
+                >
+                  <UserPlus aria-hidden />
+                  Share
+                </Button>
+              ) : null}
+            </div>
           </div>
           <SharingLine text={view.sharing} />
         </div>
@@ -385,6 +403,19 @@ function Listing({ view }: { view: ListingView }) {
                           Seen by
                         </MenuButton>
                       ) : null}
+                      {view.can.delete ? (
+                        <MenuButton
+                          destructive
+                          onSelect={() =>
+                            setDeleting({
+                              name: page.path,
+                              target: page.target,
+                            })
+                          }
+                        >
+                          Delete
+                        </MenuButton>
+                      ) : null}
                     </RowMenu>
                   </li>
                 ))}
@@ -427,6 +458,19 @@ function Listing({ view }: { view: ListingView }) {
                           Share
                         </MenuButton>
                       ) : null}
+                      {view.can.delete ? (
+                        <MenuButton
+                          destructive
+                          onSelect={() =>
+                            setDeleting({
+                              name: `${folder.name}/`,
+                              target: folder.target,
+                            })
+                          }
+                        >
+                          Delete
+                        </MenuButton>
+                      ) : null}
                     </RowMenu>
                   </li>
                 ))}
@@ -460,6 +504,19 @@ function Listing({ view }: { view: ListingView }) {
                       <MenuLink href={file.download} download>
                         Download
                       </MenuLink>
+                      {view.can.delete ? (
+                        <MenuButton
+                          destructive
+                          onSelect={() =>
+                            setDeleting({
+                              name: file.name,
+                              target: file.target,
+                            })
+                          }
+                        >
+                          Delete
+                        </MenuButton>
+                      ) : null}
                     </RowMenu>
                   </li>
                 ))}
@@ -474,6 +531,15 @@ function Listing({ view }: { view: ListingView }) {
         link={sharing}
         onClose={() => setSharing(null)}
         onChanged={() => void router.invalidate()}
+      />
+      <DeleteDialog
+        deleting={deleting}
+        retentionDays={view.retentionDays}
+        onClose={() => setDeleting(null)}
+        onDeleted={() => {
+          setDeleting(null)
+          void router.invalidate()
+        }}
       />
     </div>
   )
