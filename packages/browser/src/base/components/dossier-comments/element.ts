@@ -414,20 +414,26 @@ export class DossierComments extends HTMLElement {
     this.#stopWatch = null
     this.#parts?.pins.disconnect()
     this.#placing = null
-    // Another element counting the same one, such as the whole page's
-    // beside an item's, keeps its mark.
-    const others = [...this.ownerDocument.querySelectorAll(TAG)].filter(
-      (other): other is DossierComments =>
-        other !== this && other instanceof DossierComments && other.isConnected,
-    )
-    for (const element of this.#marked.keys()) {
-      const count = others
-        .map((other) => other.#marked.get(element))
-        .find((n) => n !== undefined)
-      if (count === undefined) element.removeAttribute(MARK)
-      else element.setAttribute(MARK, String(count))
-    }
+    for (const element of this.#marked.keys()) this.#leaveMark(element)
     this.#marked = new Map()
+  }
+
+  /**
+   * Gives up its mark on an element. Another element counting the same one,
+   * such as the whole page's beside an item's, keeps its mark.
+   */
+  #leaveMark(element: Element): void {
+    const count = [...this.ownerDocument.querySelectorAll(TAG)]
+      .filter(
+        (other): other is DossierComments =>
+          other !== this &&
+          other instanceof DossierComments &&
+          other.isConnected,
+      )
+      .map((other) => other.#marked.get(element))
+      .find((n) => n !== undefined)
+    if (count === undefined) element.removeAttribute(MARK)
+    else element.setAttribute(MARK, String(count))
   }
 
   attributeChangedCallback(
@@ -1185,7 +1191,7 @@ export class DossierComments extends HTMLElement {
       if (element !== null) counts.set(element, (counts.get(element) ?? 0) + 1)
     }
     for (const element of this.#marked.keys()) {
-      if (!counts.has(element)) element.removeAttribute(MARK)
+      if (!counts.has(element)) this.#leaveMark(element)
     }
     for (const [element, count] of counts) {
       if (element.getAttribute(MARK) !== String(count)) {

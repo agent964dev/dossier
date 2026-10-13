@@ -1455,6 +1455,15 @@ describe('with for: the comments on one item', () => {
     expect(item.hasAttribute(MARK)).toBe(false)
   })
 
+  test('leaves an item’s mark to the element still counting it when the other moves to another item', async () => {
+    peer.threads = [thread(comment(LEE, 'First', { anchor: 'S-1' }))]
+    const { one } = await mountItems()
+    const item = document.getElementById('S-1')!
+    one.setAttribute('for', 'S-2')
+    await settle()
+    expect(item.getAttribute(MARK)).toBe('1')
+  })
+
   test('takes the new item’s own unsent text when for changes', async () => {
     const { one } = await mountItems()
     byKey(one, 'open')!.click()
