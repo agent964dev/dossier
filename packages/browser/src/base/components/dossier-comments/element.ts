@@ -370,6 +370,8 @@ export class DossierComments extends HTMLElement {
   #pin: { readonly anchor: string; readonly pin: Pin } | null = null
   #placing: { readonly target: Element; readonly pin: Pin } | null = null
   #anchors = ''
+  /** The `for` it had when it left, to choose again if that changed meanwhile. */
+  #leftFor: string | null | undefined = undefined
 
   constructor(dossier: Dossier | null = null) {
     super()
@@ -381,7 +383,12 @@ export class DossierComments extends HTMLElement {
     const parts = this.#parts!
     const session = ++this.#session
     parts.pins.connect()
-    this.#render()
+    // `for` changed while it was away, unseen: chosen again as on a change.
+    if (this.#leftFor !== undefined && this.#leftFor !== this.#scope()) {
+      this.#rescope()
+    } else {
+      this.#render()
+    }
     const dossier = this.#dossier
     if (dossier === null) {
       parts.status.say(TEXT.notInDossier)
@@ -410,6 +417,7 @@ export class DossierComments extends HTMLElement {
 
   disconnectedCallback(): void {
     this.#session += 1
+    this.#leftFor = this.#scope()
     this.#stopWatch?.()
     this.#stopWatch = null
     this.#parts?.pins.disconnect()
@@ -442,13 +450,16 @@ export class DossierComments extends HTMLElement {
     after: string | null,
   ): void {
     if (before === after || this.#parts === null || !this.isConnected) return
-    if (name !== 'for') {
-      this.#render()
-      return
-    }
-    // Another element, or none: its own unsent text, kept as it was typed,
-    // and the threads it shows are chosen again.
-    if (this.#ready) this.#parts.composer.text = this.#draft()
+    if (name === 'for') this.#rescope()
+    else this.#render()
+  }
+
+  /**
+   * Another element, or none: its own unsent text, kept as it was typed,
+   * and the threads it shows are chosen again.
+   */
+  #rescope(): void {
+    if (this.#ready) this.#parts!.composer.text = this.#draft()
     this.#pin = null
     if (this.#loaded) this.#take(this.#all)
     else this.#render()

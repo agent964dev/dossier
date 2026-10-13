@@ -1477,6 +1477,27 @@ describe('with for: the comments on one item', () => {
     expect(area.value).toBe('About one')
   })
 
+  test('takes the new item’s own unsent text when for changes while it is away', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'About one')
+    one.remove()
+    one.setAttribute('for', 'S-2')
+    document.body.append(one)
+    await settle()
+    expect(area.value).toBe('')
+    type(area, 'About two')
+    peer.calls = []
+    q<HTMLButtonElement>(mainComposer(one), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.calls[0]?.patch).toMatchObject({
+      text: 'About two',
+      anchor: 'S-2',
+    })
+  })
+
   test('settles a send against the item it was written for, after for changes', async () => {
     const { one } = await mountItems()
     byKey(one, 'open')!.click()
