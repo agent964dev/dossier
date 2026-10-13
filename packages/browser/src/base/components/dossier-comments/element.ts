@@ -1596,8 +1596,10 @@ export class DossierComments extends HTMLElement {
           }
         }
         if (this.#readDraft(draft).trim() === text) this.#putDraft(draft, '')
-        // Only the pin this comment took: one placed since stays.
+        // Only the pin this comment took, wherever it waits: one placed
+        // since stays.
         if (placed !== null && this.#pin === placed) this.#pin = null
+        if (placed !== null && this.#pagePin === placed) this.#pagePin = null
         this.#render()
       },
     })

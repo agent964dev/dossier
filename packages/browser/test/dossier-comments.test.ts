@@ -1599,6 +1599,38 @@ describe('with for: the comments on one item', () => {
     })
   })
 
+  test('gives back no pin a comment took when it was sent while for named an item', async () => {
+    document.body.innerHTML = `${PAGE_HTML}<img id="mockup" title="Mockup" alt="">
+      <dossier-comments></dossier-comments>`
+    await settle()
+    const element = document.querySelector('dossier-comments') as HTMLElement
+    const form = mainComposer(element)
+    byKey(form, 'pin-button:main')!.click()
+    key(document.activeElement!, 'Enter')
+    type(q(form, 'textarea'), 'Move this')
+    let finish = () => {}
+    const write = fake.write
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path, patch) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }),
+    )
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    element.setAttribute('for', 'S-1')
+    finish()
+    await settle()
+    element.removeAttribute('for')
+    await settle()
+    expect(byKey(form, 'remove-pin:main')!.parentElement!.hidden).toBe(true)
+    type(q(form, 'textarea'), 'Something else')
+    peer.calls = []
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[0]!.patch).toMatchObject({ pin: null })
+  })
+
   test('names a thread’s item once for is removed', async () => {
     const a = comment(LEE, 'First', { anchor: 'S-1', label: 'Step one' })
     peer.threads = [thread(a)]
