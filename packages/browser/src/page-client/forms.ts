@@ -567,6 +567,13 @@ export const startForms = (deps: {
       m.last !== null &&
       sameEntries(m.last.request.entries, entries) &&
       JSON.stringify(m.last.request.submitter) === JSON.stringify(submitter)
+    const json = [
+      ...new Set(
+        controlsOf(m.form)
+          .filter((control) => control.name !== '' && isJsonField(control))
+          .map((control) => control.name),
+      ),
+    ]
     const request: SendRequest = options.again ??
       (unchanged ? m.last!.request : null) ?? {
         form: { host: m.info.host, target: m.info.target, id: m.info.id },
@@ -574,6 +581,7 @@ export const startForms = (deps: {
         entries,
         submitter,
         opId: newOpId(),
+        ...(json.length === 0 ? {} : { json }),
       }
     const edits =
       options.again !== undefined || unchanged ? m.last!.edits : m.edits

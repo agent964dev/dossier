@@ -400,6 +400,29 @@ describe('forms in a page downloaded as one file', () => {
     })
   })
 
+  test('a JSON field is kept as its object, as Dossier stores it', async () => {
+    const page = openExport({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="nested" data-type="json">
+          <input name="name">
+          <button>Send</button>
+        </form>`,
+    })
+    await flush()
+    // The prefill put the stored object in the field as its JSON text.
+    const field = page.form(1).querySelector('input[name="nested"]')!
+    expect(JSON.parse((field as HTMLInputElement).value)).toEqual({
+      a: 1,
+      b: 2,
+    })
+    page.form(1).submit()
+    await flush()
+    expect(await page.dossier.read('answers/~.json')).toMatchObject({
+      data: { name: 'Sara', nested: { a: 1, b: 2 } },
+    })
+  })
+
   test('a plain form’s file field keeps only the file’s name, size and type', async () => {
     const storage = memoryStorage()
     const page = openExport({ storage, body: FORM_BODY })

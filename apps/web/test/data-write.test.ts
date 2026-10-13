@@ -63,6 +63,10 @@ const FILES = {
       '<form action="review.json"><input type="hidden" name="board" data-type="json"></form>',
     'Review',
   ),
+  'log.html': pageWith(
+    '<form action="log/" data-entries="many"><input type="hidden" name="notes" data-type="json"><button>Add</button></form>',
+    'Log',
+  ),
 }
 
 interface Write {
@@ -889,6 +893,43 @@ describe('a JSON field', () => {
         ?.value,
     ).toEqual({ notes: { 'S-2': { text: 'Lee’s' } } })
     expect(await liveValue(tree.treeId, 'elsewhere.json')).toBeNull()
+  })
+
+  it('never takes another of the writer’s entries with it when withdrawn, though it looks like an upload', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const writer = await given(tree, 'respond')
+    const own = `log/${writer.who.email.toLowerCase()}`
+    const kept = await writeAs(writer.caller, tree, {
+      page: 'log.html',
+      path: `${own}/`,
+      patch: { notes: { keep: true } },
+    })
+    const withdrawn = await writeAs(writer.caller, tree, {
+      page: 'log.html',
+      path: `${own}/`,
+      patch: {
+        notes: {
+          file: kept.path.slice(own.length + 1),
+          name: 'Related entry',
+          size: 1,
+          type: 'application/json',
+        },
+      },
+    })
+    await runAs(
+      writer.caller,
+      Effect.flatMap(Data, (data) =>
+        data.withdraw({
+          treeId: tree.treeId as TreeId,
+          path: withdrawn.path,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+    expect(await liveValue(tree.treeId, withdrawn.path)).toBeNull()
+    expect((await liveValue(tree.treeId, kept.path))?.value).toEqual({
+      notes: { keep: true },
+    })
   })
 })
 

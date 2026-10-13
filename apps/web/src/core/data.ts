@@ -1662,7 +1662,15 @@ export const DataLive: Layer.Layer<
           const uploads: Granted<'withdraw-own'>[] = []
           for (const path of named) {
             const kept = yield* liveData(i.treeId, path)
-            if (kept === null || kept.node.ownerId !== person.id) continue
+            // Only an upload goes with the answer: a JSON field shaped like
+            // one never names another of the writer's answers.
+            if (
+              kept === null ||
+              kept.node.ownerId !== person.id ||
+              kept.version.blobSha256 === null
+            ) {
+              continue
+            }
             const ok = yield* access
               .require('withdraw-own', kept.node)
               .pipe(Effect.option)
