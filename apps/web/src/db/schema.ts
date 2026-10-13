@@ -1040,6 +1040,11 @@ export const mentions = sqliteTable(
       .references(() => nodes.id),
     /** Lower-cased. */
     email: text('email').notNull(),
+    /**
+     * The mention in the comment that reached the person, when it is not
+     * their email: `team:<name>` for a team's member.
+     */
+    via: text('via'),
     createdAt: integer('created_at').notNull(),
   },
   (t) => [

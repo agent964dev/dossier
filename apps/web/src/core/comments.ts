@@ -10,6 +10,8 @@ import {
   COMMENT_STANCE_MAX,
   COMMENT_TEXT_MAX,
   dossierError,
+  teamOfMention,
+  TEAM_MENTION_PREFIX,
   type CommentEntry,
   type CommentFile,
   type PushNumber,
@@ -68,23 +70,39 @@ const textOf = (value: unknown): string | CommentInvalid => {
   return text
 }
 
-/** At most 20 emails, lower-cased, each once. */
+/**
+ * At most 20 emails, lower-cased, and teams as `team:<name>`, its name as
+ * written; each once, a team's name whatever its case.
+ */
 const mentionsOf = (value: unknown): readonly string[] | CommentInvalid => {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) {
-    return invalid('Mentions are a list of emails.', 'mentions')
+    return invalid(
+      `Mentions are a list of emails, and ${TEAM_MENTION_PREFIX}<name> for a team.`,
+      'mentions',
+    )
   }
   const out: string[] = []
+  const seen = new Set<string>()
   for (const item of value) {
-    if (typeof item !== 'string' || !EMAIL.test(item.trim())) {
+    if (typeof item !== 'string') {
       return invalid(`${String(item)} is not an email.`, 'mentions')
     }
-    const email = item.trim().toLowerCase()
-    if (!out.includes(email)) out.push(email)
+    const team = teamOfMention(item)
+    if (team === null && !EMAIL.test(item.trim())) {
+      return invalid(`${item} is not an email or a team.`, 'mentions')
+    }
+    const mention =
+      team === null
+        ? item.trim().toLowerCase()
+        : `${TEAM_MENTION_PREFIX}${team}`
+    if (seen.has(mention.toLowerCase())) continue
+    seen.add(mention.toLowerCase())
+    out.push(mention)
   }
   if (out.length > COMMENT_MENTIONS_MAX) {
     return invalid(
-      `A comment mentions at most ${COMMENT_MENTIONS_MAX} people.`,
+      `A comment mentions at most ${COMMENT_MENTIONS_MAX} people and teams.`,
       'mentions',
     )
   }
@@ -271,14 +289,18 @@ export const commentFiles = (
         path: string
         createdAt: number
         email: string | null
+        name: string | null
         json: string | null
         revision: number
         push: number | null
       }>(
+        // A deleted account's comments keep their email and lose the name.
         sql`select nodes.path, nodes.created_at as createdAt, u.email,
+              case when pp.deleted_at is null then nullif(u.name, '') end as name,
               v.json_value as json, v.revision, v.seen_push_number as push
             from nodes join node_versions v on v.id = nodes.current_version_id
               left join "user" u on u.id = nodes.owner_id
+              left join people pp on pp.user_id = u.id
             where nodes.tree_id = ${treeId} and nodes.deleted_at is null
               and nodes.kind = 'file' and nodes.origin = 'data'
               and substr(nodes.path, 1, length(${folder}) + 1) = ${`${folder}/`}
@@ -304,6 +326,7 @@ export const commentFiles = (
             path: `${name}${row.path.slice(folder.length)}`,
             treePath: row.path,
             by: row.email,
+            name: row.name,
             at: row.createdAt,
             push: (row.push ?? 0) as PushNumber,
             revision: row.revision,

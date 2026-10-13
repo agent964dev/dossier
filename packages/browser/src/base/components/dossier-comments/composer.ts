@@ -1,8 +1,16 @@
-// One place to write: a labelled textarea that suggests people to mention as
-// @ is typed, room for the controls its caller adds, and its buttons. And
-// the status line each place reports to. Every control carries a data-key,
-// so the component finds it again after a re-render and keeps focus there.
-import { mentionAt, suggestEmails } from './threads.ts'
+// One place to write: a labelled textarea that suggests people and teams to
+// mention as @ is typed, room for the controls its caller adds, and its
+// buttons. And the status line each place reports to. Every control carries
+// a data-key, so the component finds it again after a re-render and keeps
+// focus there.
+import type { Mentionable, MentionablePerson } from '@dossier/contracts/bridge'
+import {
+  mentionAt,
+  searchOf,
+  suggestionsFor,
+  suggestionText,
+  type Suggestion,
+} from './threads.ts'
 
 let counter = 0
 /** An id unique in the document. */
@@ -32,8 +40,13 @@ export interface ComposerOptions {
   readonly hideLabel?: boolean
   readonly submitLabel: string
   readonly cancelLabel?: string
-  /** The emails to suggest after @. */
-  readonly known: () => readonly string[]
+  /** The people in the threads, to suggest after @. */
+  readonly known: () => readonly MentionablePerson[]
+  /**
+   * Whom Dossier suggests for what follows the @: its answer when one is
+   * known, else null, and `ready` is called once it comes.
+   */
+  readonly lookup?: (query: string, ready: () => void) => Mentionable | null
   readonly onSubmit: () => void
   readonly onCancel?: () => void
 }
@@ -49,9 +62,15 @@ export class Composer {
   readonly #options: ComposerOptions
   readonly #list: HTMLUListElement
   readonly #count: HTMLSpanElement
-  #shown: string[] = []
+  #shown: Suggestion[] = []
   #active = -1
   #busy = false
+  /**
+   * Bumped when the suggestions are put away (Escape, leaving, choosing,
+   * sending): an answer asked for before then shows nothing. What is typed
+   * or clicked next asks afresh.
+   */
+  #dismissals = 0
 
   constructor(options: ComposerOptions) {
     this.#options = options
@@ -124,7 +143,7 @@ export class Composer {
     textarea.addEventListener('keydown', (event) => this.#key(event))
     textarea.addEventListener('blur', () => {
       // A tap on a suggestion keeps focus, so leaving means done.
-      this.#close()
+      this.#dismiss()
     })
     textarea.addEventListener('click', () => this.#suggest())
   }
@@ -135,7 +154,7 @@ export class Composer {
 
   set text(value: string) {
     this.textarea.value = value
-    this.#close()
+    this.#dismiss()
   }
 
   get busy(): boolean {
@@ -173,11 +192,16 @@ export class Composer {
     const open = !this.#list.hidden
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault()
-      this.#close()
+      this.#dismiss()
       if (!this.#busy) this.#options.onSubmit()
       return
     }
-    if (!open) return
+    if (!open) {
+      // Nothing shown yet, an answer may still be on its way: it stays away.
+      // The key goes on to the page, as nothing here took it.
+      if (event.key === 'Escape') this.#dismiss()
+      return
+    }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       const step = event.key === 'ArrowDown' ? 1 : -1
@@ -189,51 +213,124 @@ export class Composer {
     } else if (event.key === 'Escape') {
       event.preventDefault()
       event.stopPropagation()
-      this.#close()
+      this.#dismiss()
     }
   }
 
-  /** Shows the known people matching the @ before the caret. */
+  /**
+   * Shows the people in the threads and those Dossier suggests, and its
+   * teams, matching the @ before the caret.
+   */
   #suggest(): void {
     const textarea = this.textarea
     const at =
       textarea.selectionStart === textarea.selectionEnd
         ? mentionAt(textarea.value, textarea.selectionStart)
         : null
+    // Dossier's answer for this @ when it has one; the threads' at once.
+    const dismissals = this.#dismissals
+    const found =
+      at === null
+        ? null
+        : (this.#options.lookup?.(searchOf(at.query).text, () =>
+            this.#again(at.query, dismissals),
+          ) ?? null)
     const shown =
-      at === null ? [] : suggestEmails(this.#options.known(), at.query)
+      at === null ? [] : suggestionsFor(this.#options.known(), found, at.query)
     if (
       shown.length === 0 ||
-      (shown.length === 1 && shown[0] === at?.query.toLowerCase())
+      (shown.length === 1 &&
+        suggestionText(shown[0]!).toLowerCase() ===
+          `@${at?.query.toLowerCase()}`)
     ) {
       this.#close()
       return
     }
-    const doc = this.#options.document
     const before = this.#shown[this.#active]
     this.#shown = shown
     this.#list.replaceChildren(
-      ...shown.map((email, index) => {
-        const option = doc.createElement('li')
-        option.id = `${this.#list.id}-${index}`
-        option.className = 'dossier-comments-suggestion'
-        option.dir = 'auto'
-        option.setAttribute('role', 'option')
-        option.setAttribute('aria-selected', 'false')
-        option.textContent = email
-        // Keeps focus in the textarea while the option is tapped.
-        option.addEventListener('mousedown', (event) => event.preventDefault())
-        option.addEventListener('click', () => this.#accept(email))
-        return option
-      }),
+      ...shown.map((suggestion, index) => this.#option(suggestion, index)),
     )
     this.#list.hidden = false
-    const keep = before === undefined ? -1 : shown.indexOf(before)
+    const keep =
+      before === undefined
+        ? -1
+        : shown.findIndex((s) => suggestionText(s) === suggestionText(before))
     this.#activate(keep >= 0 ? keep : 0)
+    const teams = shown.filter((s) => s.kind === 'team').length
     this.#count.textContent =
       shown.length === 1
-        ? '1 person to mention'
-        : `${shown.length} people to mention`
+        ? teams === 1
+          ? '1 team to mention'
+          : '1 person to mention'
+        : teams === 0
+          ? `${shown.length} people to mention`
+          : `${shown.length} people and teams to mention`
+  }
+
+  /**
+   * Dossier answered for `query`: shown if that @ is still being typed and
+   * the suggestions were not put away since it was asked.
+   */
+  #again(query: string, dismissals: number): void {
+    const textarea = this.textarea
+    if (dismissals !== this.#dismissals) return
+    if (this.#options.document.activeElement !== textarea) return
+    const at =
+      textarea.selectionStart === textarea.selectionEnd
+        ? mentionAt(textarea.value, textarea.selectionStart)
+        : null
+    if (at !== null && at.query === query) this.#suggest()
+  }
+
+  /** One suggestion: a photo or initial, the name, and the email or team size. */
+  #option(suggestion: Suggestion, index: number): HTMLLIElement {
+    const doc = this.#options.document
+    const option = doc.createElement('li')
+    option.id = `${this.#list.id}-${index}`
+    option.className = 'dossier-comments-suggestion'
+    option.dir = 'auto'
+    option.setAttribute('role', 'option')
+    option.setAttribute('aria-selected', 'false')
+    option.setAttribute('data-mention', suggestionText(suggestion))
+    const avatar = doc.createElement('span')
+    avatar.className = 'dossier-comments-avatar'
+    avatar.setAttribute('aria-hidden', 'true')
+    const title =
+      suggestion.kind === 'person'
+        ? (suggestion.name ?? suggestion.email)
+        : suggestion.name
+    const initial = Array.from(title)[0] ?? '?'
+    avatar.textContent = initial
+    if (suggestion.kind === 'person' && suggestion.image !== null) {
+      const photo = doc.createElement('img')
+      photo.alt = ''
+      photo.referrerPolicy = 'no-referrer'
+      photo.decoding = 'async'
+      // A photo that does not load leaves the initial.
+      photo.addEventListener('error', () => {
+        avatar.textContent = initial
+      })
+      photo.src = suggestion.image
+      avatar.replaceChildren(photo)
+    }
+    const name = doc.createElement('span')
+    name.className = 'dossier-comments-suggestion-name'
+    name.textContent = title
+    const detail = doc.createElement('span')
+    detail.className = 'dossier-comments-suggestion-detail'
+    detail.textContent =
+      suggestion.kind === 'team'
+        ? `Team · ${suggestion.members === 1 ? '1 person' : `${suggestion.members} people`}`
+        : suggestion.name === null
+          ? ''
+          : suggestion.email
+    detail.hidden = detail.textContent === ''
+    option.append(avatar, name, detail)
+    // Keeps focus in the textarea while the option is tapped.
+    option.addEventListener('mousedown', (event) => event.preventDefault())
+    option.addEventListener('click', () => this.#accept(suggestion))
+    return option
   }
 
   #activate(index: number): void {
@@ -253,7 +350,7 @@ export class Composer {
     }
   }
 
-  #accept(email: string): void {
+  #accept(suggestion: Suggestion): void {
     const textarea = this.textarea
     const caret = textarea.selectionStart
     const at = mentionAt(textarea.value, caret)
@@ -263,12 +360,18 @@ export class Composer {
     }
     const value = textarea.value
     const after = value.slice(caret)
-    const insert = `@${email}${/^\s/.test(after) ? '' : ' '}`
+    const insert = `${suggestionText(suggestion)}${/^\s/.test(after) ? '' : ' '}`
     textarea.value = `${value.slice(0, at.start)}${insert}${after}`
     const end = at.start + insert.length
     textarea.setSelectionRange(end, end)
-    this.#close()
+    this.#dismiss()
     textarea.focus()
+  }
+
+  /** Puts the suggestions away: an answer still on its way shows nothing. */
+  #dismiss(): void {
+    this.#dismissals += 1
+    this.#close()
   }
 
   #close(): void {

@@ -13,6 +13,7 @@ dossier.watch(path, onChange) // calls back at once, then after each change; ret
 dossier.write(path, patch, { replace }) // merges into a .json data file; resolves the Doc
 dossier.withdraw(path) // your own submission or entry, for good
 dossier.upload(file) // resolves { file, name, size, type }
+dossier.mentionable(query) // { people, teams } you may @mention here
 ```
 
 `page` holds the page's tree path, its link (the address people open,
@@ -47,6 +48,12 @@ export.
   `<page name>.uploads/<email>/<name>` (`plan.html` gives
   `plan.uploads/sara@acme.com/cv.pdf`), served only as a download. `file` is
   that path relative to the page.
+- `mentionable(query)` gives whom the viewer may @mention on the page, for
+  the text after the @: up to 8 `people` (`{ email, name, image }`) and 8
+  `teams` (`{ name, members }`). Only a member of the page's workspace gets
+  anyone: members, people the page or a folder above it is shared with, and
+  teams whose share or the workspace's opens the page, each only if they can
+  open it. A guest or visitor gets `{ people: [], teams: [] }`.
 
 A `Doc` is `{ path, data, by, at, push }`: `path` relative to the page, `by` the
 writer's email for data files (for authored files the pusher's email to members
@@ -90,9 +97,11 @@ Forms stay automatic: a plain `<form>` needs no page code (see Forms), and
 
 A page's comments read like any folder: `read('plan.comments/')` on
 `plan.html` gives one `Doc` per thread, its `data` a `{ root, replies,
-resolved }` where each comment has `by`, `at`, `text`, `anchor`, `stance` and
-`deleted`, and `watch` follows them. The page decides what its handoff says.
-This one copies the open threads, with the page's link:
+resolved }` where each comment has `by` (the writer's email), `name` (their
+display name, or null), `at`, `text`, `anchor`, `stance`, `mentions` (emails,
+and `team:Design` for a team) and `deleted`, and `watch` follows them. The
+page decides what its handoff says. This one copies the open threads, with
+the page's link:
 
 ```js
 const stop = dossier.watch('plan.comments/', (threads) => {
@@ -104,7 +113,7 @@ const stop = dossier.watch('plan.comments/', (threads) => {
     ...open.map(({ data: { root, replies } }) =>
       [root, ...replies]
         .filter((c) => !c.deleted)
-        .map((c) => `- ${root.anchor ?? 'page'}: ${c.by}: ${c.text}`)
+        .map((c) => `- ${root.anchor ?? 'page'}: ${c.name ?? c.by}: ${c.text}`)
         .join('\n'),
     ),
   ].join('\n')

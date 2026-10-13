@@ -177,12 +177,12 @@ export interface AccessService {
     treeId: TreeId,
   ) => Effect.Effect<ReadableNodes, never, CurrentCaller>
   /**
-   * couldRead as a condition for a change's batch, so a grant lost after
-   * the check fails the change rather than mention someone who no longer
-   * reads the node. Bound with plain `?`.
+   * couldRead of every one of these emails as one condition for a change's
+   * batch, so a grant lost after the check fails the change rather than
+   * mention someone who no longer reads the node. Bound with plain `?`.
    */
   readonly couldReadCondition: (
-    email: string,
+    emails: readonly string[],
     node: NodeRow,
   ) => Effect.Effect<{ readonly sql: string; readonly binds: unknown[] }>
   /**
@@ -202,6 +202,14 @@ export interface AccessService {
     email: string,
     node: NodeRow,
   ) => Effect.Effect<boolean, never, CurrentCaller>
+  /**
+   * Which of these emails could read the node now, by couldRead's rule, in
+   * one statement: lower-cased. For mentions only.
+   */
+  readonly readersAmong: (
+    emails: readonly string[],
+    node: NodeRow,
+  ) => Effect.Effect<ReadonlySet<string>>
   /** Agrees with require('read') on every node of the tree. */
   readonly readable: (
     treeId: TreeId,
@@ -1066,49 +1074,94 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
         return scope !== null && isUnder(path, scope.path)
       })
 
-    const couldReadCondition = (email: string, node: NodeRow) =>
-      Effect.gen(function* () {
-        const tree = yield* query(() =>
-          DB.prepare(
-            'select workspace_id as workspaceId from trees where id = ?',
-          )
-            .bind(node.treeId)
-            .first<{ workspaceId: string }>(),
-        )
-        if (tree === null) return { sql: '0', binds: [] }
-        const W = lit(tree.workspaceId)
-        const E = lit(email.toLowerCase())
-        // The person's facts as the columns of one row, so the rule reads
-        // them as plain columns and stays as shallow as with literals.
-        const facts: CallerFacts = {
-          email: sql.raw('mc.email'),
-          person: sql.raw('mc.person'),
-          member: sql.raw('mc.member'),
-          admin: sql.raw('mc.admin'),
-          teams: sql.raw('mc.teams'),
-          within: () => sql`1`,
-        }
-        const condition = tight`exists (select 1 from trees t join workspaces w on w.id = t.workspace_id
-            where t.id = ${lit(node.treeId)} and t.deleted_at is null
-              and w.deleted_at is null and w.suspended_at is null)
-          and exists (select 1 from (select p.person, ${E} as email,
-                (select count(*) from workspace_members m
-                  where m.workspace_id = ${W} and m.user_id = p.person) as member,
-                (select count(*) from workspace_members m
-                  where m.workspace_id = ${W} and m.user_id = p.person
-                    and m.role = 'admin') as admin,
-                (select json_group_array(tm.team_id) from team_members tm
-                  join teams tt on tt.id = tm.team_id
-                  join workspace_members wm on wm.workspace_id = tt.workspace_id
-                    and wm.user_id = tm.user_id
-                  where tt.workspace_id = ${W} and tm.user_id = p.person) as teams
-              from (select (select u.id from "user" u join people pp on pp.user_id = u.id
-                  where lower(u.email) = ${E} and pp.deleted_at is null limit 1) as person) p) mc,
-              nodes
+    /** The workspace a tree is in, or null when there is no such tree. */
+    const workspaceOfTree = (treeId: TreeId) =>
+      query(() =>
+        DB.prepare('select workspace_id as workspaceId from trees where id = ?')
+          .bind(treeId)
+          .first<{ workspaceId: string }>(),
+      ).pipe(Effect.map((row) => row?.workspaceId ?? null))
+
+    /**
+     * People by email as a table `mc` of the read rule's facts, one row per
+     * email in `emails` (SQL giving `email` column rows), so the rule reads
+     * them as plain columns and stays as shallow as with literals.
+     */
+    const factsTable = (workspaceId: string, emails: SQL): SQL => {
+      const W = lit(workspaceId)
+      return tight`(select p.person, p.email,
+          (select count(*) from workspace_members m
+            where m.workspace_id = ${W} and m.user_id = p.person) as member,
+          (select count(*) from workspace_members m
+            where m.workspace_id = ${W} and m.user_id = p.person
+              and m.role = 'admin') as admin,
+          (select json_group_array(tm.team_id) from team_members tm
+            join teams tt on tt.id = tm.team_id
+            join workspace_members wm on wm.workspace_id = tt.workspace_id
+              and wm.user_id = tm.user_id
+            where tt.workspace_id = ${W} and tm.user_id = p.person) as teams
+        from (select e.email, (select u.id from "user" u join people pp on pp.user_id = u.id
+            where lower(u.email) = e.email and pp.deleted_at is null limit 1) as person
+          from ${emails} e) p) mc`
+    }
+
+    const tableFacts: CallerFacts = {
+      email: sql.raw('mc.email'),
+      person: sql.raw('mc.person'),
+      member: sql.raw('mc.member'),
+      admin: sql.raw('mc.admin'),
+      teams: sql.raw('mc.teams'),
+      within: () => sql`1`,
+    }
+
+    /** The tree and its workspace stand: neither deleted nor suspended. */
+    const treeStands = (treeId: TreeId) =>
+      tight`exists (select 1 from trees t join workspaces w on w.id = t.workspace_id
+        where t.id = ${lit(treeId)} and t.deleted_at is null
+          and w.deleted_at is null and w.suspended_at is null)`
+
+    /** Rows `mc` of the emails, as given, that could read the node now. */
+    const readersOf = (
+      workspaceId: string,
+      emails: readonly string[],
+      node: NodeRow,
+    ): SQL => {
+      // The emails bound once, as JSON, whatever their number.
+      const list = tight`(select value as email from json_each(${JSON.stringify(emails)}))`
+      return tight`select mc.email from ${factsTable(workspaceId, list)}
+        where ${treeStands(node.treeId)}
+          and exists (select 1 from nodes
             where "nodes"."id" = ${lit(node.id)} and "nodes"."deleted_at" is null
-              and ${readableOn(node.treeId, tree.workspaceId, facts)(nodeColumn)})`
+              and ${readableOn(node.treeId, workspaceId, tableFacts)(nodeColumn)})`
+    }
+
+    const lowerOnce = (emails: readonly string[]) => [
+      ...new Set(emails.map((e) => e.toLowerCase())),
+    ]
+
+    const couldReadCondition = (emails: readonly string[], node: NodeRow) =>
+      Effect.gen(function* () {
+        const wanted = lowerOnce(emails)
+        if (wanted.length === 0) return { sql: '1', binds: [] }
+        const workspaceId = yield* workspaceOfTree(node.treeId)
+        if (workspaceId === null) return { sql: '0', binds: [] }
+        const condition = tight`(select count(*) from (${readersOf(workspaceId, wanted, node)})) = ${lit(wanted.length)}`
         const query_ = new SQLiteSyncDialect().sqlToQuery(condition)
         return { sql: query_.sql, binds: query_.params }
+      })
+
+    const readersAmong = (emails: readonly string[], node: NodeRow) =>
+      Effect.gen(function* () {
+        const wanted = lowerOnce(emails)
+        if (wanted.length === 0) return new Set<string>()
+        const workspaceId = yield* workspaceOfTree(node.treeId)
+        if (workspaceId === null) return new Set<string>()
+        const found = yield* query(() =>
+          db({ DB }).all<{ email: string }>(
+            readersOf(workspaceId, wanted, node),
+          ),
+        )
+        return new Set(found.map((row) => row.email))
       })
 
     const couldRead = (email: string, node: NodeRow) =>
@@ -1150,6 +1203,7 @@ export const AccessLive: Layer.Layer<Access, never, Bindings> = Layer.effect(
       withinScope,
       couldRead,
       couldReadCondition,
+      readersAmong,
       readable,
       readableByGrants,
       member,

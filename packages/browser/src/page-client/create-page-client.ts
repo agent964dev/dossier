@@ -9,6 +9,7 @@ import {
   type Json,
   type JsonObject,
   type Me,
+  type Mentionable,
   type PageBootstrap,
 } from '@dossier/contracts/bridge'
 import { createPageData } from './data.ts'
@@ -81,6 +82,12 @@ export interface Dossier {
     size: number
     type: string
   }>
+  /**
+   * Whom you may mention on this page, for what follows your @: for a
+   * member of the page's workspace, people and teams who can open it; for
+   * anyone else, nobody.
+   */
+  mentionable(query: string): Promise<Mentionable>
 }
 
 export type HostPort = Pick<
@@ -247,5 +254,6 @@ export const createPageClient = (deps: {
     write: data.write,
     withdraw: data.withdraw,
     upload: data.upload,
+    mentionable: data.mentionable,
   }) as Dossier
 }

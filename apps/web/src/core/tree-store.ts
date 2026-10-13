@@ -379,8 +379,13 @@ export interface ChangeSet {
     m: {
       readonly comment: NodeHandle | NodeRow
       readonly email: string
+      /** The comment's mention that reached them, when not their email. */
+      readonly via?: string | null
       readonly path: string
-      /** Holds while the person still reads the page, checked in the batch. */
+      /**
+       * Holds while the person still reads the page, checked in the batch;
+       * one that several mentions share is checked once.
+       */
       readonly reads: Statement
     },
   ) => void
@@ -391,6 +396,20 @@ export interface ChangeSet {
    * never brings back a comment deleted since it was read.
    */
   readonly guardCommentText: (comment: NodeRow) => void
+  /**
+   * After a comment's mentions change: each of its mentions rows whose
+   * mention is gone takes the one that still reaches the person in
+   * `reached` (null for their own email), so the person stays mentioned
+   * while any mention of them stands.
+   */
+  readonly remention: (
+    comment: NodeRow,
+    m: {
+      /** The comment's mentions now. */
+      readonly mentions: readonly string[]
+      readonly reached: ReadonlyMap<string, string | null>
+    },
+  ) => void
   /**
    * 'withdrawn': every version's content deleted, one content-free
    * 'withdrawn' version left, the node deleted, its operations reduced to
@@ -2350,12 +2369,14 @@ export const TreeStoreLive: Layer.Layer<
         const searchWrites: Statement[] = []
         /** That each person mentioned still reads the page. */
         const mentionGuards: Statement[] = []
+        const mentionKeys = new Set<string>()
         /** Mentions rows, each keyed by the seq of the event at `event`. */
         const mentioned: {
           readonly event: number
           readonly commentId: string
           readonly pageId: NodeId
           readonly email: string
+          readonly via: string | null
         }[] = []
         /** Whose sockets the revoked shares close, as the batch read them. */
         const closing: (CloseSockets | null)[] = []
@@ -3468,8 +3489,13 @@ export const TreeStoreLive: Layer.Layer<
 
           mention: (page, m) => {
             bases.push(...everyBasis(page.basis, person.id))
-            // The read rule is large: each check is a statement of its own.
-            mentionGuards.push(m.reads)
+            // The read rule is large: each check is a statement of its own,
+            // and one several mentions share is made once.
+            const key = `${m.reads.sql}\u0000${JSON.stringify(m.reads.binds)}`
+            if (!mentionKeys.has(key)) {
+              mentionKeys.add(key)
+              mentionGuards.push(m.reads)
+            }
             events.push({ type: 'mention', path: m.path, node: m.comment })
             mentioned.push({
               event: events.length - 1,
@@ -3478,11 +3504,35 @@ export const TreeStoreLive: Layer.Layer<
                 : m.comment.id,
               pageId: page.id,
               email: m.email.toLowerCase(),
+              via: m.via ?? null,
             })
           },
 
           holds: (granted) => {
             bases.push(...everyBasis(granted.basis, person.id))
+          },
+
+          remention: (comment, m) => {
+            if (m.reached.size === 0) return
+            writes.push({
+              sql: `update mentions set via = (
+                      select json_extract(r.value, '$[1]') from json_each(?2) r
+                      where json_extract(r.value, '$[0]') = mentions.email)
+                    where comment_node_id = ?1
+                      and email in (select json_extract(r.value, '$[0]') from json_each(?2) r)
+                      and not exists (select 1 from json_each(?3) k
+                        where k.value = coalesce(mentions.via, mentions.email))`,
+              binds: [
+                comment.id,
+                JSON.stringify(
+                  [...m.reached].map(([email, via]) => [
+                    email.toLowerCase(),
+                    via,
+                  ]),
+                ),
+                JSON.stringify(m.mentions),
+              ],
+            })
           },
 
           guardCommentText: (comment) => {
@@ -3747,14 +3797,15 @@ export const TreeStoreLive: Layer.Layer<
           })),
           ...mentioned.map((m) => ({
             sql: `insert into mentions (tree_id, event_seq, comment_node_id, page_node_id,
-                      email, created_at)
-                    values (?1, (select event_seq from trees where id = ?1) - ?2, ?3, ?4, ?5, ?6)`,
+                      email, via, created_at)
+                    values (?1, (select event_seq from trees where id = ?1) - ?2, ?3, ?4, ?5, ?6, ?7)`,
             binds: [
               t,
               events.length - 1 - m.event,
               m.commentId,
               m.pageId,
               m.email,
+              m.via,
               now,
             ],
           })),

@@ -6,17 +6,20 @@ import {
   type ErrorCode,
   type JsonObject,
   type Me,
+  type Mentionable,
   type Thread,
 } from '@dossier/contracts/bridge'
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
   claimText,
   keptKey,
+  LOOKUP_DELAY_MS,
   MARK,
   TEXT,
   type CommentsStateDetail,
 } from '../src/base/components/dossier-comments/element.ts'
 import {
+  mentionsIn,
   pinFromPoint,
   pinPosition,
   placeThreads,
@@ -56,12 +59,17 @@ const peer = {
   watchers: new Set<(value: readonly Doc<Thread>[]) => void>(),
   /** The next sends reject with these, in order. */
   failures: [] as DossierError[],
+  /** Whom Dossier suggests, and what it was asked. */
+  mentionable: { people: [], teams: [] } as Mentionable,
+  asked: [] as string[],
   reset() {
     this.me = SARA
     this.threads = []
     this.calls = []
     this.watchers.clear()
     this.failures = []
+    this.mentionable = { people: [], teams: [] }
+    this.asked = []
   },
   /** A change in the folder, as the watch reports it. */
   emit(threads: Doc<Thread>[]) {
@@ -112,6 +120,10 @@ const fake = {
   upload: async () => {
     throw new Error('not used')
   },
+  mentionable: async (query: string) => {
+    peer.asked.push(query)
+    return peer.mentionable
+  },
 } as unknown as Dossier
 
 let minute = 0
@@ -130,6 +142,7 @@ const comment = (
     replyTo: null,
     stance: null,
     mentions: [],
+    name: null,
     path: `${FOLDER}${by}/2026-10-10T09-${String(minute).padStart(2, '0')}-00.json`,
     by,
     at: at.toISOString(),
@@ -1196,7 +1209,10 @@ describe('<dossier-comments>', () => {
     type(area, 'Ask @le')
     expect(list.hidden).toBe(false)
     const options = [...list.querySelectorAll('[role="option"]')]
-    expect(options.map((o) => o.textContent)).toEqual([LEE, 'lena@acme.com'])
+    expect(options.map((o) => o.getAttribute('data-mention'))).toEqual([
+      `@${LEE}`,
+      '@lena@acme.com',
+    ])
     expect(area.getAttribute('aria-activedescendant')).toBe(options[0]!.id)
     key(area, 'ArrowDown')
     expect(options[1]!.getAttribute('aria-selected')).toBe('true')
@@ -1208,6 +1224,142 @@ describe('<dossier-comments>', () => {
     key(area, 'Escape')
     expect(list.hidden).toBe(true)
     expect(area.hasAttribute('aria-activedescendant')).toBe(false)
+  })
+
+  test('adds Dossier’s people and teams to those in the threads, by name, and mentions a team as @team:', async () => {
+    peer.threads = [
+      thread(comment(LEE, 'Hi', { name: 'Lee Park', mentions: ['team:Ops'] })),
+    ]
+    peer.mentionable = {
+      people: [
+        { email: LEE, name: null, image: null },
+        {
+          email: 'lena@acme.com',
+          name: 'Lena Saleh',
+          image: 'https://photos.test/lena.jpg',
+        },
+      ],
+      teams: [{ name: 'Lead Design', members: 3 }],
+    }
+    const element = await mount()
+    // A name shows where the email did, the email on hover.
+    const author = q(element, '.dossier-comments-author')
+    expect(author.textContent).toBe('Lee Park')
+    expect(author.title).toBe(LEE)
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const list = q(mainComposer(element), '[role="listbox"]')
+    type(area, 'Ask @le')
+    // The threads' people at once; Dossier's once typing rests.
+    const mentions = () =>
+      [...list.querySelectorAll('[role="option"]')].map((o) =>
+        o.getAttribute('data-mention'),
+      )
+    expect(mentions()).toEqual([`@${LEE}`])
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual(['le'])
+    expect(mentions()).toEqual([
+      `@${LEE}`,
+      '@lena@acme.com',
+      '@team:"Lead Design"',
+    ])
+    const options = [...list.querySelectorAll('[role="option"]')]
+    expect(
+      options.map((o) => q(o, '.dossier-comments-suggestion-name').textContent),
+    ).toEqual(['Lee Park', 'Lena Saleh', 'Lead Design'])
+    expect(q<HTMLImageElement>(options[1]!, 'img').src).toBe(
+      'https://photos.test/lena.jpg',
+    )
+    expect(
+      q(options[2]!, '.dossier-comments-suggestion-detail').textContent,
+    ).toBe('Team · 3 people')
+    key(area, 'ArrowUp')
+    key(area, 'Enter')
+    expect(area.value).toBe('Ask @team:"Lead Design" ')
+    // The same @ again is answered from what Dossier already said.
+    type(area, 'Ask @team:"Lead Design" and @le')
+    expect(mentions()).toHaveLength(3)
+    expect(peer.asked).toEqual(['le'])
+    type(area, 'Ask @team:"Lead Design" and @lena@acme.com')
+    buttonNamed(element, TEXT.comment)!.click()
+    await settle()
+    expect(peer.sends()[0]?.patch?.mentions).toEqual([
+      'team:Lead Design',
+      'lena@acme.com',
+    ])
+  })
+
+  test('keeps the suggestions closed after Escape when Dossier answers later, until more is typed', async () => {
+    peer.threads = [thread(comment(LEE, 'Hi'))]
+    peer.mentionable = {
+      people: [{ email: 'lena@acme.com', name: 'Lena Saleh', image: null }],
+      teams: [],
+    }
+    const element = await mount()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const list = q(mainComposer(element), '[role="listbox"]')
+    type(area, 'Ask @le')
+    expect(list.hidden).toBe(false)
+    key(area, 'Escape')
+    expect(list.hidden).toBe(true)
+    // Dossier's answer for the same @ comes after the Escape.
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual(['le'])
+    expect(list.hidden).toBe(true)
+    // Typing again shows them again, with Dossier's answer it kept.
+    type(area, 'Ask @l')
+    type(area, 'Ask @le')
+    expect(list.hidden).toBe(false)
+    expect(
+      [...list.querySelectorAll('[role="option"]')].map((o) =>
+        o.getAttribute('data-mention'),
+      ),
+    ).toContain('@lena@acme.com')
+  })
+
+  test('keeps the suggestions closed after Escape pressed before anything was suggested', async () => {
+    peer.mentionable = {
+      people: [{ email: 'lena@acme.com', name: 'Lena Saleh', image: null }],
+      teams: [],
+    }
+    const element = await mount()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const list = q(mainComposer(element), '[role="listbox"]')
+    // No one in the threads: nothing shows until Dossier answers.
+    type(area, 'Ask @le')
+    expect(list.hidden).toBe(true)
+    key(area, 'Escape')
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual(['le'])
+    expect(list.hidden).toBe(true)
+  })
+
+  test('never asks Dossier whom to suggest for a visitor', async () => {
+    peer.me = null
+    peer.threads = [thread(comment(LEE, 'Hi'))]
+    const element = await mount()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    type(area, '@le')
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual([])
+    const list = q(mainComposer(element), '[role="listbox"]')
+    expect(list.querySelectorAll('[role="option"]')).toHaveLength(1)
+  })
+
+  test('reads emails and teams, bare or quoted, as mentions', () => {
+    expect(
+      mentionsIn(
+        'cc @Lee@Acme.com, @team:Design. @team:"Design Ops" @team:"Say \\"hi\\"" @team:design and @team:"" a@b.c',
+      ),
+    ).toEqual([
+      'lee@acme.com',
+      'team:Design',
+      'team:Design Ops',
+      'team:Say "hi"',
+    ])
   })
 
   test('keeps focus and the caret in place when the threads change', async () => {
@@ -1443,23 +1595,24 @@ describe('with for: the comments on one item', () => {
     // One watch for the folder, however many elements show it.
     expect(peer.calls.filter((c) => c.op === 'watch')).toHaveLength(1)
     expect(rootsIn(page)).toEqual([whole.path, a.path, b.path])
-    expect(rootsIn(one)).toEqual([a.path])
-    expect(rootsIn(two)).toEqual([b.path])
     expect(one.classList.contains('dossier-comments-item')).toBe(true)
     expect(page.classList.contains('dossier-comments-item')).toBe(false)
-    // Folded: its button and count, no title, list or composer.
+    // Folded: its button and count, and nothing more is even built.
     const opener = byKey(one, 'open')!
     expect(opener.hidden).toBe(false)
     expect(opener.getAttribute('aria-expanded')).toBe('false')
     expect(opener.textContent).toBe('Comment1 open')
     expect(q(one, '.dossier-comments-title').hidden).toBe(true)
-    expect(q(one, '.dossier-comments-threads').hidden).toBe(true)
-    expect(mainComposer(one).hidden).toBe(true)
+    expect(one.querySelector('.dossier-comments-threads')).toBeNull()
+    expect(mainComposer(one)).toBeNull()
     expect(byKey(page, 'open')!.hidden).toBe(true)
     // Its item's mark counts its open threads, as the page's element does.
     expect(document.getElementById('S-1')!.getAttribute(MARK)).toBe('1')
     opener.click()
+    byKey(two, 'open')!.click()
     await settle()
+    expect(rootsIn(one)).toEqual([a.path])
+    expect(rootsIn(two)).toEqual([b.path])
     expect(opener.getAttribute('aria-expanded')).toBe('true')
     expect(q(one, '.dossier-comments-threads').hidden).toBe(false)
     expect(mainComposer(one).hidden).toBe(false)
@@ -1471,6 +1624,79 @@ describe('with for: the comments on one item', () => {
     expect(one.querySelector('.dossier-comments-place')).toBeNull()
   })
 
+  /** A page with an element under each of `count` items, and one for it all. */
+  const mountMany = async (count: number) => {
+    const ids = Array.from({ length: count }, (_, at) => `I-${at}`)
+    document.body.innerHTML = `${ids
+      .map(
+        (id) =>
+          `<section id="${id}"><h2>Item ${id}</h2><dossier-comments for="${id}"></dossier-comments></section>`,
+      )
+      .join('')}<img id="shot" alt="Shot"><dossier-comments></dossier-comments>`
+    await settle()
+  }
+
+  /** Document-wide lookups and reads of the layout while `run` goes. */
+  const costOf = async (run: () => void | Promise<void>) => {
+    const queries = vi.spyOn(document, 'querySelectorAll')
+    const boxes = vi.spyOn(window.Element.prototype, 'getBoundingClientRect')
+    await run()
+    await settle()
+    const cost = {
+      queries: queries.mock.calls.length,
+      boxes: boxes.mock.calls.length,
+    }
+    queries.mockRestore()
+    boxes.mockRestore()
+    return cost
+  }
+
+  test('does the same page-wide work on a delivery however many items have an element', async () => {
+    const delivery = async (count: number) => {
+      await mountMany(count)
+      const one = comment(LEE, 'On one', { anchor: 'I-1' })
+      const five = comment(LEE, 'On five', { anchor: 'I-5' })
+      return costOf(() => peer.emit([thread(one), thread(five)]))
+    }
+    const few = await delivery(10)
+    document.body.replaceChildren()
+    const many = await delivery(30)
+    expect(many).toEqual(few)
+    // No element read the layout: nothing is pinned.
+    expect(many.boxes).toBe(0)
+    // Every item is marked, and the folded elements built only their button.
+    expect(document.getElementById('I-5')!.getAttribute(MARK)).toBe('1')
+    expect(
+      document.querySelectorAll('dossier-comments[for] textarea'),
+    ).toHaveLength(0)
+    expect(
+      document.querySelectorAll('dossier-comments[for] .dossier-comments-open'),
+    ).toHaveLength(30)
+  }, 15_000)
+
+  test('types into an item’s composer without looking through the page', async () => {
+    // With nothing pinned, no element follows the page's scrolls and keys.
+    const listens = vi.spyOn(document, 'addEventListener')
+    await mountMany(30)
+    expect(
+      listens.mock.calls.filter(([kind]) =>
+        ['scroll', 'keydown', 'load', 'toggle'].includes(kind),
+      ),
+    ).toEqual([])
+    listens.mockRestore()
+    const element = document.querySelector<HTMLElement>(
+      'dossier-comments[for="I-3"]',
+    )!
+    byKey(element, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const cost = await costOf(() => {
+      for (const text of ['A', 'An', 'Ano', 'Anot', 'Anote']) type(area, text)
+    })
+    expect(cost).toEqual({ queries: 0, boxes: 0 })
+    expect(area.value).toBe('Anote')
+  })
+
   test('leaves an item’s mark to the element still counting it when the other leaves', async () => {
     peer.threads = [thread(comment(LEE, 'First', { anchor: 'S-1' }))]
     const { page, one } = await mountItems()
@@ -1479,6 +1705,37 @@ describe('with for: the comments on one item', () => {
     expect(item.getAttribute(MARK)).toBe('1')
     page.remove()
     expect(item.hasAttribute(MARK)).toBe(false)
+  })
+
+  test('takes back no mark when a send it started ends after it left the page', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    peer.threads = [thread(a)]
+    const { page, one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    byKey(one, `reply:${a.path}`)!.click()
+    const form = q(one, `[data-composer="reply:${a.path}"]`)
+    type(q(form, 'textarea'), 'On it')
+    let finish = () => {}
+    const write = fake.write
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path, patch) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }),
+    )
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    one.remove()
+    finish()
+    await settle()
+    // The page's element sees the thread resolved: nothing counts S-1 now.
+    peer.emit([
+      thread(a, [], { resolved: true, resolvedBy: LEE, resolvedAt: a.at }),
+    ])
+    await settle()
+    expect(page.isConnected).toBe(true)
+    expect(document.getElementById('S-1')!.hasAttribute(MARK)).toBe(false)
   })
 
   test('leaves an item’s mark to the element still counting it when the other moves to another item', async () => {
@@ -1805,11 +2062,11 @@ describe('with for: the comments on one item', () => {
     expect(
       q<HTMLTextAreaElement>(mainComposer(back.two), 'textarea').value,
     ).toBe('Kept on two')
-    for (const other of [back.page, back.one]) {
-      expect(
-        q<HTMLTextAreaElement>(mainComposer(other), 'textarea').value,
-      ).toBe('')
-    }
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(back.page), 'textarea').value,
+    ).toBe('')
+    // Nothing kept for it: still folded, its composer not built.
+    expect(mainComposer(back.one)).toBeNull()
     expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
   })
 })

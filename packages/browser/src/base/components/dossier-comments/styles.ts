@@ -140,8 +140,21 @@ export const STYLES = `
   border: 1px solid ${BORDER}; border-radius: var(--radius, 0.375rem);
 }
 :where(.dossier-comments-suggestion) {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.125em 0.5em;
   padding-block: 0.375em; padding-inline: 0.5em; cursor: pointer;
   border-radius: calc(var(--radius, 0.375rem) - 2px);
+}
+:where(.dossier-comments-suggestion .dossier-comments-avatar) {
+  inline-size: 1.5rem; block-size: 1.5rem; font-size: 0.75em;
+  overflow: hidden; flex: none;
+}
+:where(.dossier-comments-avatar > img) {
+  display: block; inline-size: 100%; block-size: 100%; object-fit: cover;
+}
+:where(.dossier-comments-suggestion-name) { font-weight: 600; }
+:where(.dossier-comments-suggestion-detail) {
+  font-size: 0.875em; color: var(--muted-foreground, inherit);
+  overflow-wrap: anywhere;
 }
 :where(.dossier-comments-suggestion[aria-selected="true"]) {
   background: ${TINT}; outline: 2px solid var(--ring, currentColor);

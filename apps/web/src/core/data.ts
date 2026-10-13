@@ -9,7 +9,11 @@ import {
   isCommentValue,
   isNodeName,
   pageOfCommentsFolder,
+  teamOfMention,
   MAX_DEPTH,
+  MENTIONABLE_MAX,
+  MENTIONABLE_QUERY_MAX,
+  type MentionableResult,
   type AuthoredSeq,
   type DataReadResult,
   type DocWire,
@@ -56,10 +60,24 @@ import {
   readThreads,
 } from './comments.ts'
 import { newId } from './ids.ts'
+import {
+  isMemberOf,
+  CANDIDATE_BATCHES_MAX,
+  CANDIDATES_MAX,
+  mentionCandidates,
+  type MentionCandidate,
+  mentionTeams,
+  teamMembersByName,
+} from './mentions.ts'
 import { composedLayouts } from './lookup.ts'
 import { Limits } from './limits.ts'
 import { Purge } from './purge.ts'
-import type { NodeRow, TreeRow, VersionRow } from './rows.ts'
+import {
+  ancestorPaths,
+  type NodeRow,
+  type TreeRow,
+  type VersionRow,
+} from './rows.ts'
 import {
   TreeStore,
   type ChangeFailure,
@@ -67,7 +85,6 @@ import {
   type DocRow,
   type FormRow,
   type NodeHandle,
-  type Statement,
   type VersionHandle,
   DATA_FILE_TOO_LARGE,
 } from './tree-store.ts'
@@ -274,6 +291,22 @@ export interface DataService {
     CurrentCaller
   >
   /**
+   * Whom the caller may mention on a page, for what follows their @: for a
+   * member of the page's workspace who reads it, the people (members, and
+   * emails the page or a folder above it is shared with) and teams that
+   * can open it. Anyone else, and a page that is missing or unreadable,
+   * gets nobody.
+   */
+  readonly mentionable: (i: {
+    readonly treeId: TreeId
+    readonly page: string
+    readonly query: string
+  }) => Effect.Effect<
+    MentionableResult,
+    DossierError<'unavailable'>,
+    CurrentCaller
+  >
+  /**
    * The forms of the pages in a folder, by the listing entry's node (the
    * folder for a folder page): their targets, and how many people answered.
    */
@@ -339,9 +372,19 @@ export interface DataService {
 export interface ExportSnapshot {
   /** Tree paths, as a data read gives them. */
   readonly files: readonly DocWire[]
-  /** Each comment entry among them: first written, and its versions. */
+  /**
+   * Each comment entry among them: first written, its versions, and its
+   * writer's display name.
+   */
   readonly comments: Readonly<
-    Record<string, { readonly created: string; readonly revision: number }>
+    Record<
+      string,
+      {
+        readonly created: string
+        readonly revision: number
+        readonly name: string | null
+      }
+    >
   >
 }
 
@@ -1950,21 +1993,62 @@ export const DataLive: Layer.Layer<
             const seenPush = yield* pushNumberOf(seen.version)
             const provenance = { seenPush, opId: i.opId }
             /**
-             * Who of these could read the page, with the check the batch
-             * makes again: the writer never counts.
+             * Who these mentions reach and could read the page, with the
+             * check the batch makes again: each email, and each member of
+             * a team the writer, a member of the page's workspace, names.
+             * The writer never counts; a team or email that names nobody
+             * who reads the page is left as text.
              */
-            const mentionable = (emails: readonly string[]) =>
+            /**
+             * Whom these mentions name, each person once with the mention
+             * that reaches them: null for their own email, which comes
+             * first, else the first team that holds them.
+             */
+            const reachedBy = (mentions: readonly string[]) =>
               Effect.gen(function* () {
-                const out: { email: string; reads: Statement }[] = []
-                for (const m of emails) {
-                  if (m === email) continue
-                  if (!(yield* access.couldRead(m, page.node))) continue
-                  out.push({
-                    email: m,
-                    reads: yield* access.couldReadCondition(m, page.node),
-                  })
+                const reached = new Map<string, string | null>()
+                const teams: { mention: string; name: string }[] = []
+                for (const m of mentions) {
+                  const name = teamOfMention(m)
+                  if (name !== null) teams.push({ mention: m, name })
+                  else if (m !== email && !reached.has(m)) reached.set(m, null)
                 }
-                return out
+                if (
+                  teams.length > 0 &&
+                  (yield* isMemberOf(DB, tree.workspaceId, person.id))
+                ) {
+                  const members = yield* teamMembersByName(
+                    DB,
+                    tree.workspaceId,
+                    teams.map((t) => t.name),
+                  )
+                  for (const team of teams) {
+                    for (const m of members.get(team.name.toLowerCase()) ??
+                      []) {
+                      if (m !== email && !reached.has(m)) {
+                        reached.set(m, team.mention)
+                      }
+                    }
+                  }
+                }
+                return reached
+              })
+            const mentionable = (mentions: readonly string[]) =>
+              Effect.gen(function* () {
+                const reached = yield* reachedBy(mentions)
+                const readers = yield* access.readersAmong(
+                  [...reached.keys()],
+                  page.node,
+                )
+                const out = [...reached]
+                  .filter(([m]) => readers.has(m))
+                  .map(([m, via]) => ({ email: m, via }))
+                // One check in the batch that each of them still reads it.
+                const reads = yield* access.couldReadCondition(
+                  out.map((m) => m.email),
+                  page.node,
+                )
+                return out.map((m) => ({ ...m, reads }))
               })
             const answer = (version: VersionHandle) =>
               Effect.gen(function* () {
@@ -2131,6 +2215,15 @@ export const DataLive: Layer.Layer<
                     : yield* mentionable(
                         parsed.mentions.filter((m) => !before.has(m)),
                       )
+                // Whom the comment names now, so someone it named twice
+                // stays named when one of the two goes.
+                const still =
+                  parsed.mentions === undefined
+                    ? null
+                    : {
+                        mentions: parsed.mentions,
+                        reached: yield* reachedBy(parsed.mentions),
+                      }
                 const done = yield* store
                   .change(tree.id, (cs) =>
                     Effect.sync(() => {
@@ -2148,6 +2241,7 @@ export const DataLive: Layer.Layer<
                         result: version,
                       })
                       cs.event({ type: 'comment', path: target, node: mine })
+                      if (still !== null) cs.remention(mine, still)
                       for (const m of added) {
                         cs.mention(granted, {
                           comment: mine,
@@ -2622,15 +2716,18 @@ export const DataLive: Layer.Layer<
             push: number | null
             author: string | null
             owner: string | null
+            ownerName: string | null
           }>(
             sql`select nodes.path, nodes.created_at as createdAt,
                   v.json_value as json, v.blob_sha256 as blob, v.size,
                   v.created_at as versionAt, v.revision,
                   v.seen_push_number as push, a.email as author,
-                  o.email as owner
+                  o.email as owner,
+                  case when op.deleted_at is null then nullif(o.name, '') end as ownerName
                 from nodes join node_versions v on v.id = nodes.current_version_id
                   left join "user" a on a.id = v.author_id
                   left join "user" o on o.id = nodes.owner_id
+                  left join people op on op.user_id = o.id
                 where nodes.tree_id = ${page.treeId} and nodes.deleted_at is null
                   and nodes.kind = 'file' and nodes.origin = 'data'
                   and v.state = 'live'
@@ -2654,10 +2751,7 @@ export const DataLive: Layer.Layer<
           )
         }
         const files: DocWire[] = []
-        const kept: Record<
-          string,
-          { readonly created: string; readonly revision: number }
-        > = {}
+        const kept: Record<string, ExportSnapshot['comments'][string]> = {}
         for (const row of rows) {
           const comment = commentsFolderIn(row.path) === comments
           // A comment is its writer's, even once someone else blanked it.
@@ -2674,10 +2768,77 @@ export const DataLive: Layer.Layer<
             kept[row.path] = {
               created: new Date(row.createdAt).toISOString(),
               revision: row.revision,
+              name: row.ownerName,
             }
           }
         }
         return { files, comments: kept }
+      })
+
+    const mentionable: DataService['mentionable'] = (i) =>
+      Effect.gen(function* () {
+        const nobody: MentionableResult = { people: [], teams: [] }
+        const me = (yield* CurrentCaller).person
+        // A visitor learns nobody, and asks nothing.
+        if (me === null) return nobody
+        const path = i.page.replace(/^\/+/, '')
+        if (!/\.html$/i.test(path)) return nobody
+        const found = yield* store.treeById(i.treeId)
+        const page = found === null ? null : yield* store.fileAt(i.treeId, path)
+        if (
+          found === null ||
+          page === null ||
+          page.node.origin !== 'authored'
+        ) {
+          return nobody
+        }
+        // Missing, unreadable and a guest's all look the same: nobody.
+        const granted = yield* access
+          .require('read', page.node)
+          .pipe(Effect.option)
+        if (granted._tag === 'None') return nobody
+        const workspaceId = found.tree.workspaceId
+        if (!(yield* isMemberOf(DB, workspaceId, me.id))) return nobody
+        const search = i.query
+          .trim()
+          .toLowerCase()
+          .slice(0, MENTIONABLE_QUERY_MAX)
+        const line = ancestorPaths(page.node.path)
+        // Only people who could open the page now, read in batches until
+        // enough are found, so those who cannot never crowd them out.
+        const people: MentionCandidate[] = []
+        for (let batch = 0; batch < CANDIDATE_BATCHES_MAX; batch += 1) {
+          const candidates = yield* mentionCandidates(DB, {
+            workspaceId,
+            treeId: i.treeId,
+            line,
+            query: search,
+            me: me.email.toLowerCase(),
+            offset: batch * CANDIDATES_MAX,
+          })
+          const readers = yield* access.readersAmong(
+            candidates.map((c) => c.email),
+            page.node,
+          )
+          people.push(...candidates.filter((c) => readers.has(c.email)))
+          if (
+            people.length >= MENTIONABLE_MAX ||
+            candidates.length < CANDIDATES_MAX
+          ) {
+            break
+          }
+        }
+        const teams = yield* mentionTeams(DB, {
+          workspaceId,
+          treeId: i.treeId,
+          line,
+          query: search,
+          max: MENTIONABLE_MAX,
+        })
+        return {
+          people: people.slice(0, MENTIONABLE_MAX),
+          teams,
+        } satisfies MentionableResult
       })
 
     const read: DataService['read'] = (i) =>
@@ -3273,6 +3434,7 @@ export const DataLive: Layer.Layer<
       deleteComment,
       write,
       read,
+      mentionable,
       pageForms,
       responses,
       revisions,

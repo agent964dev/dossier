@@ -29,7 +29,10 @@ export interface CommentEntry {
   readonly replyTo: string | null
   /** One of the page's stances, or null. */
   readonly stance: string | null
-  /** Lower-cased emails. */
+  /**
+   * Lower-cased emails, and `team:<name>` for a team of the page's
+   * workspace, its name as written.
+   */
   readonly mentions: readonly string[]
 }
 
@@ -44,6 +47,8 @@ export interface CommentDoc extends CommentEntry {
   readonly path: string
   /** The writer's email. */
   readonly by: string
+  /** The writer's display name, or null when Dossier has none. */
+  readonly name: string | null
   /** When it was first written, ISO 8601. */
   readonly at: string
   /** The push of the page the writer saw. */
@@ -73,8 +78,63 @@ export const COMMENT_TEXT_MAX = 10_000
 export const COMMENT_LABEL_MAX = 200
 /** The most a stance holds. */
 export const COMMENT_STANCE_MAX = 40
-/** The most people one comment mentions. */
+/** The most people and teams one comment mentions. */
 export const COMMENT_MENTIONS_MAX = 20
+/** The most people, and the most teams, one suggestion of whom to mention gives. */
+export const MENTIONABLE_MAX = 8
+/** The longest text after @ that suggestions are asked for. */
+export const MENTIONABLE_QUERY_MAX = 100
+
+/** What a comment's mentions hold for a team: `team:Design`. */
+export const TEAM_MENTION_PREFIX = 'team:'
+
+/** A team's name as teams keep it: trimmed, 1 to 60 characters. */
+export const isTeamNameText = (name: string): boolean =>
+  name.length > 0 && name.length <= 60 && name.trim() === name
+
+/** The team a mention names, or null when it names a person. */
+export const teamOfMention = (mention: string): string | null => {
+  if (!mention.startsWith(TEAM_MENTION_PREFIX)) return null
+  const name = mention.slice(TEAM_MENTION_PREFIX.length)
+  return isTeamNameText(name) ? name : null
+}
+
+/** A team's name that stands bare after `@team:`, ending at anything else. */
+export const BARE_TEAM_NAME = /^[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*$/u
+
+/**
+ * How a comment's text mentions a team: `@team:Design`, or with quotes when
+ * its name holds anything else, `@team:"Design Ops"`, a quote or backslash
+ * in it escaped with a backslash.
+ */
+export const teamMentionText = (name: string): string =>
+  BARE_TEAM_NAME.test(name)
+    ? `@${TEAM_MENTION_PREFIX}${name}`
+    : `@${TEAM_MENTION_PREFIX}"${name.replace(/[\\"]/g, (c) => `\\${c}`)}"`
+
+/** A person to mention: their email, display name and photo. */
+export interface MentionablePerson {
+  readonly email: string
+  readonly name: string | null
+  /** The address of their photo, or null. */
+  readonly image: string | null
+}
+
+/** A team to mention, with how many people it has. */
+export interface MentionableTeam {
+  readonly name: string
+  readonly members: number
+}
+
+/**
+ * Whom the viewer may mention on a page, for what follows their @. A member
+ * of the page's workspace gets the people and teams who can open the page;
+ * anyone else gets nobody.
+ */
+export interface Mentionable {
+  readonly people: readonly MentionablePerson[]
+  readonly teams: readonly MentionableTeam[]
+}
 
 /** What a page's comments folder is called inside the tree: 'a/plan.comments'. */
 const folderName = (pagePath: string): string =>
@@ -130,6 +190,8 @@ export interface CommentFile {
   readonly treePath: string
   /** The writer's email. */
   readonly by: string
+  /** The writer's display name; null or absent when there is none. */
+  readonly name?: string | null
   /** When the entry was first written, ms. */
   readonly at: number
   readonly push: DocWire['push']
@@ -158,6 +220,7 @@ const docOf = (file: CommentFile, entry: CommentEntry): CommentDoc => ({
     : [],
   path: file.path,
   by: file.by,
+  name: typeof file.name === 'string' && file.name !== '' ? file.name : null,
   at: new Date(file.at).toISOString(),
   push: file.push,
   edited: file.revision > 1 && entry.text !== '',

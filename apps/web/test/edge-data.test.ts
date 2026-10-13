@@ -9,18 +9,26 @@ import {
 } from './support/forms.ts'
 import { harness } from './support/harness.ts'
 import { callerOf, fresh } from './support/people.ts'
-import { sha256Of, workspace } from './support/trees.ts'
+import {
+  join,
+  nodeAt,
+  person,
+  sha256Of,
+  share,
+  workspace,
+} from './support/trees.ts'
 
 afterEach(() => harness.reset())
 
 let browser: Browser
+let ws: { id: string; name: string }
 let tree: FormTree
 let form: { host: string; target: string; id: string | null }
 
 beforeAll(async () => {
   browser = await signedIn(fresh())
   const owner = (await callerOf(browser)).person!
-  const ws = await workspace(owner)
+  ws = await workspace(owner)
   tree = await pushForms(owner, ws, { 'questions/index.html': QUESTIONS })
   form = await formRef(tree, 'questions/index.html', 'questions/answers/')
 })
@@ -121,6 +129,40 @@ describe('the data endpoints', () => {
     expect(await response.json()).toMatchObject({
       error: { code: 'sign_in_required' },
     })
+  })
+
+  it('answers whom to mention for a member, and nobody alike for a visitor and a missing page', async () => {
+    const owner = (await callerOf(browser)).person!
+    const lena = await person('lena')
+    await join(ws, lena)
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, ''))!.id,
+      'workspace',
+      ws.id,
+      'read',
+      owner,
+    )
+    const ask = (who: Browser, page: string) =>
+      who.fetch(
+        `/_/api/data/mentionable?${new URLSearchParams({ tree: tree.treeId, page, q: 'len' })}`,
+        { purpose: 'read' },
+      )
+    const found = await ask(browser, 'questions/index.html')
+    expect(found.status).toBe(200)
+    expect(await found.json()).toEqual({
+      people: [{ email: lena.email.toLowerCase(), name: 'lena', image: null }],
+      teams: [],
+    })
+    const nobody = { people: [], teams: [] }
+    for (const [who, page] of [
+      [new Browser(), 'questions/index.html'],
+      [browser, 'missing.html'],
+    ] as const) {
+      const response = await ask(who, page)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual(nobody)
+    }
   })
 
   it('answers a visitor’s read with nothing, never not_found', async () => {

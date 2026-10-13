@@ -2,6 +2,8 @@
 // writes with their optimistic values and rollback, and watchers.
 import {
   pageOfCommentsFolder,
+  MENTIONABLE_MAX,
+  MENTIONABLE_QUERY_MAX,
   DossierError,
   ERRORS,
   docFromWire,
@@ -14,6 +16,7 @@ import {
   type Json,
   type JsonObject,
   type Me,
+  type Mentionable,
   type PageBootstrap,
   type PageErrorCode,
   type PageOp,
@@ -51,6 +54,7 @@ export interface PageData {
   ) => Promise<Doc>
   readonly withdraw: (path: string) => Promise<void>
   readonly upload: (file: File | Blob) => Promise<Uploaded>
+  readonly mentionable: (query: string) => Promise<Mentionable>
   /** Takes the shell's `changed` messages. */
   readonly changed: (message: Changed) => void
   /** The page is going away: the shell stops watching for it. */
@@ -130,6 +134,37 @@ const isBlob = (value: unknown): value is Blob =>
   value !== null &&
   typeof (value as Partial<Blob>).arrayBuffer === 'function' &&
   typeof (value as Partial<Blob>).size === 'number'
+
+const textOrNull = (value: unknown): string | null =>
+  typeof value === 'string' && value !== '' ? value : null
+
+/** An answer of whom to mention, keeping only what has the right shape. */
+const mentionableOf = (value: unknown): Mentionable => {
+  const record = isJsonObject(value) ? value : {}
+  const list = (key: string): Json[] => {
+    const items = record[key]
+    return Array.isArray(items) ? (items as Json[]) : []
+  }
+  return {
+    people: list('people')
+      .filter(isJsonObject)
+      .filter((p) => typeof p.email === 'string' && p.email !== '')
+      .slice(0, MENTIONABLE_MAX)
+      .map((p) => ({
+        email: p.email as string,
+        name: textOrNull(p.name),
+        image: textOrNull(p.image),
+      })),
+    teams: list('teams')
+      .filter(isJsonObject)
+      .filter((t) => typeof t.name === 'string' && t.name !== '')
+      .slice(0, MENTIONABLE_MAX)
+      .map((t) => ({
+        name: t.name as string,
+        members: typeof t.members === 'number' ? t.members : 0,
+      })),
+  }
+}
 
 const UNAVAILABLE: ErrorFields = {
   code: 'unavailable',
@@ -571,6 +606,30 @@ export const createPageData = (deps: {
       }
     })
 
+  // Whom to mention ------------------------------------------------------
+
+  const mentionable: PageData['mentionable'] = (query) =>
+    gate(async () => {
+      const nobody: Mentionable = { people: [], teams: [] }
+      if (typeof query !== 'string') {
+        throw fail('invalid', 'A query is a string.', String(query))
+      }
+      // A visitor is suggested nobody, and asks nothing.
+      if (deps.me() === null) return nobody
+      let value: unknown
+      try {
+        value = await requests.request({
+          op: 'mentionable',
+          query: query.slice(0, MENTIONABLE_QUERY_MAX),
+        })
+      } catch (error) {
+        const result = outcome(error, 'read', query)
+        if (result.kind === 'error') throw result.error
+        return nobody
+      }
+      return mentionableOf(value)
+    })
+
   // Watching -------------------------------------------------------------
 
   const watch: PageData['watch'] = (input, onChange) => {
@@ -636,5 +695,15 @@ export const createPageData = (deps: {
     }
   }
 
-  return { read, watch, write, withdraw, upload, changed, leave, back }
+  return {
+    read,
+    watch,
+    write,
+    withdraw,
+    upload,
+    mentionable,
+    changed,
+    leave,
+    back,
+  }
 }

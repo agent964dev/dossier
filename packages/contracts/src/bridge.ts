@@ -314,10 +314,18 @@ export interface ExportData {
   readonly files: readonly DocWire[]
   /**
    * For each comment entry among `files`, by tree path: when it was first
-   * written (ISO 8601) and how many versions it has, which a thread shows.
+   * written (ISO 8601), how many versions it has, and its writer's display
+   * name, which a thread shows.
    */
   readonly comments: Readonly<
-    Record<string, { readonly created: string; readonly revision: number }>
+    Record<
+      string,
+      {
+        readonly created: string
+        readonly revision: number
+        readonly name?: string | null
+      }
+    >
   >
   /** Canonical links kept instead of inlined. */
   readonly linked: readonly string[]
@@ -535,6 +543,13 @@ export type PageToShell =
       readonly op: 'unwatch'
       readonly sub: number
     }
+  /** Whom the viewer may mention on this page, for what follows their @. */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'mentionable'
+      readonly query: string
+    }
   /** A form's unsent values, or null once there are none. */
   | {
       readonly type: 'draft'
@@ -695,6 +710,8 @@ export const isPageToShell = (data: unknown): data is PageToShell => {
           return Number.isInteger(data.sub) && isString(data.path)
         case 'unwatch':
           return Number.isInteger(data.sub)
+        case 'mentionable':
+          return isString(data.query)
         default:
           return false
       }

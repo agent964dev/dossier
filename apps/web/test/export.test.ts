@@ -367,6 +367,7 @@ describe('a page as one file', () => {
       path: `${fromPageFolder(folder)}${file.path.slice(folder.length)}`,
       treePath: file.path,
       by: file.by,
+      name: data.comments[file.path]!.name,
       at: Date.parse(data.comments[file.path]!.created),
       push: file.push as PushNumber,
       revision: data.comments[file.path]!.revision,
@@ -381,6 +382,7 @@ describe('a page as one file', () => {
     expect(assembleThreads(files)).toEqual('files' in live ? live.files : [])
     const [thread] = assembleThreads(files)
     expect(thread?.data.root.text).toBe('Looks right.')
+    expect(thread?.data.root.name).toBe(owner.name)
     expect(thread?.data.replies.map((reply) => reply.text)).toEqual(['Agreed.'])
   })
 
