@@ -212,7 +212,11 @@ const commentEntryOf = (
   return entry as unknown as JsonObject
 }
 
-/** A send's values: one value as it is, a repeated name as a list. */
+/**
+ * A send's values: one value as it is, a repeated name as a list, and a
+ * JSON field's text as its object, as Dossier stores it; empty text leaves
+ * the field out.
+ */
 const valuesOf = (send: SendRequest): JsonObject => {
   const values = new Map<string, Json>()
   const valueOf = (value: SendValue): Json => {
@@ -238,6 +242,24 @@ const valuesOf = (send: SendRequest): JsonObject => {
   }
   if (send.submitter !== null) {
     values.set(send.submitter.name, send.submitter.value)
+  }
+  for (const name of send.json ?? []) {
+    const text = values.get(name)
+    if (!isText(text)) continue
+    if (text.trim() === '') {
+      values.delete(name)
+      continue
+    }
+    let value: unknown = null
+    try {
+      value = JSON.parse(text)
+    } catch {
+      value = null
+    }
+    if (!isJsonObject(value)) {
+      throw refusal('invalid', 'Use a JSON object for this field.', name)
+    }
+    values.set(name, value)
   }
   return Object.fromEntries(values)
 }

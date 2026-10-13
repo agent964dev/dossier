@@ -12,10 +12,16 @@ import {
 } from '../core/index.ts'
 import { runScreen, type ScreenFailure } from './run.ts'
 
-/** A cell: text, or an upload that downloads. */
+/** A cell: text, an upload that downloads, or a JSON field's object. */
 export type Cell =
   | { readonly text: string }
   | { readonly file: string; readonly download: string }
+  | {
+      /** '3 keys', shown while the value is folded. */
+      readonly summary: string
+      /** The object, indented. */
+      readonly json: string
+    }
 
 /** What the responses screen shows, per form of the page. */
 export interface ResponsesView {
@@ -54,6 +60,7 @@ export interface ResponsesView {
       | readonly {
           readonly label: string
           readonly text: string
+          readonly cell: Cell
           readonly by: string
           /** When it was last changed, ms since the epoch. */
           readonly at: number
@@ -103,6 +110,9 @@ const isUpload = (value: unknown): value is { file: string; name: string } =>
   typeof (value as { file?: unknown }).file === 'string' &&
   typeof (value as { name?: unknown }).name === 'string'
 
+const isObject = (value: unknown): value is Record<string, Json> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 
 /** A value as people read it: lists joined, dates as '3 Nov'. */
@@ -140,6 +150,13 @@ export const dataViews = (i: {
         download: download(`${own}/${first.file}`),
       }
     }
+    if (type === 'json' && isObject(value)) {
+      const keys = Object.keys(value).length
+      return {
+        summary: keys === 1 ? '1 key' : `${keys} keys`,
+        json: JSON.stringify(value, null, 2),
+      }
+    }
     return { text: textOf(value, type) }
   }
 
@@ -152,7 +169,13 @@ export const dataViews = (i: {
   return { cellOf, ownOf }
 }
 
-const cellText = (cell: Cell) => ('text' in cell ? cell.text : cell.file)
+/** A cell as one line of text, a JSON field's object compact. */
+const cellText = (cell: Cell) =>
+  'text' in cell
+    ? cell.text
+    : 'file' in cell
+      ? cell.file
+      : JSON.stringify(JSON.parse(cell.json))
 
 const plural = (n: number, one: string, many: string) =>
   `${n} ${n === 1 ? one : many}`
@@ -257,10 +280,12 @@ export const responsesView = createServerFn({ method: 'GET' })
               : fields.flatMap((field) => {
                   const value = f.shared?.find((s) => s.field === field.name)
                   if (value === undefined) return []
+                  const cell = cellOf(value.value, field.type, '')
                   return [
                     {
                       label: field.label,
-                      text: cellText(cellOf(value.value, field.type, '')),
+                      text: cellText(cell),
+                      cell,
                       by: value.by,
                       at: value.at,
                     },

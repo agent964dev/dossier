@@ -256,8 +256,10 @@ describe('install in a page downloaded as one file', () => {
 
   test('is exported and ready at once, as its exporter, leaving the window name alone', async () => {
     const page = openExport({ name: 'dossier-boot:{"v":1,"me":null}' })
+    // The link it was exported from, which a handoff can name.
     expect(page.dossier.page).toEqual({
       path: '/questions/plan.html',
+      link: 'https://main.test/agent964/acme/questions/plan',
       push: 2,
       embedded: false,
       exported: true,
@@ -395,6 +397,29 @@ describe('forms in a page downloaded as one file', () => {
       // The prefill put the answer sent before the export in the form.
       data: { name: 'Sara A.', notes: 'first' },
       at: NOW,
+    })
+  })
+
+  test('a JSON field is kept as its object, as Dossier stores it', async () => {
+    const page = openExport({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="nested" data-type="json">
+          <input name="name">
+          <button>Send</button>
+        </form>`,
+    })
+    await flush()
+    // The prefill put the stored object in the field as its JSON text.
+    const field = page.form(1).querySelector('input[name="nested"]')!
+    expect(JSON.parse((field as HTMLInputElement).value)).toEqual({
+      a: 1,
+      b: 2,
+    })
+    page.form(1).submit()
+    await flush()
+    expect(await page.dossier.read('answers/~.json')).toMatchObject({
+      data: { name: 'Sara', nested: { a: 1, b: 2 } },
     })
   })
 

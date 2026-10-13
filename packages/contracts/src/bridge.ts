@@ -84,6 +84,11 @@ export interface SendRequest {
   readonly entries: readonly (readonly [string, SendValue])[]
   readonly submitter: { readonly name: string; readonly value: string } | null
   readonly opId: string
+  /**
+   * The form's JSON fields, whose text an exported page keeps as the object
+   * it holds, as Dossier stores it. The shell never sends this on.
+   */
+  readonly json?: readonly string[]
 }
 
 /** A send the shell keeps until it is answered: after sign-in, or online. */
@@ -647,7 +652,9 @@ export const isSendRequest = (value: unknown): value is SendRequest =>
     (isRecord(value.submitter) &&
       isString(value.submitter.name) &&
       isString(value.submitter.value))) &&
-  isString(value.opId)
+  isString(value.opId) &&
+  (value.json === undefined ||
+    (Array.isArray(value.json) && value.json.every(isString)))
 
 export const isPageToShell = (data: unknown): data is PageToShell => {
   if (!isRecord(data)) return false

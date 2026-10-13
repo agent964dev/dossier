@@ -58,6 +58,15 @@ const FILES = {
   ),
   'notes.json': '{"authored":true}',
   '_theme.css': ':root { --accent: red }',
+  'review.html': pageWith(
+    '<form action="review/"><input type="hidden" name="notes" data-type="json" value="{}"><input name="summary"><button>Send</button></form>' +
+      '<form action="review.json"><input type="hidden" name="board" data-type="json"></form>',
+    'Review',
+  ),
+  'log.html': pageWith(
+    '<form action="log/" data-entries="many"><input type="hidden" name="notes" data-type="json"><button>Add</button></form>',
+    'Log',
+  ),
 }
 
 interface Write {
@@ -770,6 +779,157 @@ describe('a respondent through a page share alone', () => {
       patch: { state: 'open' },
     })
     expect(refused.code).toBe('not_found')
+  })
+})
+
+describe('a JSON field', () => {
+  it('takes a JSON object and merges into it as RFC 7396 says, refusing any other value', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const path = `review/${owner.email.toLowerCase()}.json`
+    const first = await writeAs(browser, tree, {
+      page: 'review.html',
+      path,
+      patch: {
+        notes: {
+          'S-108': { text: 'Check the dates', reopen: true },
+          'S-109': { text: 'Fine' },
+        },
+        summary: 'Two notes',
+      },
+    })
+    expect(first.data).toEqual({
+      notes: {
+        'S-108': { text: 'Check the dates', reopen: true },
+        'S-109': { text: 'Fine' },
+      },
+      summary: 'Two notes',
+    })
+    const second = await writeAs(browser, tree, {
+      page: 'review.html',
+      path,
+      patch: { notes: { 'S-108': { reopen: null }, 'S-109': null } },
+    })
+    expect(second.data).toEqual({
+      notes: { 'S-108': { text: 'Check the dates' } },
+      summary: 'Two notes',
+    })
+    for (const notes of ['{"a":1}', [1], 3]) {
+      expect(
+        await writeFailure(browser, tree, {
+          page: 'review.html',
+          path,
+          patch: { notes },
+        }),
+        JSON.stringify(notes),
+      ).toMatchObject({ code: 'invalid', path: 'notes' })
+    }
+    // The fields beside it keep their rules, and undeclared ones stay out.
+    const others: JsonObject[] = [{ summary: { a: 1 } }, { other: { a: 1 } }]
+    for (const patch of others) {
+      expect(
+        await writeFailure(browser, tree, { page: 'review.html', path, patch }),
+      ).toMatchObject({ code: 'invalid' })
+    }
+    expect(
+      await writeAs(browser, tree, {
+        page: 'review.html',
+        path: 'review.json',
+        patch: { board: { lanes: ['todo'] } },
+      }),
+    ).toMatchObject({ data: { board: { lanes: ['todo'] } } })
+  })
+
+  it('reaches only where the form’s other fields would, for a respondent through the page alone', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const page = (await nodeAt(tree.treeId, 'review.html'))!.id
+    const sara = await person('json-sara')
+    const lee = await person('json-lee')
+    for (const who of [sara, lee]) {
+      await share(
+        tree.treeId,
+        page,
+        'email',
+        who.email.toLowerCase(),
+        'respond',
+        owner,
+      )
+    }
+    const saraCaller = await sessionFor(sara)
+    const own = `review/${sara.email.toLowerCase()}.json`
+    expect(
+      (
+        await writeAs(saraCaller, tree, {
+          page: 'review.html',
+          path: own,
+          patch: { notes: { 'S-1': { text: 'Mine' } } },
+        })
+      ).data,
+    ).toEqual({ notes: { 'S-1': { text: 'Mine' } } })
+    await writeAs(await sessionFor(lee), tree, {
+      page: 'review.html',
+      path: `review/${lee.email.toLowerCase()}.json`,
+      patch: { notes: { 'S-2': { text: 'Lee’s' } } },
+    })
+    // Another person's file, a path no form writes, and an entry under the
+    // person form all stay out of reach, whatever the JSON field holds.
+    for (const path of [
+      `review/${lee.email.toLowerCase()}.json`,
+      'elsewhere.json',
+      `review/${sara.email.toLowerCase()}/`,
+    ]) {
+      expect(
+        (
+          await writeFailure(saraCaller, tree, {
+            page: 'review.html',
+            path,
+            patch: { notes: { 'S-1': { text: 'x' } } },
+          })
+        ).code,
+        path,
+      ).toMatch(/^(forbidden|not_found)$/)
+    }
+    expect(
+      (await liveValue(tree.treeId, `review/${lee.email.toLowerCase()}.json`))
+        ?.value,
+    ).toEqual({ notes: { 'S-2': { text: 'Lee’s' } } })
+    expect(await liveValue(tree.treeId, 'elsewhere.json')).toBeNull()
+  })
+
+  it('never takes another of the writer’s entries with it when withdrawn, though it looks like an upload', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const writer = await given(tree, 'respond')
+    const own = `log/${writer.who.email.toLowerCase()}`
+    const kept = await writeAs(writer.caller, tree, {
+      page: 'log.html',
+      path: `${own}/`,
+      patch: { notes: { keep: true } },
+    })
+    const withdrawn = await writeAs(writer.caller, tree, {
+      page: 'log.html',
+      path: `${own}/`,
+      patch: {
+        notes: {
+          file: kept.path.slice(own.length + 1),
+          name: 'Related entry',
+          size: 1,
+          type: 'application/json',
+        },
+      },
+    })
+    await runAs(
+      writer.caller,
+      Effect.flatMap(Data, (data) =>
+        data.withdraw({
+          treeId: tree.treeId as TreeId,
+          path: withdrawn.path,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+    expect(await liveValue(tree.treeId, withdrawn.path)).toBeNull()
+    expect((await liveValue(tree.treeId, kept.path))?.value).toEqual({
+      notes: { keep: true },
+    })
   })
 })
 

@@ -216,6 +216,20 @@ const listOf = (value: unknown): string[] => {
   return text === null || value === null ? [] : [text]
 }
 
+/** A hidden input marked `data-type="json"`, as the push reads it. */
+const isJsonField = (control: Control): boolean =>
+  control.localName === 'input' &&
+  (control as HTMLInputElement).type === 'hidden' &&
+  (control.getAttribute('data-type') ?? '').trim().toLowerCase() === 'json'
+
+/** A JSON field's stored object as its text, or null to leave it. */
+const jsonTextOf = (value: unknown): string | null =>
+  isRecord(value)
+    ? JSON.stringify(value)
+    : typeof value === 'string'
+      ? value
+      : null
+
 const unfilled = (control: Control): boolean =>
   control.localName === 'button' ||
   (control.localName === 'input' &&
@@ -452,6 +466,11 @@ export const startForms = (deps: {
             input.checked = listOf(value).includes(input.value)
             continue
           }
+          if (isJsonField(input)) {
+            const text = has ? jsonTextOf(value) : null
+            if (text !== null) input.value = text
+            continue
+          }
         }
         if (unfilled(control)) continue
         if (control.localName === 'select') {
@@ -548,6 +567,13 @@ export const startForms = (deps: {
       m.last !== null &&
       sameEntries(m.last.request.entries, entries) &&
       JSON.stringify(m.last.request.submitter) === JSON.stringify(submitter)
+    const json = [
+      ...new Set(
+        controlsOf(m.form)
+          .filter((control) => control.name !== '' && isJsonField(control))
+          .map((control) => control.name),
+      ),
+    ]
     const request: SendRequest = options.again ??
       (unchanged ? m.last!.request : null) ?? {
         form: { host: m.info.host, target: m.info.target, id: m.info.id },
@@ -555,6 +581,7 @@ export const startForms = (deps: {
         entries,
         submitter,
         opId: newOpId(),
+        ...(json.length === 0 ? {} : { json }),
       }
     const edits =
       options.again !== undefined || unchanged ? m.last!.edits : m.edits

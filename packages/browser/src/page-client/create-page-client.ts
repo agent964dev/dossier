@@ -49,6 +49,12 @@ export interface Dossier {
   readonly me: Me | null
   readonly page: {
     readonly path: string
+    /**
+     * The page's Dossier link, the address people open:
+     * `https://<deployment>/<workspace>/<tree>/<path>`. An exported page
+     * keeps the link it was exported from.
+     */
+    readonly link: string
     readonly push: number
     readonly embedded: boolean
     readonly exported: boolean
@@ -225,6 +231,7 @@ export const createPageClient = (deps: {
 
   const page = Object.freeze({
     path: bootstrap.path,
+    link: bootstrap.link,
     push: bootstrap.push,
     embedded,
     exported,
