@@ -834,6 +834,52 @@ describe('team mentions', () => {
       }),
     ).toMatchObject({ code: 'invalid', path: 'mentions' })
   })
+
+  it('keep a person mentioned while any mention that reached them stands, by their email or by a team', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const dana = await person('dana2')
+    await join(ws, dana)
+    await team(ws, 'Writers', [dana])
+    await team(ws, 'Readers', [dana])
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'plan.html'))!.id,
+      'email',
+      dana.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const danaEmail = dana.email.toLowerCase()
+    const mentioned = async () =>
+      mentionedInTree(
+        await runAs(ownerBrowser, unseenMentions(env.DB, dana)),
+        tree.treeId,
+      )
+    const written = await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Dana, writers and readers', {
+        mentions: [danaEmail, 'team:Writers', 'team:Readers'],
+      }),
+    })
+    expect(await mentioned()).toBe(true)
+    // Her own email goes; both teams still name her.
+    await write(minutes(1), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: ['team:Writers', 'team:Readers'] },
+    })
+    expect(await mentioned()).toBe(true)
+    // One team goes; the other still names her.
+    await write(minutes(2), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: ['team:Readers'] },
+    })
+    expect(await mentioned()).toBe(true)
+    await write(minutes(3), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: [] },
+    })
+    expect(await mentioned()).toBe(false)
+  })
 })
 
 describe('whom a comment may mention', () => {

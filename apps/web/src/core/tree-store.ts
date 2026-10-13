@@ -397,6 +397,20 @@ export interface ChangeSet {
    */
   readonly guardCommentText: (comment: NodeRow) => void
   /**
+   * After a comment's mentions change: each of its mentions rows whose
+   * mention is gone takes the one that still reaches the person in
+   * `reached` (null for their own email), so the person stays mentioned
+   * while any mention of them stands.
+   */
+  readonly remention: (
+    comment: NodeRow,
+    m: {
+      /** The comment's mentions now. */
+      readonly mentions: readonly string[]
+      readonly reached: ReadonlyMap<string, string | null>
+    },
+  ) => void
+  /**
    * 'withdrawn': every version's content deleted, one content-free
    * 'withdrawn' version left, the node deleted, its operations reduced to
    * 'withdrawn', and its blobs' references counted down. A folder of the
@@ -3496,6 +3510,29 @@ export const TreeStoreLive: Layer.Layer<
 
           holds: (granted) => {
             bases.push(...everyBasis(granted.basis, person.id))
+          },
+
+          remention: (comment, m) => {
+            if (m.reached.size === 0) return
+            writes.push({
+              sql: `update mentions set via = (
+                      select json_extract(r.value, '$[1]') from json_each(?2) r
+                      where json_extract(r.value, '$[0]') = mentions.email)
+                    where comment_node_id = ?1
+                      and email in (select json_extract(r.value, '$[0]') from json_each(?2) r)
+                      and not exists (select 1 from json_each(?3) k
+                        where k.value = coalesce(mentions.via, mentions.email))`,
+              binds: [
+                comment.id,
+                JSON.stringify(
+                  [...m.reached].map(([email, via]) => [
+                    email.toLowerCase(),
+                    via,
+                  ]),
+                ),
+                JSON.stringify(m.mentions),
+              ],
+            })
           },
 
           guardCommentText: (comment) => {

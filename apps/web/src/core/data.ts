@@ -1996,7 +1996,12 @@ export const DataLive: Layer.Layer<
              * The writer never counts; a team or email that names nobody
              * who reads the page is left as text.
              */
-            const mentionable = (mentions: readonly string[]) =>
+            /**
+             * Whom these mentions name, each person once with the mention
+             * that reaches them: null for their own email, which comes
+             * first, else the first team that holds them.
+             */
+            const reachedBy = (mentions: readonly string[]) =>
               Effect.gen(function* () {
                 const reached = new Map<string, string | null>()
                 const teams: { mention: string; name: string }[] = []
@@ -2023,6 +2028,11 @@ export const DataLive: Layer.Layer<
                     }
                   }
                 }
+                return reached
+              })
+            const mentionable = (mentions: readonly string[]) =>
+              Effect.gen(function* () {
+                const reached = yield* reachedBy(mentions)
                 const readers = yield* access.readersAmong(
                   [...reached.keys()],
                   page.node,
@@ -2202,6 +2212,15 @@ export const DataLive: Layer.Layer<
                     : yield* mentionable(
                         parsed.mentions.filter((m) => !before.has(m)),
                       )
+                // Whom the comment names now, so someone it named twice
+                // stays named when one of the two goes.
+                const still =
+                  parsed.mentions === undefined
+                    ? null
+                    : {
+                        mentions: parsed.mentions,
+                        reached: yield* reachedBy(parsed.mentions),
+                      }
                 const done = yield* store
                   .change(tree.id, (cs) =>
                     Effect.sync(() => {
@@ -2219,6 +2238,7 @@ export const DataLive: Layer.Layer<
                         result: version,
                       })
                       cs.event({ type: 'comment', path: target, node: mine })
+                      if (still !== null) cs.remention(mine, still)
                       for (const m of added) {
                         cs.mention(granted, {
                           comment: mine,
