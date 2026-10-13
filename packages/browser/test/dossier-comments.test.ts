@@ -1289,6 +1289,35 @@ describe('<dossier-comments>', () => {
     ])
   })
 
+  test('keeps the suggestions closed after Escape when Dossier answers later, until more is typed', async () => {
+    peer.threads = [thread(comment(LEE, 'Hi'))]
+    peer.mentionable = {
+      people: [{ email: 'lena@acme.com', name: 'Lena Saleh', image: null }],
+      teams: [],
+    }
+    const element = await mount()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const list = q(mainComposer(element), '[role="listbox"]')
+    type(area, 'Ask @le')
+    expect(list.hidden).toBe(false)
+    key(area, 'Escape')
+    expect(list.hidden).toBe(true)
+    // Dossier's answer for the same @ comes after the Escape.
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual(['le'])
+    expect(list.hidden).toBe(true)
+    // Typing again shows them again, with Dossier's answer it kept.
+    type(area, 'Ask @l')
+    type(area, 'Ask @le')
+    expect(list.hidden).toBe(false)
+    expect(
+      [...list.querySelectorAll('[role="option"]')].map((o) =>
+        o.getAttribute('data-mention'),
+      ),
+    ).toContain('@lena@acme.com')
+  })
+
   test('never asks Dossier whom to suggest for a visitor', async () => {
     peer.me = null
     peer.threads = [thread(comment(LEE, 'Hi'))]

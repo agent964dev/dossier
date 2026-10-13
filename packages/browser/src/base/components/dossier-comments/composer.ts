@@ -65,6 +65,12 @@ export class Composer {
   #shown: Suggestion[] = []
   #active = -1
   #busy = false
+  /**
+   * Bumped when the suggestions are put away (Escape, leaving, choosing,
+   * sending): an answer asked for before then shows nothing. What is typed
+   * or clicked next asks afresh.
+   */
+  #dismissals = 0
 
   constructor(options: ComposerOptions) {
     this.#options = options
@@ -137,7 +143,7 @@ export class Composer {
     textarea.addEventListener('keydown', (event) => this.#key(event))
     textarea.addEventListener('blur', () => {
       // A tap on a suggestion keeps focus, so leaving means done.
-      this.#close()
+      this.#dismiss()
     })
     textarea.addEventListener('click', () => this.#suggest())
   }
@@ -148,7 +154,7 @@ export class Composer {
 
   set text(value: string) {
     this.textarea.value = value
-    this.#close()
+    this.#dismiss()
   }
 
   get busy(): boolean {
@@ -186,7 +192,7 @@ export class Composer {
     const open = !this.#list.hidden
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault()
-      this.#close()
+      this.#dismiss()
       if (!this.#busy) this.#options.onSubmit()
       return
     }
@@ -202,7 +208,7 @@ export class Composer {
     } else if (event.key === 'Escape') {
       event.preventDefault()
       event.stopPropagation()
-      this.#close()
+      this.#dismiss()
     }
   }
 
@@ -217,11 +223,12 @@ export class Composer {
         ? mentionAt(textarea.value, textarea.selectionStart)
         : null
     // Dossier's answer for this @ when it has one; the threads' at once.
+    const dismissals = this.#dismissals
     const found =
       at === null
         ? null
         : (this.#options.lookup?.(searchOf(at.query).text, () =>
-            this.#again(at.query),
+            this.#again(at.query, dismissals),
           ) ?? null)
     const shown =
       at === null ? [] : suggestionsFor(this.#options.known(), found, at.query)
@@ -256,9 +263,13 @@ export class Composer {
           : `${shown.length} people and teams to mention`
   }
 
-  /** Dossier answered for `query`: shown if that @ is still being typed. */
-  #again(query: string): void {
+  /**
+   * Dossier answered for `query`: shown if that @ is still being typed and
+   * the suggestions were not put away since it was asked.
+   */
+  #again(query: string, dismissals: number): void {
     const textarea = this.textarea
+    if (dismissals !== this.#dismissals) return
     if (this.#options.document.activeElement !== textarea) return
     const at =
       textarea.selectionStart === textarea.selectionEnd
@@ -348,8 +359,14 @@ export class Composer {
     textarea.value = `${value.slice(0, at.start)}${insert}${after}`
     const end = at.start + insert.length
     textarea.setSelectionRange(end, end)
-    this.#close()
+    this.#dismiss()
     textarea.focus()
+  }
+
+  /** Puts the suggestions away: an answer still on its way shows nothing. */
+  #dismiss(): void {
+    this.#dismissals += 1
+    this.#close()
   }
 
   #close(): void {
