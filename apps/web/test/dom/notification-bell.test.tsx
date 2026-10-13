@@ -86,6 +86,14 @@ beforeEach(() => {
           )
         }
         unread = 0
+        if (all) {
+          for (const page of Object.values(pages)) {
+            page.notifications = page.notifications.map((n) => ({
+              ...n,
+              read: true,
+            }))
+          }
+        }
         return Response.json({ unread })
       }
       const before = url.searchParams.get('before') ?? ''
@@ -272,6 +280,22 @@ describe('the notification bell', () => {
     await settle()
     expect(rows().some((a) => a.hasAttribute('data-unread'))).toBe(false)
     expect(badge()).toBeNull()
+  })
+
+  it('shows the list again, read, when Mark all as read is pressed while it loads', async () => {
+    unread = 1
+    pages = { '': { notifications: [note(1)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    const release = hold('')
+    act(() => bell().click())
+    await settle()
+    await act(async () => buttonNamed('Mark all as read')!.click())
+    await settle()
+    await release()
+    await settle()
+    expect(rows()).toHaveLength(1)
+    expect(rows().some((a) => a.hasAttribute('data-unread'))).toBe(false)
   })
 
   it('never lets a count asked before Mark all as read bring the old count back', async () => {

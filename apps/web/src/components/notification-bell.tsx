@@ -202,6 +202,9 @@ export function NotificationBell() {
       return
     }
     setUnread(left)
+    // Pressed while the list was still on its way: that load no longer
+    // counts, so the list comes again, now read.
+    if (before.items === null) void load(null)
   }
 
   const choose = (n: DossierNotification) => {
