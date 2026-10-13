@@ -519,6 +519,7 @@ describe('<dossier-notifications>', () => {
     link: `https://main.test/acme/plans/a/plan#dossier-comment=plan.comments%2Fsara%40acme.com%2F${n}.json&on=S-1`,
     at: new Date(Date.now() - n * 60 * 60_000).toISOString(),
     read: false,
+    agent: false,
     ...over,
   })
 
@@ -615,7 +616,7 @@ describe('<dossier-notifications>', () => {
         next: 'cursor-1',
       },
       {
-        notifications: [note(30, { team: 'Design' })],
+        notifications: [note(30, { team: 'Design', agent: true })],
         unread: 2,
         next: null,
       },
@@ -644,7 +645,12 @@ describe('<dossier-notifications>', () => {
     await settle()
     expect(viewer.list).toHaveBeenLastCalledWith({ before: 'cursor-1' })
     expect(items()).toHaveLength(3)
-    expect(items()[2]!.textContent).toContain('Sara Haddad mentioned Design')
+    expect(items()[2]!.textContent).toContain(
+      'Sara Haddad Agent mentioned Design',
+    )
+    expect(
+      items()[2]!.querySelector('.dossier-notifications-agent')?.textContent,
+    ).toBe('Agent')
     expect(more.hidden).toBe(true)
 
     buttonNamed(panel, 'Mark all as read').click()

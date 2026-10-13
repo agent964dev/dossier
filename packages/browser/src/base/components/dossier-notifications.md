@@ -37,7 +37,8 @@ list spans the width. Parts: `.dossier-notifications-button`,
 `.dossier-notifications-title`, `.dossier-notifications-mark-all`,
 `.dossier-notifications-list`, `.dossier-notifications-item` (with
 `data-unread` while unread), `.dossier-notifications-avatar`,
-`.dossier-notifications-who`, `.dossier-notifications-where`,
+`.dossier-notifications-who`, `.dossier-notifications-agent` (the "Agent"
+badge on an agent's comment), `.dossier-notifications-where`,
 `.dossier-notifications-excerpt`, `.dossier-notifications-time`,
 `.dossier-notifications-empty`, `.dossier-notifications-more`; the element
 carries `data-unread` while any are unread.

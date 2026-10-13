@@ -904,6 +904,43 @@ export class SearchGroup extends HttpApiGroup.make('search')
       .addSuccess(SearchResponse),
   ) {}
 
+/** `dossier comment`: a comment, or a reply, on the page a target names. */
+export const CommentPayload = Schema.Struct({
+  /** '<workspace>/<tree>/<page>', or a link on this deployment. */
+  path: Schema.String,
+  /** The comment; its @mentions are read from it. */
+  text: Schema.String,
+  /** The id of the element it is on; none for the whole page. */
+  on: Schema.optional(Schema.String),
+  /** A thread's root, from the page's folder or as a tree path. */
+  replyTo: Schema.optional(Schema.String),
+  stance: Schema.optional(Schema.String),
+  opId: OpId,
+})
+export type CommentPayload = typeof CommentPayload.Type
+
+export const CommentResponse = Schema.Struct({
+  /** The comment's path from the page's folder, as `--reply-to` takes it. */
+  comment: Schema.String,
+  /** The page's tree path. */
+  page: Schema.String,
+  /** The page's link, opening the comment. */
+  link: Schema.String,
+  /** The stored entry, its path inside the tree. */
+  doc: DocWire,
+})
+export type CommentResponse = typeof CommentResponse.Type
+
+export class CommentsGroup extends HttpApiGroup.make('comments')
+  // The comment component's write, as the caller: written with an agent
+  // key, it is an agent's. not_found | sign_in_required | forbidden |
+  // invalid | rate_limited
+  .add(
+    HttpApiEndpoint.post('comment', '/comment')
+      .setPayload(CommentPayload)
+      .addSuccess(CommentResponse, { status: 201 }),
+  ) {}
+
 /** One of the caller's notifications; see DossierNotification. */
 export const NotificationWire = Schema.Struct({
   id: Schema.String,
@@ -926,6 +963,8 @@ export const NotificationWire = Schema.Struct({
   /** ISO 8601. */
   at: Schema.String,
   read: Schema.Boolean,
+  /** An agent wrote the comment, with its person's agent key. */
+  agent: Schema.Boolean,
 })
 
 export const NotificationsResponse = Schema.Struct({
@@ -993,5 +1032,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(HistoryGroup)
   .add(SearchGroup)
   .add(NotificationsGroup)
+  .add(CommentsGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

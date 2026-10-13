@@ -13,6 +13,7 @@ import { Bell } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 
 import { Avatar } from './avatar'
+import { Badge } from './ui/badge'
 
 /** How often the unread count is asked again while a screen is open. */
 export const REFRESH_MS = 60_000
@@ -299,6 +300,13 @@ function Row({
         <span className="text-[0.8125rem] leading-snug text-neutral-300">
           {n.read ? null : <span className="sr-only">Unread: </span>}
           <span className="font-medium text-neutral-50">{who}</span>{' '}
+          {n.agent ? (
+            <>
+              <Badge variant="outline" className="px-1.5 py-px align-[1px]">
+                Agent
+              </Badge>{' '}
+            </>
+          ) : null}
           {notificationWhat(n)}
         </span>
         <span dir="auto" className="truncate text-xs text-neutral-400">

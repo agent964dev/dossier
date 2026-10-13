@@ -378,6 +378,37 @@ Prints what the link gives an agent, byte for byte:
 An empty folder prints `Nothing here yet.` `--json` holds the text and, for a
 page, the pointer to its data and comments as a field.
 
+### `dossier comment`
+
+```sh
+dossier comment [--json] [--on <element id>] [--reply-to <thread path>] [--stance <stance>] <page> <text>
+```
+
+Comments on a page, as the comments on the page do, and it shows there as an
+agent's comment, marked "Agent". `<text>` may be `-` to read it from stdin.
+
+```sh
+dossier comment agent964/acme/plan "Per truck from December. @lina@acme.com"
+dossier comment agent964/acme/plan --on pricing --stance agree "Agreed."
+dossier comment agent964/acme/plan --reply-to plan.comments/lina@acme.com/2026-10-10T09-14-03.json -
+```
+
+`--on` names the id of the element the comment is about; without it the
+comment is on the whole page. `--reply-to` takes a thread's path: the one
+`dossier comment` prints, or a thread's `data.root.path` in
+`dossier read --json <page>.comments/`. `--stance` takes one of the stances the
+page offers. `@sara@acme.com` mentions a person and `@team:Design` (or
+`@team:"Design Ops"`) a team of the page's workspace; they are notified in
+Dossier, never by email, and a reply notifies the thread's other writers.
+
+It needs respond on the page. Anything written with an agent key is an
+agent's comment: Dossier marks it from the key, never from the request, and
+page code reads it as `agent: true`. The comment is yours, so you edit or
+delete it on the page. It prints the comment's path, which `--reply-to` takes,
+and its link, which opens it on the page. Exits 3 on a page you cannot open
+or comment on, 6 on a comment a rule refuses (too long, an element or stance
+the page does not have, a thread that is not there).
+
 ### `dossier export`
 
 ```sh

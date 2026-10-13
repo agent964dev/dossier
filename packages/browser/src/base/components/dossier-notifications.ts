@@ -29,6 +29,7 @@ export const TEXT = {
   empty: "You're all caught up",
   loading: 'Loading…',
   unread: 'Unread',
+  agent: 'Agent',
   failed: 'Notifications could not load. Try again in a moment.',
 } as const
 
@@ -120,6 +121,11 @@ const STYLES = `
   font-size: 0.875em; overflow-wrap: anywhere;
 }
 :where(.dossier-notifications-who) { font-weight: 600; }
+:where(.dossier-notifications-agent) {
+  font-size: 0.75em; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; border-radius: 0.375em; padding-inline: 0.375em;
+  border: 1px solid var(--border, color-mix(in srgb, currentColor 30%, transparent));
+}
 :where(.dossier-notifications-where, .dossier-notifications-time) {
   color: var(--muted-foreground, inherit);
 }
@@ -489,10 +495,12 @@ export class DossierNotifications extends HTMLElement {
         if (!n.read) {
           line.append(span('dossier-notifications-hidden', `${TEXT.unread}: `))
         }
-        line.append(
-          span('dossier-notifications-who', who),
-          ` ${notificationWhat(n)}`,
-        )
+        line.append(span('dossier-notifications-who', who))
+        // Written with the CLI, through the person's agent key.
+        if (n.agent) {
+          line.append(' ', span('dossier-notifications-agent', TEXT.agent))
+        }
+        line.append(` ${notificationWhat(n)}`)
         const time = doc.createElement('time')
         time.className = 'dossier-notifications-time'
         time.dateTime = n.at

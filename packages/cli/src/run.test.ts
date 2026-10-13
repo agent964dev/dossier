@@ -203,6 +203,7 @@ describe('the agent guide', () => {
       'ls',
       'read',
       'export',
+      'comment',
       'search',
       'watch',
       'log',

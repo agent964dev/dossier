@@ -33,6 +33,8 @@ export interface CliIo {
    * that gives Ctrl-C back.
    */
   readonly onInterrupt?: (stop: () => void) => () => void
+  /** All of stdin, as text, for `dossier comment … -`. */
+  readonly stdin?: () => Promise<string>
 }
 
 /** The running command's io and output. */
@@ -122,5 +124,10 @@ export const nodeIo = (): CliIo => {
       ? { webSocket: globalThis.WebSocket }
       : {}),
     onInterrupt,
+    stdin: async () => {
+      const chunks: Buffer[] = []
+      for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
+      return Buffer.concat(chunks).toString('utf8')
+    },
   }
 }

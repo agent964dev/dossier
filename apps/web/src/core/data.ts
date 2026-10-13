@@ -13,6 +13,7 @@ import {
   MAX_DEPTH,
   MENTIONABLE_MAX,
   MENTIONABLE_QUERY_MAX,
+  mentionsIn,
   type MentionableResult,
   type AuthoredSeq,
   type DataReadResult,
@@ -267,6 +268,41 @@ export interface DataService {
     i: WritePayload,
   ) => Effect.Effect<
     DocWire,
+    DossierError<
+      | 'forbidden'
+      | 'invalid'
+      | 'not_mergeable'
+      | 'closed'
+      | 'too_large'
+      | 'rate_limited'
+      | 'sign_in_required'
+      | 'not_found'
+      | 'unavailable'
+    >,
+    CurrentCaller | Background
+  >
+  /**
+   * `dossier comment`: a comment on the page a link names, or a reply in
+   * one of its threads, written as `write` writes the comment component's,
+   * at the tree's current push. Its mentions are read from its text. A page
+   * that is missing or unreadable is not_found alike.
+   */
+  readonly comment: (i: {
+    readonly ref: LinkRef
+    readonly text: string
+    readonly anchor: string | null
+    /** A thread's root, from the page's folder or as a tree path. */
+    readonly replyTo: string | null
+    readonly stance: string | null
+    readonly opId: OpId
+  }) => Effect.Effect<
+    {
+      readonly doc: DocWire
+      /** The page's tree path. */
+      readonly page: string
+      /** The comment's path from the page's folder, as replies name it. */
+      readonly comment: string
+    },
     DossierError<
       | 'forbidden'
       | 'invalid'
@@ -2094,8 +2130,15 @@ export const DataLive: Layer.Layer<
                     dossierError('invalid', parsed.invalid, null, parsed.path),
                   )
                 }
+                // A comment written with an agent key is an agent's: Dossier
+                // says so from how the writer came, never from the patch.
+                const byAgent = (yield* CurrentCaller).via.kind === 'agent'
                 const json = (
-                  parsed.kind === 'comment' ? parsed.entry : parsed.mark
+                  parsed.kind === 'comment'
+                    ? byAgent
+                      ? { ...parsed.entry, agent: true }
+                      : parsed.entry
+                    : parsed.mark
                 ) as JsonObject
                 const stamp = entryStamp(yield* Clock.currentTimeMillis)
                 let path = `${own}/${stamp}.json`
@@ -2834,6 +2877,62 @@ export const DataLive: Layer.Layer<
         return { files, comments: kept }
       })
 
+    const commentOn: DataService['comment'] = (i) =>
+      Effect.gen(function* () {
+        const asked =
+          i.ref.path === ''
+            ? `${i.ref.workspace}/${i.ref.tree}`
+            : `${i.ref.workspace}/${i.ref.tree}/${i.ref.path}`
+        yield* signedIn('Sign in to comment.')
+        const resolved = yield* store.resolve(i.ref)
+        // Missing, unreadable and not a page all answer alike.
+        if (
+          'missing' in resolved ||
+          resolved.kind !== 'page' ||
+          resolved.node.origin !== 'authored'
+        ) {
+          return yield* Effect.fail(notFound(asked))
+        }
+        yield* access
+          .require('read', resolved.node)
+          .pipe(
+            Effect.mapError((e) =>
+              e.code === 'not_found' ? notFound(asked) : e,
+            ),
+          )
+        const page = resolved.node.path
+        const folder = commentsFolderOf(page)
+        const name = fromPageFolder(folder.slice(0, -1))
+        const dir = page.slice(0, page.lastIndexOf('/') + 1)
+        // A reply names its thread from the page's folder, as `--json`
+        // shows it, or by its tree path.
+        const replyTo =
+          i.replyTo === null
+            ? null
+            : dir !== '' && i.replyTo.startsWith(`${dir}${name}/`)
+              ? i.replyTo.slice(dir.length)
+              : i.replyTo
+        const doc = yield* write({
+          tree: resolved.tree.id,
+          page,
+          path: folder,
+          patch: {
+            text: i.text,
+            anchor: i.anchor,
+            label: null,
+            pin: null,
+            replyTo,
+            stance: i.stance,
+            mentions: mentionsIn(i.text),
+          },
+          replace: false,
+          opId: i.opId,
+          seq: resolved.tree.authoredSeq as AuthoredSeq,
+          as: null,
+        })
+        return { doc, page, comment: doc.path.slice(dir.length) }
+      })
+
     const mentionable: DataService['mentionable'] = (i) =>
       Effect.gen(function* () {
         const nobody: MentionableResult = { people: [], teams: [] }
@@ -3492,6 +3591,7 @@ export const DataLive: Layer.Layer<
       mineCounts,
       deleteComment,
       write,
+      comment: commentOn,
       read,
       mentionable,
       pageForms,

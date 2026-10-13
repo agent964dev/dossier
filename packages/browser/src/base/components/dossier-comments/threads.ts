@@ -7,7 +7,9 @@ import {
   COMMENT_STANCE_MAX,
   COMMENTS_SUFFIX,
   isTeamNameText,
+  MENTION_PATTERN,
   MENTIONABLE_MAX,
+  mentionsIn,
   TEAM_MENTION_PREFIX,
   teamMentionText,
   teamOfMention,
@@ -69,7 +71,9 @@ export const isCommentDoc = (value: unknown): value is CommentDoc =>
   (value.name === undefined || isTextOrNull(value.name)) &&
   Array.isArray(value.mentions) &&
   typeof value.edited === 'boolean' &&
-  typeof value.deleted === 'boolean'
+  typeof value.deleted === 'boolean' &&
+  // Written before comments carried whether an agent wrote them: absent.
+  (value.agent === undefined || typeof value.agent === 'boolean')
 
 export const isThread = (value: unknown): value is Thread =>
   isRecord(value) &&
@@ -258,34 +262,10 @@ export const movePin = (pin: Pin, dx: number, dy: number): Pin => ({
 export const pinText = (pin: Pin): string =>
   `${Math.round(within(pin.x) * 100)}% across, ${Math.round(within(pin.y) * 100)}% down`
 
-/**
- * An @ and what it mentions: a team, quoted (`@team:"Design Ops"`) or bare
- * (`@team:Design`), or an email.
- */
-const MENTION =
-  /(^|[^\w.+-])@(?:team:(?:"((?:[^"\\\n]|\\.)*)"|([\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*))|([\w.+-]+@[\w-]+(?:\.[\w-]+)+))/gu
+/** Whom a text mentions with @: as the CLI and Dossier read it. */
+export { mentionsIn }
 
-/**
- * Whom a text mentions with @, each once, in order: emails lower-cased, and
- * teams as `team:<name>`, named as written.
- */
-export const mentionsIn = (text: string): string[] => {
-  const out: string[] = []
-  const seen = new Set<string>()
-  for (const match of text.matchAll(MENTION)) {
-    const team =
-      match[2] !== undefined
-        ? match[2].replace(/\\(.)/g, '$1')
-        : (match[3] ?? null)
-    if (team !== null && !isTeamNameText(team)) continue
-    const mention =
-      team !== null ? `${TEAM_MENTION_PREFIX}${team}` : match[4]!.toLowerCase()
-    if (seen.has(mention.toLowerCase())) continue
-    seen.add(mention.toLowerCase())
-    out.push(mention)
-  }
-  return out
-}
+const MENTION = MENTION_PATTERN
 
 /** A run of a comment's text: plain, or one of its mentions as written. */
 export type TextPart =

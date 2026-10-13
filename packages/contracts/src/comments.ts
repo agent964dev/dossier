@@ -34,6 +34,11 @@ export interface CommentEntry {
    * workspace, its name as written.
    */
   readonly mentions: readonly string[]
+  /**
+   * Written through an agent key, with the CLI. Dossier records it from how
+   * the writer came, and never takes it from what is written.
+   */
+  readonly agent?: boolean
 }
 
 /** Resolving or reopening a thread: an entry naming its root comment. */
@@ -57,6 +62,8 @@ export interface CommentDoc extends CommentEntry {
   readonly edited: boolean
   /** Its text is gone: show "Comment deleted". */
   readonly deleted: boolean
+  /** An agent wrote it, through the CLI with its person's agent key. */
+  readonly agent: boolean
 }
 
 /** A root comment with its replies, oldest first, and whether it is resolved. */
@@ -111,6 +118,37 @@ export const teamMentionText = (name: string): string =>
   BARE_TEAM_NAME.test(name)
     ? `@${TEAM_MENTION_PREFIX}${name}`
     : `@${TEAM_MENTION_PREFIX}"${name.replace(/[\\"]/g, (c) => `\\${c}`)}"`
+
+/**
+ * An @ and what it mentions: a team, quoted (`@team:"Design Ops"`) or bare
+ * (`@team:Design`), or an email. Group 1 is what comes before the @, 2 a
+ * quoted team's name, 3 a bare one's, 4 an email.
+ */
+export const MENTION_PATTERN =
+  /(^|[^\w.+-])@(?:team:(?:"((?:[^"\\\n]|\\.)*)"|([\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*))|([\w.+-]+@[\w-]+(?:\.[\w-]+)+))/gu
+
+/**
+ * Whom a text mentions with @, each once, in order: emails lower-cased, and
+ * teams as `team:<name>`, named as written. The comment composer and the
+ * CLI's `dossier comment` both read mentions this way.
+ */
+export const mentionsIn = (text: string): string[] => {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const match of text.matchAll(MENTION_PATTERN)) {
+    const team =
+      match[2] !== undefined
+        ? match[2].replace(/\\(.)/g, '$1')
+        : (match[3] ?? null)
+    if (team !== null && !isTeamNameText(team)) continue
+    const mention =
+      team !== null ? `${TEAM_MENTION_PREFIX}${team}` : match[4]!.toLowerCase()
+    if (seen.has(mention.toLowerCase())) continue
+    seen.add(mention.toLowerCase())
+    out.push(mention)
+  }
+  return out
+}
 
 /** A person to mention: their email, display name and photo. */
 export interface MentionablePerson {
@@ -225,6 +263,7 @@ const docOf = (file: CommentFile, entry: CommentEntry): CommentDoc => ({
   push: file.push,
   edited: file.revision > 1 && entry.text !== '',
   deleted: entry.text === '',
+  agent: entry.agent === true,
 })
 
 const byTime = (a: CommentFile, b: CommentFile) =>
@@ -328,7 +367,7 @@ const placeOf = (root: CommentDoc): string => {
 
 const commentLines = (comment: CommentDoc, reply: boolean): string[] => {
   const about = [
-    `${reply ? 'Reply from ' : ''}${comment.by}`,
+    `${reply ? 'Reply from ' : ''}${comment.by}${comment.agent ? ' (agent)' : ''}`,
     when(comment.at),
     `push ${comment.push}`,
     ...(comment.stance === null ? [] : [comment.stance]),

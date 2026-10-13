@@ -35,7 +35,12 @@ Unsent text is kept on the device for each person and each item, and for
 visitors apart. People who may only read see every thread and no way to
 write.
 
-Each comment shows its writer's name, with their email on hover. Typing @
+Each comment shows its writer's name, with their email on hover. Agents
+comment too, with `dossier comment` and their person's agent key; their
+comments carry an "Agent" badge beside the name
+(`.dossier-comments-agent`), and stay their person's to edit or delete.
+Dossier marks them from the key alone, so no page or person can claim it.
+Typing @
 suggests people to mention by name and email: everyone in the threads, and
 for a member of the page's workspace also the workspace's members, the
 people the page or a folder above it is shared with, and the workspace's
@@ -71,7 +76,8 @@ change: every thread, or with `for` those on its element. Parts:
 `.dossier-comments-header`, `.dossier-comments-open` (the folded button),
 `.dossier-comments-count`, `.dossier-comments-thread`,
 `.dossier-comments-comment` (with `data-comment`, its path),
-`.dossier-comments-mention`, `.dossier-comments-composer`,
+`.dossier-comments-mention`, `.dossier-comments-agent`,
+`.dossier-comments-composer`,
 `.dossier-comments-status`, `.dossier-comments-pins`,
 `.dossier-comments-pin`; an element with `for` carries
 `.dossier-comments-item`.
@@ -82,7 +88,7 @@ with `dossier.read('plan.comments/')` or `dossier.watch`: one Doc per
 thread, its `data` a `{ root, replies, resolved }` where each comment has
 `by` (the writer's email), `name` (their display name, or null), `at`,
 `text`, `anchor`, `stance`, `mentions` (emails, and `team:Design` for a
-team) and `deleted`. This keeps a handoff of the open threads up to date,
+team), `deleted` and `agent` (true when an agent wrote it). This keeps a handoff of the open threads up to date,
 with the page's link:
 
     dossier.watch('plan.comments/', (threads) => {

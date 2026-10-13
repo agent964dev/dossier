@@ -113,7 +113,8 @@ A page's comments read like any folder: `read('plan.comments/')` on
 `plan.html` gives one `Doc` per thread, its `data` a `{ root, replies,
 resolved }` where each comment has `by` (the writer's email), `name` (their
 display name, or null), `at`, `text`, `anchor`, `stance`, `mentions` (emails,
-and `team:Design` for a team) and `deleted`, and `watch` follows them. The
+and `team:Design` for a team), `deleted` and `agent` (true for a comment an
+agent wrote with `dossier comment`), and `watch` follows them. The
 page decides what its handoff says. This one copies the open threads, with
 the page's link:
 

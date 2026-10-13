@@ -50,6 +50,8 @@ export interface NotificationView {
   /** Epoch milliseconds. */
   readonly at: number
   readonly read: boolean
+  /** An agent wrote the comment, with its person's agent key. */
+  readonly agent: boolean
 }
 
 export interface NotificationsPage {
@@ -132,6 +134,7 @@ interface Row {
   readonly pagePath: string
   readonly commentPath: string
   readonly text: string
+  readonly agent: number
   readonly actorEmail: string | null
   readonly actorName: string | null
   readonly actorImage: string | null
@@ -299,6 +302,7 @@ export const NotificationsLive: Layer.Layer<
                  n.created_at as createdAt, n.read_at as readAt,
                  p.id as pageId, p.path as pagePath, c.path as commentPath,
                  json_extract(v.json_value, '$.text') as text,
+                 coalesce(json_extract(v.json_value, '$.agent'), 0) as agent,
                  u.email as actorEmail,
                  case when pp.deleted_at is null then nullif(u.name, '') end as actorName,
                  case when pp.deleted_at is null then u.image end as actorImage,
@@ -377,6 +381,7 @@ export const NotificationsLive: Layer.Layer<
       })}${commentFragment(fromPageFolderOf(row.pagePath, row.commentPath), row.anchor)}`,
       at: row.createdAt,
       read: row.readAt !== null,
+      agent: row.agent === 1,
     })
 
     const unread: NotificationsService['unread'] = (tree) =>

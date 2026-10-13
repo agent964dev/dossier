@@ -39,6 +39,8 @@ export interface DossierNotification {
   /** ISO 8601. */
   readonly at: string
   readonly read: boolean
+  /** An agent wrote the comment, with its person's agent key. */
+  readonly agent: boolean
 }
 
 /** A page of notifications, newest first. */
@@ -76,7 +78,8 @@ const isNotification = (value: unknown): value is DossierNotification => {
     isText(value.excerpt) &&
     isText(value.link) &&
     isText(value.at) &&
-    typeof value.read === 'boolean'
+    typeof value.read === 'boolean' &&
+    typeof value.agent === 'boolean'
   )
 }
 

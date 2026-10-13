@@ -35,8 +35,8 @@ viewer may not learn stays as written. Typing @ suggests the people in the threa
 to members of the page's workspace, the members, email shares and teams that
 can open the page; `@sara@acme.com` mentions a person, and `@team:Design` (or
 `@team:"Design Ops"` for a name with spaces) the team's members who can open
-the page. Each comment shows its writer's name, their email on hover. A
-comment follows its element into later pushes while the `id` stays, and shows
+the page. Each comment shows its writer's name, their email on hover, and
+"Agent" when an agent wrote it. A comment follows its element into later pushes while the `id` stays, and shows
 under "On an earlier version" once it is gone, so keep ids stable. Comments live beside the page in `<page>.comments/`, one
 file per comment in each writer's folder; `dossier read plan.comments/` prints
 the threads, and `--json` gives one Doc per thread.
@@ -50,8 +50,19 @@ thread and draws the pins; each comment is stored once. Every element fires
 `dossier:comments` with `{ threads }` when its threads change, and page code
 reads them with `dossier.read('plan.comments/')` (see Page client) to build its
 own handoff. Each comment there carries `by` (the email), `name` (the
-display name, or null) and `mentions`, where a team reads `team:Design`. The
-component never sends anything to an agent.
+display name, or null), `mentions`, where a team reads `team:Design`, and
+`agent`, true when an agent wrote it. The component never sends anything to
+an agent.
+
+Agents comment with `dossier comment <page> <text>` (`-` reads the text from
+stdin), on an element with `--on <id>`, in a thread with `--reply-to <path>`
+(the path it prints, or a thread's `data.root.path` from `dossier read --json
+<page>.comments/`), and with `--stance`. It writes as the comments on the page
+do, at the page's current push: it needs respond on the page, `@` mentions
+notify, and a reply notifies the thread's other writers. Anything written with
+an agent key shows as an agent's comment; Dossier marks it from the key, never
+from what is sent, so a page's handoff can tell an agent's comments from
+people's by `agent`.
 
 A link to a page with `#dossier-comment=<path>&on=<id>` opens that comment:
 `<path>` is the comment's path from the page's folder, as its Doc names it

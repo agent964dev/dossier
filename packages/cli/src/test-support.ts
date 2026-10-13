@@ -85,6 +85,8 @@ export const harness = async (options: {
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   readonly webSocket?: typeof globalThis.WebSocket
   readonly onInterrupt?: (stop: () => void) => () => void
+  /** What stdin holds, for a command that reads it. */
+  readonly stdin?: string
 }): Promise<Harness> => {
   const dir = await mkdtemp(join(tmpdir(), 'dossier-cli-'))
   const configPath = join(dir, 'dossier', 'config.json')
@@ -117,6 +119,9 @@ export const harness = async (options: {
     ...(options.onInterrupt === undefined
       ? {}
       : { onInterrupt: options.onInterrupt }),
+    ...(options.stdin === undefined
+      ? {}
+      : { stdin: async () => options.stdin! }),
   }
   return {
     dir,

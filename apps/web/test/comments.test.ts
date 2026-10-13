@@ -31,6 +31,7 @@ import { NOTIFICATIONS_KEPT } from '../src/core/tree-store.ts'
 import { homeModel } from '../src/server/home-model.ts'
 import { listingModel } from '../src/server/listing-model.ts'
 import { Browser, signedIn } from './support/browser.ts'
+import { keySecretFor } from './support/keys.ts'
 import { beforeBatch, count, exec, rows } from './support/d1.ts'
 import {
   pageWith,
@@ -1394,6 +1395,150 @@ describe('whom a comment may mention', () => {
     expect(found.people.map((p) => p.email)).toEqual([
       reader.email.toLowerCase(),
     ])
+  })
+})
+
+describe('comments agents write', () => {
+  const ask = (
+    caller: Caller,
+    i: { path: string; text: string } & JsonObject,
+  ) =>
+    runAs(
+      caller,
+      Effect.flatMap(Data, (data) =>
+        data.comment({
+          ref: ref(i.path),
+          text: i.text,
+          anchor: typeof i.on === 'string' ? i.on : null,
+          replyTo: typeof i.replyTo === 'string' ? i.replyTo : null,
+          stance: null,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+
+  it('are marked as an agent’s from the key alone, never from what a browser sends', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', '', 'sara-a')
+    const lina = await given(tree, 'respond', '', 'lina-a')
+    const saraKey = await agent(sara.who)
+    // Lina starts a thread in the browser.
+    const root = await write(T0, lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Per pallet or per truck?', {
+        anchor: 'pricing',
+        label: 'Pricing',
+      }),
+    })
+    // Sara's agent replies, mentioning the owner, through the CLI's route.
+    const reply = await ask(saraKey, {
+      path: `${ws.name}/${tree.name}/plan`,
+      text: `Per truck. @${owner.email.toLowerCase()}`,
+      replyTo: root.path,
+    })
+    expect(reply.page).toBe('plan.html')
+    expect(reply.comment).toMatch(
+      new RegExp(`^plan\\.comments/${sara.email}/.+\\.json$`),
+    )
+    expect(reply.doc.data).toMatchObject({
+      agent: true,
+      replyTo: root.path,
+      mentions: [owner.email.toLowerCase()],
+    })
+    const [thread] = await threadsOf(lina.caller, tree)
+    expect(thread!.data.root.agent).toBe(false)
+    expect(thread!.data.replies.map((r) => [r.by, r.agent])).toEqual([
+      [sara.email, true],
+    ])
+    // Lina hears of the reply and the owner of the mention; Sara of nothing.
+    expect(
+      await rows<{ email: string; type: string; via: string | null }>(
+        `select email, type, via from notifications where tree_id = ?
+         order by type desc`,
+        tree.treeId,
+      ),
+    ).toEqual([
+      { email: lina.email, type: 'reply', via: null },
+      { email: owner.email.toLowerCase(), type: 'mention', via: null },
+    ])
+    const linaHears = await runAs(
+      lina.caller,
+      Effect.flatMap(Notifications, (n) =>
+        n.list({ before: null, limit: 20, tree: null }),
+      ),
+    )
+    expect(linaHears.notifications.map((n) => [n.type, n.agent])).toEqual([
+      ['reply', true],
+    ])
+    expect(
+      threadsText({ folder: 'plan.comments', threads: [thread!] }),
+    ).toContain(`Reply from ${sara.email} (agent) · `)
+
+    // A browser cannot claim it; an agent's edit keeps it.
+    expect(
+      await writeFailure(lina.caller, tree, {
+        path: 'plan.comments/',
+        patch: comment('I am an agent.', { agent: true }),
+      }),
+    ).toMatchObject({ code: 'invalid', path: 'agent' })
+    await write(minutes(5), sara.caller, tree, {
+      path: reply.doc.path,
+      patch: { text: 'Per truck, from December.' },
+    })
+    const [after] = await threadsOf(lina.caller, tree)
+    expect(after!.data.replies[0]).toMatchObject({
+      agent: true,
+      text: 'Per truck, from December.',
+    })
+  })
+
+  it('answer a page the key cannot open as not found, and take the route with a key', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const outsider = await person('outsider-a')
+    const failure = await failureAs(
+      await agent(outsider),
+      Effect.flatMap(Data, (data) =>
+        data.comment({
+          ref: ref(`${ws.name}/${tree.name}/plan`),
+          text: 'Hello?',
+          anchor: null,
+          replyTo: null,
+          stance: null,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+    expect(failure).toMatchObject({ code: 'not_found' })
+    expect(
+      await count('nodes', "tree_id = ? and origin = 'data'", tree.treeId),
+    ).toBe(0)
+
+    const key = await keySecretFor(owner)
+    const response = await new Browser().fetch('/_/api/comment', {
+      method: 'POST',
+      purpose: 'none',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        path: `${ws.name}/${tree.name}/plan`,
+        text: 'From the CLI.',
+        on: 'pricing',
+        opId: crypto.randomUUID(),
+      }),
+    })
+    expect(response.status).toBe(201)
+    const body = (await response.json()) as {
+      comment: string
+      link: string
+      doc: { data: { agent: boolean; anchor: string } }
+    }
+    expect(body.doc.data).toMatchObject({ agent: true, anchor: 'pricing' })
+    expect(commentOfFragment(new URL(body.link).hash)).toEqual({
+      comment: body.comment,
+      anchor: 'pricing',
+    })
   })
 })
 

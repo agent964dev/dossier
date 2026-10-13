@@ -109,6 +109,7 @@ export const TEXT = {
   linkGone: 'The comment this link opens is no longer here.',
   linkDeleted: 'The comment this link opens was deleted.',
   linkResolved: 'The thread this link opens is resolved.',
+  agent: 'Agent',
 } as const
 
 /** How long a comment a link opens stays highlighted. */
@@ -1361,7 +1362,14 @@ export class DossierComments extends HTMLElement {
     if (name !== null) author.title = comment.by
     author.id = uid('by')
     article.setAttribute('aria-labelledby', author.id)
-    meta.append(author, this.#time(comment.at))
+    meta.append(author)
+    // Written with the CLI, through the person's agent key.
+    if (comment.agent === true) {
+      const agent = this.#span(TEXT.agent)
+      agent.className = 'dossier-comments-agent'
+      meta.append(agent)
+    }
+    meta.append(this.#time(comment.at))
     if (comment.edited && !comment.deleted) {
       const edited = this.#span(TEXT.edited)
       edited.className = 'dossier-comments-edited'

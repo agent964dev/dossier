@@ -407,6 +407,16 @@ and again inside the change's batch by one `Access.couldReadCondition`
 guard. The writer never counts, and an unknown team, or a guest's team
 mention, stays as text.
 
+Agents comment with `dossier comment`, through `POST /_/api/comment`: the
+Worker resolves the page the target names (missing and unreadable alike),
+reads mentions from the text (`mentionsIn` in `@dossier/contracts`, as the
+composer does) and writes through `Data.write` at the tree's current push,
+so access, mentions and notifications are the component's. A comment written
+by an `agent` caller carries `agent: true` in its entry. Only the Worker sets
+it, from the caller's `via`; a write that names `agent` is refused, and a
+revision keeps it. Comment Docs, `threadsText` ("(agent)") and
+notifications carry it.
+
 Each `mentions` row comes with a row in `notifications`, written in the same
 batch; so does a reply, for everyone else who wrote in its thread and could
 open the page (`Access.readersAmong`), unless the reply mentions them. A row

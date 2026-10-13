@@ -34,6 +34,7 @@ const note = (
   link: `https://dossier.test/acme/plans/a/plan#dossier-comment=plan.comments%2F${n}.json&on=S-1`,
   at: new Date(Date.now() - n * 3_600_000).toISOString(),
   read: false,
+  agent: false,
   ...over,
 })
 

@@ -75,6 +75,11 @@ export const STYLES = `
   color: var(--muted-foreground, inherit);
 }
 :where(.dossier-comments-author) { font-weight: 600; color: inherit; }
+:where(.dossier-comments-agent) {
+  font-size: 0.75em; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; border: 1px solid ${BORDER};
+  border-radius: 0.375em; padding-inline: 0.375em;
+}
 :where(.dossier-comments-stance) {
   font-size: 0.875em; border: 1px solid ${BORDER}; border-radius: 999px;
   padding-block: 0; padding-inline: 0.5em;

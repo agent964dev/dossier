@@ -150,6 +150,7 @@ const comment = (
     push: 3,
     edited: false,
     deleted: false,
+    agent: false,
     ...over,
   }
 }
@@ -2069,6 +2070,26 @@ describe('with for: the comments on one item', () => {
     // Nothing kept for it: still folded, its composer not built.
     expect(mainComposer(back.one)).toBeNull()
     expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+  })
+})
+
+describe('an agent’s comment', () => {
+  test('carries an Agent badge beside its writer’s name, and only it', async () => {
+    const root = comment(LEE, 'From a person', { name: 'Lee Park' })
+    const reply = comment(SARA.email, 'From the CLI', {
+      name: 'Sara',
+      agent: true,
+    })
+    peer.threads = [thread(root, [reply])]
+    const element = await mount()
+    const metas = [...element.querySelectorAll('.dossier-comments-meta')]
+    expect(
+      metas.map((m) => m.querySelector('.dossier-comments-agent')),
+    ).toEqual([null, expect.anything()])
+    const badge = metas[1]!.querySelector('.dossier-comments-agent')!
+    expect(badge.textContent).toBe('Agent')
+    expect(badge.previousElementSibling?.textContent).toBe('Sara')
+    expect(sheet()).toContain('.dossier-comments-agent')
   })
 })
 
