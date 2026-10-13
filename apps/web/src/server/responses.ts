@@ -166,11 +166,16 @@ export const dataViews = (i: {
       ? folderOf(row.path)
       : `${folderOf(row.path)}/${row.email}`
 
-  /** The folder a shared file's upload sits in: its writer's, beside the file. */
-  const sharedOwnOf = (form: FormResponses['form'], by: string) =>
-    `${form.target.replace(/\.json$/i, '')}.files/${by.toLowerCase()}`
+  /**
+   * One value of a shared file: an upload as its name only, with no download,
+   * since who changed it last may not be who uploaded it.
+   */
+  const sharedCellOf = (value: Json | undefined, type: string): Cell => {
+    const cell = cellOf(value, type, '')
+    return 'file' in cell ? { text: cell.file } : cell
+  }
 
-  return { cellOf, ownOf, sharedOwnOf }
+  return { cellOf, ownOf, sharedCellOf }
 }
 
 /** A cell as one line of text, a JSON field's object compact. */
@@ -216,7 +221,7 @@ export const responsesView = createServerFn({ method: 'GET' })
         )
         if (ref === null) return yield* Effect.fail(notFound())
         const found = yield* (yield* Data).responses(ref)
-        const { cellOf, ownOf, sharedOwnOf } = dataViews(ref)
+        const { cellOf, ownOf, sharedCellOf } = dataViews(ref)
         const at = (path: string, kind: 'page' | 'folder' | 'file') =>
           linkFor(config.origin, {
             workspace: ref.workspace,
@@ -284,11 +289,7 @@ export const responsesView = createServerFn({ method: 'GET' })
               : fields.flatMap((field) => {
                   const value = f.shared?.find((s) => s.field === field.name)
                   if (value === undefined) return []
-                  const cell = cellOf(
-                    value.value,
-                    field.type,
-                    sharedOwnOf(f.form, value.by),
-                  )
+                  const cell = sharedCellOf(value.value, field.type)
                   return [
                     {
                       label: field.label,

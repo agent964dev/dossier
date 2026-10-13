@@ -455,7 +455,7 @@ describe('reading answers', () => {
     ).toBe('forbidden')
   })
 
-  it('links a shared file’s upload to the folder it is stored in', async () => {
+  it('shows a shared file’s upload as its name, with no download, and its JSON folded', async () => {
     const page = 'plan.html'
     const tree = await pushForms(owner, ws, {
       [page]: pageWith(
@@ -480,16 +480,14 @@ describe('reading answers', () => {
     )
     const shared = found.forms[0]!
     const [doc] = shared.shared!
-    const { cellOf, sharedOwnOf } = dataViews({
-      workspace: ws.name,
-      tree: tree.name,
+    const { sharedCellOf } = dataViews({ workspace: ws.name, tree: tree.name })
+    // Who changed it last may not be who uploaded it: two people's files with
+    // the same name, size and type read as one value.
+    expect(sharedCellOf(doc!.value, 'file')).toEqual({ text: 'plan.pdf' })
+    expect(sharedCellOf({ a: 1 }, 'json')).toEqual({
+      summary: '1 key',
+      json: JSON.stringify({ a: 1 }, null, 2),
     })
-    const cell = cellOf(doc!.value, 'file', sharedOwnOf(shared.form, doc!.by))
-    if (!('download' in cell)) throw new Error('no download link')
-    expect(cell.file).toBe('plan.pdf')
-    const file = await ownerBrowser.fetch(cell.download, { purpose: 'read' })
-    expect(file.status).toBe(200)
-    expect(await file.text()).toBe(PDF)
   })
 
   it('shows a JSON field’s object folded, with its keys counted, and other values as text', () => {
