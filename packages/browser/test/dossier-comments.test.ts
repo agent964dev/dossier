@@ -1498,6 +1498,34 @@ describe('with for: the comments on one item', () => {
     })
   })
 
+  test('keeps unsent text storage refuses, for when for comes back to its item', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'About one')
+    one.setAttribute('for', 'S-2')
+    expect(area.value).toBe('')
+    one.setAttribute('for', 'S-1')
+    expect(area.value).toBe('About one')
+  })
+
+  test('an element that joins the folder’s watch never takes its older value after a newer one', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    peer.threads = [thread(a)]
+    await mountItems()
+    const late = document.createElement('dossier-comments')
+    document.body.append(late)
+    // The newer value comes before the one the late element was queued.
+    const b = comment(LEE, 'Second', { anchor: 'S-2' })
+    peer.emit([thread(a), thread(b)])
+    await settle()
+    expect(rootsIn(late)).toEqual([a.path, b.path])
+  })
+
   test('keeps an edit’s unsaved text on a thread for leaves, for when it comes back', async () => {
     const mine = comment(SARA.email, 'First take', { anchor: 'S-1' })
     peer.threads = [thread(mine)]

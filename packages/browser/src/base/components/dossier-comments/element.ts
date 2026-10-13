@@ -184,9 +184,12 @@ const follow = (
       }
     })
   } else if (feed.last !== null) {
-    const { value } = feed.last
+    const last = feed.last
+    // Only while it is still the latest: a newer value already reached it.
     queueMicrotask(() => {
-      if (feed.followers.has(follower)) follower(value)
+      if (feed.last === last && feed.followers.has(follower)) {
+        follower(last.value)
+      }
     })
   }
   return () => {
@@ -372,6 +375,8 @@ export class DossierComments extends HTMLElement {
   #pagePin: { readonly anchor: string; readonly pin: Pin } | null = null
   #placing: { readonly target: Element; readonly pin: Pin } | null = null
   #anchors = ''
+  /** Unsent text storage refused, by draft key. */
+  readonly #unstored = new Map<string, string>()
   /** The `for` it had when it left, to choose again if that changed meanwhile. */
   #leftFor: string | null | undefined = undefined
 
@@ -1590,14 +1595,7 @@ export class DossierComments extends HTMLElement {
             select.value = ''
           }
         }
-        try {
-          const storage = this.#storage()
-          if (storage?.getItem(draft)?.trim() === text) {
-            storage.removeItem(draft)
-          }
-        } catch {
-          // Storage is refused: nothing was kept.
-        }
+        if (this.#readDraft(draft).trim() === text) this.#putDraft(draft, '')
         // Only the pin this comment took: one placed since stays.
         if (placed !== null && this.#pin === placed) this.#pin = null
         this.#render()
@@ -1816,9 +1814,7 @@ export class DossierComments extends HTMLElement {
       )
       // The text now waits as the kept comment, never also as a draft.
       if (entry.replyTo === null) {
-        this.#storage()?.removeItem(
-          draftKey(dossier.page.path, null, this.#scope()),
-        )
+        this.#putDraft(draftKey(dossier.page.path, null, this.#scope()), '')
       }
     } catch {
       // Storage is full or refused: sign-in still goes on.
@@ -1845,31 +1841,49 @@ export class DossierComments extends HTMLElement {
     const dossier = this.#dossier
     // Before the viewer is known, text could land under someone else.
     if (dossier === null || !this.#ready) return
-    const key = draftKey(
-      dossier.page.path,
-      this.#me()?.email ?? null,
-      this.#scope(),
+    this.#putDraft(
+      draftKey(dossier.page.path, this.#me()?.email ?? null, this.#scope()),
+      text,
     )
+  }
+
+  /**
+   * Keeps `text` as the draft at `key`, or drops it when blank. Storage that
+   * is full or refused leaves it here, so a change of `for` still keeps it.
+   */
+  #putDraft(key: string, text: string): void {
+    const blank = text.trim() === ''
     try {
-      if (text.trim() === '') this.#storage()?.removeItem(key)
-      else this.#storage()?.setItem(key, text)
+      const storage = this.#storage()
+      if (storage !== null) {
+        if (blank) storage.removeItem(key)
+        else storage.setItem(key, text)
+        this.#unstored.delete(key)
+        return
+      }
     } catch {
-      // Storage is full or refused: the text stays in the composer.
+      // Kept below instead.
+    }
+    if (blank) this.#unstored.delete(key)
+    else this.#unstored.set(key, text)
+  }
+
+  #readDraft(key: string): string {
+    const unstored = this.#unstored.get(key)
+    if (unstored !== undefined) return unstored
+    try {
+      return this.#storage()?.getItem(key) ?? ''
+    } catch {
+      return ''
     }
   }
 
   #draft(): string {
     const dossier = this.#dossier
     if (dossier === null) return ''
-    try {
-      return (
-        this.#storage()?.getItem(
-          draftKey(dossier.page.path, this.#me()?.email ?? null, this.#scope()),
-        ) ?? ''
-      )
-    } catch {
-      return ''
-    }
+    return this.#readDraft(
+      draftKey(dossier.page.path, this.#me()?.email ?? null, this.#scope()),
+    )
   }
 
   /**
