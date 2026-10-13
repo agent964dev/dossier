@@ -172,6 +172,19 @@ export const STYLES = `
   outline: 2px dashed var(--ring, CanvasText); outline-offset: -2px;
   background: color-mix(in srgb, Canvas 12%, transparent);
 }
+:where(.dossier-comments-open) {
+  display: inline-flex; align-items: baseline; gap: 0.5em;
+}
+:where(.dossier-comments-item) { margin-block: 0.5em; }
+:where(.dossier-comments-item .dossier-comments-header) { margin-block-end: 0; }
+:where(.dossier-comments-item .dossier-comments-threads) {
+  margin-block-start: 0.5em;
+}
+:where(.dossier-comments-item .dossier-comments-thread) { padding-block: 0.625em; }
+:where(.dossier-comments-item .dossier-comments-composer) {
+  margin-block-start: 0.5em;
+}
+:where(.dossier-comments-item .dossier-comments-input) { min-block-size: 3.5em; }
 @media (prefers-reduced-motion: no-preference) {
   :where(.dossier-comments-button, .dossier-comments-pin) {
     transition: background-color 120ms ease, border-color 120ms ease;

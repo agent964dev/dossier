@@ -9,6 +9,7 @@ import { define } from './dossier-comments/element.ts'
 export {
   DossierComments,
   define,
+  type CommentsDetail,
   type CommentsStateDetail,
 } from './dossier-comments/element.ts'
 export {

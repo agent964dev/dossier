@@ -87,3 +87,26 @@ never stored twice.
 
 Forms stay automatic: a plain `<form>` needs no page code (see Forms), and
 `data-dossier="manual"` or `"off"` hands it to page code.
+
+A page's comments read like any folder: `read('plan.comments/')` on
+`plan.html` gives one `Doc` per thread, its `data` a `{ root, replies,
+resolved }` where each comment has `by`, `at`, `text`, `anchor`, `stance` and
+`deleted`, and `watch` follows them. The page decides what its handoff says.
+This one copies the open threads, with the page's link:
+
+```js
+const stop = dossier.watch('plan.comments/', (threads) => {
+  const open = threads.filter((t) => !t.data.resolved)
+  // Or only those marked for the agent:
+  // .filter((t) => t.data.root.stance === 'for the agent')
+  handoff.textContent = [
+    `Comments on ${dossier.page.link}`,
+    ...open.map(({ data: { root, replies } }) =>
+      [root, ...replies]
+        .filter((c) => !c.deleted)
+        .map((c) => `- ${root.anchor ?? 'page'}: ${c.by}: ${c.text}`)
+        .join('\n'),
+    ),
+  ].join('\n')
+})
+```
