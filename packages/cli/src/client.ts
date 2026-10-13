@@ -315,58 +315,76 @@ export const rawCall = (
       headers['content-length'] = String(request.body.byteLength)
     }
     const wait = io.sleep ?? sleep
-    // One try, within the transfer timeout; a network error is its cause.
-    const send = Effect.tryPromise({
-      try: (signal) =>
-        io.fetch(url, {
-          method: request.method,
-          redirect: 'manual',
-          signal,
-          headers,
-          body: request.body as Uint8Array<ArrayBuffer> | undefined,
-        }),
-      catch: (cause) => cause,
-    }).pipe(
-      Effect.either,
-      Effect.timeoutFail({
-        duration: TRANSFER_TIMEOUT,
-        onTimeout: () =>
-          problem(
-            `${deployment.id} did not answer within ` +
-              `${Duration.toMinutes(TRANSFER_TIMEOUT)} minutes.`,
-            'Try again shortly.',
-          ),
-      }),
-    )
+    // One try, within the transfer timeout: a network error is its cause,
+    // and an error answer's body is read within it too. Stopped, it aborts
+    // the request, which cancels the answer's body.
+    const send = (last: boolean) =>
+      Effect.suspend(() => {
+        const abort = new AbortController()
+        return Effect.gen(function* () {
+          const sent = yield* Effect.either(
+            Effect.tryPromise({
+              try: () =>
+                io.fetch(url, {
+                  method: request.method,
+                  redirect: 'manual',
+                  signal: abort.signal,
+                  headers,
+                  body: request.body as Uint8Array<ArrayBuffer> | undefined,
+                }),
+              catch: (cause) => cause,
+            }),
+          )
+          if (Either.isLeft(sent)) return sent
+          const response = sent.right
+          if (
+            (response.status >= 200 && response.status < 300) ||
+            (!last && TRANSIENT_STATUSES.has(response.status))
+          ) {
+            return sent
+          }
+          const payload = yield* Effect.promise((): Promise<unknown> =>
+            response.json().catch(() => null),
+          )
+          return yield* Effect.fail(
+            errorFromResponse(
+              deployment,
+              response.status,
+              payload,
+              response.headers.get('location'),
+            ),
+          )
+        }).pipe(
+          Effect.onInterrupt(() => Effect.sync(() => abort.abort())),
+          Effect.timeoutFail({
+            duration: TRANSFER_TIMEOUT,
+            onTimeout: () =>
+              problem(
+                `${deployment.id} did not answer within ` +
+                  `${Duration.toMinutes(TRANSFER_TIMEOUT)} minutes.`,
+                'Try again shortly.',
+              ),
+          }),
+        )
+      })
     for (let tries = 1; ; tries += 1) {
-      const sent = yield* send
       const last = tries >= TRANSFER_TRIES
+      const sent = yield* send(last)
       if (Either.isLeft(sent)) {
         if (last) {
           return yield* Effect.fail(unreachable(deployment, sent.left, tries))
         }
-        yield* Effect.promise(() => wait(retryWait(tries, null)))
+        yield* Effect.promise((signal) => wait(retryWait(tries, null), signal))
         continue
       }
       const response = sent.right
       if (response.status >= 200 && response.status < 300) return response
-      if (!last && TRANSIENT_STATUSES.has(response.status)) {
-        yield* Effect.promise(async () => {
-          await response.body?.cancel().catch(() => undefined)
-          await wait(retryWait(tries, response.headers.get('retry-after')))
-        })
-        continue
-      }
-      const payload = yield* Effect.promise((): Promise<unknown> =>
-        response.json().catch(() => null),
-      )
-      return yield* Effect.fail(
-        errorFromResponse(
-          deployment,
-          response.status,
-          payload,
-          response.headers.get('location'),
-        ),
-      )
+      yield* Effect.promise(async (signal) => {
+        await response.body?.cancel().catch(() => undefined)
+        await wait(
+          retryWait(tries, response.headers.get('retry-after')),
+          signal,
+        )
+      })
     }
   })

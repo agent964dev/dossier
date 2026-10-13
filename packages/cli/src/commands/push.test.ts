@@ -12,8 +12,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { ErrorCode } from '@dossier/contracts'
-import { afterEach, describe, expect, it } from 'vitest'
+import { Duration } from 'effect'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { TRANSFER_TIMEOUT } from '../client.ts'
 import {
   errorResponse,
   type Harness,
@@ -88,7 +90,10 @@ const plan = (over: Record<string, unknown> = {}) => ({
 
 interface Deployment {
   readonly stage?: (request: SeenRequest) => Response
-  readonly blob?: (request: SeenRequest, attempt: number) => Response
+  readonly blob?: (
+    request: SeenRequest,
+    attempt: number,
+  ) => Response | Promise<Response>
   readonly missing?: readonly string[]
   readonly plan?: ReturnType<typeof plan>
 }
@@ -568,6 +573,82 @@ describe('dossier push', () => {
     expect(cli.sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 16_000])
     expect(sequence()).not.toContain('POST /_/api/pushes/psh_1/commit')
   })
+
+  it('gives up on an error answer whose body stalls, within the transfer timeout, and cancels it', async () => {
+    let cancelled = false
+    const cli = await setUp(
+      pushing({
+        missing: [await sha('logo.svg')],
+        blob: (request) =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                request.signal?.addEventListener('abort', () => {
+                  cancelled = true
+                  controller.error(new Error('aborted'))
+                })
+              },
+            }),
+            { status: 400 },
+          ),
+      }),
+    )
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const run = cli.run(['push', FIXTURE, 'agent964/acme'])
+      // The upload is answered; then its body stalls past the timeout.
+      while (!sequence().some((line) => line.startsWith('PUT'))) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      await vi.advanceTimersByTimeAsync(Duration.toMillis(TRANSFER_TIMEOUT))
+      expect(await run).toBe(1)
+      expect(cli.stderr()).toContain('did not answer within 5 minutes')
+      expect(cancelled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['a 503', () => new Response('busy', { status: 503 })],
+    ['a purge', () => errorResponse('blob_reclaiming')],
+  ])(
+    'stops the wait after %s when another upload fails',
+    async (_, waiting) => {
+      const logo = await sha('logo.svg')
+      const signals: (AbortSignal | undefined)[] = []
+      let waited = () => {}
+      const waits = new Promise<void>((resolve) => {
+        waited = resolve
+      })
+      const fetch = stubFetch(
+        pushing({
+          missing: [logo, await sha('plan.html')],
+          // The other upload fails once the first is waiting.
+          blob: (request) =>
+            request.url.pathname.endsWith(logo)
+              ? waiting()
+              : waits.then(() => errorResponse('forbidden')),
+        }),
+      )
+      requests = fetch.requests
+      current = await harness({
+        fetch: fetch.fetch,
+        env: ENV,
+        // A wait ends only when it is stopped.
+        sleep: (_ms, signal) => {
+          signals.push(signal)
+          waited()
+          return new Promise((resolve) =>
+            signal?.addEventListener('abort', () => resolve()),
+          )
+        },
+      })
+      expect(await current.run(['push', FIXTURE, 'agent964/acme'])).toBe(3)
+      expect(signals).not.toEqual([])
+      expect(signals.every((signal) => signal?.aborted === true)).toBe(true)
+    },
+  )
 
   it('holds at most 4 uploads and 16 MiB in flight', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'dossier-push-'))

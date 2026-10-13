@@ -529,7 +529,7 @@ const upload = (
       if (!isCode(answer.left, 'blob_reclaiming') || tries >= RECLAIM_TRIES) {
         return yield* Effect.fail(answer.left)
       }
-      yield* Effect.promise(() => wait(RECLAIM_WAIT_MS * tries))
+      yield* Effect.promise((signal) => wait(RECLAIM_WAIT_MS * tries, signal))
     }
   })
 
