@@ -178,11 +178,16 @@ export interface PeopleService {
     DossierError<'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
-  /** The trees of a workspace the caller can open, with how each is shared. */
-  readonly trees: (
-    workspace: WorkspaceRow,
-  ) => Effect.Effect<
-    readonly { readonly tree: TreeRow; readonly sharing: TreeSharing }[],
+  /**
+   * The trees of a workspace the caller can open, with how each is shared
+   * and whether the caller holds write on its root.
+   */
+  readonly trees: (workspace: WorkspaceRow) => Effect.Effect<
+    readonly {
+      readonly tree: TreeRow
+      readonly sharing: TreeSharing
+      readonly writer: boolean
+    }[],
     DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
@@ -929,7 +934,11 @@ export const PeopleLive: Layer.Layer<
             .orderBy(asc(schema.trees.name))
             .all(),
         )
-        const result: { tree: TreeRow; sharing: TreeSharing }[] = []
+        const result: {
+          tree: TreeRow
+          sharing: TreeSharing
+          writer: boolean
+        }[] = []
         for (const row of rows) {
           const roles = yield* access.roleOn(row.root as NodeRow)
           if (!roles.caps.has('read') && !roles.caps.has('read-authored')) {
@@ -969,7 +978,7 @@ export const PeopleLive: Layer.Layer<
               : people + teams > 0
                 ? { kind: 'shared', people, teams }
                 : { kind: 'private' }
-          result.push({ tree, sharing })
+          result.push({ tree, sharing, writer: roles.caps.has('write') })
         }
         return result
       })

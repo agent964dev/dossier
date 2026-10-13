@@ -24,6 +24,7 @@ vi.mock('@tanstack/react-router', () => ({
   }),
   redirect: (to: { href: string }) => ({ redirectTo: to.href }),
   useNavigate: () => () => Promise.resolve(),
+  useRouter: () => ({ invalidate: () => Promise.resolve() }),
   Link: ({
     to,
     children,
@@ -43,6 +44,11 @@ vi.mock('../../src/routes/__root', () => ({
   },
 }))
 vi.mock('../../src/server/home', () => ({ homeView }))
+// A tree's Share opens the share dialog, which is tested on its own.
+vi.mock('../../src/server/share-dialog', () => ({
+  shareDialogView: () => new Promise(() => {}),
+  setShare: () => new Promise(() => {}),
+}))
 
 const { Route } = (await import('../../src/routes/index.tsx')) as unknown as {
   Route: {
@@ -175,6 +181,53 @@ describe('the front page', () => {
     )
     expect(host.textContent).not.toContain('Your agents write the page.')
     expect(linkNamed('Sign in with Google')).toBeUndefined()
+  })
+
+  it('gives each tree a menu of what the viewer may do on its root', async () => {
+    const tree = (name: string, writer: boolean) => ({
+      name,
+      href: `https://dossier.example.com/acme/${name}/`,
+      sharing: { kind: 'private' as const },
+      mentioned: false,
+      can: { share: writer, history: writer },
+      history: writer ? `/_/history/acme/${name}/` : null,
+      files: `/_/files/acme/${name}/`,
+    })
+    render(
+      view({
+        me: { email: 'sara@acme.com', name: 'Sara' },
+        workspace: 'acme',
+        workspaces: [
+          { name: 'acme', role: 'member', isAdmin: false, suspended: false },
+        ],
+        trees: [tree('site', true), tree('notes', false)],
+      }),
+    )
+    const menu = (name: string) => {
+      const summary = host.querySelector(
+        `summary[aria-label="More for ${name}/"]`,
+      )
+      const items = summary?.parentElement?.querySelectorAll('li > *') ?? []
+      return [...items].map((item) => [
+        squash(item.textContent),
+        item.getAttribute('href'),
+      ])
+    }
+    expect(menu('site')).toEqual([
+      ['Share', null],
+      ['History', '/_/history/acme/site/'],
+      ['Files', '/_/files/acme/site/'],
+    ])
+    expect(menu('notes')).toEqual([['Files', '/_/files/acme/notes/']])
+    // The tree's link and its menu sit side by side, not one inside the other.
+    const results = await axe.run(host as never, {
+      runOnly: {
+        type: 'rule',
+        values: ['nested-interactive', 'link-name', 'list', 'listitem'],
+      },
+      resultTypes: ['violations'],
+    })
+    expect(results.violations.map((v) => v.id)).toEqual([])
   })
 
   it("still sends a new deployment's super admin to the first-run settings", async () => {
