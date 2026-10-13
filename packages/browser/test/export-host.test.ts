@@ -423,6 +423,36 @@ describe('forms in a page downloaded as one file', () => {
     })
   })
 
+  test('a JSON field merges as Dossier merges it, its nulls gone at every depth', async () => {
+    const page = openExport({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="nested" data-type="json">
+          <button>Send</button>
+        </form>
+        <form data-dossier-form="2">
+          <input type="hidden" name="extra" data-type="json">
+          <button>Add</button>
+        </form>`,
+    })
+    await flush()
+    const field = (n: number, name: string) =>
+      page.form(n).querySelector(`input[name="${name}"]`) as HTMLInputElement
+    field(1, 'nested').value = '{"a":null,"c":{"d":null,"e":1}}'
+    page.form(1).submit()
+    await flush()
+    expect((await page.dossier.read('answers/~.json'))?.data).toEqual({
+      name: 'Sara',
+      notes: 'first',
+      nested: { b: 2, c: { e: 1 } },
+    })
+    field(2, 'extra').value = '{"x":{"y":null},"z":1}'
+    page.form(2).submit()
+    await flush()
+    const [entry] = (await page.dossier.read('ideas/~/')) as { data: unknown }[]
+    expect(entry?.data).toEqual({ extra: { x: {}, z: 1 } })
+  })
+
   test('a plain form’s file field keeps only the file’s name, size and type', async () => {
     const storage = memoryStorage()
     const page = openExport({ storage, body: FORM_BODY })

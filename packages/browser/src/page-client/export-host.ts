@@ -264,33 +264,6 @@ const valuesOf = (send: SendRequest): JsonObject => {
   return Object.fromEntries(values)
 }
 
-/** What a file field keeps of each file: its name, size and type. */
-const isFileInfo = (value: unknown): boolean => {
-  const files = Array.isArray(value) ? value : [value]
-  return (
-    files.length > 0 &&
-    files.every(
-      (file) =>
-        isJsonObject(file) &&
-        isText(file.name) &&
-        typeof file.size === 'number' &&
-        isText(file.type),
-    )
-  )
-}
-
-/**
- * A person's answers sent again: a file field left empty keeps the files
- * the answer named, as a stored upload stays in Dossier.
- */
-const withKeptFiles = (values: JsonObject, before: unknown): JsonObject => {
-  if (!isJsonObject(before)) return values
-  const kept = Object.entries(before).filter(
-    ([name, value]) => !Object.hasOwn(values, name) && isFileInfo(value),
-  )
-  return kept.length === 0 ? values : { ...Object.fromEntries(kept), ...values }
-}
-
 /** The port the page client talks to, answered by the export host. */
 class ExportPort extends EventTarget {
   #started = false
@@ -642,12 +615,21 @@ export const createExportHost = (deps: {
     const values = valuesOf(request)
     const target = bare(info.target)
     let doc: DocWire
+    // Each merges as Dossier's send does: into the answer before it, or
+    // into nothing, a JSON field's nulls gone at every depth.
     if (info.kind === 'person') {
       const path = join(target, `${email}.json`)
-      doc = keep(path, docFor(path, withKeptFiles(values, current(path)?.data)))
+      const existing = current(path)?.data
+      doc = keep(
+        path,
+        docFor(
+          path,
+          applyMergePatch(isJsonObject(existing) ? existing : {}, values),
+        ),
+      )
     } else if (info.kind === 'entries') {
       const path = newEntry(join(target, email))
-      doc = keep(path, docFor(path, values))
+      doc = keep(path, docFor(path, applyMergePatch({}, values)))
     } else {
       const existing = current(target)?.data
       doc = keep(
