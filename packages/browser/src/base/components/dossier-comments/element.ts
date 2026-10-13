@@ -1530,25 +1530,35 @@ export class DossierComments extends HTMLElement {
       stance,
       mentions,
     }
-    if (this.#me() === null) {
+    const me = this.#me()
+    if (me === null) {
       this.#keepAndSignIn(entry, status)
       return
     }
+    const draft = draftKey(this.#dossier!.page.path, me.email, scope)
     this.#send({
       status,
       composer,
       again: () => this.#submitMain(),
       run: () => this.#dossier!.write(this.#folder(), entryJson(entry)),
       done: () => {
-        // What was typed since the send stays.
-        if (composer.text.trim() === text) {
+        // What was typed since the send stays, as does another item's text
+        // the composer shows since `for` changed.
+        if (this.#scope() === scope && composer.text.trim() === text) {
           composer.text = ''
           const select = this.#mainStance
           if (select !== null && select.value === (stance ?? '')) {
             select.value = ''
           }
         }
-        this.#keepDraft()
+        try {
+          const storage = this.#storage()
+          if (storage?.getItem(draft)?.trim() === text) {
+            storage.removeItem(draft)
+          }
+        } catch {
+          // Storage is refused: nothing was kept.
+        }
         // Only the pin this comment took: one placed since stays.
         if (placed !== null && this.#pin === placed) this.#pin = null
         this.#render()

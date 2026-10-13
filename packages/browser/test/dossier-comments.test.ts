@@ -1468,6 +1468,34 @@ describe('with for: the comments on one item', () => {
     expect(area.value).toBe('About one')
   })
 
+  test('settles a send against the item it was written for, after for changes', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'Same words')
+    let finish = () => {}
+    const write = fake.write
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path, patch) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }),
+    )
+    q<HTMLButtonElement>(mainComposer(one), 'button[type="submit"]').click()
+    await settle()
+    one.setAttribute('for', 'S-2')
+    type(area, 'Same words')
+    finish()
+    await settle()
+    // The other item's text stays, and the sent item's draft is gone.
+    expect(area.value).toBe('Same words')
+    one.setAttribute('for', 'S-1')
+    expect(area.value).toBe('')
+    one.setAttribute('for', 'S-2')
+    expect(area.value).toBe('Same words')
+  })
+
   test('writes a comment on its item, even before the item is drawn', async () => {
     const { one } = await mountItems()
     byKey(one, 'open')!.click()
