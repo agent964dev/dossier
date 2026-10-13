@@ -368,6 +368,8 @@ export class DossierComments extends HTMLElement {
   #marks: readonly PinMark[] = []
   /** The new comment's pin, placed but not sent. */
   #pin: { readonly anchor: string; readonly pin: Pin } | null = null
+  /** The whole page's pin, kept while `for` names an item. */
+  #pagePin: { readonly anchor: string; readonly pin: Pin } | null = null
   #placing: { readonly target: Element; readonly pin: Pin } | null = null
   #anchors = ''
   /** The `for` it had when it left, to choose again if that changed meanwhile. */
@@ -456,11 +458,18 @@ export class DossierComments extends HTMLElement {
 
   /**
    * Another element, or none: its own unsent text, kept as it was typed,
-   * and the threads it shows are chosen again.
+   * and the threads it shows are chosen again. The whole page's pin waits
+   * while an item is shown, as the threads' own state does in `#forget`.
    */
   #rescope(): void {
     if (this.#ready) this.#parts!.composer.text = this.#draft()
-    this.#pin = null
+    if (this.#scope() === null) {
+      this.#pin = this.#pagePin
+      this.#pagePin = null
+    } else if (this.#pin !== null) {
+      this.#pagePin = this.#pin
+      this.#pin = null
+    }
     if (this.#loaded) this.#take(this.#all)
     else this.#render()
   }
@@ -919,20 +928,31 @@ export class DossierComments extends HTMLElement {
     arrange(list, wanted)
   }
 
-  /** Drops the state of threads that are gone, unless something waits there. */
+  /**
+   * Drops the state of threads gone from the page, unless something waits
+   * there. A thread `for` no longer shows keeps its reply, edits, delete
+   * question and status, for when it shows again.
+   */
   #forget(): void {
     if (!this.#loaded) return
-    const roots = new Set(this.#threads.map((doc) => doc.data.root.path))
+    const roots = new Set(this.#all.map((doc) => doc.data.root.path))
     for (const [root, ui] of this.#uis) {
       if (roots.has(root) || ui.reply !== null || ui.status.busy) continue
       ui.element.remove()
       this.#uis.delete(root)
     }
+    const live = new Set(
+      this.#all.flatMap(({ data }) =>
+        [data.root, ...data.replies]
+          .filter((c) => !c.deleted)
+          .map((c) => c.path),
+      ),
+    )
     for (const path of this.#editing.keys()) {
-      const live = this.#threads.some(({ data }) =>
-        [data.root, ...data.replies].some((c) => c.path === path && !c.deleted),
-      )
-      if (!live) this.#editing.delete(path)
+      if (!live.has(path)) this.#editing.delete(path)
+    }
+    for (const path of this.#confirming) {
+      if (!live.has(path)) this.#confirming.delete(path)
     }
   }
 

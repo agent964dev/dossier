@@ -1498,6 +1498,79 @@ describe('with for: the comments on one item', () => {
     })
   })
 
+  test('keeps an edit’s unsaved text on a thread for leaves, for when it comes back', async () => {
+    const mine = comment(SARA.email, 'First take', { anchor: 'S-1' })
+    peer.threads = [thread(mine)]
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    byKey(one, `edit:${mine.path}`)!.click()
+    const editor = () =>
+      one.querySelector<HTMLTextAreaElement>(
+        `[data-composer="edit:${mine.path}"] textarea`,
+      )
+    type(editor()!, 'Second take')
+    one.setAttribute('for', 'S-2')
+    await settle()
+    expect(editor()).toBeNull()
+    one.setAttribute('for', 'S-1')
+    await settle()
+    expect(editor()?.value).toBe('Second take')
+  })
+
+  test('keeps a thread’s failed send in its status line when for leaves and comes back', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    peer.threads = [thread(a)]
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    peer.failures.push(
+      new DossierError({
+        code: 'offline',
+        message: 'Not sent. Try again.',
+        fix: null,
+        path: null,
+      }),
+    )
+    byKey(one, `resolve:${a.path}`)!.click()
+    await settle()
+    const said = statusOf(threadOf(one, a.path))
+    expect(said).not.toBe('')
+    one.setAttribute('for', 'S-2')
+    await settle()
+    one.setAttribute('for', 'S-1')
+    await settle()
+    expect(statusOf(threadOf(one, a.path))).toBe(said)
+  })
+
+  test('keeps the whole page’s placed pin while for names an item, and gives it back', async () => {
+    document.body.innerHTML = `${PAGE_HTML}<img id="mockup" title="Mockup" alt="">
+      <dossier-comments></dossier-comments>`
+    await settle()
+    const element = document.querySelector('dossier-comments') as HTMLElement
+    const form = mainComposer(element)
+    byKey(form, 'pin-button:main')!.click()
+    key(document.activeElement!, 'Enter')
+    type(q(form, 'textarea'), 'Move this')
+    element.setAttribute('for', 'S-1')
+    await settle()
+    element.removeAttribute('for')
+    await settle()
+    expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Move this')
+    const note = byKey(form, 'remove-pin:main')!.parentElement!
+    expect(note.hidden).toBe(false)
+    expect(note.textContent).toContain(
+      'Pinned at 50% across, 50% down on Mockup',
+    )
+    peer.calls = []
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[0]!.patch).toMatchObject({
+      anchor: 'mockup',
+      pin: { x: 0.5, y: 0.5 },
+    })
+  })
+
   test('names a thread’s item once for is removed', async () => {
     const a = comment(LEE, 'First', { anchor: 'S-1', label: 'Step one' })
     peer.threads = [thread(a)]
