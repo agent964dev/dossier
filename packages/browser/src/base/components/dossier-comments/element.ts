@@ -733,6 +733,7 @@ export class DossierComments extends HTMLElement {
     this.#loaded = true
     this.#render()
     this.#announce()
+    this.#claimKept()
   }
 
   /** Tells the page its threads changed, so it can build on them live. */
@@ -1866,6 +1867,8 @@ export class DossierComments extends HTMLElement {
    * in to send themselves, since they may not be the one who wrote it.
    */
   #claimKept(): void {
+    // A kept reply finds its thread only once the threads are read.
+    if (!this.#ready || !this.#loaded) return
     const me = this.#me()
     if (me === null || this.#dossier === null) return
     const kept = this.#takeKept()

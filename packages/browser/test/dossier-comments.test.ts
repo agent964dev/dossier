@@ -820,6 +820,32 @@ describe('<dossier-comments>', () => {
     expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Per truck.')
   })
 
+  test('waits for the threads before giving a kept reply back', async () => {
+    const root = comment(LEE, 'Price?')
+    sessionStorage.setItem(
+      keptKey(PAGE),
+      JSON.stringify(keptFor('Per truck.', root.path)),
+    )
+    // The watch answers only after the page client is ready.
+    vi.spyOn(fake, 'watch').mockImplementation((_, onChange) => {
+      peer.watchers.add(onChange as never)
+      return () => peer.watchers.delete(onChange as never)
+    })
+    const element = await mount()
+    expect(sessionStorage.getItem(keptKey(PAGE))).not.toBeNull()
+    peer.emit([thread(root)])
+    await settle()
+    const form = q<HTMLFormElement>(
+      threadOf(element, root.path),
+      '.dossier-comments-composer',
+    )
+    expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Per truck.')
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea').value,
+    ).toBe('')
+    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+  })
+
   test('keeps each person’s unsent text apart, and a visitor’s apart from both', async () => {
     let element = await mount()
     type(
