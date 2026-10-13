@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto'
-import { cp, readFile, realpath } from 'node:fs/promises'
+import {
+  cp,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -509,6 +517,97 @@ describe('dossier push', () => {
     expect(await cli.run(['push', FIXTURE, 'agent964/acme'])).toBe(0)
     expect(cli.sleeps).toEqual([2_000, 4_000])
     expect(sequence().filter((line) => line.startsWith('PUT'))).toHaveLength(3)
+  })
+
+  it('uploads again after a network error, a 503 or a 429, waiting longer each time', async () => {
+    const cli = await setUp(
+      pushing({
+        missing: [await sha('logo.svg')],
+        blob: (_, attempt) => {
+          if (attempt === 1) {
+            throw new TypeError('fetch failed', {
+              cause: new Error(
+                'Stream closed with error code NGHTTP2_ENHANCE_YOUR_CALM',
+              ),
+            })
+          }
+          if (attempt === 2) return new Response('busy', { status: 503 })
+          if (attempt === 3) {
+            return new Response(null, {
+              status: 429,
+              headers: { 'retry-after': '7' },
+            })
+          }
+          return new Response(null, { status: 201 })
+        },
+      }),
+    )
+
+    expect(await cli.run(['push', FIXTURE, 'agent964/acme'])).toBe(0)
+    expect(cli.sleeps).toEqual([1_000, 2_000, 7_000])
+    expect(sequence().filter((line) => line.startsWith('PUT'))).toHaveLength(4)
+    expect(sequence().at(-1)).toBe('POST /_/api/pushes/psh_1/commit')
+  })
+
+  it('stops after 6 tries, naming the cause fetch hides, and commits nothing', async () => {
+    const cli = await setUp(
+      pushing({
+        missing: [await sha('logo.svg')],
+        blob: () => {
+          throw new TypeError('fetch failed', {
+            cause: new Error('other side closed'),
+          })
+        },
+      }),
+    )
+
+    expect(await cli.run(['push', FIXTURE, 'agent964/acme'])).toBe(1)
+    expect(cli.stderr()).toContain(
+      'dossier: Could not reach dossier.acme.com after 6 tries: fetch failed: other side closed.',
+    )
+    expect(cli.sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 16_000])
+    expect(sequence()).not.toContain('POST /_/api/pushes/psh_1/commit')
+  })
+
+  it('holds at most 4 uploads and 16 MiB in flight', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'dossier-push-'))
+    const sizes = [6, 6, 6, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1].map((mib) =>
+      Math.round(mib * 1024 * 1024),
+    )
+    const hashes = await Promise.all(
+      sizes.map(async (size, i) => {
+        const content = Buffer.alloc(size, i)
+        await writeFile(join(folder, `f${i}.bin`), content)
+        return createHash('sha256').update(content).digest('hex')
+      }),
+    )
+    const route = pushing({ missing: hashes })
+    let count = 0
+    let held = 0
+    let most = { count: 0, held: 0 }
+    const cli = await setUp(async (request) => {
+      if (request.method !== 'PUT') return route(request)
+      const size = Number(request.headers.get('content-length'))
+      count += 1
+      held += size
+      most = {
+        count: Math.max(most.count, count),
+        held: Math.max(most.held, held),
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      count -= 1
+      held -= size
+      return route(request)
+    })
+
+    try {
+      expect(await cli.run(['push', folder, 'agent964/acme'])).toBe(0)
+    } finally {
+      await rm(folder, { recursive: true, force: true })
+    }
+    expect(sequence().filter((line) => line.startsWith('PUT'))).toHaveLength(9)
+    expect(most.count).toBe(4)
+    expect(most.held).toBeLessThanOrEqual(16 * 1024 * 1024)
   })
 
   it('reads a link on the deployment as the target', async () => {

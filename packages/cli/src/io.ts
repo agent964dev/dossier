@@ -82,18 +82,45 @@ const openUrl = (url: string): void => {
   }
 }
 
-export const nodeIo = (): CliIo => ({
-  env: process.env,
-  fetch: globalThis.fetch,
-  stdout: (text) => process.stdout.write(text),
-  stderr: (text) => process.stderr.write(text),
-  configPath: defaultConfigPath(process.env, homedir()),
-  cwd: process.cwd(),
-  sleep,
-  openUrl,
-  hostname: hostname().split('.')[0] || hostname(),
-  ...(typeof globalThis.WebSocket === 'function'
-    ? { webSocket: globalThis.WebSocket }
-    : {}),
-  onInterrupt,
-})
+/** How a Unix tool ends when its reader goes away: 128 + SIGPIPE. */
+export const CLOSED_PIPE_EXIT = 141
+
+/**
+ * Ends the run quietly once the reader of `stream` has gone, as in
+ * `dossier read … | head`, instead of crashing on an unhandled EPIPE. Any
+ * other write error is thrown as before.
+ */
+export const endOnClosedPipe = (
+  stream: {
+    on: (
+      event: 'error',
+      listener: (error: NodeJS.ErrnoException) => void,
+    ) => unknown
+  },
+  exit: (code: number) => void = (code) => process.exit(code),
+): void => {
+  stream.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') throw error
+    exit(CLOSED_PIPE_EXIT)
+  })
+}
+
+export const nodeIo = (): CliIo => {
+  endOnClosedPipe(process.stdout)
+  endOnClosedPipe(process.stderr)
+  return {
+    env: process.env,
+    fetch: globalThis.fetch,
+    stdout: (text) => process.stdout.write(text),
+    stderr: (text) => process.stderr.write(text),
+    configPath: defaultConfigPath(process.env, homedir()),
+    cwd: process.cwd(),
+    sleep,
+    openUrl,
+    hostname: hostname().split('.')[0] || hostname(),
+    ...(typeof globalThis.WebSocket === 'function'
+      ? { webSocket: globalThis.WebSocket }
+      : {}),
+    onInterrupt,
+  }
+}

@@ -120,21 +120,17 @@ describe('dossier read', () => {
       ),
     )
 
-    expect(await cli.run(['read', 'agent964/acme/pricing'])).toBe(3)
+    expect(await cli.run(['read', 'agent964/acme/forms/answers/'])).toBe(3)
     expect(cli.stderr()).toBe(
-      'dossier: Stopped. agent964/acme/pricing was not found, or you cannot open it.\n' +
+      'dossier: Nothing at agent964/acme/forms/answers/, or you cannot read ' +
+        'it. A folder a form writes to appears with its first answer.\n' +
         'Check the path, or ask someone who can open it to share it with you.\n',
     )
-    expect(await cli.run(['read', 'agent964/acme/pricing', '--json'])).toBe(3)
+    expect(await cli.run(['read', 'agent964/acme/brief.pdf', '--json'])).toBe(3)
     expect(JSON.parse(cli.stdout()).error).toMatchObject({
       code: 3,
-      message:
-        'Stopped. agent964/acme/pricing was not found, or you cannot open it.',
+      message: 'Nothing at agent964/acme/brief.pdf, or you cannot read it.',
     })
-    expect(await cli.run(['read', 'agent964/acme/forms/answers/'])).toBe(3)
-    expect(cli.stderr()).toContain(
-      'dossier: Stopped. agent964/acme/forms/answers/ was not found',
-    )
   })
 
   it('exits 4 when the key is refused', async () => {

@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events'
+
 import {
   ERROR_CODES,
   ERRORS,
@@ -7,6 +9,7 @@ import {
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { guide, guideMarkdown } from './guide.ts'
+import { endOnClosedPipe } from './io.ts'
 import {
   errorResponse,
   type Harness,
@@ -77,6 +80,20 @@ describe('failures', () => {
     expect(await current.run(['whoami'])).toBe(1)
     expect(current.stderr()).toContain(
       'dossier: Could not reach dossier.acme.com: fetch failed.',
+    )
+  })
+
+  it('names the cause fetch keeps behind "fetch failed"', async () => {
+    const fetch = stubFetch(() => {
+      throw new TypeError('fetch failed', {
+        cause: new Error('other side closed'),
+      })
+    })
+    current = await harness({ fetch: fetch.fetch, env: ENV })
+
+    expect(await current.run(['whoami'])).toBe(1)
+    expect(current.stderr()).toContain(
+      'dossier: Could not reach dossier.acme.com: fetch failed: other side closed.',
     )
   })
 
@@ -230,7 +247,22 @@ describe('the frame', () => {
     current = await harness({ fetch: fetch.fetch })
 
     expect(await current.run(['--version'])).toBe(0)
-    expect(current.stdout()).toBe('1.0.0\n')
+    expect(current.stdout()).toBe('1.0.1\n')
+  })
+
+  it('ends quietly with 141 when the reader of its output goes away', () => {
+    const stream = new EventEmitter()
+    const exits: number[] = []
+    endOnClosedPipe(stream, (code) => exits.push(code))
+
+    stream.emit(
+      'error',
+      Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }),
+    )
+    expect(exits).toEqual([141])
+    expect(() =>
+      stream.emit('error', Object.assign(new Error('nope'), { code: 'EIO' })),
+    ).toThrow('nope')
   })
 
   it('prints help for no verb and for --help', async () => {
