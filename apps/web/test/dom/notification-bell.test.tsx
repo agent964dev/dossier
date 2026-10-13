@@ -51,6 +51,8 @@ let gate: ((before: string) => Promise<void>) | null = null
 let readAnswer: { status: number; unread: number } | null = null
 /** Holds count answers until it resolves. */
 let countGate: (() => Promise<void>) | null = null
+/** Holds a read's answer, of one or all, until it resolves. */
+let readGate: ((what: 'one' | 'all') => Promise<void>) | null = null
 
 let host: HTMLDivElement
 let root: Root
@@ -62,6 +64,7 @@ beforeEach(() => {
   gate = null
   readAnswer = null
   countGate = null
+  readGate = null
   invalidate.mockClear()
   vi.stubGlobal(
     'fetch',
@@ -69,6 +72,13 @@ beforeEach(() => {
       calls.push({ url: input, init })
       const url = new URL(input, 'https://dossier.test')
       if (url.pathname === '/_/api/notifications/read') {
+        const all = String(init?.body).includes('"all"')
+        if (readGate !== null) {
+          // Answered as it stands now, once let through.
+          const answer = all ? 0 : unread - 1
+          await readGate(all ? 'all' : 'one')
+          return Response.json({ unread: answer })
+        }
         if (readAnswer !== null) {
           return Response.json(
             { unread: readAnswer.unread },
@@ -286,6 +296,48 @@ describe('the notification bell', () => {
     await act(async () => release())
     await settle()
     expect(badge()).toBeNull()
+  })
+
+  it('never lets one read’s answer, after Mark all as read, bring a count back', async () => {
+    unread = 2
+    pages = { '': { notifications: [note(1), note(2)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    act(() => bell().click())
+    await settle()
+    const go = { one: () => {}, all: () => {} }
+    readGate = (what) =>
+      new Promise<void>((resolve) => {
+        go[what] = resolve
+      })
+    const row = rows()[0]!
+    row.addEventListener('click', (event) => event.preventDefault())
+    await act(async () => row.click())
+    await act(async () => buttonNamed('Mark all as read')!.click())
+    await act(async () => go.all())
+    await settle()
+    await act(async () => go.one())
+    await settle()
+    expect(badge()).toBeNull()
+    expect(rows().some((a) => a.hasAttribute('data-unread'))).toBe(false)
+  })
+
+  it('shows a chosen one unread again and says so when marking it read fails', async () => {
+    unread = 2
+    pages = { '': { notifications: [note(1), note(2)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    act(() => bell().click())
+    await settle()
+    readAnswer = { status: 503, unread: 0 }
+    const row = rows()[0]!
+    row.addEventListener('click', (event) => event.preventDefault())
+    await act(async () => row.click())
+    await settle()
+    expect(rows()[0]!.hasAttribute('data-unread')).toBe(true)
+    expect(panel().textContent).toContain(
+      'Could not mark them as read. Try again.',
+    )
   })
 
   it('drops older ones asked for before the first page was read again', async () => {

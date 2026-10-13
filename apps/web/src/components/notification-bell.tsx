@@ -78,20 +78,24 @@ export function NotificationBell() {
   const title = useRef<HTMLHeadingElement>(null)
 
   /**
-   * Bumped by every first page asked for and every mark read: an answer
-   * that left before either is dropped, so it never brings rows back
-   * unread or adds older ones after another first page.
+   * Every request takes a ticket: each load, count, read and mark-all.
+   * Its answer counts only while no newer one was taken, so a late answer
+   * never undoes what came after it.
    */
-  const generation = useRef(0)
+  const ticket = useRef(0)
+  /** Lists on their way, which bring the count with them. */
+  const loading = useRef(0)
 
   const load = useCallback(async (before: string | null) => {
-    if (before === null) generation.current += 1
-    const asked = generation.current
+    ticket.current += 1
+    const asked = ticket.current
     setBusy(true)
+    loading.current += 1
     const page = await ask(
       before === null ? { limit: '20' } : { limit: '20', before },
     )
-    if (asked !== generation.current) return
+    loading.current -= 1
+    if (asked !== ticket.current) return
     setBusy(false)
     if (page === null) {
       setFailed(true)
@@ -116,10 +120,12 @@ export function NotificationBell() {
   useEffect(() => {
     let live = true
     const count = () => {
-      // Dropped when a mark read or a first page came after it was asked.
-      const asked = generation.current
+      // A list on its way brings the count with it.
+      if (loading.current > 0) return
+      ticket.current += 1
+      const asked = ticket.current
       void ask({ limit: '0' }).then((page) => {
-        if (live && page !== null && asked === generation.current) {
+        if (live && page !== null && asked === ticket.current) {
           setUnread(page.unread)
         }
       })
@@ -176,7 +182,8 @@ export function NotificationBell() {
   }
 
   const readAll = async () => {
-    generation.current += 1
+    ticket.current += 1
+    const asked = ticket.current
     setBusy(false)
     const before = { items, unread }
     setReadFailed(false)
@@ -184,6 +191,9 @@ export function NotificationBell() {
     setUnread(0)
     title.current?.focus()
     const left = await markRead('all')
+    // "mentioned you" on the screen behind goes with them.
+    if (left !== null) void router.invalidate()
+    if (asked !== ticket.current) return
     if (left === null) {
       // Not read after all: as they were, and said so.
       setItems(before.items)
@@ -192,21 +202,29 @@ export function NotificationBell() {
       return
     }
     setUnread(left)
-    // "mentioned you" on the screen behind goes with them.
-    void router.invalidate()
   }
 
   const choose = (n: DossierNotification) => {
     if (n.read) return
-    generation.current += 1
+    ticket.current += 1
+    const asked = ticket.current
     setBusy(false)
+    setReadFailed(false)
+    const shown = (read: boolean) =>
+      setItems(
+        (had) => had?.map((m) => (m.id === n.id ? { ...m, read } : m)) ?? had,
+      )
     // Shown read at once; the count is Dossier's, never one less than a cap.
-    setItems(
-      (had) =>
-        had?.map((m) => (m.id === n.id ? { ...m, read: true } : m)) ?? had,
-    )
+    shown(true)
     void markRead([n.id]).then((left) => {
-      if (left !== null) setUnread(left)
+      if (asked !== ticket.current) return
+      if (left === null) {
+        // Not read after all: unread again, so it can be tried again.
+        shown(false)
+        setReadFailed(true)
+        return
+      }
+      setUnread(left)
     })
   }
 

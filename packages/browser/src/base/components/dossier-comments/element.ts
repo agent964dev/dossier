@@ -1534,14 +1534,14 @@ export class DossierComments extends HTMLElement {
     }
     if (!this.#awaiting.has(email)) {
       this.#awaiting.add(email)
-      const session = this.#session
       void (names.get(email) as Promise<string | null>).then((name) => {
         this.#awaiting.delete(email)
         if (name === null) return
         // Counted even while out of the page, so its threads take the name
         // when it comes back; drawn only while it is in it.
         this.#namesSeen += 1
-        if (session === this.#session && this.isConnected) this.#render()
+        // Whatever session asked, it draws now if it is in the page.
+        if (this.isConnected) this.#render()
       })
     }
     return null

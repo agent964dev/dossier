@@ -2180,6 +2180,24 @@ describe('mentions in a comment', () => {
       document.body.append(element)
       await settle()
       expect(chips(element)).toEqual([['@Nora Saleh', 'nora@acme.com', false]])
+
+      // Back in the page before the name comes: it shows when it does.
+      document.body.replaceChildren()
+      peer.threads = [
+        thread(
+          comment(LEE, 'cc @omar@acme.com', { mentions: ['omar@acme.com'] }),
+        ),
+      ]
+      const again = await mount()
+      again.remove()
+      document.body.append(again)
+      await settle()
+      answer({
+        people: [{ email: 'omar@acme.com', name: 'Omar Haddad', image: null }],
+        teams: [],
+      })
+      await settle()
+      expect(chips(again)).toEqual([['@Omar Haddad', 'omar@acme.com', false]])
     } finally {
       dossier.mentionable = original
     }

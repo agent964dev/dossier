@@ -535,8 +535,23 @@ describe('<dossier-notifications>', () => {
     left: 0,
     /** Marking read fails. */
     refuse: false,
+    /** Answers wait here, by what was asked, until a test lets them go. */
+    hold: false,
+    held: [] as { what: string; go: () => void }[],
     list: vi.fn(),
     read: vi.fn(),
+  }
+  /** An answer, at once or once its test lets it go. */
+  const answer = <T>(what: string, value: () => T): Promise<T> =>
+    viewer.hold
+      ? new Promise<T>((resolve) => {
+          viewer.held.push({ what, go: () => resolve(value()) })
+        })
+      : Promise.resolve(value())
+  /** Lets the held answer to `what` go. */
+  const letGo = async (what: string) => {
+    viewer.held.find((h) => h.what === what)!.go()
+    await settle()
   }
   const dossier = {
     get me() {
@@ -546,16 +561,20 @@ describe('<dossier-notifications>', () => {
     notifications: {
       list: (opts: { before?: string | null }) => {
         viewer.list(opts)
-        return Promise.resolve(
-          viewer.pages[opts.before == null ? 0 : 1] ?? viewer.pages[0]!,
-        )
+        // The page as it stands when asked.
+        const page =
+          viewer.pages[opts.before == null ? 0 : 1] ?? viewer.pages[0]!
+        return answer('list', () => page)
       },
-      unread: () => Promise.resolve(viewer.unread),
+      unread: () => {
+        const asked = viewer.unread
+        return answer('count', () => asked)
+      },
       read: (ids: readonly string[] | 'all') => {
         viewer.read(ids)
-        return viewer.refuse
-          ? Promise.reject(new Error('unavailable'))
-          : Promise.resolve(viewer.left)
+        if (viewer.refuse) return Promise.reject(new Error('unavailable'))
+        const left = viewer.left
+        return answer(ids === 'all' ? 'all' : 'one', () => left)
       },
     },
   } as unknown as Dossier
@@ -569,6 +588,8 @@ describe('<dossier-notifications>', () => {
     viewer.unread = 0
     viewer.left = 0
     viewer.refuse = false
+    viewer.hold = false
+    viewer.held = []
     viewer.list.mockReset()
     viewer.read.mockReset()
   })
@@ -724,6 +745,73 @@ describe('<dossier-notifications>', () => {
     row.click()
     await settle()
     expect(viewer.read.mock.calls).toEqual([[['n1']]])
+  })
+
+  describe('answers that come late', () => {
+    /** An open bell with two unread, whose next answers wait. */
+    const opened = async () => {
+      viewer.unread = 2
+      viewer.left = 2
+      viewer.pages = [
+        { notifications: [note(1), note(2)], unread: 2, next: null },
+      ]
+      const it = await bell()
+      it.button.click()
+      await settle()
+      viewer.hold = true
+      const markAll = () =>
+        it.panel
+          .querySelector<HTMLButtonElement>('.dossier-notifications-mark-all')!
+          .click()
+      const unreadRows = () =>
+        it.panel.querySelectorAll('.dossier-notifications-item[data-unread]')
+          .length
+      return { ...it, markAll, unreadRows }
+    }
+
+    test('one read, then all: the one’s answer never brings a count back', async () => {
+      const it = await opened()
+      const row = it.panel.querySelector<HTMLAnchorElement>('a')!
+      row.addEventListener('click', (event) => event.preventDefault())
+      row.click()
+      viewer.left = 0
+      it.markAll()
+      await letGo('all')
+      await letGo('one')
+      expect(it.badge.hidden).toBe(true)
+      expect(it.unreadRows()).toBe(0)
+    })
+
+    test('a list asked before all were read never brings them back unread', async () => {
+      const it = await opened()
+      // Asked again on focus while open.
+      window.dispatchEvent(new Event('focus'))
+      viewer.left = 0
+      it.markAll()
+      await letGo('all')
+      await letGo('list')
+      expect(it.unreadRows()).toBe(0)
+      expect(it.badge.hidden).toBe(true)
+    })
+
+    test('a count asked before all were read never brings it back', async () => {
+      viewer.unread = 2
+      viewer.pages = [
+        { notifications: [note(1), note(2)], unread: 2, next: null },
+      ]
+      const { button, panel, badge } = await bell()
+      viewer.hold = true
+      // Closed: the count is asked again on focus.
+      window.dispatchEvent(new Event('focus'))
+      button.click()
+      await letGo('list')
+      panel
+        .querySelector<HTMLButtonElement>('.dossier-notifications-mark-all')!
+        .click()
+      await letGo('all')
+      await letGo('count')
+      expect(badge.hidden).toBe(true)
+    })
   })
 
   test('puts rows back unread and says so when marking them read fails', async () => {

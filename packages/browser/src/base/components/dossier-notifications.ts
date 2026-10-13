@@ -204,6 +204,10 @@ export class DossierNotifications extends HTMLElement {
   #signedIn = false
   /** Bumped on every connect and disconnect, so late answers are dropped. */
   #session = 0
+  /** The newest request's ticket; see #take. */
+  #ticket = 0
+  /** Lists on their way. */
+  #loading = 0
   #timer: ReturnType<typeof setInterval> | undefined
 
   readonly #onOutside = (event: Event): void => {
@@ -252,6 +256,8 @@ export class DossierNotifications extends HTMLElement {
 
   disconnectedCallback(): void {
     this.#session += 1
+    // Nothing asked before it left is answered after.
+    this.#ticket += 1
     clearInterval(this.#timer)
     const doc = this.ownerDocument
     doc.defaultView?.removeEventListener('focus', this.#onFocus)
@@ -344,6 +350,20 @@ export class DossierNotifications extends HTMLElement {
     return this.#parts !== null && !this.#parts.panel.hidden
   }
 
+  /**
+   * A ticket for a request: every load, count, read and mark-all takes
+   * one, and its answer counts only while no newer one was taken, so a
+   * late answer never undoes what came after it.
+   */
+  #take(): number {
+    this.#ticket += 1
+    return this.#ticket
+  }
+
+  #current(ticket: number): boolean {
+    return ticket === this.#ticket
+  }
+
   /** The unread count again, and the list when it is open. */
   #refresh(): void {
     const dossier = this.#dossier
@@ -352,10 +372,12 @@ export class DossierNotifications extends HTMLElement {
       void this.#load(false)
       return
     }
-    const session = this.#session
+    // A list on its way brings the count with it.
+    if (this.#loading > 0) return
+    const ticket = this.#take()
     dossier.notifications.unread().then(
       (unread) => {
-        if (session !== this.#session) return
+        if (!this.#current(ticket)) return
         this.#unread = unread
         this.#renderCount()
       },
@@ -383,13 +405,14 @@ export class DossierNotifications extends HTMLElement {
     const dossier = this.#dossier
     const parts = this.#parts!
     if (dossier === null) return
-    const session = this.#session
+    const ticket = this.#take()
     if (!this.#loaded) parts.status.textContent = TEXT.loading
+    this.#loading += 1
     try {
       const page = await dossier.notifications.list({
         before: more ? this.#next : null,
       })
-      if (session !== this.#session) return
+      if (!this.#current(ticket)) return
       const had = new Set(this.#items.map((n) => n.id))
       this.#items = more
         ? [...this.#items, ...page.notifications.filter((n) => !had.has(n.id))]
@@ -399,8 +422,10 @@ export class DossierNotifications extends HTMLElement {
       this.#loaded = true
       parts.status.textContent = ''
     } catch {
-      if (session !== this.#session) return
+      if (!this.#current(ticket)) return
       parts.status.textContent = TEXT.failed
+    } finally {
+      this.#loading -= 1
     }
     this.#renderCount()
     this.#renderList()
@@ -417,15 +442,15 @@ export class DossierNotifications extends HTMLElement {
     this.#renderList()
     // The button pressed goes away: focus stays in the panel.
     this.#parts!.title.focus({ preventScroll: true })
-    const session = this.#session
+    const ticket = this.#take()
     dossier.notifications.read('all').then(
       (unread) => {
-        if (session !== this.#session) return
+        if (!this.#current(ticket)) return
         this.#unread = unread
         this.#renderCount()
       },
       () => {
-        if (session !== this.#session) return
+        if (!this.#current(ticket)) return
         // Not read after all: as they were, and said so.
         this.#items = before.items
         this.#unread = before.unread
@@ -452,15 +477,15 @@ export class DossierNotifications extends HTMLElement {
     const parts = this.#parts!
     parts.status.textContent = ''
     parts.markAll.hidden = this.#unread <= 1 && this.#items.every((n) => n.read)
-    const session = this.#session
+    const ticket = this.#take()
     this.#dossier?.notifications.read([id]).then(
       (unread) => {
-        if (session !== this.#session) return
+        if (!this.#current(ticket)) return
         this.#unread = unread
         this.#renderCount()
       },
       () => {
-        if (session !== this.#session) return
+        if (!this.#current(ticket)) return
         // Not read after all: unread again, so it can be tried again.
         this.#items = this.#items.map((n) =>
           n.id === id ? { ...n, read: false } : n,
