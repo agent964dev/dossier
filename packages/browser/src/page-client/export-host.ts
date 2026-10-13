@@ -264,6 +264,20 @@ const valuesOf = (send: SendRequest): JsonObject => {
   return Object.fromEntries(values)
 }
 
+/**
+ * The answer a send merges into, without the fields it gives files: a file
+ * field's value replaces what it held, so a file chosen here never keeps the
+ * stored upload it replaces.
+ */
+const mergeBase = (send: SendRequest, existing: unknown): JsonObject => {
+  if (!isJsonObject(existing)) return {}
+  const base = { ...existing }
+  for (const [name, value] of send.entries) {
+    if (!isText(value)) delete base[name]
+  }
+  return base
+}
+
 /** The port the page client talks to, answered by the export host. */
 class ExportPort extends EventTarget {
   #started = false
@@ -622,10 +636,7 @@ export const createExportHost = (deps: {
       const existing = current(path)?.data
       doc = keep(
         path,
-        docFor(
-          path,
-          applyMergePatch(isJsonObject(existing) ? existing : {}, values),
-        ),
+        docFor(path, applyMergePatch(mergeBase(request, existing), values)),
       )
     } else if (info.kind === 'entries') {
       const path = newEntry(join(target, email))
@@ -634,10 +645,7 @@ export const createExportHost = (deps: {
       const existing = current(target)?.data
       doc = keep(
         target,
-        docFor(
-          target,
-          applyMergePatch(isJsonObject(existing) ? existing : {}, values),
-        ),
+        docFor(target, applyMergePatch(mergeBase(request, existing), values)),
       )
     }
     return { doc, replayed: false }

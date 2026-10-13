@@ -489,6 +489,30 @@ describe('forms in a page downloaded as one file', () => {
     })
   })
 
+  test('a file chosen in place of a stored upload replaces it, never naming the old upload', async () => {
+    const page = openExport({ body: FORM_BODY })
+    await flush()
+    const old = {
+      file: 'old-cv.pdf',
+      name: 'old-cv.pdf',
+      size: 3,
+      type: 'application/pdf',
+    }
+    await page.dossier.write('answers/~.json', { cv: old })
+    const input = page.form(1).querySelector('input[name="cv"]')!
+    const file = new page.win.File(['%PDF-1'], 'new-cv.pdf', {
+      type: 'application/pdf',
+    })
+    ;(input as unknown as { files: unknown }).files = [file]
+    page.form(1).submit()
+    await flush()
+    expect(await page.dossier.read('answers/~.json')).toMatchObject({
+      data: { cv: { name: 'new-cv.pdf', size: 6, type: 'application/pdf' } },
+    })
+    const saved = await page.dossier.read('answers/~.json')
+    expect(saved?.data).not.toHaveProperty('cv.file')
+  })
+
   test('an entries form adds an entry in the sender’s own folder', async () => {
     const page = openExport({ body: FORM_BODY })
     await flush()
