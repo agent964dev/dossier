@@ -24,10 +24,13 @@ export const listingView = createServerFn({ method: 'GET' })
       readonly workspace: string
       readonly tree: string
       readonly path: string
+      /** The Files screen's listing, rather than a link's. */
+      readonly files?: boolean
     }) => ({
       workspace: String(input.workspace),
       tree: String(input.tree),
       path: String(input.path ?? '').replace(/^\/+|\/+$/g, ''),
+      files: input.files === true,
     }),
   )
   .handler(({ data }): Promise<ListingView | ScreenFailure> =>

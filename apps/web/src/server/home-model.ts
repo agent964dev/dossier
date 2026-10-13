@@ -15,6 +15,7 @@ import {
   mentionedInTree,
   unseenMentions,
 } from '../core/index.ts'
+import { filesLink } from './listing-model.ts'
 
 export interface HomeTree {
   readonly name: string
@@ -23,6 +24,12 @@ export interface HomeTree {
   readonly sharing: TreeSharing
   /** A mention of the viewer waits unseen on a page in the tree. */
   readonly mentioned: boolean
+  /** The tree's menu, as its root's listing allows: write holders'. */
+  readonly can: { readonly share: boolean; readonly history: boolean }
+  /** The tree's history screen, for write holders; null otherwise. */
+  readonly history: string | null
+  /** The Files screen: the root's listing, even when it opens as a page. */
+  readonly files: string
 }
 
 /** A workspace in the workspace menu. */
@@ -129,16 +136,24 @@ export const homeModel = (data: { readonly w: string | null }) =>
       firstRun,
       workspaces: menuOf(memberships),
       workspace: chosen?.workspace.name ?? null,
-      trees: trees.map(({ tree, sharing }) => ({
-        name: tree.name,
-        href: linkFor(config.origin, {
-          workspace: chosen?.workspace.name ?? '',
-          tree: tree.name,
-          path: '',
-          kind: 'folder',
-        }),
-        sharing,
-        mentioned: mentionedInTree(mentions, tree.id),
-      })),
+      trees: trees.map(({ tree, sharing, writer }) => {
+        const workspace = chosen?.workspace.name ?? ''
+        return {
+          name: tree.name,
+          href: linkFor(config.origin, {
+            workspace,
+            tree: tree.name,
+            path: '',
+            kind: 'folder',
+          }),
+          sharing,
+          mentioned: mentionedInTree(mentions, tree.id),
+          can: { share: writer, history: writer },
+          history: writer
+            ? `/_/history/${encodeURIComponent(workspace)}/${encodeURIComponent(tree.name)}/`
+            : null,
+          files: filesLink(workspace, tree.name, []),
+        }
+      }),
     } satisfies HomeView
   })
