@@ -1548,23 +1548,24 @@ describe('with for: the comments on one item', () => {
     // One watch for the folder, however many elements show it.
     expect(peer.calls.filter((c) => c.op === 'watch')).toHaveLength(1)
     expect(rootsIn(page)).toEqual([whole.path, a.path, b.path])
-    expect(rootsIn(one)).toEqual([a.path])
-    expect(rootsIn(two)).toEqual([b.path])
     expect(one.classList.contains('dossier-comments-item')).toBe(true)
     expect(page.classList.contains('dossier-comments-item')).toBe(false)
-    // Folded: its button and count, no title, list or composer.
+    // Folded: its button and count, and nothing more is even built.
     const opener = byKey(one, 'open')!
     expect(opener.hidden).toBe(false)
     expect(opener.getAttribute('aria-expanded')).toBe('false')
     expect(opener.textContent).toBe('Comment1 open')
     expect(q(one, '.dossier-comments-title').hidden).toBe(true)
-    expect(q(one, '.dossier-comments-threads').hidden).toBe(true)
-    expect(mainComposer(one).hidden).toBe(true)
+    expect(one.querySelector('.dossier-comments-threads')).toBeNull()
+    expect(mainComposer(one)).toBeNull()
     expect(byKey(page, 'open')!.hidden).toBe(true)
     // Its item's mark counts its open threads, as the page's element does.
     expect(document.getElementById('S-1')!.getAttribute(MARK)).toBe('1')
     opener.click()
+    byKey(two, 'open')!.click()
     await settle()
+    expect(rootsIn(one)).toEqual([a.path])
+    expect(rootsIn(two)).toEqual([b.path])
     expect(opener.getAttribute('aria-expanded')).toBe('true')
     expect(q(one, '.dossier-comments-threads').hidden).toBe(false)
     expect(mainComposer(one).hidden).toBe(false)
@@ -1574,6 +1575,79 @@ describe('with for: the comments on one item', () => {
     )
     expect(byKey(one, 'pin-button:main')!.hidden).toBe(true)
     expect(one.querySelector('.dossier-comments-place')).toBeNull()
+  })
+
+  /** A page with an element under each of `count` items, and one for it all. */
+  const mountMany = async (count: number) => {
+    const ids = Array.from({ length: count }, (_, at) => `I-${at}`)
+    document.body.innerHTML = `${ids
+      .map(
+        (id) =>
+          `<section id="${id}"><h2>Item ${id}</h2><dossier-comments for="${id}"></dossier-comments></section>`,
+      )
+      .join('')}<img id="shot" alt="Shot"><dossier-comments></dossier-comments>`
+    await settle()
+  }
+
+  /** Document-wide lookups and reads of the layout while `run` goes. */
+  const costOf = async (run: () => void | Promise<void>) => {
+    const queries = vi.spyOn(document, 'querySelectorAll')
+    const boxes = vi.spyOn(window.Element.prototype, 'getBoundingClientRect')
+    await run()
+    await settle()
+    const cost = {
+      queries: queries.mock.calls.length,
+      boxes: boxes.mock.calls.length,
+    }
+    queries.mockRestore()
+    boxes.mockRestore()
+    return cost
+  }
+
+  test('does the same page-wide work on a delivery however many items have an element', async () => {
+    const delivery = async (count: number) => {
+      await mountMany(count)
+      const one = comment(LEE, 'On one', { anchor: 'I-1' })
+      const five = comment(LEE, 'On five', { anchor: 'I-5' })
+      return costOf(() => peer.emit([thread(one), thread(five)]))
+    }
+    const few = await delivery(10)
+    document.body.replaceChildren()
+    const many = await delivery(60)
+    expect(many).toEqual(few)
+    // No element read the layout: nothing is pinned.
+    expect(many.boxes).toBe(0)
+    // Every item is marked, and the folded elements built only their button.
+    expect(document.getElementById('I-5')!.getAttribute(MARK)).toBe('1')
+    expect(
+      document.querySelectorAll('dossier-comments[for] textarea'),
+    ).toHaveLength(0)
+    expect(
+      document.querySelectorAll('dossier-comments[for] .dossier-comments-open'),
+    ).toHaveLength(60)
+  })
+
+  test('types into an item’s composer without looking through the page', async () => {
+    // With nothing pinned, no element follows the page's scrolls and keys.
+    const listens = vi.spyOn(document, 'addEventListener')
+    await mountMany(30)
+    expect(
+      listens.mock.calls.filter(([kind]) =>
+        ['scroll', 'keydown', 'load', 'toggle'].includes(kind),
+      ),
+    ).toEqual([])
+    listens.mockRestore()
+    const element = document.querySelector<HTMLElement>(
+      'dossier-comments[for="I-3"]',
+    )!
+    byKey(element, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const cost = await costOf(() => {
+      for (const text of ['A', 'An', 'Ano', 'Anot', 'Anote']) type(area, text)
+    })
+    expect(cost).toEqual({ queries: 0, boxes: 0 })
+    expect(area.value).toBe('Anote')
   })
 
   test('leaves an item’s mark to the element still counting it when the other leaves', async () => {
@@ -1910,11 +1984,11 @@ describe('with for: the comments on one item', () => {
     expect(
       q<HTMLTextAreaElement>(mainComposer(back.two), 'textarea').value,
     ).toBe('Kept on two')
-    for (const other of [back.page, back.one]) {
-      expect(
-        q<HTMLTextAreaElement>(mainComposer(other), 'textarea').value,
-      ).toBe('')
-    }
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(back.page), 'textarea').value,
+    ).toBe('')
+    // Nothing kept for it: still folded, its composer not built.
+    expect(mainComposer(back.one)).toBeNull()
     expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
   })
 })

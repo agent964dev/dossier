@@ -73,6 +73,8 @@ export class PinLayer {
   #frame = 0
   #observer: ResizeObserver | null = null
   #connected = false
+  /** Following the layout: only while connected with something to place. */
+  #listening = false
 
   constructor(document: Document, events: PinLayerEvents) {
     this.#events = events
@@ -108,10 +110,42 @@ export class PinLayer {
     this.#announce = announce
   }
 
-  /** Starts following the page's layout. */
+  /**
+   * Starts following the page's layout, once it has something to place: a
+   * page with many elements and no pins follows nothing.
+   */
   connect(): void {
     if (this.#connected) return
     this.#connected = true
+    this.#follow()
+  }
+
+  disconnect(): void {
+    if (!this.#connected) return
+    this.#connected = false
+    this.#follow()
+  }
+
+  /** Whether there is anything to place over the page. */
+  #drawing(): boolean {
+    return (
+      this.#marks.length > 0 ||
+      this.#overlays.size > 0 ||
+      this.#placed !== null ||
+      this.#placing !== null
+    )
+  }
+
+  /** Listens to the layout while connected and drawing, and only then. */
+  #follow(): void {
+    const wanted = this.#connected && this.#drawing()
+    if (wanted === this.#listening) return
+    this.#listening = wanted
+    if (wanted) this.#listen()
+    else this.#unlisten()
+  }
+
+  #listen(): void {
     const doc = this.element.ownerDocument
     const win = doc.defaultView as Win | null
     win?.addEventListener('resize', this.#schedule)
@@ -131,9 +165,7 @@ export class PinLayer {
     this.#schedule()
   }
 
-  disconnect(): void {
-    if (!this.#connected) return
-    this.#connected = false
+  #unlisten(): void {
     const doc = this.element.ownerDocument
     const win = doc.defaultView as Win | null
     win?.removeEventListener('resize', this.#schedule)
@@ -204,6 +236,7 @@ export class PinLayer {
       this.#draft.setAttribute('aria-label', `New pin, ${where}`)
     }
     this.#dot.hidden = state.placed === null || placing !== null
+    this.#follow()
     this.#observeTargets()
     this.layout()
   }
@@ -214,6 +247,8 @@ export class PinLayer {
 
   /** Places every marker from the boxes of the elements now. */
   layout(): void {
+    // Nothing to place: no reading of boxes, which would lay the page out.
+    if (!this.#drawing()) return
     const origin = this.element.getBoundingClientRect()
     for (const mark of this.#marks) {
       const marker = this.#markers.get(mark.key)
@@ -252,7 +287,7 @@ export class PinLayer {
   }
 
   readonly #schedule = (): void => {
-    if (this.#frame !== 0 || !this.#connected) return
+    if (this.#frame !== 0 || !this.#listening) return
     const win = this.element.ownerDocument.defaultView as Win | null
     if (win === null) return
     const run = (): void => {
