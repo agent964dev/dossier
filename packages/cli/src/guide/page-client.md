@@ -64,7 +64,8 @@ export.
   the newest 20 (`limit` up to 30), and `{ before: next }` the older ones;
   each is `{ id, type ('mention' or 'reply'), team, actor ({ email, name,
 image } or null), workspace, tree, page ({ path, title }), anchor, label,
-excerpt, link, at, read }`, where `link` opens the comment on its page.
+excerpt, link, at, read, agent }`, where `link` opens the comment on its
+  page and `agent` is true when an agent wrote it.
   `unread()` counts up to 10 ("9+" past nine), and `read(ids)` or
   `read('all')` marks this tree's read. A visitor has none.
   `<dossier-notifications>` (see Base layer) is a bell built on them.

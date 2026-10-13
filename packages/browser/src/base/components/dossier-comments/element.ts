@@ -626,6 +626,11 @@ export class DossierComments extends HTMLElement {
       this.#onHash,
     )
     clearTimeout(this.#highlightTimer)
+    // A highlight whose timer will not run again goes with it.
+    this.#highlight = null
+    for (const element of this.querySelectorAll('[data-highlight]')) {
+      element.removeAttribute('data-highlight')
+    }
     this.#lookup.cancel()
     this.#body?.pins.disconnect()
     this.#placing = null
@@ -1532,9 +1537,11 @@ export class DossierComments extends HTMLElement {
       const session = this.#session
       void (names.get(email) as Promise<string | null>).then((name) => {
         this.#awaiting.delete(email)
-        if (name === null || session !== this.#session) return
+        if (name === null) return
+        // Counted even while out of the page, so its threads take the name
+        // when it comes back; drawn only while it is in it.
         this.#namesSeen += 1
-        this.#render()
+        if (session === this.#session && this.isConnected) this.#render()
       })
     }
     return null

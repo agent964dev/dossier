@@ -2152,6 +2152,38 @@ describe('mentions in a comment', () => {
     )
     expect(peer.asked).toEqual([])
   })
+
+  test('show a name that came while the element was out of the page once it is back', async () => {
+    const dossier = fake as unknown as {
+      mentionable: (query: string) => Promise<Mentionable>
+    }
+    const original = dossier.mentionable
+    let answer: (found: Mentionable) => void = () => {}
+    dossier.mentionable = () =>
+      new Promise<Mentionable>((resolve) => {
+        answer = resolve
+      })
+    try {
+      peer.threads = [
+        thread(
+          comment(LEE, 'cc @nora@acme.com', { mentions: ['nora@acme.com'] }),
+        ),
+      ]
+      const element = await mount()
+      expect(chips(element)).toEqual([])
+      element.remove()
+      answer({
+        people: [{ email: 'nora@acme.com', name: 'Nora Saleh', image: null }],
+        teams: [],
+      })
+      await settle()
+      document.body.append(element)
+      await settle()
+      expect(chips(element)).toEqual([['@Nora Saleh', 'nora@acme.com', false]])
+    } finally {
+      dossier.mentionable = original
+    }
+  })
 })
 
 describe('a link to a comment', () => {
@@ -2188,6 +2220,18 @@ describe('a link to a comment', () => {
     expect(scrolled.mock.contexts).toContain(li)
     await vi.advanceTimersByTimeAsync(HIGHLIGHT_MS)
     expect(highlighted(shown)).toEqual([])
+  })
+
+  test('leaves no highlight behind when the element leaves the page', async () => {
+    const here = comment(LEE, 'Linked')
+    peer.threads = [thread(here)]
+    history.replaceState(null, '', linkTo(here.path))
+    const element = await mount()
+    expect(highlighted(element)).toEqual([here.path])
+    element.remove()
+    document.body.append(element)
+    await settle()
+    expect(highlighted(element)).toEqual([])
   })
 
   test('opens the item’s own element, with a resolved thread shown and said so', async () => {

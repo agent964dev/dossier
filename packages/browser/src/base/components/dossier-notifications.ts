@@ -429,16 +429,30 @@ export class DossierNotifications extends HTMLElement {
     )
   }
 
-  /** A notification chosen: read now, while its link goes on as any link. */
-  #choose(n: DossierNotification): void {
-    if (!n.read) {
-      this.#items = this.#items.map((had) =>
-        had.id === n.id ? { ...had, read: true } : had,
-      )
-      this.#unread = Math.max(0, this.#unread - 1)
-      this.#renderCount()
-    }
-    this.#dossier?.notifications.read([n.id]).catch(() => {})
+  /**
+   * A notification chosen: read now, while its link goes on as any link.
+   * Its row shows read where it is, so the link it is still holds the
+   * click, and the count is Dossier's answer, never one less than a cap.
+   */
+  #choose(id: string, link: HTMLAnchorElement): void {
+    const chosen = this.#items.find((n) => n.id === id)
+    if (chosen === undefined || chosen.read) return
+    this.#items = this.#items.map((n) =>
+      n.id === id ? { ...n, read: true } : n,
+    )
+    link.removeAttribute('data-unread')
+    link.querySelector('.dossier-notifications-unread')?.remove()
+    const parts = this.#parts!
+    parts.markAll.hidden = this.#unread <= 1 && this.#items.every((n) => n.read)
+    const session = this.#session
+    this.#dossier?.notifications.read([id]).then(
+      (unread) => {
+        if (session !== this.#session) return
+        this.#unread = unread
+        this.#renderCount()
+      },
+      () => {},
+    )
   }
 
   #renderCount(): void {
@@ -475,7 +489,7 @@ export class DossierNotifications extends HTMLElement {
         link.href = n.link
         link.setAttribute('data-id', n.id)
         if (!n.read) link.setAttribute('data-unread', '')
-        link.addEventListener('click', () => this.#choose(n))
+        link.addEventListener('click', () => this.#choose(n.id, link))
         const who = notificationActor(n)
         const avatar = span('dossier-notifications-avatar', '')
         avatar.setAttribute('aria-hidden', 'true')
@@ -493,7 +507,12 @@ export class DossierNotifications extends HTMLElement {
         text.className = 'dossier-notifications-text'
         const line = span('dossier-notifications-line', '')
         if (!n.read) {
-          line.append(span('dossier-notifications-hidden', `${TEXT.unread}: `))
+          line.append(
+            span(
+              'dossier-notifications-hidden dossier-notifications-unread',
+              `${TEXT.unread}: `,
+            ),
+          )
         }
         line.append(span('dossier-notifications-who', who))
         // Written with the CLI, through the person's agent key.

@@ -71,16 +71,27 @@ export function NotificationBell() {
   )
   const [next, setNext] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
+  const [readFailed, setReadFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
   const title = useRef<HTMLHeadingElement>(null)
 
+  /**
+   * Bumped by every first page asked for and every mark read: an answer
+   * that left before either is dropped, so it never brings rows back
+   * unread or adds older ones after another first page.
+   */
+  const generation = useRef(0)
+
   const load = useCallback(async (before: string | null) => {
+    if (before === null) generation.current += 1
+    const asked = generation.current
     setBusy(true)
     const page = await ask(
       before === null ? { limit: '20' } : { limit: '20', before },
     )
+    if (asked !== generation.current) return
     setBusy(false)
     if (page === null) {
       setFailed(true)
@@ -161,19 +172,38 @@ export function NotificationBell() {
   }
 
   const readAll = async () => {
+    generation.current += 1
+    setBusy(false)
+    const before = { items, unread }
+    setReadFailed(false)
     setItems((had) => had?.map((n) => ({ ...n, read: true })) ?? had)
     setUnread(0)
     title.current?.focus()
     const left = await markRead('all')
-    if (left !== null) setUnread(left)
+    if (left === null) {
+      // Not read after all: as they were, and said so.
+      setItems(before.items)
+      setUnread(before.unread)
+      setReadFailed(true)
+      return
+    }
+    setUnread(left)
     // "mentioned you" on the screen behind goes with them.
     void router.invalidate()
   }
 
   const choose = (n: DossierNotification) => {
     if (n.read) return
-    setUnread((was) => Math.max(0, was - 1))
-    void markRead([n.id])
+    generation.current += 1
+    setBusy(false)
+    // Shown read at once; the count is Dossier's, never one less than a cap.
+    setItems(
+      (had) =>
+        had?.map((m) => (m.id === n.id ? { ...m, read: true } : m)) ?? had,
+    )
+    void markRead([n.id]).then((left) => {
+      if (left !== null) setUnread(left)
+    })
   }
 
   const badge = unreadBadge(unread)
@@ -234,11 +264,13 @@ export function NotificationBell() {
             role="status"
             className="empty:hidden px-3 pt-3 text-sm text-neutral-400"
           >
-            {failed
-              ? 'Notifications could not load. Try again in a moment.'
-              : items === null && busy
-                ? 'Loading…'
-                : ''}
+            {readFailed
+              ? 'Could not mark them as read. Try again.'
+              : failed
+                ? 'Notifications could not load. Try again in a moment.'
+                : items === null && busy
+                  ? 'Loading…'
+                  : ''}
           </p>
           {items !== null && items.length === 0 && !failed ? (
             <p className="px-3 py-10 text-center text-sm text-neutral-400">

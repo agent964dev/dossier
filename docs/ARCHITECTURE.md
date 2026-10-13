@@ -429,8 +429,9 @@ person's newest 300. `src/core/notifications.ts` reads them for
 counts) and marks them with `POST /_/api/notifications/read`, by id or all.
 Every read shows only rows whose comment still has its text, whose mention
 still names the person, and whose page passes `Access.require('read')` now;
-missing and unreadable look the same. The unread count is one indexed read
-of the newest ten unread, then the access of their pages. Opening a page
+missing and unreadable look the same. The unread count reads the unread
+rows newest first, 50 at a time by an index, with the access of their pages,
+until it finds ten readable ones or has read 300 rows. Opening a page
 (its view, not a renewal) reads that page's notifications. "mentioned you"
 (`src/core/mentions.ts`) is an unread mention notification whose comment
 still names the person, by email or by the team in `via`. Dossier's screens

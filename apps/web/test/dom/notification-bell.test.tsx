@@ -45,6 +45,10 @@ let pages: Record<
   { notifications: DossierNotification[]; next: string | null }
 > = {}
 const calls: { url: string; init: RequestInit | undefined }[] = []
+/** Holds a list answer for the page `before` names until it resolves. */
+let gate: ((before: string) => Promise<void>) | null = null
+/** What marking read answers, when not the usual. */
+let readAnswer: { status: number; unread: number } | null = null
 
 let host: HTMLDivElement
 let root: Root
@@ -53,6 +57,8 @@ beforeEach(() => {
   unread = 0
   pages = {}
   calls.length = 0
+  gate = null
+  readAnswer = null
   invalidate.mockClear()
   vi.stubGlobal(
     'fetch',
@@ -60,10 +66,17 @@ beforeEach(() => {
       calls.push({ url: input, init })
       const url = new URL(input, 'https://dossier.test')
       if (url.pathname === '/_/api/notifications/read') {
+        if (readAnswer !== null) {
+          return Response.json(
+            { unread: readAnswer.unread },
+            { status: readAnswer.status },
+          )
+        }
         unread = 0
         return Response.json({ unread })
       }
       const before = url.searchParams.get('before') ?? ''
+      if (url.searchParams.get('limit') !== '0') await gate?.(before)
       const page =
         url.searchParams.get('limit') === '0'
           ? { notifications: [], next: null }
@@ -214,5 +227,95 @@ describe('the notification bell', () => {
       document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
     })
     expect(panel().hidden).toBe(true)
+  })
+
+  /** Holds the list answers for `before` until the returned release runs. */
+  const hold = (held: string) => {
+    let release = () => {}
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    gate = (before) => (before === held ? waiting : Promise.resolve())
+    return () => act(async () => release())
+  }
+
+  it('never lets an answer that left before Mark all as read bring rows back unread', async () => {
+    unread = 1
+    pages = { '': { notifications: [note(1)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    const release = hold('')
+    act(() => bell().click())
+    await settle()
+    await act(async () => buttonNamed('Mark all as read')!.click())
+    await settle()
+    await release()
+    await settle()
+    expect(rows().some((a) => a.hasAttribute('data-unread'))).toBe(false)
+    expect(badge()).toBeNull()
+  })
+
+  it('drops older ones asked for before the first page was read again', async () => {
+    pages = {
+      '': { notifications: [note(1)], next: 'c1' },
+      c1: { notifications: [note(2)], next: null },
+    }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    act(() => bell().click())
+    await settle()
+    const release = hold('c1')
+    act(() => buttonNamed('Show more')!.click())
+    await settle()
+    // Closed and opened again: a new first page, with its own cursor.
+    act(() => bell().click())
+    pages[''] = { notifications: [note(0), note(1)], next: 'c2' }
+    act(() => bell().click())
+    await settle()
+    await release()
+    await settle()
+    expect(rows().map((a) => a.getAttribute('href'))).toEqual([
+      note(0).link,
+      note(1).link,
+    ])
+    expect(buttonNamed('Show more')).toBeDefined()
+  })
+
+  it('keeps them unread and says so when Mark all as read fails', async () => {
+    unread = 2
+    pages = { '': { notifications: [note(1), note(2)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    act(() => bell().click())
+    await settle()
+    readAnswer = { status: 503, unread: 0 }
+    await act(async () => buttonNamed('Mark all as read')!.click())
+    await settle()
+    expect(rows().every((a) => a.hasAttribute('data-unread'))).toBe(true)
+    expect(badge()?.textContent).toBe('2')
+    expect(panel().textContent).toContain(
+      'Could not mark them as read. Try again.',
+    )
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('shows a chosen one read and takes the count Dossier answers', async () => {
+    // Dossier counts up to ten: "9+".
+    unread = 10
+    readAnswer = { status: 200, unread: 10 }
+    pages = { '': { notifications: [note(1), note(2)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    act(() => bell().click())
+    await settle()
+    const row = rows()[0]!
+    row.addEventListener('click', (event) => event.preventDefault())
+    await act(async () => row.click())
+    await settle()
+    expect(badge()?.textContent).toBe('9+')
+    expect(rows()[0]!.hasAttribute('data-unread')).toBe(false)
+    await act(async () => rows()[0]!.click())
+    await settle()
+    expect(calls.filter((c) => c.url.endsWith('/read'))).toHaveLength(1)
   })
 })

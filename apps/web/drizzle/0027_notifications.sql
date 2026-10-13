@@ -21,9 +21,12 @@ CREATE INDEX `notifications_email_idx` ON `notifications` (`email`,`created_at`)
 CREATE INDEX `notifications_unread_idx` ON `notifications` (`email`,`read_at`);--> statement-breakpoint
 CREATE INDEX `notifications_page_idx` ON `notifications` (`page_node_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `notifications_comment_email_unique` ON `notifications` (`comment_node_id`,`email`);--> statement-breakpoint
--- Every mention written before notifications becomes its person's
--- notification, the newest per comment, read if they opened the page since,
--- so "mentioned you" shows as it did.
+-- Mentions written before notifications become their people's
+-- notifications, the newest per person and comment, read if they opened the
+-- page since, so "mentioned you" shows as it did. Mentions on comments
+-- deleted since come along too, and a person may get more than the 300
+-- a change keeps until their next notification is written; every read
+-- leaves out deleted comments and checks the page's access.
 INSERT OR IGNORE INTO `notifications` (`id`, `email`, `type`, `tree_id`, `page_node_id`, `comment_node_id`, `anchor`, `label`, `via`, `actor_id`, `created_at`, `read_at`)
 SELECT lower(hex(randomblob(16))), m.email, 'mention', m.tree_id, m.page_node_id, m.comment_node_id,
 	json_extract(v.json_value, '$.anchor'), json_extract(v.json_value, '$.label'), m.via, e.actor_id, m.created_at,

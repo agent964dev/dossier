@@ -528,6 +528,8 @@ describe('<dossier-notifications>', () => {
     me: { email: 'lee@acme.com', name: 'Lee', role: 'read' } as Me | null,
     pages: [] as NotificationsList[],
     unread: 0,
+    /** What marking read answers: how many stay unread. */
+    left: 0,
     list: vi.fn(),
     read: vi.fn(),
   }
@@ -546,7 +548,7 @@ describe('<dossier-notifications>', () => {
       unread: () => Promise.resolve(viewer.unread),
       read: (ids: readonly string[] | 'all') => {
         viewer.read(ids)
-        return Promise.resolve(0)
+        return Promise.resolve(viewer.left)
       },
     },
   } as unknown as Dossier
@@ -558,6 +560,7 @@ describe('<dossier-notifications>', () => {
     viewer.me = { email: 'lee@acme.com', name: 'Lee', role: 'read' }
     viewer.pages = []
     viewer.unread = 0
+    viewer.left = 0
     viewer.list.mockReset()
     viewer.read.mockReset()
   })
@@ -670,6 +673,8 @@ describe('<dossier-notifications>', () => {
     item.addEventListener('click', (event) => event.preventDefault())
     item.click()
     expect(viewer.read).toHaveBeenCalledWith(['n1'])
+    // The count Dossier answers.
+    await settle()
     expect(badge.hidden).toBe(true)
 
     document.dispatchEvent(
@@ -689,6 +694,28 @@ describe('<dossier-notifications>', () => {
     // Pressing elsewhere closes it too.
     document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
     expect(panel.hidden).toBe(true)
+  })
+
+  test('takes the count Dossier answers when one is chosen, and shows that row read', async () => {
+    viewer.unread = 10
+    viewer.left = 10
+    viewer.pages = [
+      { notifications: [note(1), note(2)], unread: 10, next: null },
+    ]
+    const { button, panel, badge } = await bell()
+    button.click()
+    await settle()
+    const row = panel.querySelector<HTMLAnchorElement>('a')!
+    row.addEventListener('click', (event) => event.preventDefault())
+    row.click()
+    await settle()
+    // Ten or more stay unread: still "9+", never one less than the cap.
+    expect(badge.textContent).toBe('9+')
+    expect(row.hasAttribute('data-unread')).toBe(false)
+    expect(row.textContent).not.toContain('Unread:')
+    row.click()
+    await settle()
+    expect(viewer.read.mock.calls).toEqual([[['n1']]])
   })
 
   test('keeps focus on the same notification when the list refreshes', async () => {
