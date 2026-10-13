@@ -52,6 +52,10 @@ describe('the agent guide', () => {
       'Data: answers/ (3 files) · Comments: 2',
       'dossier read <workspace>/<tree>/<folder>/',
       'DOSSIER_JSON=1',
+      'To find where you can work, run `dossier ls`',
+      '`dossier ls <workspace>` lists one workspace',
+      'An agent key limited to one node sees only that node.',
+      '`dossier comment --resolve <thread>` resolves a thread',
     ]) {
       expect(text).toContain(phrase)
     }

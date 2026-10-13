@@ -145,3 +145,252 @@ describe('dossier ls', () => {
     expect(cli.stderr()).toContain('Not signed in to dossier.agent964.com.')
   })
 })
+
+const tree = (workspace: string, name: string, can: string) => ({
+  name,
+  target: `${workspace}/${name}/`,
+  link: `https://dossier.acme.com/${workspace}/${name}/`,
+  can,
+})
+
+const SHARED = [
+  {
+    workspace: 'globex',
+    tree: 'plans',
+    path: 'q3.html',
+    kind: 'page',
+    title: 'Q3 plan',
+    target: 'globex/plans/q3',
+    link: 'https://dossier.acme.com/globex/plans/q3',
+    can: 'respond',
+    sharedAt: '2026-10-12T00:00:00.000Z',
+    waiting: true,
+    mentioned: false,
+  },
+  {
+    workspace: 'agent964',
+    tree: 'acme',
+    path: 'questions',
+    kind: 'folder',
+    title: 'Questions',
+    target: 'agent964/acme/questions/',
+    link: 'https://dossier.acme.com/agent964/acme/questions/',
+    can: 'respond',
+    sharedAt: '2026-10-11T00:00:00.000Z',
+    waiting: false,
+    mentioned: true,
+  },
+]
+
+const PLACES = {
+  scope: null,
+  workspaces: [
+    {
+      name: 'agent964',
+      role: 'admin',
+      suspended: false,
+      trees: [
+        tree('agent964', 'acme', 'write'),
+        tree('agent964', 'handbook', 'read'),
+      ],
+    },
+    { name: 'studio', role: 'member', suspended: true, trees: [] },
+  ],
+  shared: SHARED,
+}
+
+const workspaceView = (over: Record<string, unknown> = {}) => ({
+  name: 'agent964',
+  role: 'member',
+  suspended: false,
+  trees: [
+    tree('agent964', 'acme', 'respond'),
+    tree('agent964', 'handbook', 'read'),
+  ],
+  shared: [SHARED[1]],
+  teams: [
+    { name: 'Design', members: 4 },
+    { name: 'Design Ops', members: 1 },
+  ],
+  createsTrees: true,
+  scope: null,
+  ...over,
+})
+
+describe('dossier ls with no tree', () => {
+  it('lists each workspace with its role, its trees with what you may do, then what is shared with you', async () => {
+    const cli = await setUp(() => Response.json(PLACES))
+
+    expect(await cli.run(['ls'])).toBe(0)
+    expect(cli.stdout()).toBe(
+      [
+        'agent964/           workspace  admin',
+        'agent964/acme/      tree       write',
+        'agent964/handbook/  tree       read',
+        'studio/             workspace  member, suspended',
+        '',
+        'Shared with you:',
+        'globex/plans/q3           page    respond  Q3 plan · waiting for your answer',
+        'agent964/acme/questions/  folder  respond  Questions · mentioned you',
+        '',
+      ].join('\n'),
+    )
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url.href).toBe(
+      'https://dossier.acme.com/_/api/workspaces',
+    )
+    expect(requests[0]?.headers.get('authorization')).toBe('Bearer dsk_one')
+  })
+
+  it('gives the same structure with --json, and asks the deployment a link to its root names', async () => {
+    const cli = await setUp(() => Response.json(PLACES))
+
+    expect(await cli.run(['ls', 'https://dossier.acme.com/', '--json'])).toBe(0)
+    expect(JSON.parse(cli.stdout())).toEqual(PLACES)
+    expect(requests[0]?.url.pathname).toBe('/_/api/workspaces')
+  })
+
+  it('says so when there is nowhere to work yet', async () => {
+    const cli = await setUp(() =>
+      Response.json({ scope: null, workspaces: [], shared: [] }),
+    )
+
+    expect(await cli.run(['ls'])).toBe(0)
+    expect(cli.stdout()).toBe(
+      'You are in no workspace, and nothing is shared with you yet.\n',
+    )
+  })
+
+  it('shows a key limited to a node only that node', async () => {
+    const scope = {
+      target: 'agent964/acme/plans/',
+      workspace: 'agent964',
+      link: 'https://dossier.acme.com/agent964/acme/plans/',
+      can: 'read',
+    }
+    const cli = await setUp((request) =>
+      Response.json(
+        request.url.pathname === '/_/api/workspaces'
+          ? { scope, workspaces: [], shared: [] }
+          : workspaceView({
+              role: null,
+              trees: [],
+              shared: [],
+              teams: null,
+              createsTrees: false,
+              scope,
+            }),
+      ),
+    )
+    const expected = [
+      'agent964/acme/plans/  read',
+      'This key is limited to agent964/acme/plans/; it sees nothing else.',
+      '',
+    ].join('\n')
+
+    expect(await cli.run(['ls'])).toBe(0)
+    expect(cli.stdout()).toBe(expected)
+    expect(await cli.run(['ls', 'agent964'])).toBe(0)
+    expect(cli.stdout()).toBe(expected)
+    expect(requests[1]?.url.pathname).toBe('/_/api/workspaces/agent964')
+  })
+
+  it('exits 4 without an agent key, asking nothing', async () => {
+    const cli = await setUp(() => Response.json(PLACES), {})
+
+    expect(await cli.run(['ls'])).toBe(4)
+    expect(requests).toEqual([])
+  })
+})
+
+describe('dossier ls <workspace>', () => {
+  it.each([['agent964'], ['agent964/'], ['https://dossier.acme.com/agent964']])(
+    'lists a member its trees, what is shared there, its teams and how to make a tree: %s',
+    async (target) => {
+      const cli = await setUp(() => Response.json(workspaceView()))
+
+      expect(await cli.run(['ls', target])).toBe(0)
+      expect(cli.stdout()).toBe(
+        [
+          'agent964/           workspace  member',
+          'agent964/acme/      tree       respond',
+          'agent964/handbook/  tree       read',
+          '',
+          'Shared with you here:',
+          'agent964/acme/questions/  folder  respond  Questions · mentioned you',
+          '',
+          'Teams: share with team:<name>, mention with @team:<name> (@team:"<name>" when it has a space):',
+          'Design      4 members',
+          'Design Ops  1 member',
+          '',
+          'Make a tree by pushing to a new tree name: dossier push <folder> agent964/<tree>/',
+          '',
+        ].join('\n'),
+      )
+      expect(requests[0]?.url.pathname).toBe('/_/api/workspaces/agent964')
+    },
+  )
+
+  it('shows someone with only shares there those shares, with no teams and no way to make a tree', async () => {
+    const cli = await setUp(() =>
+      Response.json(
+        workspaceView({
+          role: null,
+          trees: [],
+          teams: null,
+          createsTrees: false,
+        }),
+      ),
+    )
+
+    expect(await cli.run(['ls', 'agent964'])).toBe(0)
+    expect(cli.stdout()).toBe(
+      [
+        'Shared with you in agent964:',
+        'agent964/acme/questions/  folder  respond  Questions · mentioned you',
+        '',
+      ].join('\n'),
+    )
+  })
+
+  it('leaves out the way to make a tree for a key that cannot push, and says when no tree opens', async () => {
+    const cli = await setUp(() =>
+      Response.json(
+        workspaceView({
+          trees: [],
+          shared: [],
+          teams: [],
+          createsTrees: false,
+        }),
+      ),
+    )
+
+    expect(await cli.run(['ls', 'agent964', '--json'])).toBe(0)
+    expect(JSON.parse(cli.stdout()).createsTrees).toBe(false)
+    expect(await cli.run(['ls', 'agent964'])).toBe(0)
+    expect(cli.stdout()).toBe(
+      ['agent964/  workspace  member', 'No trees you can open yet.', ''].join(
+        '\n',
+      ),
+    )
+  })
+
+  it('answers a workspace you cannot see as nothing there, exit 3', async () => {
+    const cli = await setUp(() =>
+      errorResponse('not_found', 'Nothing is here, or you cannot open it.'),
+    )
+
+    expect(await cli.run(['ls', 'globex'])).toBe(3)
+    expect(cli.stderr()).toBe(
+      'dossier: Nothing at globex, or you cannot open it.\n' +
+        'Run dossier ls to see your workspaces and what is shared with you.\n',
+    )
+  })
+
+  it('refuses a name that is not a workspace before asking', async () => {
+    const cli = await setUp(() => Response.json(workspaceView()))
+
+    expect(await cli.run(['ls', 'Not_A_Workspace'])).toBe(2)
+    expect(requests).toEqual([])
+  })
+})

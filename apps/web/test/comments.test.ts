@@ -1583,6 +1583,223 @@ describe('comments agents write', () => {
   })
 })
 
+describe('threads agents resolve and reopen', () => {
+  const mark = (page: string, thread: string, resolved: boolean) =>
+    Effect.flatMap(Data, (data) =>
+      data.markThread({
+        ref: ref(page),
+        thread,
+        resolved,
+        opId: crypto.randomUUID() as OpId,
+      }),
+    )
+
+  /** POST /_/api/comment/thread with a key, as the CLI sends it. */
+  const route = async (secret: string, body: Record<string, unknown>) => {
+    const response = await new Browser().fetch('/_/api/comment/thread', {
+      method: 'POST',
+      purpose: 'none',
+      headers: {
+        authorization: `Bearer ${secret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ ...body, opId: crypto.randomUUID() }),
+    })
+    return {
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    }
+  }
+
+  it('resolve and reopen as the component does, for whoever may comment, once each', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const lina = await given(tree, 'respond', '', 'lina-m')
+    const sara = await given(tree, 'respond', '', 'sara-m')
+    const root = await write(T0, lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Per pallet or per truck?', {
+        anchor: 'pricing',
+        label: 'Pricing',
+      }),
+    })
+    const saraKey = await keySecretFor(sara.who)
+    const page = `${ws.name}/${tree.name}/plan`
+
+    // Named on its own, by its tree path, through the CLI's route.
+    const resolved = await route(saraKey, {
+      thread: `${ws.name}/${tree.name}/${root.path}`,
+      resolved: true,
+    })
+    expect(resolved.status).toBe(200)
+    expect(resolved.body).toMatchObject({
+      thread: root.path,
+      page: 'plan.html',
+      resolved: true,
+      changed: true,
+    })
+    expect(
+      commentOfFragment(new URL(resolved.body.link as string).hash),
+    ).toEqual({ comment: root.path, anchor: 'pricing' })
+    const [after] = await threadsOf(lina.caller, tree)
+    expect(after!.data).toMatchObject({
+      resolved: true,
+      resolvedBy: sara.email,
+    })
+
+    // Again: nothing more is written.
+    const before = await count(
+      'nodes',
+      "tree_id = ? and origin = 'data' and kind = 'file'",
+      tree.treeId,
+    )
+    const again = await route(saraKey, {
+      page,
+      thread: root.path,
+      resolved: true,
+    })
+    expect(again.body).toMatchObject({ resolved: true, changed: false })
+    expect(
+      await count(
+        'nodes',
+        "tree_id = ? and origin = 'data' and kind = 'file'",
+        tree.treeId,
+      ),
+    ).toBe(before)
+
+    // Reopened with the page and its path from the page's folder.
+    const reopened = await runAs(
+      await agent(sara.who),
+      mark(page, root.path, false),
+    )
+    expect(reopened).toMatchObject({ thread: root.path, changed: true })
+    const [open] = await threadsOf(lina.caller, tree)
+    expect(open!.data.resolved).toBe(false)
+  })
+
+  it('refuse a reader, a read-only key and a key that does not reach the comments; a stranger finds nothing', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const lina = await given(tree, 'respond', '', 'lina-r')
+    const reader = await given(tree, 'read', '', 'reader-r')
+    const root = await write(T0, lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Per pallet or per truck?'),
+    })
+    const page = `${ws.name}/${tree.name}/plan`
+    const failure = async (caller: Caller) =>
+      failureAs(caller, mark(page, root.path, true))
+
+    expect(await failure(await agent(reader.who))).toMatchObject({
+      code: 'forbidden',
+    })
+    expect(
+      await failure(await agent(lina.who, { readOnly: true })),
+    ).toMatchObject({
+      code: 'forbidden',
+      fix: 'This agent key is read only. Use a key that can write.',
+    })
+    const planNode = (await nodeAt(tree.treeId, 'plan.html'))!.id
+    expect(
+      await failure(await agent(lina.who, { scope: planNode })),
+    ).toMatchObject({ code: 'forbidden' })
+    const stranger = await failure(await agent(await person('stranger-r')))
+    expect(stranger).toMatchObject({ code: 'not_found' })
+    const missing = await failureAs(
+      await agent(lina.who),
+      mark(`${ws.name}/${tree.name}/nothing`, root.path, true),
+    )
+    expect(missing).toMatchObject({ code: 'not_found' })
+    // A key whose reach holds the whole tree resolves.
+    const rootNode = (await nodeAt(tree.treeId, ''))!.id
+    expect(
+      await runAs(
+        await agent(lina.who, { scope: rootNode }),
+        mark(page, root.path, true),
+      ),
+    ).toMatchObject({ changed: true })
+    const [thread] = await threadsOf(lina.caller, tree)
+    expect(thread!.data.resolved).toBe(true)
+
+    // Already resolved: those who may not resolve are still refused, rather
+    // than told nothing changed.
+    expect(await failure(await agent(reader.who))).toMatchObject({
+      code: 'forbidden',
+    })
+    expect(
+      await failure(await agent(lina.who, { readOnly: true })),
+    ).toMatchObject({
+      code: 'forbidden',
+    })
+    expect(
+      await failure(await agent(lina.who, { scope: planNode })),
+    ).toMatchObject({
+      code: 'forbidden',
+    })
+    expect(
+      await failure(await agent(await person('stranger-r2'))),
+    ).toMatchObject({ code: 'not_found' })
+
+    // The workspace's admin holds write on the tree, and reopens it.
+    expect(
+      await runAs(await agent(owner), mark(page, root.path, false)),
+    ).toMatchObject({ changed: true })
+    const [reopened] = await threadsOf(lina.caller, tree)
+    expect(reopened!.data.resolved).toBe(false)
+  })
+
+  it('refuse what is not a thread, and find a page’s threads in a folder below the root', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const lina = await given(tree, 'respond', '', 'lina-t')
+    const root = await write(T0, lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Per pallet or per truck?'),
+    })
+    const reply = await write(minutes(1), lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Per truck.', { replyTo: root.path }),
+    })
+    const key = await keySecretFor(lina.who)
+    const base = `${ws.name}/${tree.name}`
+
+    const ofReply = await route(key, {
+      thread: `${base}/${reply.path}`,
+      resolved: true,
+    })
+    expect(ofReply.status).toBe(400)
+    expect(ofReply.body.error).toMatchObject({ code: 'invalid' })
+    const notComments = await route(key, {
+      thread: `${base}/questions/index.html`,
+      resolved: true,
+    })
+    expect(notComments.status).toBe(400)
+
+    const asked = await write(minutes(2), lina.caller, tree, {
+      page: 'questions/index.html',
+      path: 'questions/index.comments/',
+      patch: comment('When is this due?'),
+    })
+    expect(asked.path).toMatch(/^questions\/index\.comments\//)
+    const resolved = await route(key, {
+      thread: `${base}/${asked.path}`,
+      resolved: true,
+    })
+    expect(resolved.status).toBe(200)
+    expect(resolved.body).toMatchObject({
+      page: 'questions/index.html',
+      thread: asked.path.slice('questions/'.length),
+      changed: true,
+    })
+    expect(new URL(resolved.body.link as string).pathname).toBe(
+      `/${base}/questions/`,
+    )
+    const [thread] = await threadsOf(
+      lina.caller,
+      tree,
+      'questions/index.comments/',
+    )
+    expect(thread!.data.resolved).toBe(true)
+  })
+})
+
 describe('what an agent reads', () => {
   it('reads a comments folder as its threads, and counts a page’s comments', async () => {
     const tree = await pushForms(owner, ws, FILES)

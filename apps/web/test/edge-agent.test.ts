@@ -1,9 +1,11 @@
+import type { OpId } from '@dossier/contracts'
 import { SELF } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import {
+  Data,
   SignIn,
   type CommitResult,
   type StageResult,
@@ -11,9 +13,20 @@ import {
 import { bearerOf } from '../src/edge/caller.ts'
 import { Browser, signedIn } from './support/browser.ts'
 import { harness, ORIGIN } from './support/harness.ts'
-import { everything } from './support/keys.ts'
+import { everything, keySecretFor } from './support/keys.ts'
 import { callerOf, fresh, runAs } from './support/people.ts'
-import { agent, pushAll, ref, workspace } from './support/trees.ts'
+import {
+  agent,
+  join,
+  nodeAt,
+  person,
+  pushAll,
+  ref,
+  share,
+  team,
+  treeOf,
+  workspace,
+} from './support/trees.ts'
 
 afterEach(() => harness.reset())
 
@@ -345,5 +358,287 @@ describe('several credentials in one Authorization value', () => {
       )
       expect(api.status, `${first} + ${second}`).toBe(401)
     }
+  })
+})
+
+describe('where an agent can work', () => {
+  const PAGE = '<!doctype html><title>Page</title><p>A page</p>'
+
+  const get = async (path: string, secret: string) => {
+    const response = await SELF.fetch(`${ORIGIN}/_/api/${path}`, {
+      headers: { authorization: `Bearer ${secret}` },
+    })
+    return {
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    }
+  }
+
+  const treeAt = (ws: string, name: string, can: string) => ({
+    name,
+    target: `${ws}/${name}/`,
+    link: `${ORIGIN}/${ws}/${name}/`,
+    can,
+  })
+
+  /**
+   * An admin with two workspaces; a member who reads one tree through a
+   * workspace share and was given a folder of another; a guest given a page;
+   * and someone given nothing.
+   */
+  const world = async () => {
+    const admin = await person('ls-admin')
+    const member = await person('ls-member')
+    const guest = await person('ls-guest')
+    const outsider = await person('ls-outsider')
+    const ws = await workspace(admin)
+    const other = await workspace(admin)
+    await join(ws, member)
+    await team(ws, 'Design', [admin, member])
+    await team(ws, 'Design Ops')
+    const pusher = await agent(admin)
+    committed(
+      await pushAll(pusher, `${ws.name}/acme`, {
+        'plan.html': PAGE,
+        'questions/index.html': PAGE,
+      }),
+    )
+    committed(await pushAll(pusher, `${ws.name}/notes`, { 'index.html': PAGE }))
+    committed(await pushAll(pusher, `${other.name}/site`, { 'a.html': PAGE }))
+    const acme = (await treeOf(ws.name, 'acme'))!.id
+    const notes = (await treeOf(ws.name, 'notes'))!.id
+    const rootOf = async (tree: string) => (await nodeAt(tree, ''))!.id
+    await share(notes, await rootOf(notes), 'workspace', ws.id, 'read', admin)
+    const questions = (await nodeAt(acme, 'questions'))!.id
+    await share(
+      acme,
+      questions,
+      'email',
+      member.email.toLowerCase(),
+      'respond',
+      admin,
+    )
+    const plan = (await nodeAt(acme, 'plan.html'))!.id
+    await share(
+      acme,
+      plan,
+      'email',
+      guest.email.toLowerCase(),
+      'respond',
+      admin,
+    )
+    return { admin, member, guest, outsider, ws, other }
+  }
+
+  it('lists an admin and a member their workspaces, the trees each opens with what they may do, and their shares', async () => {
+    const { admin, member, ws, other } = await world()
+
+    const mine = await get('workspaces', await keySecretFor(admin))
+    expect(mine.status).toBe(200)
+    expect(mine.body).toEqual({
+      scope: null,
+      workspaces: [ws, other]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((w) => ({
+          name: w.name,
+          role: 'admin',
+          suspended: false,
+          trees:
+            w === ws
+              ? [
+                  treeAt(ws.name, 'acme', 'write'),
+                  treeAt(ws.name, 'notes', 'write'),
+                ]
+              : [treeAt(other.name, 'site', 'write')],
+        })),
+      shared: [],
+    })
+
+    const theirs = await get('workspaces', await keySecretFor(member))
+    expect(theirs.body).toMatchObject({
+      scope: null,
+      workspaces: [
+        {
+          name: ws.name,
+          role: 'member',
+          suspended: false,
+          trees: [treeAt(ws.name, 'notes', 'read')],
+        },
+      ],
+      shared: [
+        {
+          workspace: ws.name,
+          tree: 'acme',
+          path: 'questions',
+          kind: 'folder',
+          target: `${ws.name}/acme/questions/`,
+          link: `${ORIGIN}/${ws.name}/acme/questions/`,
+          can: 'respond',
+        },
+      ],
+    })
+
+    const one = await get(`workspaces/${ws.name}`, await keySecretFor(member))
+    expect(one.status).toBe(200)
+    expect(one.body).toMatchObject({
+      name: ws.name,
+      role: 'member',
+      suspended: false,
+      trees: [treeAt(ws.name, 'notes', 'read')],
+      shared: [{ target: `${ws.name}/acme/questions/`, can: 'respond' }],
+      teams: [
+        { name: 'Design', members: 2 },
+        { name: 'Design Ops', members: 0 },
+      ],
+      createsTrees: true,
+      scope: null,
+    })
+    // Not a member of the admin's other workspace, and given nothing there.
+    expect(
+      (await get(`workspaces/${other.name}`, await keySecretFor(member)))
+        .status,
+    ).toBe(404)
+  })
+
+  it('shows a guest only what was shared with them, with no teams, and anyone else nothing, as if missing', async () => {
+    const { guest, outsider, ws } = await world()
+
+    const guestKey = await keySecretFor(guest)
+    expect((await get('workspaces', guestKey)).body).toMatchObject({
+      scope: null,
+      workspaces: [],
+      shared: [
+        { target: `${ws.name}/acme/plan`, kind: 'page', can: 'respond' },
+      ],
+    })
+    const there = await get(`workspaces/${ws.name}`, guestKey)
+    expect(there.status).toBe(200)
+    expect(there.body).toMatchObject({
+      name: ws.name,
+      role: null,
+      trees: [],
+      shared: [{ target: `${ws.name}/acme/plan` }],
+      teams: null,
+      createsTrees: false,
+    })
+
+    const outsiderKey = await keySecretFor(outsider)
+    expect((await get('workspaces', outsiderKey)).body).toEqual({
+      scope: null,
+      workspaces: [],
+      shared: [],
+    })
+    const hidden = await get(`workspaces/${ws.name}`, outsiderKey)
+    const missing = await get('workspaces/no-such-workspace-here', outsiderKey)
+    expect(hidden.status).toBe(404)
+    expect(missing.status).toBe(404)
+    const shape = (body: Record<string, unknown>) => ({
+      ...(body.error as Record<string, unknown>),
+      path: null,
+    })
+    expect(shape(hidden.body)).toEqual(shape(missing.body))
+    expect((hidden.body.error as { code: string }).code).toBe('not_found')
+  })
+
+  it('shows a key limited to a node only that node, and a read-only key only reading', async () => {
+    const { admin, ws, other } = await world()
+    const keyFor = async (reach: string | null, readOnly: boolean) =>
+      keySecretFor(admin, {
+        name: 'limited',
+        reach:
+          reach === null
+            ? { kind: 'everything' }
+            : { kind: 'node', ref: ref(reach) },
+        readOnly,
+      })
+
+    const scoped = await keyFor(`${ws.name}/acme/questions/`, false)
+    const scope = {
+      target: `${ws.name}/acme/questions/`,
+      workspace: ws.name,
+      link: `${ORIGIN}/${ws.name}/acme/questions/`,
+      can: 'write',
+    }
+    expect((await get('workspaces', scoped)).body).toEqual({
+      scope,
+      workspaces: [],
+      shared: [],
+    })
+    expect((await get(`workspaces/${ws.name}`, scoped)).body).toEqual({
+      name: ws.name,
+      role: null,
+      suspended: false,
+      trees: [],
+      shared: [],
+      teams: null,
+      createsTrees: false,
+      scope,
+    })
+    expect((await get(`workspaces/${other.name}`, scoped)).status).toBe(404)
+
+    const scopedReading = await keyFor(`${ws.name}/acme/plan.html`, true)
+    expect((await get('workspaces', scopedReading)).body).toMatchObject({
+      scope: {
+        target: `${ws.name}/acme/plan.html`,
+        link: `${ORIGIN}/${ws.name}/acme/plan`,
+        can: 'read',
+      },
+      workspaces: [],
+    })
+
+    const reading = await keyFor(null, true)
+    const all = await get('workspaces', reading)
+    expect(all.body.scope).toBeNull()
+    expect(
+      (all.body.workspaces as { trees: { can: string }[] }[])
+        .flatMap((w) => w.trees)
+        .map((t) => t.can),
+    ).toEqual(['read', 'read', 'read'])
+    const one = await get(`workspaces/${ws.name}`, reading)
+    expect(one.body).toMatchObject({
+      role: 'admin',
+      trees: [
+        treeAt(ws.name, 'acme', 'read'),
+        treeAt(ws.name, 'notes', 'read'),
+      ],
+      teams: [
+        { name: 'Design', members: 2 },
+        { name: 'Design Ops', members: 0 },
+      ],
+      createsTrees: false,
+    })
+  })
+
+  it('shows a key limited to its person’s own comment that it reads there', async () => {
+    const { guest, ws } = await world()
+    const written = await runAs(
+      await agent(guest),
+      Effect.flatMap(Data, (data) =>
+        data.comment({
+          ref: ref(`${ws.name}/acme/plan`),
+          text: 'Per truck?',
+          anchor: null,
+          replyTo: null,
+          stance: null,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+    const own = `${ws.name}/acme/${written.doc.path}`
+    const commentKey = await keySecretFor(guest, {
+      name: 'my comment',
+      reach: { kind: 'node', ref: ref(own) },
+      readOnly: false,
+    })
+    expect((await get('workspaces', commentKey)).body).toMatchObject({
+      scope: { target: own, can: 'read' },
+      workspaces: [],
+      shared: [],
+    })
+  })
+
+  it('answers a visitor with sign_in_required', async () => {
+    const response = await SELF.fetch(`${ORIGIN}/_/api/workspaces`)
+    expect(response.status).toBe(401)
   })
 })

@@ -78,7 +78,7 @@
     },
     "packages/cli": {
       "name": "@agent964/dossier",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "bin": {
         "dossier": "dist/index.js",
       },

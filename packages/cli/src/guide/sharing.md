@@ -11,7 +11,8 @@ Roles add up across shares: read on a folder and respond on a page inside it
 give both. A share on a folder covers everything inside it, and a lower node
 cannot narrow it. Workspace admins hold write on every tree.
 
-Targets: `sara@acme.com`, `team:Design`, `workspace`, `anyone`.
+Targets: `sara@acme.com`, `team:Design`, `workspace`, `anyone`. A member
+finds the workspace's teams with `dossier ls <workspace>`.
 
 ```sh
 dossier share <workspace>/<tree>/<path>                       # list

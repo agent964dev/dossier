@@ -282,6 +282,42 @@ export interface DataService {
     CurrentCaller | Background
   >
   /**
+   * `dossier comment --resolve` and `--reopen`: the comment component's
+   * Resolve and Reopen on a thread of the page a link names, as `write`
+   * writes them, for whoever may comment there. A thread already in that
+   * state is left as it is. A page that is missing or unreadable is
+   * not_found alike; a thread that is not one is invalid.
+   */
+  readonly markThread: (i: {
+    readonly ref: LinkRef
+    /** The thread's root, from the page's folder or as a tree path. */
+    readonly thread: string
+    readonly resolved: boolean
+    readonly opId: OpId
+  }) => Effect.Effect<
+    {
+      /** The page's tree path. */
+      readonly page: string
+      /** The thread's root from the page's folder, as replies name it. */
+      readonly thread: string
+      /** The root comment's element id, for the link that opens it. */
+      readonly anchor: string | null
+      readonly changed: boolean
+    },
+    DossierError<
+      | 'forbidden'
+      | 'invalid'
+      | 'not_mergeable'
+      | 'closed'
+      | 'too_large'
+      | 'rate_limited'
+      | 'sign_in_required'
+      | 'not_found'
+      | 'unavailable'
+    >,
+    CurrentCaller | Background
+  >
+  /**
    * `dossier comment`: a comment on the page a link names, or a reply in
    * one of its threads, written as `write` writes the comment component's,
    * at the tree's current push. Its mentions are read from its text. A page
@@ -2933,6 +2969,72 @@ export const DataLive: Layer.Layer<
         return { doc, page, comment: doc.path.slice(dir.length) }
       })
 
+    const markThread: DataService['markThread'] = (i) =>
+      Effect.gen(function* () {
+        const asked =
+          i.ref.path === ''
+            ? `${i.ref.workspace}/${i.ref.tree}`
+            : `${i.ref.workspace}/${i.ref.tree}/${i.ref.path}`
+        yield* signedIn('Sign in to comment.')
+        const resolved = yield* store.resolve(i.ref)
+        // Missing, unreadable and not a page all answer alike.
+        if (
+          'missing' in resolved ||
+          resolved.kind !== 'page' ||
+          resolved.node.origin !== 'authored'
+        ) {
+          return yield* Effect.fail(notFound(asked))
+        }
+        // Whoever may comment on the page may resolve and reopen its
+        // threads, as the comment component lets them.
+        yield* access
+          .require('comment', resolved.node)
+          .pipe(
+            Effect.mapError((e) =>
+              e.code === 'not_found' ? notFound(asked) : e,
+            ),
+          )
+        const page = resolved.node.path
+        const folder = commentsFolderOf(page)
+        const name = fromPageFolder(folder.slice(0, -1))
+        const dir = page.slice(0, page.lastIndexOf('/') + 1)
+        if (
+          !(yield* access.withinScope(resolved.tree.id, folder.slice(0, -1)))
+        ) {
+          return yield* Effect.fail(
+            forbidden(folder, 'This agent key does not reach here.'),
+          )
+        }
+        // A thread is named from the page's folder, as `--json` shows it,
+        // or by its tree path, as for a reply.
+        const thread =
+          dir !== '' && i.thread.startsWith(`${dir}${name}/`)
+            ? i.thread.slice(dir.length)
+            : i.thread
+        const threads = yield* readThreads(
+          bindings,
+          access,
+          resolved.tree.id,
+          folder.slice(0, -1),
+        )
+        const found = threads.find((t) => t.data.root.path === thread)
+        const anchor = found?.data.root.anchor ?? null
+        if (found !== undefined && found.data.resolved === i.resolved) {
+          return { page, thread, anchor, changed: false }
+        }
+        yield* write({
+          tree: resolved.tree.id,
+          page,
+          path: folder,
+          patch: i.resolved ? { resolves: thread } : { reopens: thread },
+          replace: false,
+          opId: i.opId,
+          seq: resolved.tree.authoredSeq as AuthoredSeq,
+          as: null,
+        })
+        return { page, thread, anchor, changed: true }
+      })
+
     const mentionable: DataService['mentionable'] = (i) =>
       Effect.gen(function* () {
         const nobody: MentionableResult = { people: [], teams: [] }
@@ -3592,6 +3694,7 @@ export const DataLive: Layer.Layer<
       deleteComment,
       write,
       comment: commentOn,
+      markThread,
       read,
       mentionable,
       pageForms,

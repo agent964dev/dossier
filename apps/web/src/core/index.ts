@@ -117,6 +117,7 @@ export {
   type WorkspaceRole,
 } from './people.ts'
 export { treeSharingLabel } from '../lib/sharing.ts'
+export { workspacePlace, workspacePlaces } from './places.ts'
 export {
   defaultPrivacyText,
   PRIVACY_TEXT_LIMIT,

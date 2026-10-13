@@ -5,6 +5,9 @@ deployment, keeps one agent key per deployment, and pushes, pulls, reads,
 watches, moves, removes, restores, compares, shares, searches and exports the
 nodes of trees. People and coding agents use the same verbs.
 
+`dossier ls` shows where you can work: your workspaces, the trees you can
+open with what you may do in each, and what is shared with you.
+
 `dossier --agent-info` prints the guide agents read: every verb with its usage
 and flags, the exit codes, and the conventions for writing pages. This file is
 the reference for people.
@@ -96,7 +99,7 @@ one tree or node, and to read only. `dossier login` makes a key with no limit,
 named after the machine (`cli on m4`). Keys made in settings can carry limits.
 A command outside a key's reach answers as if the node did not exist (exit 3),
 and a write with a read-only key exits 3 with "You can open this but not change
-it."
+it." `dossier ls` shows a key limited to a node only that node.
 
 ### Protocol and timeouts
 
@@ -351,12 +354,88 @@ that is not one.
 ### `dossier ls`
 
 ```sh
-dossier ls [--json] <target>
+dossier ls [--json] [<target>]
 ```
 
-Lists what a folder holds: pages, folders, attachments, `_` files as the kit,
-and data. Each row gives the name (a folder ends in `/`), its kind, its size and
-the push that last changed it. An empty folder prints `Nothing here yet.`
+Lists where you can work, one workspace, or what a folder holds.
+
+```sh
+dossier ls                        # where you can work
+dossier ls agent964               # one workspace
+dossier ls agent964/acme/plans/   # a folder
+```
+
+With no target, or a link to the deployment's root, `ls` lists your
+workspaces with your role in each (`admin` or `member`, and `suspended`
+while a super admin has suspended it), the trees of each you can open, with
+what you may do at each tree's root (`read`, `respond` or `write`), and then
+what others shared with you, newest first. Each row starts with what the
+other verbs take:
+
+```text
+agent964/           workspace  admin
+agent964/acme/      tree       write
+agent964/handbook/  tree       read
+studio/             workspace  member
+
+Shared with you:
+globex/plans/q3           page    respond  Q3 plan · waiting for your answer
+agent964/acme/questions/  folder  respond  Questions · mentioned you
+```
+
+`--json` prints `{ "scope", "workspaces", "shared" }`. Each workspace is
+`{ "name", "role", "suspended", "trees" }`, each tree
+`{ "name", "target", "link", "can" }`, and each share
+`{ "workspace", "tree", "path", "kind", "title", "target", "link", "can", "sharedAt", "waiting", "mentioned" }`.
+
+With a workspace (`agent964`, `agent964/` or its link), `ls` lists, for a
+member, the workspace's trees you can open and its teams with their member
+counts, by the names `team:<name>` shares with and `@team:<name>` mentions,
+and ends with how to make a tree:
+
+```text
+agent964/           workspace  member
+agent964/acme/      tree       respond
+agent964/handbook/  tree       read
+
+Shared with you here:
+agent964/acme/questions/  folder  respond  Questions · mentioned you
+
+Teams: share with team:<name>, mention with @team:<name> (@team:"<name>" when it has a space):
+Design      4 members
+Design Ops  1 member
+
+Make a tree by pushing to a new tree name: dossier push <folder> agent964/<tree>/
+```
+
+Someone who is not a member but was given something in the workspace sees
+only what they were given, under `Shared with you in agent964:`, and no
+teams. A workspace you are not in and have nothing in answers like one that
+does not exist: exit 3. `--json` prints
+`{ "name", "role", "suspended", "trees", "shared", "teams", "createsTrees", "scope" }`;
+`role` and `teams` are null for someone who is not a member.
+
+What each caller sees follows the home screen's rules:
+
+- A tree is listed when you can open its root. Something shared with you on
+  its own, such as a folder or a page, is listed under what is shared with
+  you.
+- `can` is what you may do now at that node, through every grant you hold.
+  A read-only agent key shows `read` everywhere and never offers to make a
+  tree; nor does a suspended workspace.
+- An agent key limited to one node sees only that node: `scope` names it,
+  with what you may do there, and `workspaces`, `shared` and `teams` stay
+  empty. `dossier ls <workspace>` answers only for that node's workspace.
+
+```text
+agent964/acme/plans/  write
+This key is limited to agent964/acme/plans/; it sees nothing else.
+```
+
+With `workspace/tree` or a path in it, `ls` lists what that folder holds:
+pages, folders, attachments, `_` files as the kit, and data. Each row gives
+the name (a folder ends in `/`), its kind, its size and the push that last
+changed it. An empty folder prints `Nothing here yet.`
 
 ### `dossier read`
 
@@ -382,6 +461,8 @@ page, the pointer to its data and comments as a field.
 
 ```sh
 dossier comment [--json] [--on <element id>] [--reply-to <thread path>] [--stance <stance>] <page> <text>
+dossier comment [--json] --resolve <thread> [<page>]
+dossier comment [--json] --reopen <thread> [<page>]
 ```
 
 Comments on a page, as the comments on the page do, and it shows there as an
@@ -408,6 +489,33 @@ delete it on the page. It prints the comment's path, which `--reply-to` takes,
 and its link, which opens it on the page. Exits 3 on a page you cannot open
 or comment on, 6 on a comment a rule refuses (too long, an element or stance
 the page does not have, a thread that is not there).
+
+`--resolve` resolves a thread and `--reopen` opens it again, as Resolve and
+Reopen on the page do; anyone who may comment on the page may do either. Name
+the thread by its root comment:
+
+```sh
+dossier comment --resolve agent964/acme/plan.comments/lina@acme.com/2026-10-10T09-14-03.json
+dossier comment agent964/acme/plan --reopen plan.comments/lina@acme.com/2026-10-10T09-14-03.json
+dossier comment --resolve 'https://dossier.agent964.com/agent964/acme/plan#dossier-comment=…'
+```
+
+On its own, `<thread>` is `workspace/tree/<path>` with the comment's full
+path inside the tree: for a thread on `questions/index.html`, that is
+`agent964/acme/questions/index.comments/…`. After the page, it is the path
+`dossier comment` prints, from the page's folder. A link that opens the comment, as a notification gives it, names
+both. A resolve or reopen takes no text, `--on`, `--reply-to` or `--stance`.
+
+```text
+Resolved plan.comments/lina@acme.com/2026-10-10T09-14-03.json on plan.html.
+https://dossier.agent964.com/agent964/acme/plan#dossier-comment=plan.comments%2Flina%40acme.com%2F2026-10-10T09-14-03.json&on=pricing
+```
+
+A thread already resolved, or already open, is left as it is, and the first
+line says `… was already resolved.` (or `open`); it still exits 0. `--json`
+prints `{ "thread", "page", "resolved", "changed", "link" }`. Exits 3 on a page
+you cannot open or comment on, or with a read-only key or one that does not
+reach the page's comments; 6 on a thread that is not one, such as a reply.
 
 ### `dossier export`
 

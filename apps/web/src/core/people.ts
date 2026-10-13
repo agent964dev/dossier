@@ -22,6 +22,7 @@ import {
   suspendedError,
   type Granted,
   type Membership,
+  type Role,
 } from './access.ts'
 import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
@@ -179,14 +180,16 @@ export interface PeopleService {
     CurrentCaller
   >
   /**
-   * The trees of a workspace the caller can open, with how each is shared
-   * and whether the caller holds write on its root.
+   * The trees of a workspace the caller can open, with how each is shared,
+   * whether the caller holds write on its root, and the strongest role
+   * their grants give there (before a read-only key narrows it).
    */
   readonly trees: (workspace: WorkspaceRow) => Effect.Effect<
     readonly {
       readonly tree: TreeRow
       readonly sharing: TreeSharing
       readonly writer: boolean
+      readonly can: Role
     }[],
     DossierError<'not_found' | 'sign_in_required' | 'unavailable'>,
     CurrentCaller
@@ -260,6 +263,13 @@ export interface PeopleService {
   readonly teamsForSharing: (
     workspace: WorkspaceRow,
   ) => Effect.Effect<readonly TeamRef[], never, CurrentCaller>
+  /**
+   * Any member: the workspace's teams with how many people each has, by
+   * name. Anyone else gets none.
+   */
+  readonly teamsForMembers: (
+    workspace: WorkspaceRow,
+  ) => Effect.Effect<readonly TeamSummary[], never, CurrentCaller>
   readonly createTeam: (i: {
     readonly workspace: string
     readonly name: string
@@ -938,6 +948,7 @@ export const PeopleLive: Layer.Layer<
           tree: TreeRow
           sharing: TreeSharing
           writer: boolean
+          can: Role
         }[] = []
         for (const row of rows) {
           const roles = yield* access.roleOn(row.root as NodeRow)
@@ -978,7 +989,16 @@ export const PeopleLive: Layer.Layer<
               : people + teams > 0
                 ? { kind: 'shared', people, teams }
                 : { kind: 'private' }
-          result.push({ tree, sharing, writer: roles.caps.has('write') })
+          result.push({
+            tree,
+            sharing,
+            writer: roles.caps.has('write'),
+            can: roles.caps.has('write')
+              ? 'write'
+              : roles.caps.has('respond')
+                ? 'respond'
+                : 'read',
+          })
         }
         return result
       })
@@ -1316,7 +1336,7 @@ export const PeopleLive: Layer.Layer<
         } satisfies TeamDetail
       })
 
-    const teamsForSharing: PeopleService['teamsForSharing'] = (workspace) =>
+    const teamsForMembers: PeopleService['teamsForMembers'] = (workspace) =>
       Effect.gen(function* () {
         const caller = yield* CurrentCaller
         if (caller.person === null) return []
@@ -1326,9 +1346,13 @@ export const PeopleLive: Layer.Layer<
           ).bind(workspace.id, caller.person.id),
         )
         if (member === null) return []
-        const rows = yield* teamsOf(workspace.id)
-        return rows.map((t): TeamRef => ({ id: t.id, name: t.name }))
-      }).pipe(Effect.orElseSucceed((): readonly TeamRef[] => []))
+        return yield* teamsOf(workspace.id)
+      }).pipe(Effect.orElseSucceed((): readonly TeamSummary[] => []))
+
+    const teamsForSharing: PeopleService['teamsForSharing'] = (workspace) =>
+      Effect.map(teamsForMembers(workspace), (rows) =>
+        rows.map((t): TeamRef => ({ id: t.id, name: t.name })),
+      )
 
     const teamName = (name: string) =>
       Effect.gen(function* () {
@@ -2198,6 +2222,7 @@ export const PeopleLive: Layer.Layer<
       teams,
       team,
       teamsForSharing,
+      teamsForMembers,
       createTeam,
       renameTeam,
       deleteTeam,

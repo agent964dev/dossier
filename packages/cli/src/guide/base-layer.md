@@ -64,6 +64,15 @@ an agent key shows as an agent's comment; Dossier marks it from the key, never
 from what is sent, so a page's handoff can tell an agent's comments from
 people's by `agent`.
 
+`dossier comment --resolve <thread>` resolves a thread and `--reopen <thread>`
+opens it again, as the component's Resolve and Reopen do, for anyone who may
+comment on the page. Name the thread by its root comment: the link that opens
+it, as `dossier comment` and notifications give it; or the page and the path
+`dossier comment` prints, `dossier comment <page> --resolve <path>`; or
+`<workspace>/<tree>/<path>` with the comment's full path inside the tree
+(`agent964/acme/questions/index.comments/…`). A thread already resolved, or
+already open, is left as it is.
+
 A link to a page with `#dossier-comment=<path>&on=<id>` opens that comment:
 `<path>` is the comment's path from the page's folder, as its Doc names it
 (`plan.comments/sara@acme.com/….json`), and `on` its thread's element id.
