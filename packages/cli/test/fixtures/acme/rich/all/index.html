@@ -1,0 +1,40 @@
+<title>Everything in one page</title>
+<h1>Everything in one page</h1>
+<p>
+  A layout, a theme, a component, an image, a diagram, code, math, a diff,
+  comments and a form.
+</p>
+<acme-note>this box comes from the folder's own component.</acme-note>
+<figure id="route">
+  <img src="photo.png" alt="Delivery route map" />
+  <figcaption>The delivery route</figcaption>
+</figure>
+<pre class="mermaid">
+flowchart LR
+  Draft --> Review
+  Review -->|approved| Ship
+</pre>
+<pre><code class="language-ts">// Greets one person.
+export const greet = (name: string): string => `Hello, ${name}!`
+</code></pre>
+<p>
+  Euler's identity, <span class="math inline">\(e^{i\pi} + 1 = 0\)</span>, in
+  the line.
+</p>
+<dossier-diff before="../v1/plan.md" after="../plan.md"></dossier-diff>
+<p><dossier-copy></dossier-copy></p>
+<form action="answers/" method="post">
+  <fieldset>
+    <legend>Your view</legend>
+    <label>Name <input name="name" required /></label>
+    <label
+      >Rating
+      <select name="rating">
+        <option>Good</option>
+        <option>Needs work</option>
+      </select></label
+    >
+  </fieldset>
+  <button>Send</button>
+</form>
+<dossier-comments></dossier-comments>

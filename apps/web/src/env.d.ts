@@ -1,7 +1,26 @@
+// Secrets, which `wrangler types` cannot see because they live outside
+// wrangler.jsonc. Set them with `wrangler secret put` in every environment.
+interface Env {
+  /** Comma-separated emails, seeded as super admins at their first sign-in. */
+  SUPER_ADMINS: string
+  BETTER_AUTH_SECRET: string
+  HANDLE_SECRET: string
+  GOOGLE_CLIENT_ID?: string
+  GOOGLE_CLIENT_SECRET?: string
+  /**
+   * The webhook Queue, producer and consumer. A deployment without one
+   * delivers no webhooks.
+   */
+  WEBHOOKS?: Queue<import('./core/webhooks.ts').WebhookMessage>
+}
+
 declare namespace Cloudflare {
   interface Env {
-    SESSION_SECRET?: string
-    LINK_SECRET?: string
-    BOOTSTRAP_API_KEY?: string
+    SUPER_ADMINS: string
+    BETTER_AUTH_SECRET: string
+    HANDLE_SECRET: string
+    GOOGLE_CLIENT_ID?: string
+    GOOGLE_CLIENT_SECRET?: string
+    WEBHOOKS?: Queue<import('./core/webhooks.ts').WebhookMessage>
   }
 }

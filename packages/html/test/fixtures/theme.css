@@ -1,0 +1,18 @@
+/* Acme's theme: the roles base components read, and one of our own. */
+:root {
+  --background: #ffffff;
+  --primary: #8a1c7c;
+  --primary-foreground: #ffffff;
+  --font-display: 'Fraunces', serif;
+  --font-body: system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b0b0f;
+    --primary:#e05ad0
+  }
+}
+
+.cards { --card-gap: 12px; gap: var(--card-gap); }
+html[data-dossier-embedded] .site-header { display: none; --accent: red }

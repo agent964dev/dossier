@@ -5,40 +5,64 @@ import {
   Scripts,
   createRootRoute,
 } from '@tanstack/react-router'
+
+import type { SignedInPerson } from '../components/avatar'
+import { PlainError } from '../components/plain-error'
+import { currentLookVersion, type CurrentLook } from '../server/look'
+import { signedInPerson } from '../server/signed-in'
 import '../styles/app.css'
 
 export const Route = createRootRoute({
-  head: () => ({
+  // The Look changes only when a super admin saves it, and the Look screen
+  // loads a new document after a save, so a loaded document keeps this. So
+  // does who is signed in: signing in or out loads a new document.
+  loader: async (): Promise<
+    CurrentLook & { readonly signedIn: SignedInPerson | null }
+  > => {
+    const [look, signedIn] = await Promise.all([
+      currentLookVersion(),
+      signedInPerson(),
+    ])
+    return { ...look, signedIn }
+  },
+  staleTime: Number.POSITIVE_INFINITY,
+  head: ({ loaderData }) => ({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { name: 'color-scheme', content: 'dark' },
-      { name: 'theme-color', content: '#031119' },
-      {
-        name: 'description',
-        content:
-          'dossier is a private publishing workspace for the documents your agents write: every version kept, every document a permanent link.',
-      },
-      { title: 'dossier — a private publishing workspace' },
+      { name: 'color-scheme', content: loaderData?.scheme ?? 'dark' },
+      { name: 'theme-color', content: loaderData?.themeColor ?? '#031119' },
+      { name: 'referrer', content: 'strict-origin-when-cross-origin' },
+      { title: loaderData?.name ?? 'Dossier' },
     ],
     links: [
-      {
+      { rel: 'icon', href: '/_/app/favicon.svg', type: 'image/svg+xml' },
+      // The deployment's Look: every design token and font face, after
+      // app.css, which only names them.
+      ...(loaderData === undefined
+        ? []
+        : [
+            {
+              rel: 'stylesheet',
+              href: `/_/look/${loaderData.version}.css`,
+            },
+          ]),
+      ...(loaderData?.preload ?? []).map((href) => ({
         rel: 'preload',
-        href: '/fonts/ClashDisplay-Variable.woff2',
+        href,
         as: 'font',
         type: 'font/woff2',
-        crossOrigin: 'anonymous',
-      },
-      {
-        rel: 'preload',
-        href: '/fonts/Geist-Variable.woff2',
-        as: 'font',
-        type: 'font/woff2',
-        crossOrigin: 'anonymous',
-      },
+        crossOrigin: 'anonymous' as const,
+      })),
     ],
   }),
   component: RootComponent,
+  errorComponent: () => (
+    <RootDocument>
+      <PlainError />
+    </RootDocument>
+  ),
+  notFoundComponent: NotFound,
 })
 
 function RootComponent() {
@@ -49,10 +73,31 @@ function RootComponent() {
   )
 }
 
-function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
+function NotFound() {
   return (
-    // Dark only. There is no light variant and no toggle (DESIGN.md section 9).
-    <html lang="en" className="dark">
+    <main className="grid min-h-dvh place-items-center px-6 text-center">
+      <div className="flex flex-col gap-3">
+        <h1 className="text-xl font-semibold text-neutral-50">
+          This page does not exist, or you cannot open it.
+        </h1>
+        <a
+          href="/"
+          className="text-brand-300 underline-offset-4 hover:underline"
+        >
+          Go home
+        </a>
+      </div>
+    </main>
+  )
+}
+
+function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
+  const look = Route.useLoaderData({
+    select: (data: CurrentLook | undefined) => data?.scheme,
+  })
+  return (
+    // agent964's Look is dark; a deployment's Look may be light.
+    <html lang="en" className={look === 'light' ? 'light' : 'dark'}>
       <head>
         <HeadContent />
       </head>

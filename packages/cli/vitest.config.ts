@@ -1,11 +1,19 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  plugins: [
+    {
+      // Bun's bundler reads `with { type: 'text' }` imports; tests do the same.
+      name: 'markdown-as-text',
+      enforce: 'pre',
+      load(id) {
+        if (!id.endsWith('.md')) return null
+        return `export default ${JSON.stringify(readFileSync(id, 'utf8'))}`
+      },
+    },
+  ],
   test: {
-    // The integration suite spawns the built CLI once per case. Under the
-    // root `bun run test`, four packages run at once and a case can wait
-    // longer than the 5-second default on a shared runner.
-    testTimeout: 30_000,
-    hookTimeout: 120_000,
+    include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
   },
 })

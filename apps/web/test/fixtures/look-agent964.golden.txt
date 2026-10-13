@@ -1,0 +1,150 @@
+@font-face {
+  font-family: "Dossier Display";
+  src: url("/_/app/fonts/ClashDisplay-Variable.woff2") format("woff2");
+  font-weight: 200 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Dossier Body";
+  src: url("/_/app/fonts/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Dossier Mono";
+  src: url("/_/app/fonts/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Dossier Arabic";
+  src: url("/_/app/fonts/Tajawal-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FEFF;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Dossier Arabic";
+  src: url("/_/app/fonts/Tajawal-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FEFF;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Dossier Arabic";
+  src: url("/_/app/fonts/Tajawal-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FEFF;
+  font-display: swap;
+}
+:root {
+  color-scheme: dark;
+  --neutral-50: oklch(99.24% 0 0);
+  --neutral-100: oklch(97.71% 0.0024 194);
+  --neutral-200: oklch(93.09% 0.0087 200.1);
+  --neutral-300: oklch(85.16% 0.0167 206.3);
+  --neutral-400: oklch(73.96% 0.0245 212.6);
+  --neutral-500: oklch(59.57% 0.0297 218.6);
+  --neutral-600: oklch(44.94% 0.0313 224);
+  --neutral-700: oklch(33.2% 0.0303 228.6);
+  --neutral-800: oklch(24.6% 0.0276 232.1);
+  --neutral-900: oklch(19.26% 0.0253 234.3);
+  --neutral-950: oklch(16.9% 0.0286 232.6);
+  --brand-50: oklch(96% 0.0412 207.1);
+  --brand-100: oklch(94.18% 0.0523 207.1);
+  --brand-200: oklch(90.85% 0.0553 207.1);
+  --brand-300: oklch(86.54% 0.1367 207.1);
+  --brand-400: oklch(73.83% 0.138 207.1);
+  --brand-500: oklch(62.15% 0.1294 207.1);
+  --brand-600: oklch(51.58% 0.1169 207.1);
+  --brand-700: oklch(42.27% 0.0958 207.1);
+  --brand-800: oklch(34.4% 0.078 207.1);
+  --brand-900: oklch(28.32% 0.0642 207.1);
+  --brand-950: oklch(25% 0.0567 207.1);
+  --accent-50: oklch(96% 0.0205 267.3);
+  --accent-100: oklch(94.18% 0.026 267.3);
+  --accent-200: oklch(90.85% 0.0276 267.3);
+  --accent-300: oklch(86.54% 0.0684 267.3);
+  --accent-400: oklch(73.83% 0.1188 267.3);
+  --accent-500: oklch(62.15% 0.1988 267.3);
+  --accent-600: oklch(51.58% 0.286 267.3);
+  --accent-700: oklch(42.27% 0.2816 267.3);
+  --accent-800: oklch(34.4% 0.2292 267.3);
+  --accent-900: oklch(28.32% 0.1887 267.3);
+  --accent-950: oklch(25% 0.1666 267.3);
+  --complement-50: oklch(96% 0.0315 60.4);
+  --complement-100: oklch(94.18% 0.0397 60.4);
+  --complement-200: oklch(90.85% 0.0425 60.4);
+  --complement-300: oklch(86.54% 0.1086 60.4);
+  --complement-400: oklch(73.83% 0.1585 60.4);
+  --complement-500: oklch(62.15% 0.1487 60.4);
+  --complement-600: oklch(51.58% 0.1352 60.4);
+  --complement-700: oklch(42.27% 0.1117 60.4);
+  --complement-800: oklch(34.4% 0.0909 60.4);
+  --complement-900: oklch(28.32% 0.0749 60.4);
+  --complement-950: oklch(25% 0.0661 60.4);
+  --success-50: oklch(96% 0.0758 145.8);
+  --success-100: oklch(94.18% 0.1085 145.8);
+  --success-200: oklch(90.85% 0.1213 145.8);
+  --success-300: oklch(86.54% 0.2981 145.8);
+  --success-400: oklch(73.83% 0.2859 145.8);
+  --success-500: oklch(62.15% 0.2661 145.8);
+  --success-600: oklch(51.58% 0.2209 145.8);
+  --success-700: oklch(42.27% 0.181 145.8);
+  --success-800: oklch(34.4% 0.1473 145.8);
+  --success-900: oklch(28.32% 0.1213 145.8);
+  --success-950: oklch(25% 0.1071 145.8);
+  --warning-50: oklch(96% 0.0495 83.5);
+  --warning-100: oklch(94.18% 0.0705 83.5);
+  --warning-200: oklch(90.85% 0.0749 83.5);
+  --warning-300: oklch(86.54% 0.1666 83.5);
+  --warning-400: oklch(73.83% 0.1598 83.5);
+  --warning-500: oklch(62.15% 0.1456 83.5);
+  --warning-600: oklch(51.58% 0.1209 83.5);
+  --warning-700: oklch(42.27% 0.0991 83.5);
+  --warning-800: oklch(34.4% 0.0806 83.5);
+  --warning-900: oklch(28.32% 0.0664 83.5);
+  --warning-950: oklch(25% 0.0586 83.5);
+  --error-50: oklch(96% 0.0255 27.4);
+  --error-100: oklch(94.18% 0.032 27.4);
+  --error-200: oklch(90.85% 0.0345 27.4);
+  --error-300: oklch(86.54% 0.0889 27.4);
+  --error-400: oklch(73.83% 0.1633 27.4);
+  --error-500: oklch(62.15% 0.2549 27.4);
+  --error-600: oklch(51.58% 0.2319 27.4);
+  --error-700: oklch(42.27% 0.1924 27.4);
+  --error-800: oklch(34.4% 0.1566 27.4);
+  --error-900: oklch(28.32% 0.1289 27.4);
+  --error-950: oklch(25% 0.1138 27.4);
+  --background: oklch(16.9% 0.0286 232.6);
+  --foreground: oklch(99.24% 0 0);
+  --card: oklch(19.26% 0.0253 234.3);
+  --card-foreground: oklch(99.24% 0 0);
+  --popover: oklch(19.26% 0.0253 234.3);
+  --popover-foreground: oklch(99.24% 0 0);
+  --primary: oklch(86.54% 0.1367 207.1);
+  --primary-foreground: oklch(16.9% 0.0286 232.6);
+  --secondary: oklch(24.6% 0.0276 232.1);
+  --secondary-foreground: oklch(97.71% 0.0024 194);
+  --muted: oklch(24.6% 0.0276 232.1);
+  --muted-foreground: oklch(59.57% 0.0297 218.6);
+  --accent: oklch(62.15% 0.1988 267.3);
+  --accent-foreground: oklch(99.24% 0 0);
+  --destructive: oklch(58.42% 0.2603 27.4);
+  --destructive-foreground: oklch(99.24% 0 0);
+  --border: oklch(33.2% 0.0303 228.6 / 40%);
+  --input: oklch(24.6% 0.0276 232.1 / 80%);
+  --ring: oklch(86.54% 0.1367 207.1);
+  --glow-cyan: oklch(86.54% 0.1367 207.1);
+  --radius: 10px;
+  --font-display: "Dossier Display", "Dossier Body", "Dossier Arabic", system-ui, sans-serif;
+  --font-body: "Dossier Body", "Dossier Arabic", system-ui, -apple-system, sans-serif;
+  --font-mono: "Dossier Mono", "Dossier Arabic", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-arabic: "Dossier Arabic", "Tajawal", "Geeza Pro", "Noto Sans Arabic", sans-serif;
+}

@@ -1,0 +1,12 @@
+[
+  { "url": "base.css", "text": "base.css", "kind": "import" },
+  { "url": "print.css", "text": "print.css", "kind": "import" },
+  { "url": "layer.css", "text": "layer.css", "kind": "import" },
+  { "url": "quoted.css", "text": "quoted.css", "kind": "import" },
+  { "url": "fonts/acme.woff2", "text": "fonts/acme.woff2", "kind": "url" },
+  { "url": "fonts/acme.woff", "text": "fonts/acme.woff", "kind": "url" },
+  { "url": "img/hero 1.png", "text": "img/hero\\ 1.png", "kind": "url" },
+  { "url": "icon.png", "text": "icon.png", "kind": "url" },
+  { "url": "icon@2x.png", "text": "icon@2x.png", "kind": "url" },
+  { "url": "img/a.png", "text": "img/\\61 .png", "kind": "url" }
+]

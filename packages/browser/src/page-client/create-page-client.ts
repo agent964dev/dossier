@@ -1,0 +1,244 @@
+import {
+  DossierError,
+  WINDOW_NAME_PREFIX,
+  isShellToPage,
+  readTopBoot,
+  type Doc,
+  type DraftValues,
+  type ExportData,
+  type Json,
+  type JsonObject,
+  type Me,
+  type PageBootstrap,
+} from '@dossier/contracts/bridge'
+import { createPageData } from './data.ts'
+import { startForms, type FormsController } from './forms.ts'
+import { startKit } from './kit.ts'
+import { trackLocation } from './location.ts'
+import { createRequests } from './requests.ts'
+
+export type { Doc } from '@dossier/contracts/bridge'
+
+/** Where a managed form stands; 'closed' is final for the page load. */
+export type FormState =
+  | 'idle'
+  | 'draft'
+  | 'sending'
+  | 'sent'
+  | 'failed'
+  | 'closed'
+
+/** The detail of the `dossier:state` event a managed form fires. */
+export interface DossierStateDetail {
+  readonly state: FormState
+  readonly error: DossierError | null
+  readonly doc: Doc | null
+}
+
+/**
+ * Where the sends of managed forms come from: the submit events page code let
+ * through, and submit() calls. Sends that come before the forms controller
+ * starts wait for it.
+ */
+export interface SubmitSource {
+  readonly connect: (handler: FormsController['submitted']) => void
+}
+
+export interface Dossier {
+  /** Null for a visitor, and for a nested page until ready. */
+  readonly me: Me | null
+  readonly page: {
+    readonly path: string
+    readonly push: number
+    readonly embedded: boolean
+    readonly exported: boolean
+  }
+  /** Identity in place; already resolved for the top page. */
+  readonly ready: Promise<void>
+  /** Every readable file below a folder. */
+  read<T = Json>(path: `${string}/`): Promise<Doc<T>[]>
+  /** A file; missing and unreadable look the same. */
+  read<T = Json>(path: string): Promise<Doc<T> | null>
+  /** Calls back at once, then after each change; returns the stop. */
+  watch(path: string, onChange: (value: Doc | Doc[] | null) => void): () => void
+  /** A folder path: a new entry in your own folder. */
+  write<T = Json>(
+    path: string,
+    patch: JsonObject,
+    opts?: { replace?: true },
+  ): Promise<Doc<T>>
+  /** Your own submission or entry, for good. */
+  withdraw(path: string): Promise<void>
+  upload(file: File | Blob): Promise<{
+    file: string
+    name: string
+    size: number
+    type: string
+  }>
+}
+
+export type HostPort = Pick<
+  MessagePort,
+  'postMessage' | 'addEventListener' | 'removeEventListener' | 'start' | 'close'
+>
+
+/** How long a nested page waits for the shell's welcome. */
+export const WELCOME_TIMEOUT = 10_000
+
+/** The page client behind `window.dossier`. */
+export const createPageClient = (deps: {
+  readonly bootstrap: PageBootstrap
+  /** The shell's port, or the export host in a page downloaded as one file. */
+  readonly port: HostPort
+  readonly window: Window
+  readonly submits?: SubmitSource
+  /** Called once the forms controller starts. */
+  readonly onForms?: (forms: FormsController) => void
+  /** In a page downloaded as one file: its exporter, and when it was exported. */
+  readonly exported?: Pick<ExportData, 'me' | 'at'>
+}): Dossier => {
+  const { bootstrap, port, window: win } = deps
+  // A page downloaded as one file answers from the file and this browser.
+  const exported = bootstrap.export === true
+  // Components start loading before any author script runs.
+  startKit({
+    window: win,
+    kit: bootstrap.kit,
+    used: bootstrap.used,
+    exported,
+  })
+  const embedded = win.parent !== win.top
+  // An exported page opened on its own still has its export host.
+  const alone = win.top === win && !exported
+
+  // The shell sets the top page's boot data. A nested page's name is set by
+  // the page around it, so it is cleared but never believed. An exported
+  // page leaves the name to the page's own scripts.
+  const name = win.name
+  let boot = null
+  if (!exported && name.startsWith(WINDOW_NAME_PREFIX)) {
+    win.name = ''
+    if (!embedded) boot = readTopBoot(name)
+  }
+
+  let me: Me | null = boot?.me ?? deps.exported?.me ?? null
+  let welcomed = (): void => {}
+  let timer: number | undefined
+  let isReady = boot !== null || alone || exported
+  const ready =
+    boot !== null || alone || exported
+      ? Promise.resolve()
+      : new Promise<void>((resolve, reject) => {
+          welcomed = () => {
+            isReady = true
+            resolve()
+          }
+          timer = win.setTimeout(() => {
+            reject(
+              new DossierError({
+                code: 'unavailable',
+                message: 'The page could not reach Dossier.',
+                fix: null,
+                path: null,
+              }),
+            )
+          }, WELCOME_TIMEOUT)
+        })
+  // Page code that never awaits `ready` should not see an unhandled rejection.
+  ready.catch(() => {})
+
+  const requests = createRequests(port)
+  let formsAsked = false
+  /** Starts the forms controller once identity is known and the document is parsed. */
+  const beginForms = (
+    drafts: Readonly<Record<string, DraftValues>>,
+    resume: readonly string[],
+  ): void => {
+    // A page opened on its own has no shell to send through.
+    if (formsAsked || alone) return
+    formsAsked = true
+    const begin = (): void => {
+      const controller = startForms({
+        window: win,
+        bootstrap,
+        me: () => me,
+        drafts,
+        resume,
+        requests,
+        exportedAt: exported ? (deps.exported?.at ?? '') : null,
+      })
+      requests.onResumed(controller.resumed)
+      deps.submits?.connect(controller.submitted)
+      deps.onForms?.(controller)
+    }
+    const doc = win.document
+    if (doc.readyState === 'loading') {
+      doc.addEventListener('DOMContentLoaded', begin, { once: true })
+    } else {
+      begin()
+    }
+  }
+
+  const data = createPageData({
+    bootstrap,
+    requests,
+    me: () => me,
+    isReady: () => isReady,
+    ready,
+    connected: !alone,
+    newOpId: () => win.crypto.randomUUID(),
+    report: (error: unknown) =>
+      queueMicrotask(() => {
+        throw error
+      }),
+  })
+
+  // A page leaving says so, since its port gives the shell no sign; one
+  // shown again from the back-forward cache watches again.
+  win.addEventListener('pagehide', () => data.leave())
+  win.addEventListener('pageshow', (event) => {
+    if ((event as PageTransitionEvent).persisted === true) data.back()
+  })
+
+  port.addEventListener('message', (event) => {
+    const message: unknown = event.data
+    if (!isShellToPage(message)) return
+    if (message.type === 'changed') {
+      data.changed(message)
+      return
+    }
+    if (message.type !== 'welcome') {
+      requests.receive(message)
+      return
+    }
+    me = message.me
+    win.clearTimeout(timer)
+    welcomed()
+    beginForms(message.drafts, message.resume)
+  })
+  port.start()
+  if (boot !== null) beginForms(boot.drafts, boot.resume)
+
+  if (!embedded && !alone && !exported) {
+    trackLocation({ window: win, bootstrap, port })
+  }
+
+  const page = Object.freeze({
+    path: bootstrap.path,
+    push: bootstrap.push,
+    embedded,
+    exported,
+  })
+  return Object.freeze({
+    get me() {
+      return me
+    },
+    page,
+    ready,
+    read: data.read,
+    watch: data.watch,
+    write: data.write,
+    withdraw: data.withdraw,
+    upload: data.upload,
+  }) as Dossier
+}

@@ -2,115 +2,88 @@
 
 ![CI](https://github.com/agent964dev/dossier/actions/workflows/ci.yml/badge.svg)
 
-Dossier publishes versioned HTML documents into workspace-owned trees on Cloudflare Workers. It keeps every version, supports inherited access boundaries and shares, serves reusable CSS/font assets, and provides both a dark-themed web dashboard and the `@agent964/dossier` CLI.
+Dossier hosts trees of plain HTML.
 
-Provenance: Dossier descends from postplan 0.0.4 (MIT); its reference copy remains in repository history at commit [`5be3f93`](https://github.com/agent964dev/dossier/tree/5be3f93/upstream).
+- Agents push folders of plain HTML into trees. A page inherits its layouts,
+  theme and components from the `_` files in the folders above it, so a tree
+  shares one look and one set of components without a build step.
+- Plain HTML forms keep each person's answers on the server, with drafts,
+  closing and withdrawal. Pages read, watch and write that data live through a
+  small page client.
+- People open what is shared with them by signing in with Google. Shares give
+  read, respond or write to a person, a team, the workspace or anyone.
+- Every page has a version agents read: its companion file, or Markdown made
+  from the page. `dossier read` prints it, and so does any link asked with an
+  agent key.
 
-## Workspace layout
+Each tree's pages run on their own origin on a separate content domain, so
+embeds from other sites play and page code never reaches the viewer's session.
+Everything runs on Cloudflare: one Worker, D1, R2, a Durable Object per tree
+and a Queue.
 
-- `apps/web` — TanStack Start application, custom Worker entry, Effect HTTP API, Drizzle/D1 migrations, R2 document storage, integration tests, and the web UI.
-- `packages/policy` — runtime-neutral HTML and CSS upload policy shared by the Worker and CLI.
-- `packages/contracts` — Effect schemas and the shared `HttpApi` contract.
-- `packages/cli` — the public `@agent964/dossier` command-line client.
-- `packages/cli/skills/dossier` — packaged agent instructions for reading and publishing dossier documents.
-- `docs` — architecture notes, CLI reference, production runbook.
+The owner's deployment is <https://dossier.agent964.com>.
 
 ## Install the CLI
 
-The supported distribution is npm and requires Node 22.12 or newer (Bun also works):
+The CLI needs Node.js 22.12 or newer.
 
 ```sh
-npm install --global @agent964/dossier
-dossier auth login
-dossier whoami
+npm i -g @agent964/dossier
+dossier login
+dossier push ./site agent964/acme
+dossier read agent964/acme/plan.html
 ```
 
-After authentication, common commands include:
-
-```sh
-dossier upload report.html --kind report
-dossier list --tree
-dossier tree <document-id>
-dossier diff <document-id>
-dossier update
-dossier assets push theme.css
-dossier trash
-```
+`dossier --agent-info` prints the guide agents read. See
+[docs/CLI.md](docs/CLI.md) for every verb.
 
 ## Develop
 
-Install the pinned workspace dependencies:
-
 ```sh
 bun install
-```
-
-Run repository checks:
-
-```sh
+bun run lint
+bun run format:check
 bun run typecheck
 bun run test
+bun run test:release
 ```
 
-HTML/CSS policy fixtures live in `packages/policy/test/fixtures` and run through
-`packages/policy/src/fixtures.test.ts`. Worker tests in `apps/web/test` cover
-upload validation, serving headers, and access rules. Both run in CI through
-`bun run test`. The retired `apps/web/browser` probes and their recorded results
-have been removed; the suite does not require a global Playwright installation
-or assert browser rendering and cookie behavior.
+The repository uses Bun (the version is pinned in `package.json`), oxlint and
+oxfmt. `bun run format` formats the repository. Each package runs its own
+Vitest suite; `apps/web` runs its tests in the Workers runtime.
 
-Dependabot checks all Bun workspace dependencies and GitHub Actions weekly on
-Monday at 09:00 Baghdad time, with one group for each ecosystem. CI and release
-workflows read the Bun runtime pin from `packageManager` in the root
-`package.json`; update that field when upgrading Bun itself. The CLI, contracts,
-and policy packages use Vitest 5 from the root; `apps/web` pins Vitest 4 because
-the current Cloudflare test plugin requires it. Run tests through the workspace
-scripts so each suite uses its own supported runner. Dependabot leaves Vitest
-major upgrades for a coordinated Cloudflare plugin migration while continuing
-minor and patch updates. Development uses Node 26 type declarations; CI still
-runs the CLI on its supported Node 22 runtime.
-
-### Lint and format
-
-The repository uses oxc for linting and formatting:
+To run the Worker locally over HTTPS, with each tree on its own host, follow
+[the dev environment](docs/RUNBOOK.md#6-the-dev-environment) in the runbook
+once, then:
 
 ```sh
-bun run lint
-bun run format
+bun run --cwd apps/web dev:https
 ```
 
-Lint fails on any warning. `.oxlintrc.json` allows in-place array sorting and
-reversal because these operations use locally owned arrays or explicit copies,
-and allows functions to stay near the service or test that uses them. CSS
-side-effect imports are allowed for the app stylesheet. Shadowed bindings,
-unstable React keys, and other suspicious code remain checked.
+It serves `https://localhost:8787`, and each tree at
+`https://<tree-id>.content.localhost:8787`.
 
-Start the web application and Worker locally:
+## Workspace layout
 
-```sh
-bun run --cwd apps/web dev
-```
+- `apps/web`: the Worker. The edge, the core services, Dossier's own screens
+  (TanStack Start), the tree hub Durable Object, the purge and webhook jobs,
+  the D1 schema and migrations, and its tests.
+- `packages/contracts`: the API contract, the error table, names and paths,
+  and the messages between pages and the shell.
+- `packages/html`: page analysis, the push rules, composition, form rules,
+  Markdown for agents, search text and export planning. Pure code, no I/O.
+- `packages/browser`: the shell, the page client, the base layout, the base
+  components and the libraries pages get, built as static files.
+- `packages/cli`: the `@agent964/dossier` command line.
 
-Build and run the unpublished CLI from this checkout:
+## Docs
 
-```sh
-bun run --cwd packages/cli build
-node packages/cli/dist/index.js --api-url http://localhost:8787 health
-```
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the code is put together.
+- [docs/CLI.md](docs/CLI.md): the command line.
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): running a deployment, setting up your
+  own, releases and the dev environment.
+- [GLOSSARY.md](GLOSSARY.md): the words Dossier uses.
 
-## Runtime surfaces
+## License
 
-The Worker entry keeps the boundaries explicit:
-
-- `/api/*` — the Effect API. Health and policy checks are public; document, asset, workspace, key, and diff operations require a Bearer API key.
-- `POST /api/setup` — deployment-only bootstrap protected by `BOOTSTRAP_API_KEY`.
-- `/d/*` — byte-preserving document serving and tree hubs.
-- `/a/*` — versioned workspace CSS and WOFF2 assets.
-- `/auth/*` — Shoo sign-in, callback, and sign-out.
-- every other route — TanStack Start, including dashboard, trash, workspace, diff, and CLI-key pages.
-
-## Production
-
-Production runs at <https://dossier.agent964.com>. The top-level Wrangler environment is production; do not deploy it as part of ordinary development. The exact resource creation, secret, migration, deploy, bootstrap, owner handoff, rollback, and logging procedures are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
-
-See [`apps/web/README.md`](apps/web/README.md) for local/development commands and Worker configuration details.
+[MIT](LICENSE).

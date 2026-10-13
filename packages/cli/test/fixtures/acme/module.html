@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Module</title>
+  </head>
+  <body>
+    <h1>Module</h1>
+    <p id="out">Loading…</p>
+    <button id="lazy" type="button">Load more</button>
+    <p id="lazy-out"></p>
+    <script type="module">
+      import { greeting } from './_components/x.js'
+      document.getElementById('out').textContent = greeting
+      document.getElementById('lazy').addEventListener('click', async () => {
+        const out = document.getElementById('lazy-out')
+        try {
+          const lazy = await import(`./_components/lazy.js?at=${Date.now()}`)
+          out.textContent = lazy.message
+        } catch (error) {
+          out.textContent = `Failed: ${error}`
+        }
+      })
+    </script>
+  </body>
+</html>

@@ -1,0 +1,386 @@
+import { describe, expect, it } from 'vitest'
+
+import golden from './fixtures/look-agent964.golden.txt?raw'
+import {
+  AGENT964_LOOK,
+  CHECKED_TEXT,
+  checkLook,
+  contrast,
+  contrastChecks,
+  FIELD_TEXT,
+  lookCss,
+  lookVersion,
+  parseColor,
+  PRESETS,
+  scaleFrom,
+  STEPS,
+  TEXT_EXEMPT,
+  type Look,
+} from '../src/lib/look.ts'
+
+describe('parseColor', () => {
+  it('reads OKLCH as written, with a percentage or a number for lightness', () => {
+    expect(parseColor('oklch(62.18% 0.1464 59.6)')).toMatchObject({
+      oklch: { l: 0.6218, c: 0.1464 },
+      alpha: 1,
+      css: 'oklch(62.18% 0.1464 59.6)',
+    })
+    expect(parseColor('oklch(0.7 0.2 0)')?.css).toBe('oklch(70% 0.2 0)')
+    expect(parseColor('OKLCH(70% 0.2 0deg / 40%)')?.css).toBe(
+      'oklch(70% 0.2 0 / 40%)',
+    )
+  })
+
+  it('reads HEX of three, four, six and eight digits', () => {
+    expect(parseColor('#fff')?.oklch.l).toBeCloseTo(1, 3)
+    expect(parseColor('#1F7A4D')?.css).toBe('#1f7a4d')
+    expect(parseColor('#1d2a2224')?.alpha).toBeCloseTo(0x24 / 255, 5)
+    expect(parseColor('#0008')?.alpha).toBeCloseTo(0x88 / 255, 5)
+  })
+
+  it('refuses anything else', () => {
+    for (const text of [
+      'red',
+      'rgb(0 0 0)',
+      'hsl(0 0% 0%)',
+      '#12345',
+      '#ggg',
+      'oklch(120% 0.1 20)',
+      'oklch(50% -0.1 20)',
+      'oklch(50% 0.1)',
+      'oklch(50% 0.1 20); } body { color: red',
+      '',
+    ]) {
+      expect(parseColor(text), text).toBeNull()
+    }
+  })
+})
+
+describe('contrast', () => {
+  it('gives 21 for black on white and the published ratios for known pairs', () => {
+    expect(contrast('#000000', '#ffffff')).toBeCloseTo(21, 5)
+    // #767676 is the lightest grey that passes AA on white: 4.54:1.
+    expect(contrast('#767676', '#ffffff')).toBeCloseTo(4.54, 2)
+    // #595959 on white is 7.00:1, AAA for normal text.
+    expect(contrast('#595959', '#ffffff')).toBeCloseTo(7.0, 2)
+  })
+
+  it('reads the same either way round', () => {
+    expect(contrast('#ffffff', '#767676')).toBeCloseTo(
+      contrast('#767676', '#ffffff'),
+      10,
+    )
+  })
+})
+
+const lightnessOf = (text: string) => parseColor(text)!.oklch.l
+
+describe('scaleFrom', () => {
+  for (const [base, at] of [
+    ['#ff7ab6', 300],
+    ['oklch(70% 0.2 0)', 300],
+    ['#1f7a4d', 700],
+    ['#3eebff', 300],
+    ['oklch(45% 0.1 250)', 950],
+    ['#fdf6ff', 50],
+  ] as const) {
+    it(`returns eleven steps ordered by lightness around ${base} at ${at}`, () => {
+      const scale = scaleFrom(base, at)
+      expect(Object.keys(scale).map(Number)).toEqual([...STEPS])
+      expect(scale[at]).toBe(parseColor(base)!.css)
+      const lightness = STEPS.map((step) => lightnessOf(scale[step]))
+      for (let i = 1; i < lightness.length; i += 1) {
+        expect(lightness[i]!).toBeLessThan(lightness[i - 1]!)
+      }
+      for (const step of STEPS) expect(parseColor(scale[step])).not.toBeNull()
+    })
+  }
+})
+
+describe('lookVersion', () => {
+  it('is stable for equal Looks, whatever their key order', async () => {
+    // Every object's keys in reverse order, at every depth.
+    const reversed = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(reversed)
+        : typeof value === 'object' && value !== null
+          ? Object.fromEntries(
+              Object.keys(value)
+                .reverse()
+                .map((key) => [
+                  key,
+                  reversed((value as Record<string, unknown>)[key]),
+                ]),
+            )
+          : value
+    const reordered = reversed(AGENT964_LOOK) as Look
+    // The copy really is written in another order, nested objects included.
+    expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(AGENT964_LOOK))
+    expect(Object.keys(reordered.palette)[0]).toBe('error')
+    expect(Object.keys(reordered.fonts)[0]).toBe('arabic')
+    const a = await lookVersion(AGENT964_LOOK)
+    expect(a).toMatch(/^[0-9a-f]{16}$/)
+    expect(await lookVersion(reordered)).toBe(a)
+    expect(await lookVersion(structuredClone(AGENT964_LOOK))).toBe(a)
+  })
+
+  it('changes with any value', async () => {
+    const a = await lookVersion(AGENT964_LOOK)
+    expect(await lookVersion({ ...AGENT964_LOOK, radius: 11 })).not.toBe(a)
+    expect(await lookVersion({ ...AGENT964_LOOK, name: 'Acme' })).not.toBe(a)
+  })
+})
+
+describe('lookCss', () => {
+  it("writes agent964's Look as today's design tokens", () => {
+    expect(lookCss(AGENT964_LOOK)).toBe(golden)
+  })
+
+  it('scopes the preview and names its families apart', () => {
+    const css = lookCss(PRESETS.Studio, {
+      scope: '[data-look-preview]',
+      prefix: 'Dossier Preview',
+    })
+    expect(css).toContain('[data-look-preview] {')
+    expect(css).toContain('font-family: "Dossier Preview Display"')
+    expect(css).not.toContain(':root')
+    expect(css).toContain('--brand-300: #ff7ab6;')
+    expect(css).toContain('--radius: 16px;')
+  })
+
+  it('writes fonts from the deployment and the Arabic face into every stack', () => {
+    const sha = 'a'.repeat(64)
+    const css = lookCss({
+      ...AGENT964_LOOK,
+      fonts: {
+        ...AGENT964_LOOK.fonts,
+        body: {
+          kind: 'google',
+          family: 'Inter',
+          faces: [
+            {
+              sha256: sha,
+              format: 'woff2',
+              weight: '400',
+              style: 'normal',
+              unicodeRange: 'U+0000-00FF',
+            },
+          ],
+        },
+      },
+    })
+    expect(css).toContain(`url("/_/fonts/${sha}.woff2") format("woff2")`)
+    expect(css).not.toMatch(/googleapis|gstatic/)
+    expect(css).toMatch(/--font-body: "Dossier Body", "Dossier Arabic"/)
+  })
+})
+
+describe('the presets', () => {
+  it('each pass every contrast check and read back as a Look', () => {
+    for (const [name, look] of Object.entries(PRESETS)) {
+      expect(
+        contrastChecks(look).filter((check) => !check.ok),
+        name,
+      ).toEqual([])
+      expect(checkLook(JSON.parse(JSON.stringify(look))), name).toEqual({
+        look,
+      })
+    }
+  })
+})
+
+describe('checkLook', () => {
+  it('names a colour that does not parse', () => {
+    const look = structuredClone(AGENT964_LOOK) as {
+      palette: Record<string, Record<string, string>>
+    }
+    look.palette.brand!['300'] = 'cyan'
+    expect(checkLook(look)).toEqual({
+      problem: expect.stringContaining('brand-300 is not a colour'),
+    })
+  })
+
+  it('refuses a radius past 24 and a name past 40 characters', () => {
+    expect(checkLook({ ...AGENT964_LOOK, radius: 25 })).toHaveProperty(
+      'problem',
+    )
+    expect(
+      checkLook({ ...AGENT964_LOOK, name: 'x'.repeat(41) }),
+    ).toHaveProperty('problem')
+  })
+
+  it('refuses a font family that could leave its quotes', () => {
+    expect(
+      checkLook({
+        ...AGENT964_LOOK,
+        fonts: {
+          ...AGENT964_LOOK.fonts,
+          body: {
+            kind: 'upload',
+            family: 'X"; } body { color: red',
+            faces: [
+              {
+                sha256: 'b'.repeat(64),
+                format: 'woff2',
+                weight: '400',
+                style: 'normal',
+                unicodeRange: null,
+              },
+            ],
+          },
+        },
+      }),
+    ).toHaveProperty('problem')
+  })
+})
+
+describe('what the contrast checks cover', () => {
+  it('fails a Look whose roles pass while the headings match the cards', () => {
+    const white = 'oklch(99.24% 0 0)'
+    // The roles name their colours outright, so they pass; the screens'
+    // headings use neutral-50, set here to the card's own colour.
+    const look: Look = {
+      ...AGENT964_LOOK,
+      palette: {
+        ...AGENT964_LOOK.palette,
+        neutral: {
+          ...AGENT964_LOOK.palette.neutral,
+          50: AGENT964_LOOK.palette.neutral[900],
+        },
+      },
+      roles: {
+        ...AGENT964_LOOK.roles,
+        foreground: { color: white },
+        'card-foreground': { color: white },
+        'popover-foreground': { color: white },
+        'accent-foreground': { color: white },
+        'destructive-foreground': { color: white },
+      },
+    }
+    const failing = contrastChecks(look).filter((check) => !check.ok)
+    expect(failing.length).toBeGreaterThan(0)
+    expect(failing.map((check) => check.worst)).toContain('neutral-50 on cards')
+    expect(Math.min(...failing.map((check) => check.ratio))).toBeLessThan(1.1)
+  })
+
+  it('covers every text colour the screens use', () => {
+    const sources = import.meta.glob('../src/**/*.{ts,tsx}', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>
+    const used = new Set<string>()
+    const pattern =
+      /\btext-((?:neutral|brand|accent|complement|success|warning|error)-\d+|foreground|muted-foreground|primary|primary-foreground|card-foreground|popover-foreground|secondary-foreground|accent-foreground|destructive|destructive-foreground)\b/g
+    for (const [path, text] of Object.entries(sources)) {
+      if (path.endsWith('.test.ts')) continue
+      for (const match of text.matchAll(pattern)) used.add(match[1]!)
+    }
+    expect(used.size).toBeGreaterThan(10)
+    const unchecked = [...used].filter(
+      (name) => !CHECKED_TEXT.includes(name) && !(name in TEXT_EXEMPT),
+    )
+    expect(unchecked).toEqual([])
+  })
+
+  it('checks text on fields, over the page and over cards', () => {
+    const fields = contrastChecks(AGENT964_LOOK).find(
+      (check) => check.pair === 'Text on fields',
+    )
+    expect(fields?.ok).toBe(true)
+    // A field as light as the text people read on it fails the check.
+    const look: Look = {
+      ...AGENT964_LOOK,
+      roles: { ...AGENT964_LOOK.roles, input: { step: 'neutral-400' } },
+    }
+    const failing = contrastChecks(look).find(
+      (check) => check.pair === 'Text on fields',
+    )
+    expect(failing?.ok).toBe(false)
+    expect(failing?.worst).toMatch(/^neutral-400 on fields/)
+  })
+
+  it('puts on fields only text colours the fields line checks', () => {
+    const sources = import.meta.glob('../src/**/*.tsx', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>
+    const COLOUR =
+      /\btext-((?:neutral|brand|accent|complement|success|warning|error)-\d+|foreground|muted-foreground|primary|[a-z]+-foreground)\b/g
+    const wrong: string[] = []
+    for (const [path, text] of Object.entries(sources)) {
+      // Placeholders sit on a field wherever they are.
+      for (const match of text.matchAll(
+        /placeholder:text-([a-z]+(?:-[a-z0-9]+)*)/g,
+      )) {
+        if (!FIELD_TEXT.includes(match[1]!)) wrong.push(`${path}: ${match[0]}`)
+      }
+      // So does any text in a class list that paints a field's surface.
+      for (const list of text.matchAll(/(['"`])([^'"`]*?)\1/g)) {
+        const classes = list[2]!
+        if (!/\bbg-input\b/.test(classes)) continue
+        for (const match of classes.matchAll(COLOUR)) {
+          if (!FIELD_TEXT.includes(match[1]!)) {
+            wrong.push(`${path}: ${match[0]} in "${classes.slice(0, 60)}…"`)
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([])
+  })
+})
+
+describe('system fonts', () => {
+  it('takes only the three named families, never a property every object has', () => {
+    for (const family of [
+      'constructor',
+      'toString',
+      '__proto__',
+      'hasOwnProperty',
+    ]) {
+      expect(
+        checkLook({
+          ...AGENT964_LOOK,
+          fonts: {
+            ...AGENT964_LOOK.fonts,
+            display: { kind: 'system', family },
+          },
+        }),
+        family,
+      ).toHaveProperty('problem')
+    }
+    const odd = {
+      ...AGENT964_LOOK,
+      fonts: {
+        ...AGENT964_LOOK.fonts,
+        display: { kind: 'system', family: 'constructor' },
+      },
+    } as unknown as Look
+    expect(() => lookCss(odd)).not.toThrow()
+    expect(lookCss(odd)).not.toMatch(/undefined|function/)
+  })
+
+  it('writes no face whose format is a property every object has', () => {
+    const css = lookCss({
+      ...AGENT964_LOOK,
+      fonts: {
+        ...AGENT964_LOOK.fonts,
+        body: {
+          kind: 'upload',
+          family: 'Odd',
+          faces: [
+            {
+              sha256: 'c'.repeat(64),
+              format: 'constructor' as never,
+              weight: '400',
+              style: 'normal',
+              unicodeRange: null,
+            },
+          ],
+        },
+      },
+    })
+    expect(css).not.toContain('c'.repeat(64))
+  })
+})

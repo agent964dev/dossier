@@ -1,0 +1,748 @@
+// The one interface that removes rows and bytes. Only the purge (core/purge.ts)
+// and the scheduled jobs (jobs/) import it, and every member needs a
+// SystemJob in its context, which no request ever has. Review changes here by
+// hand: everything below deletes.
+import {
+  dossierError,
+  isPageFile,
+  type DossierError,
+  type EventSeq,
+  type EventType,
+  type LinkKind,
+  type Sha256,
+  type TreeId,
+  type WorkspaceId,
+} from '@dossier/contracts'
+import { Clock, Context, Effect } from 'effect'
+
+import type { EventRow, TreeRow, WorkspaceRow } from './rows.ts'
+
+/** A job the Worker runs itself: a purge run, a webhook sweep, a delivery. */
+export class SystemJob extends Context.Tag('SystemJob')<
+  SystemJob,
+  { readonly job: 'purge' | 'sweep' | 'deliver'; readonly runId: string }
+>() {}
+
+export interface PurgeCounts {
+  readonly nodes: number
+  readonly versions: number
+  readonly trees: number
+  readonly workspaces: number
+  /** Keys scoped to a purged node, revoked with their scope cleared. */
+  readonly keysRevoked: number
+}
+
+/** An event with the workspace its tree is in now. */
+export type EventInWorkspace = EventRow & { readonly workspaceId: WorkspaceId }
+
+/** What a webhook delivery says about one event, read as it goes out. */
+export interface DeliveryFacts {
+  readonly event: EventRow
+  readonly tree: TreeRow
+  /** The workspace the tree is in now. */
+  readonly workspace: WorkspaceRow
+  /** Null where the event hides its actor. */
+  readonly actorEmail: string | null
+  /** What the event's path names, for its link. */
+  readonly linkKind: LinkKind
+}
+
+export interface SystemStore {
+  /** Staged pushes past their expiry: expired, their files and holds gone. */
+  readonly expireStagedPushes: (
+    now: number,
+    limit: number,
+  ) => Effect.Effect<number, DossierError<'unavailable'>>
+  /**
+   * Nodes deleted before the cutoff, and the nodes of trees and workspaces
+   * deleted before it, with everything that hangs off them, `limit` a run.
+   */
+  readonly purgeDeletedNodes: (
+    cutoff: number,
+    limit: number,
+  ) => Effect.Effect<PurgeCounts, DossierError<'unavailable'>>
+  /** Records past their life: operations, Seen by, views, handles, rates. */
+  readonly purgeRecords: (
+    cutoff: number,
+    now: number,
+  ) => Effect.Effect<
+    Readonly<
+      Record<
+        'operations' | 'seenBy' | 'pageViews' | 'handles' | 'rates',
+        number
+      >
+    >,
+    DossierError<'unavailable'>
+  >
+  /**
+   * Marks up to `limit` blobs nothing references and nothing holds as
+   * reclaiming, `only` those hashes when given; the hashes it claimed.
+   */
+  readonly claimBlobs: (
+    limit: number,
+    only?: readonly Sha256[],
+  ) => Effect.Effect<readonly Sha256[], DossierError<'unavailable'>>
+  /** After the R2 delete: the blob's analyses and its row. */
+  readonly finishBlob: (
+    sha256: Sha256,
+    generation: string | null,
+  ) => Effect.Effect<void, DossierError<'unavailable'>>
+  /** Claims started before `olderThan`. */
+  readonly staleClaims: (
+    olderThan: number,
+  ) => Effect.Effect<readonly Sha256[], DossierError<'unavailable'>>
+  /** A claim whose bytes are still there goes back to live. */
+  readonly releaseClaim: (
+    sha256: Sha256,
+  ) => Effect.Effect<void, DossierError<'unavailable'>>
+  /** One commit's events, `from` to `to`, oldest first. */
+  readonly eventsInRange: (
+    treeId: TreeId,
+    from: EventSeq,
+    to: EventSeq,
+  ) => Effect.Effect<readonly EventInWorkspace[], DossierError<'unavailable'>>
+  /**
+   * Events created at or after `since` that a webhook of their tree's
+   * workspace takes and has no delivery for yet, oldest first, `limit` at
+   * most.
+   */
+  readonly eventsSince: (
+    since: number,
+    limit: number,
+  ) => Effect.Effect<readonly EventInWorkspace[], DossierError<'unavailable'>>
+  /** The event, its tree and workspace now, or null once it is purged. */
+  readonly eventForDelivery: (
+    treeId: TreeId,
+    seq: EventSeq,
+  ) => Effect.Effect<DeliveryFacts | null, DossierError<'unavailable'>>
+}
+
+/** Nodes one call removes at most: one batch. */
+export const NODE_BATCH = 100
+
+/** Rows of each kind of record one call removes at most. */
+export const RECORD_BATCH = 2000
+
+/**
+ * The most D1 statements each member sends in one call, reads included, so a
+ * caller can keep a run within its budget.
+ */
+export const SYSTEM_STATEMENTS = {
+  expireStagedPushes: 8,
+  purgeDeletedNodes: 13 + 18 + 13,
+  purgeRecords: 7,
+  claimBlobs: 1,
+  finishBlob: 2,
+  staleClaims: 1,
+  releaseClaim: 1,
+} as const
+
+/** A day in milliseconds. */
+const DAY = 24 * 60 * 60 * 1000
+
+/**
+ * The nodes of the batch `?1` (a JSON array of IDs) that go, as each
+ * statement sees the database: still deleted before the cutoff `?2` (or in a
+ * tree or workspace deleted before it), and with every child going in the
+ * same batch. A node a restore made live again, or with a child that stays,
+ * stays, and so does every node above it.
+ */
+const DOOMED_NODES = `with recursive
+  ids(id) as (select value from json_each(?1)),
+  stays(id) as (
+    select n.id from nodes n join ids on ids.id = n.id
+    where not (
+        (n.deleted_at is not null and n.deleted_at < ?2)
+        or exists (select 1 from trees t join workspaces w on w.id = t.workspace_id
+          where t.id = n.tree_id and (t.deleted_at < ?2 or w.deleted_at < ?2)))
+      or exists (select 1 from nodes c where c.parent_id = n.id
+        and c.id not in (select id from ids))
+    union
+    select n.parent_id from nodes n join stays on stays.id = n.id
+    where n.parent_id is not null
+  ),
+  doomed(id) as (
+    select id from ids where id not in (select id from stays)
+      and id in (select id from nodes)
+  )`
+
+/** The trees of the batch `?1` deleted before `?2` that have no node left. */
+const DOOMED_TREES = `with doomed(id) as (
+    select t.id from trees t join workspaces w on w.id = t.workspace_id
+      join json_each(?1) j on j.value = t.id
+    where (t.deleted_at < ?2 or w.deleted_at < ?2)
+      and not exists (select 1 from nodes n where n.tree_id = t.id)
+  )`
+
+/**
+ * The workspaces of the batch `?1` deleted before `?2`, not yet purged, that
+ * have no tree left.
+ */
+const DOOMED_WORKSPACES = `with doomed(id) as (
+    select w.id from workspaces w join json_each(?1) j on j.value = w.id
+    where w.deleted_at < ?2 and w.purged_at is null
+      and not exists (select 1 from trees t where t.workspace_id = w.id)
+  )`
+
+/** How long an upload may still be writing after its push expired. */
+export const UPLOAD_GRACE_MS = 60 * 60 * 1000
+
+/** How long an upload's hold lasts while its bytes are never verified. */
+export const ABANDONED_HOLD_MS = 24 * 60 * 60 * 1000
+
+/** The staged pushes of the batch `?1` whose expiry `?2` has passed. */
+const EXPIRED_PUSHES = `with doomed(id) as (
+    select p.id from pushes p join json_each(?1) j on j.value = p.id
+    where p.state = 'staged' and p.expires_at <= ?2
+  )`
+
+const ZERO = { nodes: 0, versions: 0, trees: 0, workspaces: 0, keysRevoked: 0 }
+
+/** The store over the Worker's D1 and R2; reached through TreeStore.system. */
+export const makeSystemStore = (bindings: Env): SystemStore => {
+  const { DB } = bindings
+
+  const query = <A>(what: string, run: () => Promise<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (error) => {
+        console.error(`The purge could not ${what}`, error)
+        return dossierError('unavailable')
+      },
+    })
+
+  /** Each statement in one batch, bound to as many values as it names. */
+  const batch = (
+    what: string,
+    statements: readonly { readonly sql: string; readonly binds: unknown[] }[],
+  ) =>
+    query(what, () =>
+      DB.batch(
+        statements.map((s) => {
+          const highest = Math.max(
+            0,
+            ...[...s.sql.matchAll(/\?(\d+)/g)].map((m) => Number(m[1])),
+          )
+          return DB.prepare(s.sql).bind(...s.binds.slice(0, highest))
+        }),
+      ),
+    ).pipe(Effect.map((results) => results.map((r) => r.meta.changes ?? 0)))
+
+  const ids = (what: string, sql: string, ...binds: unknown[]) =>
+    query(what, () =>
+      DB.prepare(sql)
+        .bind(...binds)
+        .all<{ id: string }>(),
+    ).pipe(Effect.map((rows) => rows.results.map((r) => r.id)))
+
+  const expireStagedPushes: SystemStore['expireStagedPushes'] = (now, limit) =>
+    Effect.gen(function* () {
+      const found = yield* ids(
+        'read expired pushes',
+        `select id from pushes where state = 'staged' and expires_at <= ?
+         order by expires_at limit ?`,
+        now,
+        limit,
+      )
+      // An upload still writing its bytes keeps its hold for a while after
+      // its push expires, so the bytes are never reclaimed under it; the
+      // holds of pushes that expired earlier go once that while is over.
+      // Each attempt renews its hold's time, verified before or not, so the
+      // while counts from the last one.
+      const settled = now - UPLOAD_GRACE_MS
+      const earlier = {
+        sql: `delete from blob_holds where holder_kind = 'push'
+                and created_at <= ?1
+                and holder_id in (select id from pushes where state = 'expired')`,
+        binds: [settled],
+      }
+      // An upload that never wrote its bytes gives up its hold after a day,
+      // whatever held it; an upload that tries again renews its hold, so
+      // one still going is never caught here.
+      const abandoned = {
+        sql: `delete from blob_holds where verified = 0 and created_at <= ?1`,
+        binds: [now - ABANDONED_HOLD_MS],
+      }
+      if (found.length === 0) {
+        yield* batch('let go of expired pushes’ holds', [earlier, abandoned])
+        return 0
+      }
+      const binds = [JSON.stringify(found), now, settled]
+      const changes = yield* batch('expire pushes', [
+        earlier,
+        abandoned,
+        {
+          sql: `${EXPIRED_PUSHES} delete from blob_holds
+                where holder_kind = 'push' and holder_id in (select id from doomed)
+                  and created_at <= ?3`,
+          binds,
+        },
+        ...['push_files', 'push_folders', 'push_forms'].map((table) => ({
+          sql: `${EXPIRED_PUSHES} delete from ${table}
+                where push_id in (select id from doomed)`,
+          binds,
+        })),
+        {
+          sql: `${EXPIRED_PUSHES} update pushes set state = 'expired'
+                where id in (select id from doomed)`,
+          binds,
+        },
+      ])
+      return changes[6] ?? 0
+    })
+
+  /** One batch of deleted nodes, deepest first, with what hangs off them. */
+  const nodeBatch = (cutoff: number, limit: number, now: number) =>
+    Effect.gen(function* () {
+      const found = yield* ids(
+        'read deleted nodes',
+        `select id from (
+           select n.id, n.depth from nodes n where n.deleted_at < ?1
+           union
+           select n.id, n.depth from trees t join nodes n on n.tree_id = t.id
+             where t.deleted_at < ?1
+           union
+           select n.id, n.depth from workspaces w
+             join trees t on t.workspace_id = w.id
+             join nodes n on n.tree_id = t.id
+             where w.deleted_at < ?1
+         ) order by depth desc, id limit ?2`,
+        cutoff,
+        Math.min(limit, NODE_BATCH),
+      )
+      if (found.length === 0) return ZERO
+      const binds = [JSON.stringify(found), cutoff, now]
+      const inDoomed = (column: string) =>
+        `${column} in (select id from doomed)`
+      const changes = yield* batch('remove deleted nodes', [
+        {
+          sql: `${DOOMED_NODES} delete from forms where ${inDoomed('host_node_id')}
+                or host_version_id in (select id from node_versions
+                  where ${inDoomed('node_id')})`,
+          binds,
+        },
+        ...[
+          'shares',
+          'seen_by',
+          'page_views',
+          'path_aliases',
+          'view_handle_nodes',
+          // Its search row, and through the trigger its words in the index.
+          'search_docs',
+          'search_names',
+        ].map((table) => ({
+          sql: `${DOOMED_NODES} delete from ${table} where ${inDoomed('node_id')}`,
+          binds,
+        })),
+        {
+          sql: `${DOOMED_NODES} delete from mentions
+                where ${inDoomed('comment_node_id')} or ${inDoomed('page_node_id')}`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_NODES} delete from operations
+                where ${inDoomed('result_node_id')}`,
+          binds,
+        },
+        {
+          // One update, so no live key ever has its scope cleared, which
+          // would widen it to the whole account.
+          sql: `${DOOMED_NODES} update agent_keys
+                set revoked_at = coalesce(revoked_at, ?3), scope_node_id = null
+                where ${inDoomed('scope_node_id')}`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_NODES} update blobs set ref_count = ref_count -
+                  (select count(*) from node_versions v
+                    where v.blob_sha256 = blobs.sha256 and ${inDoomed('v.node_id')})
+                where sha256 in (select blob_sha256 from node_versions
+                  where blob_sha256 is not null and ${inDoomed('node_id')})`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_NODES} delete from node_versions where ${inDoomed('node_id')}`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_NODES} delete from nodes where ${inDoomed('id')}`,
+          binds,
+        },
+      ])
+      return {
+        ...ZERO,
+        keysRevoked: changes[10] ?? 0,
+        versions: changes[12] ?? 0,
+        nodes: changes[13] ?? 0,
+      }
+    })
+
+  /** Deleted trees with no node left: their rows of every kind, then them. */
+  const treeBatch = (cutoff: number) =>
+    Effect.gen(function* () {
+      const found = yield* ids(
+        'read deleted trees',
+        `select t.id from trees t join workspaces w on w.id = t.workspace_id
+         where (t.deleted_at < ?1 or w.deleted_at < ?1)
+           and not exists (select 1 from nodes n where n.tree_id = t.id)
+         order by t.id limit 20`,
+        cutoff,
+      )
+      if (found.length === 0) return ZERO
+      const binds = [JSON.stringify(found), cutoff]
+      const byTree = (table: string) => ({
+        sql: `${DOOMED_TREES} delete from ${table}
+              where tree_id in (select id from doomed)`,
+        binds,
+      })
+      const handles = `(select hash_sha256 from view_handles
+        where tree_id in (select id from doomed))`
+      const pushes = `(select id from pushes where tree_id in (select id from doomed))`
+      const changes = yield* batch('remove deleted trees', [
+        byTree('events'),
+        byTree('mentions'),
+        byTree('path_aliases'),
+        byTree('tree_aliases'),
+        byTree('page_needs'),
+        byTree('search_docs'),
+        byTree('search_names'),
+        byTree('forms'),
+        byTree('shares'),
+        {
+          sql: `${DOOMED_TREES} delete from view_handle_nodes
+                where handle_hash in ${handles}`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_TREES} delete from view_handle_firsts
+                where handle_hash in ${handles}`,
+          binds,
+        },
+        byTree('view_handles'),
+        {
+          // Operation scopes are '<tree id>:<path>'.
+          sql: `${DOOMED_TREES} delete from operations
+                where substr(scope, 1, instr(scope, ':') - 1) in (select id from doomed)`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_TREES} delete from blob_holds
+                where holder_kind = 'push' and holder_id in ${pushes}`,
+          binds,
+        },
+        ...['push_files', 'push_folders', 'push_forms'].map((table) => ({
+          sql: `${DOOMED_TREES} delete from ${table} where push_id in ${pushes}`,
+          binds,
+        })),
+        byTree('pushes'),
+        {
+          sql: `${DOOMED_TREES} delete from trees where id in (select id from doomed)`,
+          binds,
+        },
+      ])
+      return { ...ZERO, trees: changes[changes.length - 1] ?? 0 }
+    })
+
+  /**
+   * Deleted workspaces with no tree left: memberships, teams, invitations
+   * and pushes go; the row stays, marked purged, so the name stays taken.
+   */
+  const workspaceBatch = (cutoff: number, now: number) =>
+    Effect.gen(function* () {
+      const found = yield* ids(
+        'read deleted workspaces',
+        `select w.id from workspaces w
+         where w.deleted_at < ?1 and w.purged_at is null
+           and not exists (select 1 from trees t where t.workspace_id = w.id)
+         order by w.id limit 20`,
+        cutoff,
+      )
+      if (found.length === 0) return ZERO
+      const binds = [JSON.stringify(found), cutoff, now]
+      // A push of a tree that moved to another workspace stays with it.
+      const pushes = `(select id from pushes
+        where workspace_id in (select id from doomed)
+          and (tree_id is null or tree_id not in (select id from trees)))`
+      const changes = yield* batch('remove deleted workspaces', [
+        {
+          sql: `${DOOMED_WORKSPACES} delete from blob_holds
+                where holder_kind = 'push' and holder_id in ${pushes}`,
+          binds,
+        },
+        ...['push_files', 'push_folders', 'push_forms'].map((table) => ({
+          sql: `${DOOMED_WORKSPACES} delete from ${table} where push_id in ${pushes}`,
+          binds,
+        })),
+        {
+          sql: `${DOOMED_WORKSPACES} delete from pushes where id in ${pushes}`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_WORKSPACES} delete from webhook_deliveries where webhook_id in
+                  (select id from webhooks where workspace_id in (select id from doomed))`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_WORKSPACES} delete from webhooks
+                where workspace_id in (select id from doomed)`,
+          binds,
+        },
+        {
+          sql: `${DOOMED_WORKSPACES} delete from team_members where team_id in
+                  (select id from teams where workspace_id in (select id from doomed))`,
+          binds,
+        },
+        ...['teams', 'invitations', 'workspace_members'].map((table) => ({
+          sql: `${DOOMED_WORKSPACES} delete from ${table}
+                where workspace_id in (select id from doomed)`,
+          binds,
+        })),
+        {
+          sql: `${DOOMED_WORKSPACES} update workspaces set purged_at = ?3
+                where id in (select id from doomed)`,
+          binds,
+        },
+      ])
+      return { ...ZERO, workspaces: changes[changes.length - 1] ?? 0 }
+    })
+
+  const purgeDeletedNodes: SystemStore['purgeDeletedNodes'] = (cutoff, limit) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      // Nodes first; trees once their nodes are gone; workspaces last.
+      const nodes = yield* nodeBatch(cutoff, limit, now)
+      if (nodes.nodes > 0) return nodes
+      const trees = yield* treeBatch(cutoff)
+      if (trees.trees > 0) return { ...trees, keysRevoked: nodes.keysRevoked }
+      const workspaces = yield* workspaceBatch(cutoff, now)
+      return { ...workspaces, keysRevoked: nodes.keysRevoked }
+    })
+
+  const purgeRecords: SystemStore['purgeRecords'] = (cutoff, now) =>
+    Effect.gen(function* () {
+      const day = new Date(cutoff).toISOString().slice(0, 10)
+      const older = (table: string, column: string) =>
+        `delete from ${table} where rowid in
+           (select rowid from ${table} where ${column} < ?1 limit ?2)`
+      const expired = `with gone(hash) as (select hash_sha256 from view_handles
+          where expires_at < ?1 order by hash_sha256 limit ?2)`
+      const changes = yield* batch('remove old records', [
+        {
+          sql: older('operations', 'created_at'),
+          binds: [cutoff, RECORD_BATCH],
+        },
+        {
+          sql: older('seen_by', 'last_seen_at'),
+          binds: [cutoff, RECORD_BATCH],
+        },
+        { sql: older('page_views', 'day'), binds: [day, RECORD_BATCH] },
+        {
+          sql: `${expired} delete from view_handle_nodes
+                where handle_hash in (select hash from gone)`,
+          binds: [now, RECORD_BATCH],
+        },
+        {
+          sql: `${expired} delete from view_handle_firsts
+                where handle_hash in (select hash from gone)`,
+          binds: [now, RECORD_BATCH],
+        },
+        {
+          sql: `${expired} delete from view_handles
+                where hash_sha256 in (select hash from gone)`,
+          binds: [now, RECORD_BATCH],
+        },
+        {
+          sql: older('rate_counters', 'window_start'),
+          binds: [now - DAY, RECORD_BATCH],
+        },
+      ])
+      return {
+        operations: changes[0] ?? 0,
+        seenBy: changes[1] ?? 0,
+        pageViews: changes[2] ?? 0,
+        handles: changes[5] ?? 0,
+        rates: changes[6] ?? 0,
+      }
+    })
+
+  const claimBlobs: SystemStore['claimBlobs'] = (limit, only) =>
+    Effect.gen(function* () {
+      if (only !== undefined && only.length === 0) return []
+      const now = yield* Clock.currentTimeMillis
+      // Every hold is a guarded insert that needs a live row, and so is
+      // every new reference: once claimed, nothing takes the blob back.
+      const rows = yield* query('claim blobs', () =>
+        DB.prepare(
+          `update blobs set state = 'reclaiming', reclaim_started_at = ?1
+           where sha256 in (
+             select b.sha256 from blobs b
+             where b.state = 'live' and b.ref_count <= 0
+               and not exists (select 1 from blob_holds h where h.sha256 = b.sha256)
+               and not exists (select 1 from node_versions v
+                 where v.blob_sha256 = b.sha256)
+               and (?3 is null or b.sha256 in (select value from json_each(?3)))
+             limit ?2)
+           returning sha256`,
+        )
+          .bind(now, limit, only === undefined ? null : JSON.stringify(only))
+          .all<{ sha256: Sha256 }>(),
+      )
+      return rows.results.map((r) => r.sha256)
+    })
+
+  const finishBlob: SystemStore['finishBlob'] = (sha256, generation) =>
+    batch('finish a blob', [
+      {
+        sql: `delete from analyses where sha256 = ?1 and exists
+                (select 1 from blobs where sha256 = ?1 and state = 'reclaiming'
+                   and generation is ?2)`,
+        binds: [sha256, generation],
+      },
+      {
+        sql: `delete from blobs where sha256 = ?1 and state = 'reclaiming'
+                and generation is ?2`,
+        binds: [sha256, generation],
+      },
+    ]).pipe(Effect.asVoid)
+
+  const staleClaims: SystemStore['staleClaims'] = (olderThan) =>
+    query('read old claims', () =>
+      DB.prepare(
+        `select sha256 from blobs where state = 'reclaiming'
+           and reclaim_started_at < ? order by reclaim_started_at limit 100`,
+      )
+        .bind(olderThan)
+        .all<{ sha256: Sha256 }>(),
+    ).pipe(Effect.map((rows) => rows.results.map((r) => r.sha256)))
+
+  const releaseClaim: SystemStore['releaseClaim'] = (sha256) =>
+    query('release a claim', () =>
+      DB.prepare(
+        `update blobs set state = 'live', reclaim_started_at = null
+         where sha256 = ? and state = 'reclaiming'`,
+      )
+        .bind(sha256)
+        .run(),
+    ).pipe(Effect.asVoid)
+
+  // The webhook jobs' reads.
+
+  const read = <A>(what: string, run: () => Promise<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (error) => {
+        console.error(`A webhook job could not ${what}`, error)
+        return dossierError('unavailable')
+      },
+    })
+
+  const EVENT_COLUMNS = `e.tree_id as treeId, e.seq as seq, e.type as type,
+    e.node_id as nodeId, e.path as path, e.actor_id as actorId,
+    e.push_id as pushId, e.detail as detail, e.created_at as createdAt`
+
+  const eventsInRange: SystemStore['eventsInRange'] = (treeId, from, to) =>
+    read('read a commit’s events', () =>
+      DB.prepare(
+        `select ${EVENT_COLUMNS}, t.workspace_id as workspaceId
+         from events e join trees t on t.id = e.tree_id
+         where e.tree_id = ? and e.seq between ? and ? order by e.seq`,
+      )
+        .bind(treeId, from, to)
+        .all<EventInWorkspace>(),
+    ).pipe(Effect.map((rows) => rows.results))
+
+  const eventsSince: SystemStore['eventsSince'] = (since, limit) =>
+    read('read the last day’s events', () =>
+      DB.prepare(
+        `select ${EVENT_COLUMNS}, t.workspace_id as workspaceId
+         from events e join trees t on t.id = e.tree_id
+         where e.created_at >= ?1 and exists (
+           select 1 from webhooks w
+           where w.workspace_id = t.workspace_id and w.created_at <= e.created_at
+             and exists (select 1 from json_each(w.events_json) j where j.value = e.type)
+             and not exists (select 1 from webhook_deliveries d
+               where d.event_tree_id = e.tree_id and d.event_seq = e.seq
+                 and d.webhook_id = w.id))
+         order by e.created_at, e.tree_id, e.seq limit ?2`,
+      )
+        .bind(since, limit)
+        .all<EventInWorkspace>(),
+    ).pipe(Effect.map((rows) => rows.results))
+
+  const eventForDelivery: SystemStore['eventForDelivery'] = (treeId, seq) =>
+    Effect.gen(function* () {
+      const row = yield* read('read an event to deliver', () =>
+        DB.prepare(
+          `select ${EVENT_COLUMNS},
+             t.id as t_id, t.workspace_id as t_workspaceId, t.name as t_name,
+             t.root_node_id as t_rootNodeId, t.created_by as t_createdBy,
+             t.authored_seq as t_authoredSeq, t.event_seq as t_eventSeq,
+             t.push_count as t_pushCount, t.created_at as t_createdAt,
+             t.deleted_at as t_deletedAt,
+             w.id as w_id, w.name as w_name, w.created_by as w_createdBy,
+             w.created_at as w_createdAt, w.suspended_at as w_suspendedAt,
+             w.deleted_at as w_deletedAt, w.purged_at as w_purgedAt,
+             u.email as actorEmail,
+             coalesce(n.kind, (select k.kind from nodes k
+               where k.tree_id = e.tree_id and k.path = e.path
+               order by k.deleted_at is not null, k.created_at desc limit 1)) as nodeKind
+           from events e
+             join trees t on t.id = e.tree_id
+             join workspaces w on w.id = t.workspace_id
+             left join "user" u on u.id = e.actor_id
+             left join nodes n on n.id = e.node_id
+           where e.tree_id = ? and e.seq = ?`,
+        )
+          .bind(treeId, seq)
+          .first<Record<string, unknown>>(),
+      )
+      if (row === null) return null
+      const pick = (prefix: string) =>
+        Object.fromEntries(
+          Object.entries(row)
+            .filter(([key]) => key.startsWith(prefix))
+            .map(([key, value]) => [key.slice(prefix.length), value]),
+        )
+      const event = {
+        treeId: row.treeId,
+        seq: row.seq,
+        type: row.type,
+        nodeId: row.nodeId,
+        path: row.path,
+        actorId: row.actorId,
+        pushId: row.pushId,
+        detail: row.detail,
+        createdAt: row.createdAt,
+      } as EventRow
+      const kind = row.nodeKind as 'folder' | 'file' | null
+      const path = String(row.path)
+      const linkKind: LinkKind =
+        kind === 'folder' ||
+        path === '' ||
+        (kind === null && (row.type as EventType) === 'push')
+          ? 'folder'
+          : isPageFile(path)
+            ? 'page'
+            : 'file'
+      return {
+        event,
+        tree: pick('t_') as TreeRow,
+        workspace: pick('w_') as WorkspaceRow,
+        actorEmail: (row.actorEmail as string | null) ?? null,
+        linkKind,
+      } satisfies DeliveryFacts
+    })
+
+  return {
+    expireStagedPushes,
+    purgeDeletedNodes,
+    purgeRecords,
+    claimBlobs,
+    finishBlob,
+    staleClaims,
+    releaseClaim,
+    eventsInRange,
+    eventsSince,
+    eventForDelivery,
+  }
+}

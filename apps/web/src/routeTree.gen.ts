@@ -10,129 +10,272 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SignInRouteImport } from './routes/sign-in'
-import { Route as WorkspaceRouteImport } from './routes/workspace'
-import { Route as CliAuthRouteImport } from './routes/cli.auth'
-import { Route as DashboardIndexRouteImport } from './routes/dashboard/index'
-import { Route as DashboardTrashRouteImport } from './routes/dashboard/trash'
-import { Route as DashboardDocumentsIdRouteImport } from './routes/dashboard/documents.$id'
-import { Route as DashboardDocumentsIdDiffRouteImport } from './routes/dashboard/documents.$id_.diff'
+import { Route as WorkspaceIndexRouteImport } from './routes/$workspace/index'
+import { Route as Char91_Char93DeviceRouteImport } from './routes/[_]/device'
+import { Route as Char91_Char93NoAccessRouteImport } from './routes/[_]/no-access'
+import { Route as Char91_Char93PrivacyRouteImport } from './routes/[_]/privacy'
+import { Route as Char91_Char93SearchRouteImport } from './routes/[_]/search'
+import { Route as Char91_Char93SettingsRouteImport } from './routes/[_]/settings'
+import { Route as Char91_Char93SignInRouteImport } from './routes/[_]/sign-in'
+import { Route as WorkspaceTreeSplatRouteImport } from './routes/$workspace/$tree/$'
+import { Route as Char91_Char93AdminIndexRouteImport } from './routes/[_]/admin/index'
+import { Route as Char91_Char93AdminLookRouteImport } from './routes/[_]/admin/look'
+import { Route as Char91_Char93WWorkspaceSettingsRouteRouteImport } from './routes/[_]/w/$workspace/settings/route'
+import { Route as Char91_Char93HistoryWorkspaceTreeSplatRouteImport } from './routes/[_]/history/$workspace/$tree/$'
+import { Route as Char91_Char93ResponsesWorkspaceTreeSplatRouteImport } from './routes/[_]/responses/$workspace/$tree/$'
+import { Route as Char91_Char93WWorkspaceSettingsIndexRouteImport } from './routes/[_]/w/$workspace/settings/index'
+import { Route as Char91_Char93WWorkspaceSettingsWebhooksRouteImport } from './routes/[_]/w/$workspace/settings/webhooks'
+import { Route as Char91_Char93WWorkspaceSettingsWorkspaceRouteImport } from './routes/[_]/w/$workspace/settings/workspace'
+import { Route as Char91_Char93WWorkspaceSettingsTeamsIndexRouteImport } from './routes/[_]/w/$workspace/settings/teams.index'
+import { Route as Char91_Char93WWorkspaceSettingsTeamsTeamRouteImport } from './routes/[_]/w/$workspace/settings/teams.$team'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SignInRoute = SignInRouteImport.update({
-  id: '/sign-in',
-  path: '/sign-in',
+const WorkspaceIndexRoute = WorkspaceIndexRouteImport.update({
+  id: '/$workspace/',
+  path: '/$workspace/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const WorkspaceRoute = WorkspaceRouteImport.update({
-  id: '/workspace',
-  path: '/workspace',
+const Char91_Char93DeviceRoute = Char91_Char93DeviceRouteImport.update({
+  id: '/_/device',
+  path: '/_/device',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CliAuthRoute = CliAuthRouteImport.update({
-  id: '/cli/auth',
-  path: '/cli/auth',
+const Char91_Char93NoAccessRoute = Char91_Char93NoAccessRouteImport.update({
+  id: '/_/no-access',
+  path: '/_/no-access',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DashboardIndexRoute = DashboardIndexRouteImport.update({
-  id: '/dashboard/',
-  path: '/dashboard/',
+const Char91_Char93PrivacyRoute = Char91_Char93PrivacyRouteImport.update({
+  id: '/_/privacy',
+  path: '/_/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DashboardTrashRoute = DashboardTrashRouteImport.update({
-  id: '/dashboard/trash',
-  path: '/dashboard/trash',
+const Char91_Char93SearchRoute = Char91_Char93SearchRouteImport.update({
+  id: '/_/search',
+  path: '/_/search',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DashboardDocumentsIdRoute = DashboardDocumentsIdRouteImport.update({
-  id: '/dashboard/documents/$id',
-  path: '/dashboard/documents/$id',
+const Char91_Char93SettingsRoute = Char91_Char93SettingsRouteImport.update({
+  id: '/_/settings',
+  path: '/_/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DashboardDocumentsIdDiffRoute =
-  DashboardDocumentsIdDiffRouteImport.update({
-    id: '/dashboard/documents/$id_/diff',
-    path: '/dashboard/documents/$id/diff',
+const Char91_Char93SignInRoute = Char91_Char93SignInRouteImport.update({
+  id: '/_/sign-in',
+  path: '/_/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspaceTreeSplatRoute = WorkspaceTreeSplatRouteImport.update({
+  id: '/$workspace/$tree/$',
+  path: '/$workspace/$tree/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const Char91_Char93AdminIndexRoute = Char91_Char93AdminIndexRouteImport.update({
+  id: '/_/admin/',
+  path: '/_/admin/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const Char91_Char93AdminLookRoute = Char91_Char93AdminLookRouteImport.update({
+  id: '/_/admin/look',
+  path: '/_/admin/look',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const Char91_Char93WWorkspaceSettingsRouteRoute =
+  Char91_Char93WWorkspaceSettingsRouteRouteImport.update({
+    id: '/_/w/$workspace/settings',
+    path: '/_/w/$workspace/settings',
     getParentRoute: () => rootRouteImport,
+  } as any)
+const Char91_Char93HistoryWorkspaceTreeSplatRoute =
+  Char91_Char93HistoryWorkspaceTreeSplatRouteImport.update({
+    id: '/_/history/$workspace/$tree/$',
+    path: '/_/history/$workspace/$tree/$',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const Char91_Char93ResponsesWorkspaceTreeSplatRoute =
+  Char91_Char93ResponsesWorkspaceTreeSplatRouteImport.update({
+    id: '/_/responses/$workspace/$tree/$',
+    path: '/_/responses/$workspace/$tree/$',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const Char91_Char93WWorkspaceSettingsIndexRoute =
+  Char91_Char93WWorkspaceSettingsIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
+  } as any)
+const Char91_Char93WWorkspaceSettingsWebhooksRoute =
+  Char91_Char93WWorkspaceSettingsWebhooksRouteImport.update({
+    id: '/webhooks',
+    path: '/webhooks',
+    getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
+  } as any)
+const Char91_Char93WWorkspaceSettingsWorkspaceRoute =
+  Char91_Char93WWorkspaceSettingsWorkspaceRouteImport.update({
+    id: '/workspace',
+    path: '/workspace',
+    getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
+  } as any)
+const Char91_Char93WWorkspaceSettingsTeamsIndexRoute =
+  Char91_Char93WWorkspaceSettingsTeamsIndexRouteImport.update({
+    id: '/teams/',
+    path: '/teams/',
+    getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
+  } as any)
+const Char91_Char93WWorkspaceSettingsTeamsTeamRoute =
+  Char91_Char93WWorkspaceSettingsTeamsTeamRouteImport.update({
+    id: '/teams/$team',
+    path: '/teams/$team',
+    getParentRoute: () => Char91_Char93WWorkspaceSettingsRouteRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/sign-in': typeof SignInRoute
-  '/workspace': typeof WorkspaceRoute
-  '/cli/auth': typeof CliAuthRoute
-  '/dashboard/trash': typeof DashboardTrashRoute
-  '/dashboard/': typeof DashboardIndexRoute
-  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
-  '/dashboard/documents/$id/diff': typeof DashboardDocumentsIdDiffRoute
+  '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/no-access': typeof Char91_Char93NoAccessRoute
+  '/_/privacy': typeof Char91_Char93PrivacyRoute
+  '/_/search': typeof Char91_Char93SearchRoute
+  '/_/settings': typeof Char91_Char93SettingsRoute
+  '/_/sign-in': typeof Char91_Char93SignInRoute
+  '/$workspace/': typeof WorkspaceIndexRoute
+  '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
+  '/_/admin/look': typeof Char91_Char93AdminLookRoute
+  '/_/admin/': typeof Char91_Char93AdminIndexRoute
+  '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
+  '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
+  '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
+  '/_/w/$workspace/settings/webhooks': typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
+  '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
+  '/_/w/$workspace/settings/': typeof Char91_Char93WWorkspaceSettingsIndexRoute
+  '/_/w/$workspace/settings/teams/$team': typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
+  '/_/w/$workspace/settings/teams/': typeof Char91_Char93WWorkspaceSettingsTeamsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/sign-in': typeof SignInRoute
-  '/workspace': typeof WorkspaceRoute
-  '/cli/auth': typeof CliAuthRoute
-  '/dashboard/trash': typeof DashboardTrashRoute
-  '/dashboard': typeof DashboardIndexRoute
-  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
-  '/dashboard/documents/$id/diff': typeof DashboardDocumentsIdDiffRoute
+  '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/no-access': typeof Char91_Char93NoAccessRoute
+  '/_/privacy': typeof Char91_Char93PrivacyRoute
+  '/_/search': typeof Char91_Char93SearchRoute
+  '/_/settings': typeof Char91_Char93SettingsRoute
+  '/_/sign-in': typeof Char91_Char93SignInRoute
+  '/$workspace': typeof WorkspaceIndexRoute
+  '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
+  '/_/admin/look': typeof Char91_Char93AdminLookRoute
+  '/_/admin': typeof Char91_Char93AdminIndexRoute
+  '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
+  '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
+  '/_/w/$workspace/settings/webhooks': typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
+  '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
+  '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsIndexRoute
+  '/_/w/$workspace/settings/teams/$team': typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
+  '/_/w/$workspace/settings/teams': typeof Char91_Char93WWorkspaceSettingsTeamsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/sign-in': typeof SignInRoute
-  '/workspace': typeof WorkspaceRoute
-  '/cli/auth': typeof CliAuthRoute
-  '/dashboard/trash': typeof DashboardTrashRoute
-  '/dashboard/': typeof DashboardIndexRoute
-  '/dashboard/documents/$id': typeof DashboardDocumentsIdRoute
-  '/dashboard/documents/$id_/diff': typeof DashboardDocumentsIdDiffRoute
+  '/_/device': typeof Char91_Char93DeviceRoute
+  '/_/no-access': typeof Char91_Char93NoAccessRoute
+  '/_/privacy': typeof Char91_Char93PrivacyRoute
+  '/_/search': typeof Char91_Char93SearchRoute
+  '/_/settings': typeof Char91_Char93SettingsRoute
+  '/_/sign-in': typeof Char91_Char93SignInRoute
+  '/$workspace/': typeof WorkspaceIndexRoute
+  '/$workspace/$tree/$': typeof WorkspaceTreeSplatRoute
+  '/_/admin/look': typeof Char91_Char93AdminLookRoute
+  '/_/admin/': typeof Char91_Char93AdminIndexRoute
+  '/_/w/$workspace/settings': typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
+  '/_/history/$workspace/$tree/$': typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
+  '/_/responses/$workspace/$tree/$': typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
+  '/_/w/$workspace/settings/webhooks': typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
+  '/_/w/$workspace/settings/workspace': typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
+  '/_/w/$workspace/settings/': typeof Char91_Char93WWorkspaceSettingsIndexRoute
+  '/_/w/$workspace/settings/teams/$team': typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
+  '/_/w/$workspace/settings/teams/': typeof Char91_Char93WWorkspaceSettingsTeamsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/sign-in'
-    | '/workspace'
-    | '/cli/auth'
-    | '/dashboard/trash'
-    | '/dashboard/'
-    | '/dashboard/documents/$id'
-    | '/dashboard/documents/$id/diff'
+    | '/_/device'
+    | '/_/no-access'
+    | '/_/privacy'
+    | '/_/search'
+    | '/_/settings'
+    | '/_/sign-in'
+    | '/$workspace/'
+    | '/$workspace/$tree/$'
+    | '/_/admin/look'
+    | '/_/admin/'
+    | '/_/w/$workspace/settings'
+    | '/_/history/$workspace/$tree/$'
+    | '/_/responses/$workspace/$tree/$'
+    | '/_/w/$workspace/settings/webhooks'
+    | '/_/w/$workspace/settings/workspace'
+    | '/_/w/$workspace/settings/'
+    | '/_/w/$workspace/settings/teams/$team'
+    | '/_/w/$workspace/settings/teams/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/sign-in'
-    | '/workspace'
-    | '/cli/auth'
-    | '/dashboard/trash'
-    | '/dashboard'
-    | '/dashboard/documents/$id'
-    | '/dashboard/documents/$id/diff'
+    | '/_/device'
+    | '/_/no-access'
+    | '/_/privacy'
+    | '/_/search'
+    | '/_/settings'
+    | '/_/sign-in'
+    | '/$workspace'
+    | '/$workspace/$tree/$'
+    | '/_/admin/look'
+    | '/_/admin'
+    | '/_/history/$workspace/$tree/$'
+    | '/_/responses/$workspace/$tree/$'
+    | '/_/w/$workspace/settings/webhooks'
+    | '/_/w/$workspace/settings/workspace'
+    | '/_/w/$workspace/settings'
+    | '/_/w/$workspace/settings/teams/$team'
+    | '/_/w/$workspace/settings/teams'
   id:
     | '__root__'
     | '/'
-    | '/sign-in'
-    | '/workspace'
-    | '/cli/auth'
-    | '/dashboard/trash'
-    | '/dashboard/'
-    | '/dashboard/documents/$id'
-    | '/dashboard/documents/$id_/diff'
+    | '/_/device'
+    | '/_/no-access'
+    | '/_/privacy'
+    | '/_/search'
+    | '/_/settings'
+    | '/_/sign-in'
+    | '/$workspace/'
+    | '/$workspace/$tree/$'
+    | '/_/admin/look'
+    | '/_/admin/'
+    | '/_/w/$workspace/settings'
+    | '/_/history/$workspace/$tree/$'
+    | '/_/responses/$workspace/$tree/$'
+    | '/_/w/$workspace/settings/webhooks'
+    | '/_/w/$workspace/settings/workspace'
+    | '/_/w/$workspace/settings/'
+    | '/_/w/$workspace/settings/teams/$team'
+    | '/_/w/$workspace/settings/teams/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  SignInRoute: typeof SignInRoute
-  WorkspaceRoute: typeof WorkspaceRoute
-  CliAuthRoute: typeof CliAuthRoute
-  DashboardTrashRoute: typeof DashboardTrashRoute
-  DashboardIndexRoute: typeof DashboardIndexRoute
-  DashboardDocumentsIdRoute: typeof DashboardDocumentsIdRoute
-  DashboardDocumentsIdDiffRoute: typeof DashboardDocumentsIdDiffRoute
+  Char91_Char93DeviceRoute: typeof Char91_Char93DeviceRoute
+  Char91_Char93NoAccessRoute: typeof Char91_Char93NoAccessRoute
+  Char91_Char93PrivacyRoute: typeof Char91_Char93PrivacyRoute
+  Char91_Char93SearchRoute: typeof Char91_Char93SearchRoute
+  Char91_Char93SettingsRoute: typeof Char91_Char93SettingsRoute
+  Char91_Char93SignInRoute: typeof Char91_Char93SignInRoute
+  WorkspaceIndexRoute: typeof WorkspaceIndexRoute
+  WorkspaceTreeSplatRoute: typeof WorkspaceTreeSplatRoute
+  Char91_Char93AdminLookRoute: typeof Char91_Char93AdminLookRoute
+  Char91_Char93AdminIndexRoute: typeof Char91_Char93AdminIndexRoute
+  Char91_Char93WWorkspaceSettingsRouteRoute: typeof Char91_Char93WWorkspaceSettingsRouteRouteWithChildren
+  Char91_Char93HistoryWorkspaceTreeSplatRoute: typeof Char91_Char93HistoryWorkspaceTreeSplatRoute
+  Char91_Char93ResponsesWorkspaceTreeSplatRoute: typeof Char91_Char93ResponsesWorkspaceTreeSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -144,77 +287,191 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/sign-in': {
-      id: '/sign-in'
-      path: '/sign-in'
-      fullPath: '/sign-in'
-      preLoaderRoute: typeof SignInRouteImport
+    '/$workspace/': {
+      id: '/$workspace/'
+      path: '/$workspace'
+      fullPath: '/$workspace/'
+      preLoaderRoute: typeof WorkspaceIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/workspace': {
-      id: '/workspace'
+    '/_/device': {
+      id: '/_/device'
+      path: '/_/device'
+      fullPath: '/_/device'
+      preLoaderRoute: typeof Char91_Char93DeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/no-access': {
+      id: '/_/no-access'
+      path: '/_/no-access'
+      fullPath: '/_/no-access'
+      preLoaderRoute: typeof Char91_Char93NoAccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/privacy': {
+      id: '/_/privacy'
+      path: '/_/privacy'
+      fullPath: '/_/privacy'
+      preLoaderRoute: typeof Char91_Char93PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/search': {
+      id: '/_/search'
+      path: '/_/search'
+      fullPath: '/_/search'
+      preLoaderRoute: typeof Char91_Char93SearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/settings': {
+      id: '/_/settings'
+      path: '/_/settings'
+      fullPath: '/_/settings'
+      preLoaderRoute: typeof Char91_Char93SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/sign-in': {
+      id: '/_/sign-in'
+      path: '/_/sign-in'
+      fullPath: '/_/sign-in'
+      preLoaderRoute: typeof Char91_Char93SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$workspace/$tree/$': {
+      id: '/$workspace/$tree/$'
+      path: '/$workspace/$tree/$'
+      fullPath: '/$workspace/$tree/$'
+      preLoaderRoute: typeof WorkspaceTreeSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/admin/': {
+      id: '/_/admin/'
+      path: '/_/admin'
+      fullPath: '/_/admin/'
+      preLoaderRoute: typeof Char91_Char93AdminIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/admin/look': {
+      id: '/_/admin/look'
+      path: '/_/admin/look'
+      fullPath: '/_/admin/look'
+      preLoaderRoute: typeof Char91_Char93AdminLookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/w/$workspace/settings': {
+      id: '/_/w/$workspace/settings'
+      path: '/_/w/$workspace/settings'
+      fullPath: '/_/w/$workspace/settings'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/history/$workspace/$tree/$': {
+      id: '/_/history/$workspace/$tree/$'
+      path: '/_/history/$workspace/$tree/$'
+      fullPath: '/_/history/$workspace/$tree/$'
+      preLoaderRoute: typeof Char91_Char93HistoryWorkspaceTreeSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/responses/$workspace/$tree/$': {
+      id: '/_/responses/$workspace/$tree/$'
+      path: '/_/responses/$workspace/$tree/$'
+      fullPath: '/_/responses/$workspace/$tree/$'
+      preLoaderRoute: typeof Char91_Char93ResponsesWorkspaceTreeSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_/w/$workspace/settings/': {
+      id: '/_/w/$workspace/settings/'
+      path: '/'
+      fullPath: '/_/w/$workspace/settings/'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsIndexRouteImport
+      parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
+    }
+    '/_/w/$workspace/settings/webhooks': {
+      id: '/_/w/$workspace/settings/webhooks'
+      path: '/webhooks'
+      fullPath: '/_/w/$workspace/settings/webhooks'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsWebhooksRouteImport
+      parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
+    }
+    '/_/w/$workspace/settings/workspace': {
+      id: '/_/w/$workspace/settings/workspace'
       path: '/workspace'
-      fullPath: '/workspace'
-      preLoaderRoute: typeof WorkspaceRouteImport
-      parentRoute: typeof rootRouteImport
+      fullPath: '/_/w/$workspace/settings/workspace'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsWorkspaceRouteImport
+      parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
     }
-    '/cli/auth': {
-      id: '/cli/auth'
-      path: '/cli/auth'
-      fullPath: '/cli/auth'
-      preLoaderRoute: typeof CliAuthRouteImport
-      parentRoute: typeof rootRouteImport
+    '/_/w/$workspace/settings/teams/': {
+      id: '/_/w/$workspace/settings/teams/'
+      path: '/teams'
+      fullPath: '/_/w/$workspace/settings/teams/'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsTeamsIndexRouteImport
+      parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
     }
-    '/dashboard/': {
-      id: '/dashboard/'
-      path: '/dashboard'
-      fullPath: '/dashboard/'
-      preLoaderRoute: typeof DashboardIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/trash': {
-      id: '/dashboard/trash'
-      path: '/dashboard/trash'
-      fullPath: '/dashboard/trash'
-      preLoaderRoute: typeof DashboardTrashRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/documents/$id': {
-      id: '/dashboard/documents/$id'
-      path: '/dashboard/documents/$id'
-      fullPath: '/dashboard/documents/$id'
-      preLoaderRoute: typeof DashboardDocumentsIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/dashboard/documents/$id_/diff': {
-      id: '/dashboard/documents/$id_/diff'
-      path: '/dashboard/documents/$id/diff'
-      fullPath: '/dashboard/documents/$id/diff'
-      preLoaderRoute: typeof DashboardDocumentsIdDiffRouteImport
-      parentRoute: typeof rootRouteImport
+    '/_/w/$workspace/settings/teams/$team': {
+      id: '/_/w/$workspace/settings/teams/$team'
+      path: '/teams/$team'
+      fullPath: '/_/w/$workspace/settings/teams/$team'
+      preLoaderRoute: typeof Char91_Char93WWorkspaceSettingsTeamsTeamRouteImport
+      parentRoute: typeof Char91_Char93WWorkspaceSettingsRouteRoute
     }
   }
 }
 
+interface Char91_Char93WWorkspaceSettingsRouteRouteChildren {
+  Char91_Char93WWorkspaceSettingsWebhooksRoute: typeof Char91_Char93WWorkspaceSettingsWebhooksRoute
+  Char91_Char93WWorkspaceSettingsWorkspaceRoute: typeof Char91_Char93WWorkspaceSettingsWorkspaceRoute
+  Char91_Char93WWorkspaceSettingsIndexRoute: typeof Char91_Char93WWorkspaceSettingsIndexRoute
+  Char91_Char93WWorkspaceSettingsTeamsTeamRoute: typeof Char91_Char93WWorkspaceSettingsTeamsTeamRoute
+  Char91_Char93WWorkspaceSettingsTeamsIndexRoute: typeof Char91_Char93WWorkspaceSettingsTeamsIndexRoute
+}
+
+const Char91_Char93WWorkspaceSettingsRouteRouteChildren: Char91_Char93WWorkspaceSettingsRouteRouteChildren =
+  {
+    Char91_Char93WWorkspaceSettingsWebhooksRoute:
+      Char91_Char93WWorkspaceSettingsWebhooksRoute,
+    Char91_Char93WWorkspaceSettingsWorkspaceRoute:
+      Char91_Char93WWorkspaceSettingsWorkspaceRoute,
+    Char91_Char93WWorkspaceSettingsIndexRoute:
+      Char91_Char93WWorkspaceSettingsIndexRoute,
+    Char91_Char93WWorkspaceSettingsTeamsTeamRoute:
+      Char91_Char93WWorkspaceSettingsTeamsTeamRoute,
+    Char91_Char93WWorkspaceSettingsTeamsIndexRoute:
+      Char91_Char93WWorkspaceSettingsTeamsIndexRoute,
+  }
+
+const Char91_Char93WWorkspaceSettingsRouteRouteWithChildren =
+  Char91_Char93WWorkspaceSettingsRouteRoute._addFileChildren(
+    Char91_Char93WWorkspaceSettingsRouteRouteChildren,
+  )
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  SignInRoute: SignInRoute,
-  WorkspaceRoute: WorkspaceRoute,
-  CliAuthRoute: CliAuthRoute,
-  DashboardTrashRoute: DashboardTrashRoute,
-  DashboardIndexRoute: DashboardIndexRoute,
-  DashboardDocumentsIdRoute: DashboardDocumentsIdRoute,
-  DashboardDocumentsIdDiffRoute: DashboardDocumentsIdDiffRoute,
+  Char91_Char93DeviceRoute: Char91_Char93DeviceRoute,
+  Char91_Char93NoAccessRoute: Char91_Char93NoAccessRoute,
+  Char91_Char93PrivacyRoute: Char91_Char93PrivacyRoute,
+  Char91_Char93SearchRoute: Char91_Char93SearchRoute,
+  Char91_Char93SettingsRoute: Char91_Char93SettingsRoute,
+  Char91_Char93SignInRoute: Char91_Char93SignInRoute,
+  WorkspaceIndexRoute: WorkspaceIndexRoute,
+  WorkspaceTreeSplatRoute: WorkspaceTreeSplatRoute,
+  Char91_Char93AdminLookRoute: Char91_Char93AdminLookRoute,
+  Char91_Char93AdminIndexRoute: Char91_Char93AdminIndexRoute,
+  Char91_Char93WWorkspaceSettingsRouteRoute:
+    Char91_Char93WWorkspaceSettingsRouteRouteWithChildren,
+  Char91_Char93HistoryWorkspaceTreeSplatRoute:
+    Char91_Char93HistoryWorkspaceTreeSplatRoute,
+  Char91_Char93ResponsesWorkspaceTreeSplatRoute:
+    Char91_Char93ResponsesWorkspaceTreeSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
 
 import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
+import type { startInstance } from './start.ts'
 declare module '@tanstack/react-start' {
   interface Register {
     ssr: true
     router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
   }
 }

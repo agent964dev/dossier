@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Beta</title>
+    <script>
+      document.documentElement.dataset.seen =
+        localStorage.getItem('dossier-check') ?? ''
+    </script>
+  </head>
+  <body>
+    <h1>Beta</h1>
+    <p id="seen"></p>
+    <script>
+      document.getElementById('seen').textContent =
+        `This tree sees: ${document.documentElement.dataset.seen || 'nothing'}`
+    </script>
+  </body>
+</html>

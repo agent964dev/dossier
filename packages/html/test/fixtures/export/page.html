@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><script type="application/json" id="dossier-bootstrap">{"v":1,"origin":"https://dossier.example","tree":{"id":"t1","workspace":"acme","name":"plans"},"path":"/plan.html","link":"https://dossier.example/acme/plans/plan","push":3,"seq":7,"base":"abc123def456","kit":{"acme-card":"_components/acme-card.js","dossier-copy":"/_/base/abc123def456/_components/dossier-copy.js"},"used":["acme-card"],"forms":[]}</script><script src="/_/base/abc123def456/client.js"></script><link rel="modulepreload" href="_components/acme-card.js"><link rel="modulepreload" href="/_/base/abc123def456/lib/mermaid.js">
+<title>Plan</title>
+<link rel="stylesheet" href="_theme.css" media="screen">
+<link rel="preload" href="fonts/acme.woff2" as="font">
+<link rel="icon" href="icon.png">
+<link rel="alternate" type="text/markdown" href="plan.md">
+<style>@import "extra.css"; .hero { background: url(img/hero.jpg) }</style>
+<script type="module">import { start } from './app.js'; start(); import('./lazy.js')</script>
+<script src="vendor/classic.js"></script>
+</head><body class="page">
+<img src=img/logo.png alt="Logo">
+<img srcset="img/small.png 1x, img/big.png 2x" src="img/small.png">
+<video src="media/walkthrough.mp4" poster="img/poster.jpg"></video>
+<div style="background-image: url('img/tile.png')"></div>
+<a href="notes.html#top">Notes</a> <a href="#section">Here</a> <a href="https://example.com/">Away</a>
+<iframe src="guides/setup/install"></iframe>
+<dossier-copy></dossier-copy>
+<dossier-copy src="guides/"></dossier-copy>
+<dossier-diff before="v1/plan.md" after="plan.md"></dossier-diff>
+<script type="module" src="app.js"></script>
+<pre class="mermaid">graph TD; A-->B</pre>
+<acme-card></acme-card>
+</body></html>

@@ -1,0 +1,12 @@
+[
+  { "specifier": "./shared.js", "text": "./shared.js", "dynamic": false },
+  { "specifier": "../lib/util.js", "text": "../lib/util.js", "dynamic": false },
+  { "specifier": "./all.js", "text": "./all.js", "dynamic": false },
+  { "specifier": "./side-effect.js", "text": "./side-effect.js", "dynamic": false },
+  { "specifier": "./again.js", "text": "./again.js", "dynamic": false },
+  { "specifier": "./named.js", "text": "./named.js", "dynamic": false },
+  { "specifier": "./lazy.js", "text": "./lazy.js", "dynamic": true },
+  { "specifier": "./template.js", "text": "./template.js", "dynamic": true },
+  { "specifier": "./data.json", "text": "./data.json", "dynamic": true },
+  { "specifier": "./escaped.js", "text": "./\\u0065scaped.js", "dynamic": false }
+]

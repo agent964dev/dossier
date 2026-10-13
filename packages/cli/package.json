@@ -1,20 +1,18 @@
 {
   "name": "@agent964/dossier",
-  "version": "0.2.3",
-  "description": "Publish, read, compare, and manage versioned HTML documents with Dossier.",
+  "version": "1.0.0",
+  "description": "Push, pull and read Dossier trees, and sign in agents, from the command line.",
   "type": "module",
   "bin": {
     "dossier": "dist/index.js"
   },
   "files": [
     "dist",
-    "skills",
     "README.md",
     "LICENSE"
   ],
   "exports": {
-    ".": "./dist/index.js",
-    "./skills/dossier/SKILL.md": "./skills/dossier/SKILL.md"
+    ".": "./dist/index.js"
   },
   "engines": {
     "node": ">=22.12"
@@ -39,13 +37,12 @@
   "dependencies": {
     "@effect/cli": "0.77.1",
     "@effect/platform": "0.97.2",
-    "@effect/platform-bun": "0.91.2",
     "@effect/platform-node": "0.108.2",
-    "diff": "9.0.0",
     "effect": "3.22.2"
   },
   "devDependencies": {
     "@dossier/contracts": "workspace:*",
-    "@dossier/policy": "workspace:*"
+    "@dossier/html": "workspace:*",
+    "ignore": "7.0.12"
   }
 }

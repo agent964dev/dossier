@@ -93,7 +93,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: bash scripts/release/deploy.sh
 
-      - name: Verify production SHA and capabilities
+      - name: Verify production SHA and the content host
         if: steps.freshness.outputs.ship == 'true'
         env:
           EXPECTED_SHA: ${{ github.sha }}

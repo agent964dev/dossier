@@ -1,0 +1,5 @@
+/_/base/*
+  Cache-Control: public, max-age=31536000, immutable
+  X-Content-Type-Options: nosniff
+  Content-Security-Policy: sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-presentation allow-top-navigation-by-user-activation
+  Referrer-Policy: strict-origin-when-cross-origin

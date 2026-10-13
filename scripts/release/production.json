@@ -1,10 +1,29 @@
 {
-  "healthUrl": "https://dossier.agent964.com/api/healthz",
-  "features": ["state"],
+  "healthUrl": "https://dossier.agent964.com/_/api/health",
+  "contentProbeUrl": "https://releasecheck.dossier-content.com/_/api/health",
+  "worker": "dossier",
+  "origin": "https://dossier.agent964.com",
+  "contentHost": "{tree}.dossier-content.com",
+  "contentRoute": {
+    "pattern": "*.dossier-content.com/*",
+    "zone_name": "dossier-content.com"
+  },
+  "customDomain": "dossier.agent964.com",
+  "deployment": "dossier.agent964.com",
+  "protocol": 1,
   "secrets": [
-    "SESSION_SECRET",
-    "LINK_SECRET",
-    "SEED_ADMIN_EMAIL",
-    "BOOTSTRAP_API_KEY"
-  ]
+    "BETTER_AUTH_SECRET",
+    "HANDLE_SECRET",
+    "SUPER_ADMINS",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET"
+  ],
+  "d1": {
+    "name": "dossier-next-production",
+    "id": "e12b541d-bd5c-4325-8b9c-eab819223d54"
+  },
+  "r2": "dossier-next-production",
+  "queue": "dossier-next-production",
+  "hub": { "binding": "TREE_HUB", "class": "TreeHub" },
+  "crons": ["17 3 * * SUN", "*/5 * * * *"]
 }

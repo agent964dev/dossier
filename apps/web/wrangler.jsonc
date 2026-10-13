@@ -6,93 +6,119 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  "routes": [{ "pattern": "dossier.agent964.com", "custom_domain": true }],
-  "triggers": { "crons": ["17 3 * * SUN"] },
-  "observability": {
-    "enabled": true,
-  },
+  "routes": [
+    { "pattern": "dossier.agent964.com", "custom_domain": true },
+    {
+      "pattern": "*.dossier-content.com/*",
+      "zone_name": "dossier-content.com",
+    },
+  ],
+  "observability": { "enabled": true },
+  // A request waits on D1 several times one after another, so the Worker
+  // runs near its database: Smart Placement moves it there once it has seen
+  // enough traffic, and keeps it near the visitor otherwise.
+  "placement": { "mode": "smart" },
   "assets": {
     "binding": "ASSETS",
+    "run_worker_first": ["/_/app/*", "/_/base/*"],
+    // Base-layer files keep their names: _layout.html is never a pretty URL.
+    "html_handling": "none",
   },
-  // Set LINK_SECRET with `wrangler secret put LINK_SECRET` in each environment.
+  // Secrets in every environment: BETTER_AUTH_SECRET, HANDLE_SECRET,
+  // SUPER_ADMINS, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
   "vars": {
-    "PUBLIC_BASE_URL": "https://dossier.agent964.com",
-    "SEED_WORKSPACE": "agent964:agent964.com",
-    // SEED_ADMIN_EMAIL is a Worker secret; never shadow it with a plain-text var.
-    "STYLE_HOST_ALLOWLIST": "fonts.googleapis.com,fonts.gstatic.com",
-    "EMBED_HOST_ALLOWLIST": "",
-    "SCRIPT_HOST_ALLOWLIST": "",
-    "SHOO_BASE_URL": "https://shoo.dev",
-    "MAX_REQUEST_BYTES": "8388608",
-    "MAX_HTML_BYTES": "1048576",
-    "MAX_ASSET_BYTES": "5242880",
-    "PURGE_RETENTION_DAYS": "30",
+    "PUBLIC_ORIGIN": "https://dossier.agent964.com",
+    "DEPLOYMENT_NAME": "dossier.agent964.com",
+    "CONTENT_HOST": "{tree}.dossier-content.com",
   },
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "dossier-production",
-      "database_id": "72766ce3-44da-4bdd-a025-90a6ebe1e3e0",
+      "database_name": "dossier-next-production",
+      "database_id": "e12b541d-bd5c-4325-8b9c-eab819223d54",
       "migrations_dir": "drizzle",
     },
   ],
-  "r2_buckets": [{ "binding": "OBJECTS", "bucket_name": "dossier-production" }],
-  "ratelimits": [
-    {
-      "name": "UPLOAD_RATE_LIMITER",
-      "namespace_id": "1001",
-      "simple": { "limit": 30, "period": 60 },
-    },
-    {
-      "name": "STATE_RATE_LIMITER",
-      "namespace_id": "1003",
-      "simple": { "limit": 60, "period": 60 },
-    },
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "dossier-next-production" },
   ],
+  // One hub per tree relays change hints to the sockets watching it.
+  "durable_objects": {
+    "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TreeHub"] }],
+  // Webhooks: commits send to the Queue, and this Worker consumes it.
+  // A Queue has one consumer Worker, so each environment has its own.
+  // max_retries is above a delivery's nine attempts: the consumer decides
+  // when one has failed for good, and D1 holds every delivery's state.
+  // A one-second batch wait keeps a delivery within a few seconds of its
+  // commit, since an event passes through the Queue twice.
+  "queues": {
+    "producers": [
+      { "binding": "WEBHOOKS", "queue": "dossier-next-production" },
+    ],
+    "consumers": [
+      {
+        "queue": "dossier-next-production",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 10,
+      },
+    ],
+  },
+  // The weekly purge (Sunday 03:17 UTC), and the webhook sweep every five
+  // minutes.
+  "triggers": { "crons": ["17 3 * * SUN", "*/5 * * * *"] },
   "env": {
     "dev": {
-      // Set LINK_SECRET with `wrangler secret put LINK_SECRET --env dev`.
+      "name": "dossier-next-dev",
       "workers_dev": true,
-      "triggers": { "crons": ["17 3 * * SUN"] },
-      "preview_urls": true,
-      "routes": [],
+      // Dev's traffic comes from too few places for Smart Placement to
+      // decide, so it names the region of dev's D1 primary (Milan).
+      "placement": { "region": "aws:eu-south-1" },
+      "preview_urls": false,
+      "routes": [
+        {
+          "pattern": "*-dev.dossier-content.com/*",
+          "zone_name": "dossier-content.com",
+        },
+      ],
       "vars": {
-        "PUBLIC_BASE_URL": "https://dossier-dev.tech964.workers.dev",
-        "SEED_WORKSPACE": "agent964:agent964.com",
-        // Set the real value with the SEED_ADMIN_EMAIL secret.
-        "SEED_ADMIN_EMAIL": "admin@example.com",
-        "STYLE_HOST_ALLOWLIST": "fonts.googleapis.com,fonts.gstatic.com",
-        "EMBED_HOST_ALLOWLIST": "",
-        "SCRIPT_HOST_ALLOWLIST": "",
-        "SHOO_BASE_URL": "https://shoo.dev",
-        "MAX_REQUEST_BYTES": "8388608",
-        "MAX_HTML_BYTES": "1048576",
-        "MAX_ASSET_BYTES": "5242880",
-        "PURGE_RETENTION_DAYS": "30",
+        "PUBLIC_ORIGIN": "https://dossier-next-dev.tech964.workers.dev",
+        "DEPLOYMENT_NAME": "dossier-next-dev.tech964.workers.dev",
+        "CONTENT_HOST": "{tree}-dev.dossier-content.com",
       },
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "dossier-development",
-          "database_id": "a3944e02-ce91-4e17-8fa1-b93534ba2158",
+          "database_name": "dossier-next-dev",
+          "database_id": "1c6c9e18-3069-4b54-b5ca-e3b681389c8e",
           "migrations_dir": "drizzle",
         },
       ],
-      "r2_buckets": [
-        { "binding": "OBJECTS", "bucket_name": "dossier-development" },
-      ],
-      "ratelimits": [
-        {
-          "name": "UPLOAD_RATE_LIMITER",
-          "namespace_id": "1002",
-          "simple": { "limit": 30, "period": 60 },
-        },
-        {
-          "name": "STATE_RATE_LIMITER",
-          "namespace_id": "1004",
-          "simple": { "limit": 60, "period": 60 },
-        },
-      ],
+      "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "dossier-next-dev" }],
+      "durable_objects": {
+        "bindings": [{ "name": "TREE_HUB", "class_name": "TreeHub" }],
+      },
+      // Webhooks: commits send to the Queue, and this Worker consumes it.
+      // A Queue has one consumer Worker, so each environment has its own.
+      // max_retries is above a delivery's nine attempts: the consumer decides
+      // when one has failed for good, and D1 holds every delivery's state.
+      // A one-second batch wait keeps a delivery within a few seconds of its
+      // commit, since an event passes through the Queue twice.
+      "queues": {
+        "producers": [{ "binding": "WEBHOOKS", "queue": "dossier-next-dev" }],
+        "consumers": [
+          {
+            "queue": "dossier-next-dev",
+            "max_batch_size": 10,
+            "max_batch_timeout": 1,
+            "max_retries": 10,
+          },
+        ],
+      },
+      // The weekly purge, and the webhook sweep every five minutes.
+      "triggers": { "crons": ["17 3 * * SUN", "*/5 * * * *"] },
     },
   },
 }

@@ -1,0 +1,21 @@
+<title>Cards</title>
+<h1>Cards</h1>
+<acme-card> Erbil depot Opens 3 November with 2 trucks. </acme-card>
+<p><other-tag>An unknown tag shows its text at once.</other-tag></p>
+<p>
+  <button type="button" id="add-badge">Add a badge</button>
+  <span id="badges"></span>
+</p>
+<script>
+  document.getElementById('add-badge').addEventListener('click', () => {
+    document
+      .getElementById('badges')
+      .append(document.createElement('acme-badge'))
+  })
+</script>
+<h2>The install guide, framed</h2>
+<iframe
+  src="../guides/setup/install"
+  title="Install the CLI"
+  style="width: 100%; height: 320px; border: 1px solid #ccc"
+></iframe>

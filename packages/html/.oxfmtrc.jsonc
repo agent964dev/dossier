@@ -1,0 +1,12 @@
+// The repository's style, plus the HTML fixtures, which the tests read
+// byte for byte and so must stay exactly as written.
+{
+  "semi": false,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "tabWidth": 2,
+  "useTabs": false,
+  "printWidth": 80,
+  "sortPackageJson": false,
+  "ignorePatterns": ["node_modules", "test/fixtures/**"],
+}

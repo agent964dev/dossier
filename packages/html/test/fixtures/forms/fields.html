@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head><title>Event sign-up</title></head>
+<body>
+<h1>Event sign-up</h1>
+<form action="answers/" method="post" id="signup">
+  <fieldset>
+    <legend>  Your
+      details </legend>
+    <label for="name">Full name</label>
+    <input id="name" name="name" required minlength="2" maxlength="80">
+    <label>Password <input type="password" name="secret" pattern="[a-z]{4,}"></label>
+    <label>Email <input type="email" name="email" required multiple></label>
+    <input type="url" name="site" aria-label="Your website">
+    <label>Phone <input type="TEL" name="phone" pattern="\+?[0-9 ]{7,15}"></label>
+    <input type="search" name="query" aria-label="Search terms" maxlength="40">
+    <label>Favourite colour <input type="color" name="colour"></label>
+    <input type="hidden" name="source" value="newsletter">
+    <label>Mystery <input type="mystery" name="mystery" multiple></label>
+  </fieldset>
+  <fieldset>
+    <legend>Numbers</legend>
+    <label>Guests <input type="number" name="guests" min="1" max="10" required></label>
+    <label>Budget <input type="number" name="budget" min="0" step="0.5"></label>
+    <label>Any amount <input type="number" name="amount" step="any"></label>
+    <label>Volume <input type="range" name="volume" min="0" max="11"></label>
+    <label>Seats <input type="number" name="seats" minlength="x" maxlength="12abc"></label>
+  </fieldset>
+  <fieldset>
+    <legend>When</legend>
+    <label>Day <input type="date" name="day" min="2026-10-01" max="2026-12-31" required></label>
+    <label>Start <input type="time" name="start" min="09:00" max="17:30"></label>
+    <label>Meeting <input type="datetime-local" name="meeting"></label>
+    <label>Month <input type="month" name="month"></label>
+    <label>Week <input type="week" name="week"></label>
+  </fieldset>
+  <fieldset>
+    <legend>Meal</legend>
+    <label><input type="radio" name="meal" value="veg" required> Vegetarian</label>
+    <label><input type="radio" name="meal" value="fish"> Fish</label>
+    <input type="radio" name="meal" id="meal-none"><label for="meal-none">No meal</label>
+  </fieldset>
+  <fieldset>
+    <legend>Workshops</legend>
+    <label><input type="checkbox" name="workshops" value="html"> HTML</label>
+    <label><input type="checkbox" name="workshops" value="css"> CSS</label>
+  </fieldset>
+  <label><input type="checkbox" name="agree" required> I agree
+    to the terms</label>
+  <label for="size">T-shirt size</label>
+  <select id="size" name="size" required>
+    <option value="">Choose one</option>
+    <optgroup label="Small">
+      <option>XS</option>
+      <option value="s">  Small
+        size </option>
+    </optgroup>
+    <option value="l">Large</option>
+  </select>
+  <label>Topics
+    <select name="topics" multiple>
+      <option>Design</option>
+      <option value="code">Code</option>
+    </select>
+  </label>
+  <label>Notes <textarea name="notes" maxlength="200">typed text</textarea></label>
+  <label>Photo <input type="file" name="photo" accept="image/*,.heic"></label>
+  <label>Papers <input type="file" name="papers" multiple accept="application/pdf, .DOCX"></label>
+  <input type="text" placeholder="A control without a name is never sent">
+  <input name="">
+  <button type="reset" name="clear">Clear</button>
+  <button type="button" name="helper">Help</button>
+  <input type="reset" name="reset">
+  <button name="decision" value="yes">Count me in</button>
+  <button name="decision" value="maybe" type="submit">Maybe</button>
+  <input type="submit" name="decision" value="no">
+  <button>Send</button>
+</form>
+<p>Outside the form: <label>Referral <input name="referral" form="signup"></label></p>
+<p><input name="stray"></p>
+
+<form action="feedback/" aria-label="  Quick
+  feedback ">
+  <input name="comment" form="other" aria-label="Comment">
+  <label>Rating <input name="rating" type="number" min="1" max="5"></label>
+  <input type="checkbox" name="mixed"> <input type="text" name="mixed">
+  <input type="radio" name="pick" value="a">
+  <input type="checkbox" name="pick" value="b">
+  <input type="text" name="pick" value="c">
+  <input type="image" name="go" src="go.png" alt="Go">
+</form>
+<form action="other/" id="other"></form>
+<template><form action="later/"><label>Later <input name="later" required></label></form></template>
+</body>
+</html>

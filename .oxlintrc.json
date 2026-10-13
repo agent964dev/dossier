@@ -26,6 +26,7 @@
     "drizzle",
     "apps/web/worker-configuration.d.ts",
     "**/routeTree.gen.ts",
-    "upstream/**"
+    "upstream/**",
+    "packages/html/test/fixtures/**"
   ]
 }

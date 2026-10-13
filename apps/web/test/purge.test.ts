@@ -1,1039 +1,1247 @@
-import { env as workerEnv } from 'cloudflare:workers'
-import {
-  createExecutionContext,
-  createScheduledController,
-  waitOnExecutionContext,
-} from 'cloudflare:test'
+// The purge: what it removes past the retention period, what it keeps, and
+// how runs share the work. Times move with TestClock; every deletion is made
+// the real way (a push that drops a file, a withdrawal, a deleted
+// workspace).
+import type {
+  AuthoredSeq,
+  OpId,
+  Person,
+  PushId,
+  Sha256,
+  TreeId,
+} from '@dossier/contracts'
+import { MARKDOWN_VERSION } from '@dossier/html'
+import { createScheduledController } from 'cloudflare:test'
+import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
-import worker, { scheduled } from '../src/worker'
 import {
-  Assets,
-  Documents,
-  makeDb,
-  makeObjects,
-  PersistenceError,
-  Principal,
-  Publish,
+  Data,
+  Files,
+  People,
   Purge,
-  State,
-  StorageError,
-  type DbService,
-  type PrincipalIdentity,
-} from '../src/services'
-import { makeCoreLayer, seedPrincipal, testEnv } from './core-helpers'
+  Push,
+  Settings,
+  TreeStore,
+  type Caller,
+} from '../src/core/index.ts'
+import { SYSTEM_STATEMENTS } from '../src/core/system-store.ts'
+import { WEEKLY_PURGE } from '../src/jobs/scheduled.ts'
+import {
+  beforeBatch,
+  count,
+  exec,
+  failingStatements,
+  rows,
+} from './support/d1.ts'
+import {
+  formRef,
+  pageWith,
+  pushForms,
+  QUESTIONS,
+  sendAs,
+  uploadAs,
+  withdrawAs,
+} from './support/forms.ts'
+import { harness, testRuntime } from './support/harness.ts'
+import { run, runAs, sessionFor } from './support/people.ts'
+import {
+  anyNodeAt,
+  at,
+  beforeDelete,
+  blobRow,
+  blobText,
+  DAY,
+  failureAt,
+  HOUR,
+  lastRunRow,
+  MINUTE,
+  namesBlob,
+  purgeAt,
+  purgeFailureAt,
+  pushAt,
+  putBlob,
+  putBlobOf,
+  stageAt,
+  stored,
+  storedBlob,
+  uploadAt,
+} from './support/purge.ts'
+import {
+  agent,
+  failureAs,
+  join,
+  nodeAt,
+  person,
+  ref,
+  sha256Of,
+  share,
+  superAdmin,
+  team,
+  workspace,
+} from './support/trees.ts'
+import worker from './support/worker.ts'
 
-const env = testEnv(workerEnv)
-const layer = makeCoreLayer(env)
-const NOW = new Date('2026-12-31T12:00:00.000Z')
-const OLD = new Date(NOW.getTime() - 31 * 86_400_000).toISOString()
-const YOUNG = new Date(NOW.getTime() - 10 * 86_400_000).toISOString()
+afterEach(() => harness.reset())
 
-function run<A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-  provided = layer,
-): Promise<A> {
-  return Effect.runPromise(
-    effect.pipe(Effect.provide(provided)) as Effect.Effect<A, E, never>,
-  )
+let owner: Person
+let ws: { id: string; name: string }
+
+beforeAll(async () => {
+  owner = await person('owner')
+  ws = await workspace(owner)
+})
+
+/** A tree name and text no other test uses. */
+const fresh = () => {
+  const tag = crypto.randomUUID().slice(0, 8)
+  return { tag, name: `p${tag}` }
 }
 
-async function principalFor(suffix: string): Promise<{
-  principal: PrincipalIdentity
-  token: string
-}> {
-  const seeded = await seedPrincipal(env, { suffix })
-  const principal = await run(
-    Effect.gen(function* () {
-      return yield* (yield* Principal).resolve(
-        new Request('https://dossier.test/api/uploads', {
-          headers: { authorization: `Bearer ${seeded.token}` },
-        }),
+const versionsOf = (nodeId: string) =>
+  count('node_versions', 'node_id = ?', nodeId)
+
+const dayOf = (time: number) => new Date(time).toISOString().slice(0, 10)
+
+describe('what a purge removes', () => {
+  it('removes only nodes deleted before the cutoff, with their versions, views, mentions and aliases, and keeps a live file’s every version', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const browser = await sessionFor(owner)
+    const reader = await person('reader')
+    const target = `${ws.name}/${name}`
+    const page = (title: string) =>
+      pageWith(
+        `<p>${title} ${tag}</p><dossier-comments></dossier-comments>`,
+        title,
       )
-    }),
-  )
-  return { principal, token: seeded.token }
-}
-
-function html(title: string, version: number): string {
-  return `<!doctype html><title>${title}</title><p>${version}</p>`
-}
-
-async function archive(
-  suffix: string,
-  options: {
-    readonly versions?: number
-    readonly createdAt?: string
-    readonly stateful?: boolean
-  } = {},
-) {
-  const { principal, token } = await principalFor(suffix)
-  const first = await run(
-    Effect.gen(function* () {
-      return yield* (yield* Publish).publish(
-        {
-          html: html(`Purge ${suffix}`, 1),
-          idempotencyKey: `${suffix}-1`,
-        },
-        principal,
-      )
-    }),
-  )
-  const versions = options.versions ?? 1
-  for (let start = 2; start <= versions; start += 20) {
-    const end = Math.min(versions, start + 19)
-    await Promise.all(
-      Array.from({ length: end - start + 1 }, (_, offset) => {
-        const version = start + offset
-        return run(
-          Effect.gen(function* () {
-            return yield* (yield* Publish).publish(
-              {
-                html: html(`Purge ${suffix}`, version),
-                documentId: first.document.id,
-                idempotencyKey: `${suffix}-${version}`,
-              },
-              principal,
-            )
-          }),
-        )
-      }),
+    const first = await pushAt(T0, pusher, target, {
+      'live.html': page('Live one'),
+      'gone.html': page('Gone'),
+      'later.html': page('Later'),
+    })
+    const treeId = first.treeId
+    await share(
+      treeId,
+      (await nodeAt(treeId, ''))!.id,
+      'email',
+      reader.email.toLowerCase(),
+      'read',
+      owner,
     )
-  }
-  if (options.stateful === true) {
-    await run(
-      Effect.gen(function* () {
-        return yield* (yield* Publish).publish(
-          {
-            html: `<!doctype html><html><head><title>State ${suffix}</title></head><body>
-              <textarea data-state="notes">Initial</textarea>
-            </body></html>`,
-            documentId: first.document.id,
-            stateful: true,
-            idempotencyKey: `${suffix}-stateful`,
-          },
-          principal,
-        )
-      }),
-    )
-    await run(
-      Effect.gen(function* () {
-        return yield* (yield* State).save(
-          first.document.id,
-          { kind: 'account', principal },
-          { changes: [{ name: 'notes', value: 'Saved', base: 0 }] },
-        )
-      }),
-    )
-  }
-  const keys = await env.DB.prepare(
-    `SELECT object_key FROM document_versions
-      WHERE document_id = ? ORDER BY id`,
-  )
-    .bind(first.document.id)
-    .all<{ object_key: string }>()
-  const deleted = await run(
-    Effect.gen(function* () {
-      return yield* (yield* Documents).delete(first.document.id, principal)
-    }),
-  )
-  await env.DB.prepare(
-    'UPDATE deletion_batches SET created_at = ? WHERE id = ?',
-  )
-    .bind(options.createdAt ?? OLD, deleted.batchId)
-    .run()
-  return {
-    principal,
-    token,
-    documentId: first.document.id,
-    batchId: deleted.batchId,
-    keys: keys.results.map((row) => row.object_key),
-  }
-}
-
-async function createStateful(suffix: string) {
-  const { principal, token } = await principalFor(suffix)
-  const published = await run(
-    Effect.gen(function* () {
-      return yield* (yield* Publish).publish(
-        {
-          html: `<!doctype html><html><head><title>State ${suffix}</title></head><body>
-            <textarea data-state="notes">Initial</textarea>
-          </body></html>`,
-          stateful: true,
-          idempotencyKey: `${suffix}-stateful`,
-        },
-        principal,
-      )
-    }),
-  )
-  await run(
-    Effect.gen(function* () {
-      return yield* (yield* State).save(
-        published.document.id,
-        { kind: 'account', principal },
-        { changes: [{ name: 'notes', value: 'Saved', base: 0 }] },
-      )
-    }),
-  )
-  return { principal, token, documentId: published.document.id }
-}
-
-async function archiveDocument(
-  documentId: string,
-  principal: PrincipalIdentity,
-) {
-  const deleted = await run(
-    Effect.gen(function* () {
-      return yield* (yield* Documents).delete(documentId, principal)
-    }),
-  )
-  await env.DB.prepare(
-    'UPDATE deletion_batches SET created_at = ? WHERE id = ?',
-  )
-    .bind(OLD, deleted.batchId)
-    .run()
-  return deleted.batchId
-}
-
-function purge(dryRun: boolean, now = NOW, provided = layer) {
-  return run(
-    Effect.gen(function* () {
-      return yield* (yield* Purge).runPurge({
-        now,
-        retentionDays: 30,
-        dryRun,
-      })
-    }),
-    provided,
-  )
-}
-
-async function listKeys(prefix?: string): Promise<string[]> {
-  const keys: string[] = []
-  let cursor: string | undefined
-  do {
-    const page = await env.OBJECTS.list({ prefix, cursor })
-    keys.push(...page.objects.map((object) => object.key))
-    cursor = page.truncated ? page.cursor : undefined
-  } while (cursor)
-  return keys
-}
-
-function bucketWithDelete(
-  remove: (keys: string | string[]) => Promise<void>,
-): R2Bucket {
-  return {
-    head: env.OBJECTS.head.bind(env.OBJECTS),
-    get: env.OBJECTS.get.bind(env.OBJECTS),
-    put: env.OBJECTS.put.bind(env.OBJECTS),
-    createMultipartUpload: env.OBJECTS.createMultipartUpload.bind(env.OBJECTS),
-    resumeMultipartUpload: env.OBJECTS.resumeMultipartUpload.bind(env.OBJECTS),
-    delete: remove,
-    list: env.OBJECTS.list.bind(env.OBJECTS),
-  }
-}
-
-function deferred(): {
-  readonly promise: Promise<void>
-  readonly resolve: () => void
-} {
-  let resolve!: () => void
-  const promise = new Promise<void>((complete) => {
-    resolve = complete
-  })
-  return { promise, resolve }
-}
-
-function pausePreparedRun(
-  matches: (query: string) => boolean,
-  reached: ReturnType<typeof deferred>,
-  release: ReturnType<typeof deferred>,
-): DbService {
-  const base = makeDb(env.DB)
-  let paused = false
-  const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
-    new Proxy(statement, {
-      get(target, property) {
-        if (property === 'bind') {
-          return (...values: unknown[]) => wrap(target.bind(...values))
-        }
-        if (property === 'run') {
-          return async () => {
-            if (!paused) {
-              paused = true
-              reached.resolve()
-              await release.promise
-            }
-            return target.run()
-          }
-        }
-        const value = Reflect.get(target, property, target)
-        return typeof value === 'function' ? value.bind(target) : value
-      },
-    })
-  const raw = new Proxy(base.raw, {
-    get(target, property) {
-      if (property === 'prepare') {
-        return (query: string) => {
-          const statement = target.prepare(query)
-          return matches(query) ? wrap(statement) : statement
-        }
-      }
-      const value = Reflect.get(target, property, target)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-  return { ...base, raw }
-}
-
-function failDbBatchAt(call: number): DbService {
-  const base = makeDb(env.DB)
-  let batchCalls = 0
-  return {
-    ...base,
-    batch: (statements) => {
-      batchCalls += 1
-      return batchCalls === call
-        ? Effect.fail(
-            new PersistenceError({
-              operation: 'simulated D1 cleanup interruption',
-              cause: new Error('simulated D1 cleanup interruption'),
-            }),
-          )
-        : base.batch(statements)
-    },
-  }
-}
-
-async function snapshotD1(): Promise<string> {
-  const tables = await env.DB.prepare(
-    `SELECT name
-       FROM sqlite_master
-      WHERE type = 'table'
-        AND name NOT LIKE 'sqlite_%'
-        AND name NOT LIKE '_cf_%'
-      ORDER BY name`,
-  ).all<{ name: string }>()
-  const snapshot: Record<string, unknown> = {}
-  for (const table of tables.results) {
-    const name = table.name.replaceAll('"', '""')
-    snapshot[table.name] = (
-      await env.DB.prepare(`SELECT * FROM "${name}" ORDER BY rowid`).all()
-    ).results
-  }
-  return JSON.stringify(snapshot)
-}
-
-describe('Purge', () => {
-  it('leaves batches younger than retention untouched', async () => {
-    const archived = await archive('purge_young', { createdAt: YOUNG })
-    const report = await purge(false)
-
-    expect(report.batches).toEqual([])
-    expect(await env.OBJECTS.head(archived.keys[0]!)).not.toBeNull()
-    expect(
-      await env.DB.prepare(
-        'SELECT purge_status FROM deletion_batches WHERE id = ?',
-      )
-        .bind(archived.batchId)
-        .first(),
-    ).toEqual({ purge_status: 'pending' })
-    const trash = await run(
-      Effect.gen(function* () {
-        return yield* (yield* Documents).list(
-          { scope: 'trash' },
-          archived.principal,
-        )
-      }),
-    )
-    expect(trash.documents[0]).toMatchObject({
-      purgeStatus: 'pending',
-      purgesAt: new Date(Date.parse(YOUNG) + 30 * 86_400_000).toISOString(),
-    })
-  })
-
-  it('purges old R2 objects and document rows while retaining audit counts', async () => {
-    const archived = await archive('purge_old', { versions: 2 })
-    const before = await env.DB.prepare(
-      `SELECT COUNT(*) AS versions, COALESCE(SUM(file_size), 0) AS bytes
-         FROM document_versions WHERE document_id = ?`,
-    )
-      .bind(archived.documentId)
-      .first<{ versions: number; bytes: number }>()
-    const report = await purge(false)
-
-    expect(report).toMatchObject({
-      dryRun: false,
-      totals: {
-        batches: 1,
-        documents: 1,
-        versions: 2,
-        bytes: before!.bytes,
-      },
-    })
-    for (const key of archived.keys) {
-      expect(await env.OBJECTS.head(key)).toBeNull()
-    }
-    const rows = await env.DB.prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents,
-         (SELECT COUNT(*) FROM document_versions WHERE document_id = ?1) AS versions,
-         (SELECT COUNT(*) FROM upload_events WHERE document_id = ?1) AS events`,
-    )
-      .bind(archived.documentId)
-      .first()
-    expect(rows).toEqual({ documents: 0, versions: 0, events: 0 })
-    expect(
-      await env.DB.prepare(
-        `SELECT purge_status, purged_bytes, deleted_count, purged_at
-           FROM deletion_batches WHERE id = ?`,
-      )
-        .bind(archived.batchId)
-        .first(),
-    ).toEqual({
-      purge_status: 'purged',
-      purged_bytes: before!.bytes,
-      deleted_count: 1,
-      purged_at: NOW.toISOString(),
-    })
-  })
-
-  it('leaves restored batches untouched', async () => {
-    const archived = await archive('purge_restored')
-    await run(
-      Effect.gen(function* () {
-        return yield* (yield* Documents).restore(
-          archived.documentId,
-          archived.batchId,
-          archived.principal,
-        )
-      }),
-    )
-
-    expect((await purge(false)).batches).toEqual([])
-    expect(await env.OBJECTS.head(archived.keys[0]!)).not.toBeNull()
-    expect(
-      await env.DB.prepare('SELECT id FROM documents WHERE id = ?')
-        .bind(archived.documentId)
-        .first(),
-    ).toEqual({ id: archived.documentId })
-  })
-
-  it('lets restore win when it commits before the purge claim', async () => {
-    const archived = await archive('purge_restore_wins')
-    const claimReached = deferred()
-    const releaseClaim = deferred()
-    const pausingLayer = makeCoreLayer(env, {
-      db: pausePreparedRun(
-        (query) => query.includes("SET purge_status = 'claimed'"),
-        claimReached,
-        releaseClaim,
-      ),
-    })
-
-    const purgeResult = purge(false, NOW, pausingLayer)
-    await claimReached.promise
-    try {
-      await run(
-        Effect.gen(function* () {
-          return yield* (yield* Documents).restore(
-            archived.documentId,
-            archived.batchId,
-            archived.principal,
-          )
-        }),
-      )
-    } finally {
-      releaseClaim.resolve()
-    }
-
-    expect((await purgeResult).batches).toEqual([])
-    expect(await env.OBJECTS.head(archived.keys[0]!)).not.toBeNull()
-    expect(
-      await env.DB.prepare(
-        `SELECT restored_at, purge_status
-           FROM deletion_batches WHERE id = ?`,
-      )
-        .bind(archived.batchId)
-        .first(),
-    ).toMatchObject({
-      restored_at: expect.any(String),
-      purge_status: 'pending',
-    })
-  })
-
-  it('rejects restore when the purge claim commits first', async () => {
-    const archived = await archive('purge_claim_wins')
-    const deleteReached = deferred()
-    const releaseDelete = deferred()
-    let paused = false
-    const pausingBucket = bucketWithDelete(async (keys) => {
-      if (!paused) {
-        paused = true
-        deleteReached.resolve()
-        await releaseDelete.promise
-      }
-      await env.OBJECTS.delete(keys)
-    })
-    const pausingLayer = makeCoreLayer(env, {
-      objects: makeObjects(pausingBucket),
-    })
-
-    const purgeResult = purge(false, NOW, pausingLayer)
-    await deleteReached.promise
-    let response: Response
-    try {
-      response = await worker.fetch(
-        new Request(
-          `https://dossier.test/api/documents/${archived.documentId}/restore`,
-          {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${archived.token}`,
-              'content-type': 'application/json',
+    // A comment on each page that will go, naming a reader.
+    for (const p of ['gone', 'later']) {
+      await at(
+        T0 + MINUTE,
+        browser,
+        Effect.flatMap(Data, (data) =>
+          data.write({
+            tree: treeId as TreeId,
+            page: `${p}.html`,
+            path: `${p}.comments/`,
+            patch: {
+              text: `@${reader.email} look`,
+              anchor: null,
+              label: null,
+              pin: null,
+              replyTo: null,
+              stance: null,
+              mentions: [reader.email],
             },
-            body: JSON.stringify({ batchId: archived.batchId }),
-          },
-        ) as Parameters<typeof worker.fetch>[0],
-        env,
+            replace: false,
+            opId: crypto.randomUUID() as OpId,
+            seq: 1 as AuthoredSeq,
+          }),
+        ),
       )
-    } finally {
-      releaseDelete.resolve()
     }
+    const ids = {
+      live: (await nodeAt(treeId, 'live.html'))!.id,
+      gone: (await nodeAt(treeId, 'gone.html'))!.id,
+      later: (await nodeAt(treeId, 'later.html'))!.id,
+    }
+    expect(await count('mentions', 'tree_id = ?', treeId)).toBe(2)
+    // The live page changes; gone.html is dropped now, later.html in 20 days.
+    await pushAt(
+      T0 + 2 * MINUTE,
+      pusher,
+      target,
+      { 'live.html': page('Live two'), 'later.html': page('Later') },
+      { force: true },
+    )
+    await pushAt(
+      T0 + 20 * DAY,
+      pusher,
+      target,
+      { 'live.html': page('Live two') + ' ' },
+      { force: true },
+    )
+    const goneSha = await sha256Of(page('Gone'))
+    // Recent views, Seen by and old paths of each page, so only the node's
+    // own purge removes them, never their age.
+    const purgedAt = T0 + 31 * DAY
+    for (const id of Object.values(ids)) {
+      await exec(
+        'insert into page_views (node_id, day, count) values (?, ?, 3)',
+        id,
+        dayOf(purgedAt),
+      )
+      await exec(
+        'insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?)',
+        id,
+        reader.id,
+        purgedAt,
+      )
+      await exec(
+        `insert into path_aliases (tree_id, old_path, node_id, moved_at_seq, created_at)
+         values (?, ?, ?, 1, ?)`,
+        treeId,
+        `old-${id}.html`,
+        id,
+        T0,
+      )
+    }
+    const events = await count('events', 'tree_id = ?', treeId)
 
-    expect(response!.status).toBe(409)
-    expect(await response!.json()).toMatchObject({
-      ok: false,
-      code: 'batch_purged',
-    })
-    expect((await purgeResult).batches).toEqual([
-      expect.objectContaining({ id: archived.batchId }),
-    ])
-    expect(await env.OBJECTS.head(archived.keys[0]!)).toBeNull()
+    const outcome = await purgeAt(purgedAt)
+    expect(outcome).toMatchObject({ trigger: 'weekly', remaining: false })
+    expect(outcome.nodes).toBeGreaterThanOrEqual(1)
+    expect(await count('nodes', 'id = ?', ids.gone)).toBe(0)
+    expect(await versionsOf(ids.gone)).toBe(0)
+    for (const table of ['page_views', 'seen_by', 'path_aliases']) {
+      expect(await count(table, 'node_id = ?', ids.gone)).toBe(0)
+      expect(await count(table, 'node_id = ?', ids.later)).toBe(1)
+      expect(await count(table, 'node_id = ?', ids.live)).toBe(1)
+    }
+    expect(await count('mentions', 'page_node_id = ?', ids.gone)).toBe(0)
+    expect(await count('mentions', 'page_node_id = ?', ids.later)).toBe(1)
+    // The comment went with its page when the push dropped it (a later
+    // gone.html starts with none), and leaves with it.
+    expect(
+      await count(
+        'nodes',
+        "tree_id = ? and path like 'gone.comments%'",
+        treeId,
+      ),
+    ).toBe(0)
+    // A deleted file within the retention period keeps its history.
+    expect(await versionsOf(ids.later)).toBe(2)
+    // A live file keeps every version.
+    expect(await versionsOf(ids.live)).toBe(3)
+    // The history keeps its sequence.
+    expect(await count('events', 'tree_id = ?', treeId)).toBe(events)
+    // gone.html's bytes were referenced by nothing else.
+    expect(await blobRow(goneSha)).toBeNull()
+    expect(await storedBlob(goneSha)).toBe(false)
+
+    // Twenty days on, later.html's deletion passes the cutoff too.
+    await purgeAt(T0 + 51 * DAY)
+    expect(await count('nodes', 'id = ?', ids.later)).toBe(0)
+    expect(await count('mentions', 'tree_id = ?', treeId)).toBe(0)
+    expect(await count('page_views', 'node_id = ?', ids.later)).toBe(0)
+    expect(await versionsOf(ids.live)).toBe(3)
   })
 
-  it('keeps the restored audit batch and purges a later re-archive', async () => {
-    const archived = await archive('purge_rearchive')
-    await run(
-      Effect.gen(function* () {
-        return yield* (yield* Documents).restore(
-          archived.documentId,
-          archived.batchId,
-          archived.principal,
+  it('expires staged pushes past a day and lets go of their holds', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const target = `${ws.name}/${name}`
+    const kept = `kept ${tag}`
+    const fresher = `new ${tag}`
+    await pushAt(T0, pusher, target, { 'a.txt': kept })
+    const files = { 'a.txt': kept, 'b.txt': fresher }
+    const staged = await stageAt(T0 + MINUTE, pusher, target, files, {
+      force: true,
+    })
+    const pushId = staged.pushId!
+    await uploadAt(T0 + MINUTE, pusher, pushId, files, staged.missing)
+    const holds = () =>
+      count('blob_holds', "holder_kind = 'push' and holder_id = ?", pushId)
+    expect(await holds()).toBe(2)
+
+    await purgeAt(T0 + 23 * HOUR)
+    expect(await holds()).toBe(2)
+    expect(
+      (
+        await rows<{ state: string }>(
+          'select state from pushes where id = ?',
+          pushId,
         )
-      }),
-    )
-    const rearchived = await run(
-      Effect.gen(function* () {
-        return yield* (yield* Documents).delete(
-          archived.documentId,
-          archived.principal,
+      )[0]?.state,
+    ).toBe('staged')
+
+    const outcome = await purgeAt(T0 + MINUTE + 25 * HOUR)
+    expect(outcome.expiredPushes).toBeGreaterThanOrEqual(1)
+    expect(
+      (
+        await rows<{ state: string }>(
+          'select state from pushes where id = ?',
+          pushId,
         )
-      }),
-    )
-    expect(rearchived.batchId).not.toBe(archived.batchId)
-    await env.DB.prepare(
-      'UPDATE deletion_batches SET created_at = ? WHERE id = ?',
-    )
-      .bind(OLD, rearchived.batchId)
-      .run()
-
-    const report = await purge(false)
-
-    expect(report.batches).toEqual([
-      expect.objectContaining({ id: rearchived.batchId }),
-    ])
-    expect(
-      await env.DB.prepare(
-        `SELECT restored_at, purge_status
-           FROM deletion_batches WHERE id = ?`,
-      )
-        .bind(archived.batchId)
-        .first(),
-    ).toMatchObject({
-      restored_at: expect.any(String),
-      purge_status: 'pending',
+      )[0]?.state,
+    ).toBe('expired')
+    expect(await holds()).toBe(0)
+    expect(await count('push_files', 'push_id = ?', pushId)).toBe(0)
+    expect(await count('push_folders', 'push_id = ?', pushId)).toBe(0)
+    // The bytes only that push held go; the tree's own stay.
+    expect(await blobRow(await sha256Of(fresher))).toBeNull()
+    expect(await storedBlob(await sha256Of(fresher))).toBe(false)
+    expect(await blobRow(await sha256Of(kept))).toMatchObject({
+      ref_count: 1,
+      state: 'live',
     })
+    // The push can no longer commit.
     expect(
-      await env.DB.prepare(
-        'SELECT purge_status FROM deletion_batches WHERE id = ?',
-      )
-        .bind(rearchived.batchId)
-        .first(),
-    ).toEqual({ purge_status: 'purged' })
-    expect(await env.OBJECTS.head(archived.keys[0]!)).toBeNull()
+      await failureAt(
+        T0 + 26 * HOUR,
+        pusher,
+        Effect.flatMap(Push, (push) => push.commit(pushId as PushId)),
+      ),
+    ).toMatchObject({ code: 'not_found' })
   })
 
-  it('deletes all saved-state rows before the purged document', async () => {
-    const stateful = await createStateful('purge_state_rows')
-    const createdAt = '2026-09-14T08:00:00.000Z'
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO document_state_grants
-           (document_id, email, can_save, created_by_account_id, created_at)
-         VALUES (?, 'editor@example.com', 1, ?, ?)`,
-      ).bind(stateful.documentId, stateful.principal.accountId, createdAt),
-      env.DB.prepare(
-        `INSERT INTO document_edit_links
-           (document_id, generation, created_by_account_id, created_at,
-            revoked_at)
-         VALUES (?, 1, ?, ?, NULL)`,
-      ).bind(stateful.documentId, stateful.principal.accountId, createdAt),
-    ])
-    await archiveDocument(stateful.documentId, stateful.principal)
-
-    await purge(false)
-
-    expect(
-      await env.DB.prepare(
-        `SELECT
-           (SELECT COUNT(*) FROM document_state_fields
-             WHERE document_id = ?1) AS fields,
-           (SELECT COUNT(*) FROM document_state_grants
-             WHERE document_id = ?1) AS grants,
-           (SELECT COUNT(*) FROM document_edit_links
-             WHERE document_id = ?1) AS links,
-           (SELECT COUNT(*) FROM document_state
-             WHERE document_id = ?1) AS state,
-           (SELECT COUNT(*) FROM document_versions
-             WHERE document_id = ?1) AS versions,
-           (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents`,
-      )
-        .bind(stateful.documentId)
-        .first(),
-    ).toEqual({
-      fields: 0,
-      grants: 0,
-      links: 0,
-      state: 0,
-      versions: 0,
-      documents: 0,
+  it('keeps a blob two trees share until neither references it, then removes its bytes and its Markdown of every version, and leaves fonts, looks and the base layer alone', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const shared = pageWith(`<p>Shared ${tag}</p>`, 'Shared')
+    const sha = await sha256Of(shared)
+    const one = `${ws.name}/${name}`
+    const two = `${ws.name}/${name}-2`
+    await pushAt(T0, pusher, one, {
+      'plan.html': shared,
+      'keep.txt': `1 ${tag}`,
     })
-  })
-
-  it('keeps values unavailable while archived and restores them unchanged', async () => {
-    const stateful = await createStateful('purge_state_restore')
-    const revokedAt = '2026-09-14T09:00:00.000Z'
-    await env.DB.prepare(
-      `INSERT INTO document_edit_links
-         (document_id, generation, created_by_account_id, created_at,
-          revoked_at)
-       VALUES (?, 2, ?, ?, ?)`,
+    await pushAt(T0, pusher, two, {
+      'plan.html': shared,
+      'keep.txt': `2 ${tag}`,
+    })
+    expect(await blobRow(sha)).toMatchObject({ ref_count: 2 })
+    // The push wrote this converter version's Markdown; older versions'
+    // Markdown is planted as an earlier build left it.
+    expect(await stored(`derived/markdown/${MARKDOWN_VERSION}/${sha}.md`)).toBe(
+      true,
     )
-      .bind(
-        stateful.documentId,
-        stateful.principal.accountId,
-        revokedAt,
-        revokedAt,
-      )
-      .run()
-    const batchId = await archiveDocument(
-      stateful.documentId,
-      stateful.principal,
-    )
+    for (let v = 1; v < MARKDOWN_VERSION; v += 1) {
+      await env.BLOBS.put(`derived/markdown/${v}/${sha}.md`, `# v${v}`)
+    }
+    // Objects under other prefixes, named by the same hash.
+    const others = [`fonts/${sha}`, `looks/${sha}`, `base/test/${sha}.js`]
+    for (const key of others) await env.BLOBS.put(key, 'not a blob')
 
-    const archivedSave = await run(
-      Effect.gen(function* () {
-        return yield* (yield* State)
-          .save(
-            stateful.documentId,
-            { kind: 'account', principal: stateful.principal },
-            { changes: [{ name: 'notes', value: 'Blocked', base: 1 }] },
+    await pushAt(
+      T0 + MINUTE,
+      pusher,
+      one,
+      { 'keep.txt': `1 ${tag}` },
+      { force: true },
+    )
+    await purgeAt(T0 + 32 * DAY)
+    expect(
+      await anyNodeAt(
+        (
+          await rows<{ id: string }>(
+            'select id from trees where name = ?',
+            name,
           )
-          .pipe(Effect.either)
-      }),
+        )[0]!.id,
+        'plan.html',
+      ),
+    ).toBeUndefined()
+    expect(await blobRow(sha)).toMatchObject({ ref_count: 1, state: 'live' })
+    expect(await storedBlob(sha)).toBe(true)
+
+    await pushAt(
+      T0 + 33 * DAY,
+      pusher,
+      two,
+      { 'keep.txt': `2 ${tag}` },
+      { force: true },
     )
-    expect(archivedSave).toMatchObject({
-      _tag: 'Left',
-      left: { code: 'not_found' },
-    })
-
-    await run(
-      Effect.gen(function* () {
-        return yield* (yield* Documents).restore(
-          stateful.documentId,
-          batchId,
-          stateful.principal,
-        )
-      }),
-    )
-    const restored = await run(
-      Effect.gen(function* () {
-        return yield* (yield* State).read(stateful.documentId, {
-          kind: 'account',
-          principal: stateful.principal,
-        })
-      }),
-    )
-    expect(restored.fields.notes).toEqual({
-      value: 'Saved',
-      revision: 1,
-      type: 'textarea',
-    })
-
-    const savedAgain = await run(
-      Effect.gen(function* () {
-        return yield* (yield* State).save(
-          stateful.documentId,
-          { kind: 'account', principal: stateful.principal },
-          { changes: [{ name: 'notes', value: 'Restored save', base: 1 }] },
-        )
-      }),
-    )
-    expect(savedAgain.fields.notes).toMatchObject({
-      value: 'Restored save',
-      revision: 2,
-    })
-    expect(
-      await env.DB.prepare(
-        `SELECT generation, revoked_at FROM document_edit_links
-          WHERE document_id = ?`,
-      )
-        .bind(stateful.documentId)
-        .first(),
-    ).toEqual({ generation: 2, revoked_at: revokedAt })
-  })
-
-  it('defaults the admin endpoint to dry-run for deployment admins', async () => {
-    const archived = await archive('purge_admin', {
-      createdAt: '2020-01-01T00:00:00.000Z',
-    })
-    const denied = await worker.fetch(
-      new Request('https://dossier.test/api/admin/purge', {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${archived.token}`,
-          'content-type': 'application/json',
-        },
-        body: '{}',
-      }) as Parameters<typeof worker.fetch>[0],
-      env,
-    )
-    expect(denied.status).toBe(401)
-
-    await env.DB.prepare(
-      'UPDATE accounts SET deployment_admin = 1 WHERE id = ?',
-    )
-      .bind(archived.principal.accountId)
-      .run()
-    await env.DB.prepare('UPDATE api_keys SET last_used_at = NULL WHERE id = ?')
-      .bind(archived.principal.apiKeyId)
-      .run()
-    const beforeD1 = await snapshotD1()
-    const beforeR2 = await listKeys()
-
-    const response = await worker.fetch(
-      new Request('https://dossier.test/api/admin/purge', {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${archived.token}`,
-          'content-type': 'application/json',
-        },
-        body: '{}',
-      }) as Parameters<typeof worker.fetch>[0],
-      env,
-    )
-
-    expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({
-      dryRun: true,
-      batches: [{ id: archived.batchId }],
-    })
-    expect(await snapshotD1()).toBe(beforeD1)
-    expect(await listKeys()).toEqual(beforeR2)
-    expect(
-      await env.DB.prepare('SELECT last_used_at FROM api_keys WHERE id = ?')
-        .bind(archived.principal.apiKeyId)
-        .first(),
-    ).toEqual({ last_used_at: null })
-    await env.DB.prepare(
-      'UPDATE deletion_batches SET created_at = ? WHERE id = ?',
-    )
-      .bind(YOUNG, archived.batchId)
-      .run()
-  })
-
-  it('never touches asset versions or asset R2 keys', async () => {
-    const archived = await archive('purge_asset')
-    const asset = await run(
-      Effect.gen(function* () {
-        return yield* (yield* Assets).push(
-          {
-            slug: 'purge-asset',
-            ext: 'css',
-            contentBase64: btoa('body { color: #123456; }'),
-          },
-          archived.principal,
-        )
-      }),
-    )
-    const assetRow = await env.DB.prepare(
-      `SELECT v.object_key
-         FROM asset_versions v
-         JOIN assets a ON a.id = v.asset_id
-        WHERE a.slug = ? AND v.version_number = ?`,
-    )
-      .bind(asset.slug, asset.versionNumber)
-      .first<{ object_key: string }>()
-
-    await purge(false)
-
-    expect(await env.OBJECTS.head(assetRow!.object_key)).not.toBeNull()
-    expect(
-      await env.DB.prepare('SELECT id FROM asset_versions WHERE object_key = ?')
-        .bind(assetRow!.object_key)
-        .first(),
-    ).not.toBeNull()
-  })
-
-  it('dry-run performs no D1 or R2 writes', async () => {
-    const archived = await archive('purge_dry', { versions: 2 })
-    const beforeRows = await env.DB.prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents,
-         (SELECT COUNT(*) FROM document_versions WHERE document_id = ?1) AS versions,
-         (SELECT purge_status FROM deletion_batches WHERE id = ?2) AS status`,
-    )
-      .bind(archived.documentId, archived.batchId)
-      .first()
-    const beforeKeys = await listKeys(`docs/${archived.documentId}/`)
-
-    const report = await purge(true)
-
-    expect(report).toMatchObject({
-      dryRun: true,
-      batches: [{ id: archived.batchId, documents: 1, versions: 2 }],
-    })
-    expect(
-      await env.DB.prepare(
-        `SELECT
-           (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents,
-           (SELECT COUNT(*) FROM document_versions WHERE document_id = ?1) AS versions,
-           (SELECT purge_status FROM deletion_batches WHERE id = ?2) AS status`,
-      )
-        .bind(archived.documentId, archived.batchId)
-        .first(),
-    ).toEqual(beforeRows)
-    expect(await listKeys(`docs/${archived.documentId}/`)).toEqual(beforeKeys)
-    await env.DB.prepare(
-      'UPDATE deletion_batches SET created_at = ? WHERE id = ?',
-    )
-      .bind(YOUNG, archived.batchId)
-      .run()
-  })
-
-  it('resumes after an R2 failure following the first chunk', async () => {
-    const archived = await archive('purge_crash', { versions: 1001 })
-    let calls = 0
-    const failingBucket = bucketWithDelete(async (keys) => {
-      calls += 1
-      if (calls === 2) throw new Error('simulated R2 crash')
-      await env.OBJECTS.delete(keys)
-    })
-    const failingLayer = makeCoreLayer(env, {
-      objects: makeObjects(failingBucket),
-    })
-    const failed = await run(
-      Effect.gen(function* () {
-        return yield* (yield* Purge)
-          .runPurge({ now: NOW, retentionDays: 30, dryRun: false })
-          .pipe(Effect.either)
-      }),
-      failingLayer,
-    )
-    expect(failed).toMatchObject({
-      _tag: 'Left',
-      left: { _tag: 'StorageError' },
-    })
-    expect((failed as { _tag: 'Left'; left: unknown }).left).toBeInstanceOf(
-      StorageError,
-    )
-    const checkpoint = await env.DB.prepare(
-      `SELECT purge_status, purge_progress, purged_bytes
-           FROM deletion_batches WHERE id = ?`,
-    )
-      .bind(archived.batchId)
-      .first<{
-        purge_status: string
-        purge_progress: string
-        purged_bytes: number
-      }>()
-    expect(checkpoint).toMatchObject({
-      purge_status: 'claimed',
-      purged_bytes: expect.any(Number),
-    })
-    expect(JSON.parse(checkpoint!.purge_progress)).toEqual({
-      deletedObjects: 1000,
-      deletedVersions: 0,
-      deletedDocuments: 0,
-      cursor: expect.any(String),
-    })
-    expect(await listKeys(`docs/${archived.documentId}/`)).toHaveLength(1)
-
-    const resumed = await purge(false, new Date(NOW.getTime() + 11 * 60_000))
-    expect(resumed.batches[0]).toMatchObject({
-      id: archived.batchId,
-      versions: 1001,
-    })
-    expect(await listKeys(`docs/${archived.documentId}/`)).toEqual([])
-  }, 120_000)
-
-  it('resumes state cleanup after an interruption during D1 cleanup', async () => {
-    const archived = await archive('purge_d1_crash', {
-      versions: 80,
-      stateful: true,
-    })
-    const createdAt = '2026-09-14T10:00:00.000Z'
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO document_state_grants
-           (document_id, email, can_save, created_by_account_id, created_at)
-         VALUES (?, 'editor@example.com', 1, ?, ?)`,
-      ).bind(archived.documentId, archived.principal.accountId, createdAt),
-      env.DB.prepare(
-        `INSERT INTO document_edit_links
-           (document_id, generation, created_by_account_id, created_at,
-            revoked_at)
-         VALUES (?, 1, ?, ?, NULL)`,
-      ).bind(archived.documentId, archived.principal.accountId, createdAt),
-    ])
-    const failingLayer = makeCoreLayer(env, { db: failDbBatchAt(2) })
-    const failed = await run(
-      Effect.gen(function* () {
-        return yield* (yield* Purge)
-          .runPurge({ now: NOW, retentionDays: 30, dryRun: false })
-          .pipe(Effect.either)
-      }),
-      failingLayer,
-    )
-
-    expect(failed).toMatchObject({
-      _tag: 'Left',
-      left: { _tag: 'PersistenceError' },
-    })
-    expect((failed as { _tag: 'Left'; left: unknown }).left).toBeInstanceOf(
-      PersistenceError,
-    )
-    expect(await listKeys(`docs/${archived.documentId}/`)).toEqual([])
-    expect(
-      await env.DB.prepare(
-        'SELECT COUNT(*) AS count FROM document_versions WHERE document_id = ?',
-      )
-        .bind(archived.documentId)
-        .first(),
-    ).toEqual({ count: 1 })
-    const checkpoint = await env.DB.prepare(
-      `SELECT purge_status, purge_progress
-         FROM deletion_batches WHERE id = ?`,
-    )
-      .bind(archived.batchId)
-      .first<{ purge_status: string; purge_progress: string }>()
-    expect(checkpoint).toMatchObject({ purge_status: 'claimed' })
-    expect(JSON.parse(checkpoint!.purge_progress)).toMatchObject({
-      deletedObjects: 81,
-      deletedVersions: 80,
-      deletedDocuments: 0,
-    })
-    expect(
-      await env.DB.prepare(
-        `SELECT
-           (SELECT COUNT(*) FROM document_state_fields
-             WHERE document_id = ?1) AS fields,
-           (SELECT COUNT(*) FROM document_state_grants
-             WHERE document_id = ?1) AS grants,
-           (SELECT COUNT(*) FROM document_edit_links
-             WHERE document_id = ?1) AS links,
-           (SELECT COUNT(*) FROM document_state
-             WHERE document_id = ?1) AS state`,
-      )
-        .bind(archived.documentId)
-        .first(),
-    ).toEqual({ fields: 1, grants: 1, links: 1, state: 1 })
-
-    const resumed = await purge(false, new Date(NOW.getTime() + 11 * 60_000))
-
-    expect(resumed.batches).toEqual([
-      expect.objectContaining({
-        id: archived.batchId,
-        documents: 1,
-        versions: 81,
-      }),
-    ])
-    expect(
-      await env.DB.prepare(
-        `SELECT purge_status,
-                (SELECT COUNT(*) FROM documents WHERE id = ?1) AS documents,
-                (SELECT COUNT(*) FROM document_versions
-                  WHERE document_id = ?1) AS versions,
-                (SELECT COUNT(*) FROM document_state_fields
-                  WHERE document_id = ?1) AS fields,
-                (SELECT COUNT(*) FROM document_state_grants
-                  WHERE document_id = ?1) AS grants,
-                (SELECT COUNT(*) FROM document_edit_links
-                  WHERE document_id = ?1) AS links,
-                (SELECT COUNT(*) FROM document_state
-                  WHERE document_id = ?1) AS state
-           FROM deletion_batches WHERE id = ?2`,
-      )
-        .bind(archived.documentId, archived.batchId)
-        .first(),
-    ).toEqual({
-      purge_status: 'purged',
-      documents: 0,
-      versions: 0,
-      fields: 0,
-      grants: 0,
-      links: 0,
-      state: 0,
-    })
-  }, 120_000)
-
-  it('deletes more than 1000 object keys in bounded R2 chunks', async () => {
-    const archived = await archive('purge_chunks', { versions: 1001 })
-    const chunks: number[] = []
-    const countingBucket = bucketWithDelete(async (keys) => {
-      chunks.push(typeof keys === 'string' ? 1 : keys.length)
-      await env.OBJECTS.delete(keys)
-    })
-    const countingLayer = makeCoreLayer(env, {
-      objects: makeObjects(countingBucket),
-    })
-
-    await purge(false, NOW, countingLayer)
-
-    expect(chunks).toEqual([1000, 1])
-    expect(await listKeys(`docs/${archived.documentId}/`)).toEqual([])
-  }, 120_000)
-
-  it('runs from the scheduled handler and logs structured JSON', async () => {
-    const archived = await archive('purge_scheduled', {
-      createdAt: '2020-01-01T00:00:00.000Z',
-    })
-    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-    try {
-      const controller = createScheduledController({
-        cron: '17 3 * * SUN',
-        scheduledTime: new Date(),
-      })
-      const context = createExecutionContext()
-      scheduled(controller, env, context)
-      await waitOnExecutionContext(context)
-
-      expect(
-        await env.DB.prepare(
-          'SELECT purge_status FROM deletion_batches WHERE id = ?',
-        )
-          .bind(archived.batchId)
-          .first(),
-      ).toEqual({ purge_status: 'purged' })
-      expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({
-        dryRun: false,
-        batches: [{ id: archived.batchId }],
-      })
-    } finally {
-      log.mockRestore()
+    await purgeAt(T0 + 65 * DAY)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await count('analyses', 'sha256 = ?', sha)).toBe(0)
+    expect(await storedBlob(sha)).toBe(false)
+    for (let v = 1; v <= MARKDOWN_VERSION; v += 1) {
+      expect(await stored(`derived/markdown/${v}/${sha}.md`)).toBe(false)
     }
+    for (const key of others) expect(await stored(key)).toBe(true)
+  })
+
+  it('keeps a blob while a hold stands: verified, or unverified for a day', async () => {
+    const { tag } = fresh()
+    const text = `held ${tag}`
+    const sha = await sha256Of(text)
+    const holder = { kind: 'upload' as const, id: `test:${tag}` }
+    const store = <A, E>(
+      f: (s: Effect.Effect.Success<typeof TreeStore>) => Effect.Effect<A, E>,
+    ) => run(Effect.flatMap(TreeStore, f))
+    // An upload has taken its hold and is writing the bytes.
+    await store((s) => s.holdBlob(holder, sha as Sha256, text.length))
+    await putBlob(sha, text)
+    expect(
+      (
+        await rows<{ verified: number }>(
+          'select verified from blob_holds where sha256 = ?',
+          sha,
+        )
+      )[0]?.verified,
+    ).toBe(0)
+    // Unverified, the hold stands for a day.
+    await purgeAt(Date.now() + 23 * HOUR)
+    expect(await blobRow(sha)).toMatchObject({ state: 'live' })
+    expect(await storedBlob(sha)).toBe(true)
+    await store((s) => s.confirmHold(holder, sha as Sha256, text.length))
+    const later = Date.now() + 40 * DAY
+    await purgeAt(later + MINUTE)
+    expect(await blobRow(sha)).toMatchObject({ state: 'live' })
+    // The change it was for never commits: the hold goes, then the bytes.
+    await store((s) => s.releaseHold(holder, sha as Sha256))
+    await purgeAt(later + 2 * MINUTE)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await storedBlob(sha)).toBe(false)
+  })
+
+  it('removes records past their life: old operations, Seen by and views, expired handles, day-old rate counts', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const pushed = await pushAt(T0, pusher, `${ws.name}/${name}`, {
+      'a.html': pageWith(`<p>${tag}</p>`),
+    })
+    const node = (await nodeAt(pushed.treeId, 'a.html'))!.id
+    const now = T0 + 40 * DAY
+    const cutoff = now - 30 * DAY
+    const readers = [await person('old'), await person('new')]
+    await exec(
+      `insert into operations (principal, scope, op_id, result_node_id, result_version_id, result_state, created_at)
+       values (?, ?, 'old', null, null, 'stored', ?), (?, ?, 'new', null, null, 'stored', ?)`,
+      owner.id,
+      `${pushed.treeId}:${tag}`,
+      cutoff - 1,
+      owner.id,
+      `${pushed.treeId}:${tag}`,
+      cutoff + 1,
+    )
+    await exec(
+      `insert into seen_by (node_id, user_id, last_seen_at) values (?, ?, ?), (?, ?, ?)`,
+      node,
+      readers[0]!.id,
+      cutoff - 1,
+      node,
+      readers[1]!.id,
+      cutoff + 1,
+    )
+    await exec(
+      `insert into page_views (node_id, day, count) values (?, ?, 1), (?, ?, 1)`,
+      node,
+      dayOf(cutoff - DAY),
+      node,
+      dayOf(cutoff + DAY),
+    )
+    for (const [hash, expires] of [
+      [`old${tag}`, now - 1],
+      [`new${tag}`, now + HOUR],
+    ] as const) {
+      await exec(
+        `insert into view_handles (hash_sha256, generation, anon_session_id, tree_id, expires_at, renewed_at, created_at)
+         values (?, 1, ?, ?, ?, ?, ?)`,
+        hash,
+        hash,
+        pushed.treeId,
+        expires,
+        T0,
+        T0,
+      )
+      await exec(
+        'insert into view_handle_nodes (handle_hash, seq, node_id, created_at) values (?, 1, ?, ?)',
+        hash,
+        node,
+        T0,
+      )
+      await exec(
+        'insert into view_handle_firsts (handle_hash, seq, grant_order, created_at) values (?, 1, 0, ?)',
+        hash,
+        T0,
+      )
+    }
+    await exec(
+      `insert into rate_counters (key, window_start, count) values (?, ?, 1), (?, ?, 1)`,
+      `old:${tag}`,
+      now - 2 * DAY,
+      `new:${tag}`,
+      now - MINUTE,
+    )
+
+    await purgeAt(now)
+    expect(
+      await count('operations', 'scope = ?', `${pushed.treeId}:${tag}`),
+    ).toBe(1)
+    expect(
+      await count(
+        'operations',
+        "scope = ? and op_id = 'new'",
+        `${pushed.treeId}:${tag}`,
+      ),
+    ).toBe(1)
+    expect(
+      (
+        await rows<{ user_id: string }>(
+          'select user_id from seen_by where node_id = ?',
+          node,
+        )
+      ).map((r) => r.user_id),
+    ).toEqual([readers[1]!.id])
+    expect(
+      (
+        await rows<{ day: string }>(
+          'select day from page_views where node_id = ?',
+          node,
+        )
+      ).map((r) => r.day),
+    ).toEqual([dayOf(cutoff + DAY)])
+    for (const table of [
+      'view_handles',
+      'view_handle_nodes',
+      'view_handle_firsts',
+    ]) {
+      const column = table === 'view_handles' ? 'hash_sha256' : 'handle_hash'
+      expect(await count(table, `${column} = ?`, `old${tag}`)).toBe(0)
+      expect(await count(table, `${column} = ?`, `new${tag}`)).toBe(1)
+    }
+    expect(await count('rate_counters', 'key = ?', `old:${tag}`)).toBe(0)
+    expect(await count('rate_counters', 'key = ?', `new:${tag}`)).toBe(1)
+    // The page itself is live and untouched.
+    expect(await versionsOf(node)).toBe(1)
+  })
+})
+
+describe('bytes being reclaimed', () => {
+  it('tells a push that meets a claimed blob to retry, and lets its upload succeed once the purge has finished with that hash', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const text = `reused ${tag}`
+    const sha = await sha256Of(text)
+    await pushAt(T0, pusher, `${ws.name}/${name}`, {
+      'a.txt': text,
+      'b.txt': `b ${tag}`,
+    })
+    await pushAt(
+      T0 + MINUTE,
+      pusher,
+      `${ws.name}/${name}`,
+      { 'b.txt': `b ${tag}` },
+      { force: true },
+    )
+    const other = await agent(owner)
+    const target = `${ws.name}/${name}-again`
+    let pushId: PushId | null = null
+    let met: unknown = null
+    const runtime = testRuntime({
+      env: {
+        BLOBS: beforeDelete(
+          env.BLOBS,
+          (keys) => namesBlob(keys, sha),
+          async () => {
+            // While the purge holds the claim: a push of the same bytes.
+            const staged = await stageAt(Date.now(), other, target, {
+              'a.txt': text,
+            })
+            pushId = staged.pushId
+            expect(staged.missing).toEqual([sha])
+            met = await failureAs(other, await putBlobOf(pushId!, text))
+            expect(await blobRow(sha)).toMatchObject({ state: 'reclaiming' })
+          },
+        ),
+      },
+    })
+    await purgeAt(T0 + 32 * DAY, { runtime })
+    expect(met).toMatchObject({ code: 'blob_reclaiming' })
+    expect(await blobRow(sha)).toBeNull()
+    // Pushed again, the bytes go up and the push commits.
+    await runAs(other, await putBlobOf(pushId!, text))
+    await runAs(
+      other,
+      Effect.flatMap(Push, (push) => push.commit(pushId!)),
+    )
+    expect(await blobRow(sha)).toMatchObject({ ref_count: 1, state: 'live' })
+    expect(await blobText(sha)).toBe(text)
+  })
+
+  it('reclaims the bytes a withdrawal releases at once, without a run', async () => {
+    const { tag } = fresh()
+    const browser = await sessionFor(owner)
+    const tree = await pushForms(owner, ws, {
+      'questions/index.html': QUESTIONS,
+    })
+    const form = await formRef(
+      tree,
+      'questions/index.html',
+      'questions/answers/',
+    )
+    const pdf = `%PDF-1.7 ${tag}`
+    const sha = await sha256Of(pdf)
+    const stored_ = await uploadAs(browser, tree, {
+      page: 'questions/index.html',
+      form,
+      field: 'cv',
+      name: 'cv.pdf',
+      bytes: pdf,
+    })
+    await sendAs(browser, tree, {
+      page: 'questions/index.html',
+      form,
+      entries: [
+        ['role', 'Driver'],
+        [
+          'cv',
+          {
+            file: stored_.file,
+            name: stored_.name,
+            size: stored_.size,
+            type: stored_.type,
+          },
+        ],
+      ],
+    })
+    expect(await blobRow(sha)).toMatchObject({ ref_count: 1, state: 'live' })
+    expect(await storedBlob(sha)).toBe(true)
+    const runs = await count('purge_runs')
+    await withdrawAs(browser, tree, `questions/answers/${owner.email}.json`)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await storedBlob(sha)).toBe(false)
+    expect(await count('purge_runs')).toBe(runs)
+  })
+})
+
+describe('runs', () => {
+  /** A deleted file whose bytes nothing else holds, `days` ago from T0. */
+  const droppedFile = async (T0: number) => {
+    const { tag, name } = fresh()
+    const pusher = await agent(owner)
+    const text = `dropped ${tag}`
+    await pushAt(T0, pusher, `${ws.name}/${name}`, {
+      'a.txt': text,
+      'b.txt': `b ${tag}`,
+    })
+    await pushAt(
+      T0 + MINUTE,
+      pusher,
+      `${ws.name}/${name}`,
+      { 'b.txt': `b ${tag}` },
+      { force: true },
+    )
+    return { sha: await sha256Of(text), name }
+  }
+
+  it('finishes in the next run what a run stopped after its claim left, and health says so meanwhile', async () => {
+    const T0 = Date.now()
+    const { sha } = await droppedFile(T0)
+    const runtime = testRuntime({
+      env: {
+        BLOBS: new Proxy(env.BLOBS, {
+          get(target, property) {
+            if (property === 'delete') {
+              return async () => {
+                throw new Error('R2 is unavailable')
+              }
+            }
+            const value = Reflect.get(target, property, target) as unknown
+            return typeof value === 'function' ? value.bind(target) : value
+          },
+        }),
+      },
+    })
+    expect(await purgeFailureAt(T0 + 32 * DAY, { runtime })).toMatchObject({
+      code: 'unavailable',
+    })
+    const failed = (await lastRunRow())!
+    expect(failed.state).toBe('failed')
+    expect(failed.error).toContain('File storage')
+    const checkpoint = JSON.parse(failed.checkpoint_json) as {
+      step: string
+      claimed: string[]
+    }
+    expect(checkpoint.step).toBe('blobs')
+    expect(checkpoint.claimed).toContain(sha)
+    expect(await blobRow(sha)).toMatchObject({ state: 'reclaiming' })
+    expect(await storedBlob(sha)).toBe(true)
+    const health = await run(Effect.flatMap(Settings, (s) => s.health()))
+    expect(health.checks.find((c) => c.name === 'Purge')).toMatchObject({
+      ok: false,
+    })
+    expect(health.ok).toBe(false)
+
+    const outcome = await purgeAt(T0 + 32 * DAY + MINUTE)
+    expect(outcome.blobs).toBeGreaterThanOrEqual(1)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await storedBlob(sha)).toBe(false)
+    expect((await lastRunRow())!.state).toBe('done')
+    const after = await run(Effect.flatMap(Settings, (s) => s.health()))
+    expect(after.checks.find((c) => c.name === 'Purge')).toMatchObject({
+      ok: true,
+    })
+    expect(after.checks.find((c) => c.name === 'Purge')?.detail).toContain(
+      'The weekly purge finished',
+    )
+  })
+
+  it('waits out the lease of a run that stopped without a word, then finishes its claims', async () => {
+    const T0 = Date.now()
+    const { sha } = await droppedFile(T0)
+    const runtime = testRuntime({
+      env: {
+        // The bytes cannot be deleted, and the failure cannot be recorded:
+        // as if the Worker had stopped mid-run.
+        DB: failingStatements(env.DB, (sql) =>
+          sql.includes("set state = 'failed', error = ?"),
+        ),
+        BLOBS: new Proxy(env.BLOBS, {
+          get(target, property) {
+            if (property === 'delete') {
+              return async () => {
+                throw new Error('R2 is unavailable')
+              }
+            }
+            const value = Reflect.get(target, property, target) as unknown
+            return typeof value === 'function' ? value.bind(target) : value
+          },
+        }),
+      },
+    })
+    const stopped = T0 + 32 * DAY
+    await purgeFailureAt(stopped, { runtime })
+    const left = (await lastRunRow())!
+    expect(left.state).toBe('running')
+
+    expect(await purgeFailureAt(stopped + MINUTE)).toMatchObject({
+      code: 'conflict',
+      message: 'A purge is running.',
+    })
+    expect(await blobRow(sha)).toMatchObject({ state: 'reclaiming' })
+
+    await purgeAt(stopped + 11 * MINUTE)
+    expect(
+      (
+        await rows<{ state: string; error: string }>(
+          'select state, error from purge_runs where id = ?',
+          left.id,
+        )
+      )[0],
+    ).toEqual({ state: 'failed', error: 'It stopped before it finished.' })
+    expect(await blobRow(sha)).toBeNull()
+    expect(await storedBlob(sha)).toBe(false)
+  })
+
+  it('stops at its budget as partial, and the next run goes on from there', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const files: Record<string, string> = { 'keep.txt': `keep ${tag}` }
+    for (let i = 0; i < 110; i += 1) files[`many/f${i}.txt`] = `same ${tag}`
+    const pushed = await pushAt(T0, pusher, `${ws.name}/${name}`, files)
+    await pushAt(
+      T0 + MINUTE,
+      pusher,
+      `${ws.name}/${name}`,
+      { 'keep.txt': `keep ${tag}` },
+      { force: true },
+    )
+    const left = () =>
+      count('nodes', "tree_id = ? and path like 'many%'", pushed.treeId)
+    expect(await left()).toBe(111)
+
+    // Room for the lease, the expiry step and one batch of nodes.
+    const partial = await purgeAt(T0 + 32 * DAY, {
+      budget: {
+        statements:
+          3 +
+          SYSTEM_STATEMENTS.expireStagedPushes +
+          1 +
+          SYSTEM_STATEMENTS.purgeDeletedNodes +
+          1,
+        millis: 25_000,
+      },
+    })
+    expect(partial).toMatchObject({ remaining: true, nodes: 100 })
+    const row = (await lastRunRow())!
+    expect(row.state).toBe('partial')
+    expect(JSON.parse(row.checkpoint_json)).toMatchObject({ step: 'nodes' })
+    expect(await left()).toBeGreaterThan(0)
+    expect(await blobRow(await sha256Of(`same ${tag}`))).toMatchObject({
+      state: 'live',
+    })
+
+    const rest = await purgeAt(T0 + 32 * DAY + MINUTE)
+    expect(rest.remaining).toBe(false)
+    expect((await lastRunRow())!.state).toBe('done')
+    expect(await left()).toBe(0)
+    expect(await blobRow(await sha256Of(`same ${tag}`))).toBeNull()
+    expect(await nodeAt(pushed.treeId, 'keep.txt')).toBeDefined()
+  })
+
+  it('makes a second run wait while the first holds its lease', async () => {
+    const T0 = Date.now()
+    const { name } = await droppedFile(T0)
+    const admin = await person('chief')
+    await superAdmin(admin)
+    const chief = await sessionFor(admin)
+    const when = T0 + 32 * DAY
+    let second: unknown = null
+    let pressed: unknown = null
+    const runtime = testRuntime({
+      env: {
+        DB: beforeBatch(
+          env.DB,
+          (sql) => sql.includes('delete from nodes where'),
+          async () => {
+            second = await purgeFailureAt(when)
+            pressed = await failureAs(
+              chief,
+              Effect.flatMap(Purge, (p) => p.runNow()),
+            )
+          },
+        ),
+      },
+    })
+    const first = await purgeAt(when, { runtime })
+    expect(second).toMatchObject({
+      code: 'conflict',
+      message: 'A purge is running.',
+    })
+    expect(pressed).toMatchObject({ code: 'conflict' })
+    expect(first.nodes).toBeGreaterThanOrEqual(1)
+    expect(await count('trees', 'name = ?', name)).toBe(1)
+    expect((await lastRunRow())!.state).toBe('done')
+  })
+
+  it('answers Purge now only for a super admin in a browser, and runs as the weekly run does', async () => {
+    const admin = await person('root')
+    await superAdmin(admin)
+    const member = await person('member')
+    await join(ws, member)
+    const runNow = Effect.flatMap(Purge, (p) => p.runNow())
+    const runs = await count('purge_runs')
+    const memberBrowser = await sessionFor(member)
+    expect(await failureAs(memberBrowser, runNow)).toMatchObject({
+      code: 'not_found',
+    })
+    expect(await failureAs(await agent(admin), runNow)).toMatchObject({
+      code: 'not_found',
+    })
+    expect(
+      await failureAs(
+        {
+          person: null,
+          via: { kind: 'visitor', anonSessionId: null },
+          requestId: 'test',
+        },
+        runNow,
+      ),
+    ).toMatchObject({ code: 'not_found' })
+    const ended = await sessionFor(admin)
+    await exec(
+      'update session set expires_at = ? where id = ?',
+      Date.now() - 1,
+      (ended.via as { sessionId: string }).sessionId,
+    )
+    expect(await failureAs(ended, runNow)).toMatchObject({ code: 'not_found' })
+    // None of them started a run.
+    expect(await count('purge_runs')).toBe(runs)
+
+    const outcome = await runAs(await sessionFor(admin), runNow)
+    expect(outcome).toMatchObject({ trigger: 'manual', remaining: false })
+    expect(await lastRunRow()).toMatchObject({
+      id: outcome.runId,
+      trigger: 'manual',
+      state: 'done',
+      started_by: admin.id,
+    })
+    const last = await run(Effect.flatMap(Purge, (p) => p.lastRun()))
+    expect(last).toMatchObject({
+      trigger: 'manual',
+      state: 'done',
+      outcome: { runId: outcome.runId },
+    })
+  })
+
+  it('runs one weekly purge when the weekly schedule fires, and nothing on another', async () => {
+    const before = await count('purge_runs', "trigger = 'weekly'")
+    await worker.scheduled(
+      createScheduledController({
+        scheduledTime: new Date(),
+        cron: WEEKLY_PURGE,
+      }),
+    )
+    expect(await count('purge_runs', "trigger = 'weekly'")).toBe(before + 1)
+    expect(await lastRunRow()).toMatchObject({
+      trigger: 'weekly',
+      state: 'done',
+    })
+    await worker.scheduled(
+      createScheduledController({
+        scheduledTime: new Date(),
+        cron: '0 0 * * *',
+      }),
+    )
+    expect(await count('purge_runs', "trigger = 'weekly'")).toBe(before + 1)
+  })
+})
+
+describe('workspaces and keys', () => {
+  it('purges a deleted workspace’s trees, its people and teams, and keeps its name taken', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const admin = await person('admin')
+    const gone = await workspace(admin, `w${tag}`)
+    const helper = await person('helper')
+    await join(gone, helper)
+    await team(gone, 'Design', [helper])
+    const adminBrowser = await sessionFor(admin)
+    await at(
+      T0,
+      adminBrowser,
+      Effect.flatMap(People, (p) =>
+        p.invite({
+          workspace: gone.name,
+          email: `invited-${tag}@example.com`,
+          teamIds: [],
+        }),
+      ),
+    )
+    const pusher = await agent(admin)
+    const pushed = await pushAt(T0, pusher, `${gone.name}/${name}`, {
+      'plan.html': pageWith(`<p>${tag}</p>`),
+      'notes/a.txt': `a ${tag}`,
+    })
+    // A push that would make a new tree, still staged.
+    const staged = await stageAt(T0, pusher, `${gone.name}/${name}-new`, {
+      'x.txt': `x ${tag}`,
+    })
+    await uploadAt(
+      T0,
+      pusher,
+      staged.pushId!,
+      { 'x.txt': `x ${tag}` },
+      staged.missing,
+    )
+    await at(
+      T0 + MINUTE,
+      adminBrowser,
+      Effect.flatMap(People, (p) =>
+        p.deleteWorkspace({ workspace: gone.name, confirm: gone.name }),
+      ),
+    )
+
+    // Within the retention period nothing goes.
+    await purgeAt(T0 + 29 * DAY)
+    expect(await count('nodes', 'tree_id = ?', pushed.treeId)).toBeGreaterThan(
+      0,
+    )
+
+    const purgedAt = T0 + 31 * DAY
+    const outcome = await purgeAt(purgedAt)
+    expect(outcome.trees).toBeGreaterThanOrEqual(1)
+    expect(outcome.workspaces).toBeGreaterThanOrEqual(1)
+    expect(await count('nodes', 'tree_id = ?', pushed.treeId)).toBe(0)
+    expect(await count('trees', 'workspace_id = ?', gone.id)).toBe(0)
+    expect(await count('events', 'tree_id = ?', pushed.treeId)).toBe(0)
+    expect(await count('pushes', 'workspace_id = ?', gone.id)).toBe(0)
+    expect(await count('workspace_members', 'workspace_id = ?', gone.id)).toBe(
+      0,
+    )
+    expect(await count('teams', 'workspace_id = ?', gone.id)).toBe(0)
+    expect(await count('invitations', 'workspace_id = ?', gone.id)).toBe(0)
+    expect(await count('blob_holds', 'holder_id = ?', staged.pushId)).toBe(0)
+    expect(
+      (
+        await rows<{ name: string; deleted_at: number; purged_at: number }>(
+          'select name, deleted_at, purged_at from workspaces where id = ?',
+          gone.id,
+        )
+      )[0],
+    ).toEqual({ name: gone.name, deleted_at: T0 + MINUTE, purged_at: purgedAt })
+    expect(await blobRow(await sha256Of(`a ${tag}`))).toBeNull()
+
+    const root = await person('root')
+    await superAdmin(root)
+    const rootBrowser = await sessionFor(root)
+    expect(
+      await failureAs(
+        rootBrowser,
+        Effect.flatMap(People, (p) => p.createWorkspace({ name: gone.name })),
+      ),
+    ).toMatchObject({
+      code: 'conflict',
+      message: `The name ${gone.name} is taken.`,
+    })
+    expect(
+      await failureAt(
+        purgedAt + MINUTE,
+        rootBrowser,
+        Effect.flatMap(People, (p) => p.restoreWorkspace(gone.id)),
+      ),
+    ).toMatchObject({ code: 'conflict' })
+  })
+
+  it('revokes a key scoped to a purged folder and clears its scope in the batch that removes the folder, and leaves a key on a live node alone', async () => {
+    const { tag, name } = fresh()
+    const T0 = Date.now()
+    const pusher = await agent(owner)
+    const target = `${ws.name}/${name}`
+    const pushed = await pushAt(T0, pusher, target, {
+      'plans/a.txt': `a ${tag}`,
+      'notes/b.txt': `b ${tag}`,
+    })
+    const plans = (await nodeAt(pushed.treeId, 'plans'))!.id
+    const notes = (await nodeAt(pushed.treeId, 'notes'))!.id
+    const onPlans = await agent(owner, { scope: plans as never })
+    const onNotes = await agent(owner, { scope: notes as never })
+    await pushAt(
+      T0 + MINUTE,
+      pusher,
+      target,
+      { 'notes/b.txt': `b ${tag}` },
+      { force: true },
+    )
+    const keyOf = async (caller: Caller) =>
+      (
+        await rows<{ scope_node_id: string | null; revoked_at: number | null }>(
+          'select scope_node_id, revoked_at from agent_keys where id = ?',
+          (caller.via as { keyId: string }).keyId,
+        )
+      )[0]
+
+    // A batch that fails removes nothing and clears nothing.
+    const when = T0 + 32 * DAY
+    await purgeFailureAt(when, {
+      runtime: testRuntime({
+        env: {
+          DB: failingStatements(env.DB, (sql) =>
+            sql.includes('delete from nodes where'),
+          ),
+        },
+      }),
+    })
+    expect(await count('nodes', 'id = ?', plans)).toBe(1)
+    expect(await keyOf(onPlans)).toEqual({
+      scope_node_id: plans,
+      revoked_at: null,
+    })
+
+    await purgeAt(when + MINUTE)
+    expect(await count('nodes', 'id = ?', plans)).toBe(0)
+    expect(await keyOf(onPlans)).toEqual({
+      scope_node_id: null,
+      revoked_at: when + MINUTE,
+    })
+    expect(await keyOf(onNotes)).toEqual({
+      scope_node_id: notes,
+      revoked_at: null,
+    })
+  })
+})
+
+describe('restoring and purging', () => {
+  /** A tree whose page `gone.html` a push deleted an hour in. */
+  const deletedPage = async () => {
+    const { tag, name } = fresh()
+    const key = await agent(owner)
+    const t0 = Date.UTC(2026, 8, 1, 9)
+    const text = pageWith(`<p>Gone ${tag}</p>`, 'Gone')
+    const first = await pushAt(t0, key, `${ws.name}/${name}`, {
+      'gone.html': text,
+      'keep.html': pageWith('<p>Keep</p>', 'Keep'),
+    })
+    await pushAt(
+      t0 + HOUR,
+      key,
+      `${ws.name}/${name}`,
+      { 'keep.html': pageWith('<p>Keep</p>', 'Keep') },
+      { force: true },
+    )
+    const node = await anyNodeAt(first.treeId, 'gone.html')
+    return {
+      key,
+      treeId: first.treeId,
+      name,
+      node: node!.id,
+      sha: await sha256Of(text),
+      text,
+      /** Past the retention period of the deletion. */
+      later: t0 + HOUR + 31 * DAY,
+    }
+  }
+
+  /**
+   * A restore to push 1. With no time, on the real clock: a restore that
+   * loses its batch waits before it reads again, which a test clock never
+   * lets pass.
+   */
+  const restore = (
+    t: Awaited<ReturnType<typeof deletedPage>>,
+    time: number | null,
+  ) =>
+    (time === null
+      ? (e: Effect.Effect<never, never, never>) => runAs(t.key, e)
+      : (e: Effect.Effect<never, never, never>) => at(time, t.key, e))(
+      Effect.flatMap(Files, (f) =>
+        f
+          .restore({
+            ref: ref(`${ws.name}/${t.name}/gone.html`),
+            to: { push: 1 as never },
+          })
+          .pipe(Effect.either),
+      ) as never,
+    ) as Promise<
+      import('effect').Either.Either<unknown, { readonly code: string }>
+    >
+
+  /** The file is live with its bytes, or gone with no version left. */
+  const restoredWithBytes = async (
+    t: Awaited<ReturnType<typeof deletedPage>>,
+  ) => {
+    expect(await nodeAt(t.treeId, 'gone.html')).toBeDefined()
+    expect(await blobRow(t.sha)).toMatchObject({ state: 'live' })
+    expect(await blobText(t.sha)).toBe(t.text)
+  }
+  const refusedAndGone = async (t: Awaited<ReturnType<typeof deletedPage>>) => {
+    expect(await versionsOf(t.node)).toBe(0)
+    expect(await count('node_versions', 'blob_sha256 = ?', t.sha)).toBe(0)
+    expect(await blobRow(t.sha)).toBeNull()
+    expect(await storedBlob(t.sha)).toBe(false)
+  }
+
+  it('keeps a file restored before the purge, with its blob', async () => {
+    const t = await deletedPage()
+    const done = await restore(t, t.later)
+    expect(done._tag).toBe('Right')
+    await purgeAt(t.later)
+    await restoredWithBytes(t)
+  })
+
+  it('refuses a restore after the purge, and leaves no version behind', async () => {
+    const t = await deletedPage()
+    await purgeAt(t.later)
+    const refused = await restore(t, t.later)
+    expect(refused._tag === 'Left' && refused.left.code).toBe('not_found')
+    await refusedAndGone(t)
+  })
+
+  it('refuses a restore whose batch a purge got to first', async () => {
+    const t = await deletedPage()
+    // The purge runs after the restore has read the tree, before it commits.
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) =>
+              sql.includes('json_each') &&
+              sql.includes("'live', pv.blob_sha256"),
+            async () => {
+              await purgeAt(t.later)
+            },
+          ),
+        },
+      }),
+    )
+    const refused = await restore(t, null)
+    harness.reset()
+    expect(refused._tag === 'Left' && refused.left.code).toBe('not_found')
+    await refusedAndGone(t)
+  })
+
+  it('keeps a file a restore brought back while the purge was reading', async () => {
+    const t = await deletedPage()
+    // The restore commits after the purge chose its nodes, before it removes them.
+    const DB = beforeBatch(
+      env.DB,
+      (sql) => sql.includes('delete from nodes where'),
+      async () => {
+        const done = await restore(t, t.later)
+        expect(done._tag).toBe('Right')
+      },
+    )
+    await purgeAt(t.later, { runtime: testRuntime({ env: { DB } }) })
+    await restoredWithBytes(t)
+  })
+})
+
+describe('claims and holds a run inherits', () => {
+  const store = <A, E>(
+    f: (s: Effect.Effect.Success<typeof TreeStore>) => Effect.Effect<A, E>,
+  ) => run(Effect.flatMap(TreeStore, f))
+
+  it('never deletes the bytes of a blob a stopped run had claimed that lives again', async () => {
+    const { tag, name } = fresh()
+    const t0 = Date.UTC(2026, 10, 2, 9)
+    const text = `alive again ${tag}`
+    await pushAt(t0, await agent(owner), `${ws.name}/${name}`, {
+      'a.txt': text,
+    })
+    const sha = await sha256Of(text)
+    // A run claimed it, finished it, then stopped before its checkpoint said
+    // so; the same bytes have been pushed again since.
+    await exec(
+      `insert into purge_runs (id, trigger, started_by, state, lease_until, checkpoint_json,
+         counts_json, started_at)
+       values (?, 'weekly', null, 'running', ?, ?, '{}', ?)`,
+      crypto.randomUUID(),
+      t0 + HOUR,
+      JSON.stringify({ step: 'blobs', claimed: [sha] }),
+      t0 - HOUR,
+    )
+    await purgeAt(t0 + 2 * HOUR)
+    expect(await blobRow(sha)).toMatchObject({ state: 'live' })
+    expect(await storedBlob(sha)).toBe(true)
+  })
+
+  it('finishes a claim no checkpoint names, at the next run', async () => {
+    const { tag } = fresh()
+    const t0 = Date.UTC(2026, 10, 3, 9)
+    const text = `orphaned claim ${tag}`
+    const sha = await sha256Of(text)
+    await exec(
+      `insert into blobs (sha256, size, ref_count, state, first_seen_at, reclaim_started_at)
+       values (?, ?, 0, 'reclaiming', ?, ?)`,
+      sha,
+      text.length,
+      t0 - DAY,
+      t0 - 10 * MINUTE,
+    )
+    await putBlob(sha, text)
+    await purgeAt(t0)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await storedBlob(sha)).toBe(false)
+  })
+
+  it('keeps the hold of an upload still writing when its push expires, and lets it go after', async () => {
+    const { tag, name } = fresh()
+    const t0 = Date.UTC(2026, 10, 4, 9)
+    const text = `late upload ${tag}`
+    const sha = (await sha256Of(text)) as Sha256
+    const staged = await stageAt(t0, await agent(owner), `${ws.name}/${name}`, {
+      'late.txt': text,
+    })
+    const holder = { kind: 'push' as const, id: staged.pushId! }
+    // A minute before the push expires, its upload takes its hold.
+    await at(
+      t0 + DAY - MINUTE,
+      await agent(owner),
+      Effect.flatMap(TreeStore, (s) => s.holdBlob(holder, sha, text.length)),
+    )
+    await putBlob(sha, text)
+    await purgeAt(t0 + DAY + MINUTE)
+    expect(await blobRow(sha)).toMatchObject({ state: 'live' })
+    expect(await storedBlob(sha)).toBe(true)
+    await purgeAt(t0 + DAY + 2 * HOUR)
+    expect(await blobRow(sha)).toBeNull()
+    expect(await storedBlob(sha)).toBe(false)
+    void store
   })
 })

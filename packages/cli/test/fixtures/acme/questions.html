@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Questions</title>
+  </head>
+  <body>
+    <h1>Questions</h1>
+    <form method="post" action="answers/">
+      <label>
+        Team size
+        <input name="teamSize" type="number" min="1" />
+      </label>
+      <label>
+        Start date
+        <input name="start" type="date" />
+      </label>
+      <label>
+        Anything else
+        <textarea name="notes"></textarea>
+      </label>
+      <button type="submit">Send</button>
+    </form>
+  </body>
+</html>

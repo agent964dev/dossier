@@ -19,7 +19,7 @@ function Input({
       className={cn(
         'flex h-10 w-full min-w-0 rounded-lg border border-border bg-input px-3 py-2',
         'text-base text-neutral-100 md:text-sm',
-        'placeholder:text-muted-foreground',
+        'placeholder:text-neutral-400',
         'transition-[color,border-color,box-shadow] duration-200 ease-agent',
         'outline-none focus-visible:border-brand-300/50 focus-visible:ring-[3px] focus-visible:ring-ring/40',
         'disabled:pointer-events-none disabled:opacity-50',
