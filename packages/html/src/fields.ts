@@ -135,6 +135,10 @@ const legendOf = (fieldset: Element): string | null => {
   return null
 }
 
+/** `data-type="json"`, as the page client reads it too. */
+const isJsonInput = (control: Element): boolean =>
+  (attrOf(control, 'data-type') ?? '').trim().toLowerCase() === 'json'
+
 /**
  * What a control is: its field type before checkboxes of one name are
  * counted, or null for controls that never send a value of their own.
@@ -153,6 +157,8 @@ const kindOf = (control: Element): FieldType | null => {
       const type = (attrOf(control, 'type') ?? '').trim().toLowerCase()
       if (type === 'submit' || type === 'image') return 'submit'
       if (type === 'reset' || type === 'button') return null
+      // A hidden input that holds one JSON object page code draws.
+      if (type === 'hidden' && isJsonInput(control)) return 'json'
       return INPUT_TYPES.has(type) ? (type as FieldType) : 'text'
     }
   }

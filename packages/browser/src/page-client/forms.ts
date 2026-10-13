@@ -216,6 +216,20 @@ const listOf = (value: unknown): string[] => {
   return text === null || value === null ? [] : [text]
 }
 
+/** A hidden input marked `data-type="json"`, as the push reads it. */
+const isJsonField = (control: Control): boolean =>
+  control.localName === 'input' &&
+  (control as HTMLInputElement).type === 'hidden' &&
+  (control.getAttribute('data-type') ?? '').trim().toLowerCase() === 'json'
+
+/** A JSON field's stored object as its text, or null to leave it. */
+const jsonTextOf = (value: unknown): string | null =>
+  isRecord(value)
+    ? JSON.stringify(value)
+    : typeof value === 'string'
+      ? value
+      : null
+
 const unfilled = (control: Control): boolean =>
   control.localName === 'button' ||
   (control.localName === 'input' &&
@@ -450,6 +464,11 @@ export const startForms = (deps: {
           }
           if (input.type === 'radio') {
             input.checked = listOf(value).includes(input.value)
+            continue
+          }
+          if (isJsonField(input)) {
+            const text = has ? jsonTextOf(value) : null
+            if (text !== null) input.value = text
             continue
           }
         }

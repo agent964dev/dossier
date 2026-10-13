@@ -448,12 +448,6 @@ const isTreePath = (path: string) =>
 const entryStamp = (now: number) =>
   new Date(now).toISOString().slice(0, 19).replaceAll(':', '-')
 
-/** Drops nulls, as merging into nothing would. */
-const withoutNulls = (values: Readonly<Record<string, unknown>>): JsonObject =>
-  Object.fromEntries(
-    Object.entries(values).filter(([, value]) => value !== null),
-  ) as JsonObject
-
 /**
  * A merge patch applied to nothing, as RFC 7396 says: a null removes its
  * key at every depth, an object is merged into an empty one, anything else
@@ -1038,9 +1032,10 @@ export const DataLive: Layer.Layer<
                   kind: 'file',
                   owner: seenRow.kind === 'shared' ? null : person.id,
                 })
+                // A JSON field's nulls go at every depth, as a merge's do.
                 version = cs.putData(node, {
                   ...provenance,
-                  json: withoutNulls(values),
+                  json: intoNothing(values),
                 })
               }
               cs.operation({

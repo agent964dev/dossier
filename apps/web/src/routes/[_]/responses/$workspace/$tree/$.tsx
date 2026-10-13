@@ -254,6 +254,19 @@ function CellValue({ cell }: { cell: Cell }) {
       <>{cell.text}</>
     )
   }
+  if ('json' in cell) {
+    // A JSON field's object, folded until opened.
+    return (
+      <details className="min-w-0">
+        <summary className="cursor-pointer rounded-sm text-neutral-300 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+          JSON · {cell.summary}
+        </summary>
+        <pre className="mt-1.5 max-h-80 overflow-auto rounded-md border border-border bg-background p-2.5 font-mono text-xs whitespace-pre text-neutral-100">
+          {cell.json}
+        </pre>
+      </details>
+    )
+  }
   return (
     <a
       href={cell.download}
@@ -443,7 +456,7 @@ function SharedValues({ values }: { values: NonNullable<FormView['shared']> }) {
           <span className="min-w-0 text-[0.9375rem]">
             <span className="text-neutral-400">{value.label}: </span>
             <span className="break-words text-neutral-50">
-              {value.text === '' ? '—' : value.text}
+              {value.text === '' ? '—' : <CellValue cell={value.cell} />}
             </span>
           </span>
           <span className="shrink-0 font-mono text-xs text-neutral-400">

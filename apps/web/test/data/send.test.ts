@@ -183,6 +183,30 @@ describe('a send', () => {
     ).toBe(2)
   })
 
+  it('stores a JSON field’s text as its object, nulls gone at every depth, and refuses text that is not an object', async () => {
+    const tree = await pushForms(owner, ws, {
+      ...FILES,
+      'review.html': pageWith(
+        '<form action="review/"><input type="hidden" name="notes" data-type="json"><button>Send</button></form>',
+        'Review',
+      ),
+    })
+    const form = await formRef(tree, 'review.html', 'review/')
+    const sent = await sendAs(browser, tree, {
+      page: 'review.html',
+      form,
+      entries: [['notes', '{"S-1":{"text":"Check","gone":null}}']],
+    })
+    expect(sent.doc?.data).toEqual({ notes: { 'S-1': { text: 'Check' } } })
+    expect(
+      await sendFailure(browser, tree, {
+        page: 'review.html',
+        form,
+        entries: [['notes', '["not","an","object"]']],
+      }),
+    ).toMatchObject({ code: 'invalid', path: 'notes' })
+  })
+
   it('keeps both people’s fields in a shared file, the respondent answering with respond alone', async () => {
     const tree = await pushForms(owner, ws, FILES)
     const sara = await person('sara')

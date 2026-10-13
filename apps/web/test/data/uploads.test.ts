@@ -3,6 +3,7 @@ import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { Data, Pages, type Caller } from '../../src/core/index.ts'
+import { dataViews } from '../../src/server/responses.ts'
 import { Browser, signedIn } from '../support/browser.ts'
 import { count, exec, rows } from '../support/d1.ts'
 import {
@@ -452,5 +453,16 @@ describe('reading answers', () => {
         )
       ).code,
     ).toBe('forbidden')
+  })
+
+  it('shows a JSON field’s object folded, with its keys counted, and other values as text', () => {
+    const { cellOf } = dataViews({ workspace: 'w', tree: 't' })
+    const notes = { 'S-1': { text: 'Check' }, 'S-2': { text: 'Fine' } }
+    expect(cellOf(notes, 'json', '')).toEqual({
+      summary: '2 keys',
+      json: JSON.stringify(notes, null, 2),
+    })
+    expect(cellOf({ a: 1 }, 'hidden', '')).toEqual({ text: '{"a":1}' })
+    expect(cellOf(undefined, 'json', '')).toEqual({ text: '' })
   })
 })

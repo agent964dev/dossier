@@ -40,6 +40,8 @@ export type PushProblemCode =
   | 'form_action_comments'
   /** data-closes has no offset or Z. */
   | 'closes_without_offset'
+  /** A JSON field marked required, or whose value is not a JSON object. */
+  | 'json_field'
   /** Two forms on one page share a target and lack distinct ids. */
   | 'forms_need_ids'
   /** Deeper than MAX_DEPTH. */
@@ -250,7 +252,44 @@ const formProblems = (
       )
     }
   }
+  for (const field of form.fields) {
+    if (field.type !== 'json') continue
+    const named = `${where} has the JSON field ${field.name}`
+    if (field.required) {
+      found.push(
+        problem(
+          'json_field',
+          path,
+          form.line,
+          `${named} marked required, which a JSON field cannot be: page code fills it.`,
+          'Remove required from the JSON field.',
+        ),
+      )
+    }
+    if (!isJsonObjectText(field.value ?? '')) {
+      found.push(
+        problem(
+          'json_field',
+          path,
+          form.line,
+          `${named}, whose value is not a JSON object.`,
+          'Leave value out, or write a JSON object in it, such as value="{}".',
+        ),
+      )
+    }
+  }
   return { problems: found, target }
+}
+
+/** Empty, or the text of a JSON object: what a JSON field may start with. */
+const isJsonObjectText = (text: string): boolean => {
+  if (text.trim() === '') return true
+  try {
+    const value: unknown = JSON.parse(text)
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+  } catch {
+    return false
+  }
 }
 
 /**

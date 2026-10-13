@@ -135,6 +135,8 @@ export type FieldType =
   | 'week'
   | 'file'
   | 'submit'
+  /** A hidden input marked `data-type="json"`: one JSON object page code draws. */
+  | 'json'
 
 /** One field of a form: every control of one name, merged. */
 export interface FieldRule {
@@ -218,6 +220,7 @@ export const formSchema = (form: FormSummary): FormSchema => ({
 })
 
 const FILL_IN = 'Fill in this field.'
+const JSON_OBJECT = 'Use a JSON object for this field.'
 const OFFERED = 'Choose one of the options offered.'
 const VALID = 'Enter a valid value.'
 
@@ -260,6 +263,28 @@ const isUpload = (value: unknown): value is UploadValue => {
     Number.isFinite(upload.size) &&
     upload.size >= 0
   )
+}
+
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/**
+ * A JSON field's value: an object page code wrote, or the JSON text of the
+ * hidden input a plain send carried. Empty text leaves the field out.
+ */
+const jsonOutcome = (sent: unknown): Outcome => {
+  if (sent === undefined) return null
+  if (typeof sent !== 'string') {
+    return isJsonObject(sent) ? { value: sent } : { message: JSON_OBJECT }
+  }
+  if (sent.trim() === '') return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(sent)
+  } catch {
+    return { message: JSON_OBJECT }
+  }
+  return isJsonObject(parsed) ? { value: parsed } : { message: JSON_OBJECT }
 }
 
 const offers = (field: FieldRule, value: string): boolean =>
@@ -540,6 +565,8 @@ const checkField = (field: FieldRule, sent: readonly unknown[]): Outcome => {
   if (sent.length > 1 && !takesMany(field)) {
     return { message: 'Send only one value for this field.' }
   }
+  // Never required: page code fills it, and an empty one is left out.
+  if (field.type === 'json') return jsonOutcome(sent[0])
   if (field.type === 'file') {
     if (!sent.every(isUpload)) return { message: 'Send a file, not text.' }
     if (sent.length === 0)
@@ -711,6 +738,7 @@ const sentOf = (field: FieldRule, value: unknown): unknown[] | string => {
       : 'Enter a number.'
   }
   if (field.type === 'file') return [value]
+  if (field.type === 'json') return isJsonObject(value) ? [value] : JSON_OBJECT
   return typeof value === 'string' ? [value] : VALID
 }
 

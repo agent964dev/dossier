@@ -324,6 +324,30 @@ describe('prefill', () => {
     expect(shared.form(2).lastElementChild?.localName).toBe('output')
   })
 
+  test('a JSON field takes its stored object as JSON text, and a send carries that text', async () => {
+    const it = open({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="notes" data-type="json" value="{}">
+          <input type="hidden" name="other" data-type="json" value='{"keep":1}'>
+          <input name="name">
+          <button>Send</button>
+        </form>`,
+    })
+    await flush()
+    const notes = { 'S-108': { text: 'Check the dates', reopen: true } }
+    await it.answer(it.requests('read')[0]!.id, wire({ notes, name: 'Sara' }))
+    expect(JSON.parse(it.field('[name=notes]').value)).toEqual(notes)
+    // A field the stored answer does not name keeps its own value.
+    expect(it.field('[name=other]').value).toBe('{"keep":1}')
+    await submit(it)
+    expect(sendsOf(it)[0]!.entries).toEqual([
+      ['notes', JSON.stringify(notes)],
+      ['other', '{"keep":1}'],
+      ['name', 'Sara'],
+    ])
+  })
+
   test('forms that say off, and numbers the page does not list, are left alone', async () => {
     const it = open({
       body: `

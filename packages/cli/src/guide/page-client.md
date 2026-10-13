@@ -35,7 +35,9 @@ embedded in another page, and whether it runs from an export.
   adds `ideas/sara@acme.com/<UTC time>.json`. People with respond can write a
   shared file such as `layout.json`. Page code never writes authored files, `_`
   files, pages or another person's files; a write into a form's target is
-  checked against the form, and refused when the form is closed.
+  checked against the form, and refused when the form is closed. Only the
+  fields the form names may be written there; a JSON field (see Forms) takes
+  any JSON object page code draws, merged key by key.
 - `withdraw(path)` deletes your own submission or entry with every revision,
   leaving a line in history.
 - `upload(file)` stores a file beside the page, at
