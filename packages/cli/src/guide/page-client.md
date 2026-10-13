@@ -6,7 +6,7 @@ API from page code is refused.
 
 ```ts
 dossier.me // { email, name, role } of the viewer, or null for a visitor
-dossier.page // { path, push, embedded, exported }
+dossier.page // { path, link, push, embedded, exported }
 await dossier.ready // resolves once the page client can answer
 dossier.read(path) // a file: Doc or null; a folder ('answers/'): Doc[]
 dossier.watch(path, onChange) // calls back at once, then after each change; returns stop()
@@ -15,8 +15,11 @@ dossier.withdraw(path) // your own submission or entry, for good
 dossier.upload(file) // resolves { file, name, size, type }
 ```
 
-`page` holds the page's tree path, the push it was rendered from, whether it is
-embedded in another page, and whether it runs from an export.
+`page` holds the page's tree path, its link (the address people open,
+`https://<deployment>/<workspace>/<tree>/<path>`, which a handoff can name; an
+exported file keeps the link it was exported from), the push it was rendered
+from, whether it is embedded in another page, and whether it runs from an
+export.
 
 - `read(path)` of a file gives a `Doc`, or `null`; missing and unreadable look
   the same. A folder path ends in `/` and gives a `Doc[]` of every readable file

@@ -79,6 +79,7 @@ describe('install', () => {
       expect(html.hasAttribute('data-dossier-embedded')).toBe(embedded)
       expect(dossier.page).toEqual({
         path: '/questions/plan.html',
+        link: 'https://main.test/agent964/acme/questions/plan',
         push: 2,
         embedded,
         exported: false,

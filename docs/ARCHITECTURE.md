@@ -372,6 +372,8 @@ answers with the result or a `DossierError`.
 
 - Page-code writes are RFC 7396 merge patches into `.json` data files. Local
   writes show at once and roll back on refusal.
+- `page.link` is the page's link from the bootstrap, the address people open;
+  an export keeps the link it was exported from.
 - A request with no answer is sent again with the same operation ID after 1, 3
   and 9 seconds, then fails `unavailable`. Nothing is sent while offline.
 - The shell keeps form drafts and sends made offline per viewer in IndexedDB

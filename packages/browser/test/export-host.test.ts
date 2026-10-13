@@ -256,8 +256,10 @@ describe('install in a page downloaded as one file', () => {
 
   test('is exported and ready at once, as its exporter, leaving the window name alone', async () => {
     const page = openExport({ name: 'dossier-boot:{"v":1,"me":null}' })
+    // The link it was exported from, which a handoff can name.
     expect(page.dossier.page).toEqual({
       path: '/questions/plan.html',
+      link: 'https://main.test/agent964/acme/questions/plan',
       push: 2,
       embedded: false,
       exported: true,
