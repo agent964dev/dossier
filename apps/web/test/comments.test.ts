@@ -953,6 +953,28 @@ describe('whom a comment may mention', () => {
       nobody,
     )
   })
+
+  it('finds the people who can open the page past many members who cannot', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    // Sixty members match first and open nothing; the one reader sorts last.
+    for (let n = 0; n < 60; n += 1) {
+      await join(ws, await person(`pad-${String(n).padStart(2, '0')}`))
+    }
+    const reader = await person('pad-zz')
+    await join(ws, reader)
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'plan.html'))!.id,
+      'email',
+      reader.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const found = await mentionable(ownerBrowser, tree, 'plan.html', 'pad')
+    expect(found.people.map((p) => p.email)).toEqual([
+      reader.email.toLowerCase(),
+    ])
+  })
 })
 
 describe('what an agent reads', () => {

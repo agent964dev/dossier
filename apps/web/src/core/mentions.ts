@@ -131,8 +131,12 @@ export const teamMembersByName = (
     }),
   )
 
-/** How many candidates are read before who can open the page is checked. */
-const CANDIDATES_MAX = 50
+/**
+ * How many candidates are read at a time before who can open the page is
+ * checked, and how many such batches at most.
+ */
+export const CANDIDATES_MAX = 50
+export const CANDIDATE_BATCHES_MAX = 10
 
 /** A photo only by an https address. */
 const imageOf = (image: string | null): string | null =>
@@ -160,6 +164,8 @@ export const mentionCandidates = (
     readonly line: readonly string[]
     readonly query: string
     readonly me: string
+    /** How many candidates earlier batches read. */
+    readonly offset?: number
   },
 ) =>
   read('A mention candidates read', () =>
@@ -188,9 +194,16 @@ export const mentionCandidates = (
            or instr(lower(coalesce(name, '')), ?4) > 0)
        group by email
        order by rank, lower(coalesce(nullif(max(name), ''), email)), email
-       limit ${CANDIDATES_MAX}`,
+       limit ${CANDIDATES_MAX} offset ?6`,
     )
-      .bind(i.workspaceId, i.treeId, JSON.stringify(i.line), i.query, i.me)
+      .bind(
+        i.workspaceId,
+        i.treeId,
+        JSON.stringify(i.line),
+        i.query,
+        i.me,
+        i.offset ?? 0,
+      )
       .all<{ email: string; name: string | null; image: string | null }>(),
   ).pipe(
     Effect.map((rows) =>

@@ -62,7 +62,10 @@ import {
 import { newId } from './ids.ts'
 import {
   isMemberOf,
+  CANDIDATE_BATCHES_MAX,
+  CANDIDATES_MAX,
   mentionCandidates,
+  type MentionCandidate,
   mentionTeams,
   teamMembersByName,
 } from './mentions.ts'
@@ -2801,18 +2804,30 @@ export const DataLive: Layer.Layer<
           .toLowerCase()
           .slice(0, MENTIONABLE_QUERY_MAX)
         const line = ancestorPaths(page.node.path)
-        const candidates = yield* mentionCandidates(DB, {
-          workspaceId,
-          treeId: i.treeId,
-          line,
-          query: search,
-          me: me.email.toLowerCase(),
-        })
-        // Only people who could open the page now.
-        const readers = yield* access.readersAmong(
-          candidates.map((c) => c.email),
-          page.node,
-        )
+        // Only people who could open the page now, read in batches until
+        // enough are found, so those who cannot never crowd them out.
+        const people: MentionCandidate[] = []
+        for (let batch = 0; batch < CANDIDATE_BATCHES_MAX; batch += 1) {
+          const candidates = yield* mentionCandidates(DB, {
+            workspaceId,
+            treeId: i.treeId,
+            line,
+            query: search,
+            me: me.email.toLowerCase(),
+            offset: batch * CANDIDATES_MAX,
+          })
+          const readers = yield* access.readersAmong(
+            candidates.map((c) => c.email),
+            page.node,
+          )
+          people.push(...candidates.filter((c) => readers.has(c.email)))
+          if (
+            people.length >= MENTIONABLE_MAX ||
+            candidates.length < CANDIDATES_MAX
+          ) {
+            break
+          }
+        }
         const teams = yield* mentionTeams(DB, {
           workspaceId,
           treeId: i.treeId,
@@ -2821,9 +2836,7 @@ export const DataLive: Layer.Layer<
           max: MENTIONABLE_MAX,
         })
         return {
-          people: candidates
-            .filter((c) => readers.has(c.email))
-            .slice(0, MENTIONABLE_MAX),
+          people: people.slice(0, MENTIONABLE_MAX),
           teams,
         } satisfies MentionableResult
       })
