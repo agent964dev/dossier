@@ -1426,6 +1426,9 @@ export class DossierComments extends HTMLElement {
 
   /** Each anchored element carries how many open threads it has. */
   #markAnchors(current: readonly PlacedThread[]): void {
+    // Out of the page, as after a send that ended once it left: it counts
+    // nothing, so it takes back no mark it gave up.
+    if (!this.isConnected) return
     const doc = this.ownerDocument
     const counts = new Map<Element, number>()
     for (const { doc: thread } of current) {

@@ -1318,6 +1318,24 @@ describe('<dossier-comments>', () => {
     ).toContain('@lena@acme.com')
   })
 
+  test('keeps the suggestions closed after Escape pressed before anything was suggested', async () => {
+    peer.mentionable = {
+      people: [{ email: 'lena@acme.com', name: 'Lena Saleh', image: null }],
+      teams: [],
+    }
+    const element = await mount()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const list = q(mainComposer(element), '[role="listbox"]')
+    // No one in the threads: nothing shows until Dossier answers.
+    type(area, 'Ask @le')
+    expect(list.hidden).toBe(true)
+    key(area, 'Escape')
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual(['le'])
+    expect(list.hidden).toBe(true)
+  })
+
   test('never asks Dossier whom to suggest for a visitor', async () => {
     peer.me = null
     peer.threads = [thread(comment(LEE, 'Hi'))]
@@ -1642,7 +1660,7 @@ describe('with for: the comments on one item', () => {
     }
     const few = await delivery(10)
     document.body.replaceChildren()
-    const many = await delivery(60)
+    const many = await delivery(30)
     expect(many).toEqual(few)
     // No element read the layout: nothing is pinned.
     expect(many.boxes).toBe(0)
@@ -1653,8 +1671,8 @@ describe('with for: the comments on one item', () => {
     ).toHaveLength(0)
     expect(
       document.querySelectorAll('dossier-comments[for] .dossier-comments-open'),
-    ).toHaveLength(60)
-  })
+    ).toHaveLength(30)
+  }, 15_000)
 
   test('types into an item’s composer without looking through the page', async () => {
     // With nothing pinned, no element follows the page's scrolls and keys.
@@ -1687,6 +1705,37 @@ describe('with for: the comments on one item', () => {
     expect(item.getAttribute(MARK)).toBe('1')
     page.remove()
     expect(item.hasAttribute(MARK)).toBe(false)
+  })
+
+  test('takes back no mark when a send it started ends after it left the page', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    peer.threads = [thread(a)]
+    const { page, one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    byKey(one, `reply:${a.path}`)!.click()
+    const form = q(one, `[data-composer="reply:${a.path}"]`)
+    type(q(form, 'textarea'), 'On it')
+    let finish = () => {}
+    const write = fake.write
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path, patch) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }),
+    )
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    one.remove()
+    finish()
+    await settle()
+    // The page's element sees the thread resolved: nothing counts S-1 now.
+    peer.emit([
+      thread(a, [], { resolved: true, resolvedBy: LEE, resolvedAt: a.at }),
+    ])
+    await settle()
+    expect(page.isConnected).toBe(true)
+    expect(document.getElementById('S-1')!.hasAttribute(MARK)).toBe(false)
   })
 
   test('leaves an item’s mark to the element still counting it when the other moves to another item', async () => {

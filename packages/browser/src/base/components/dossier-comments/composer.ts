@@ -196,7 +196,12 @@ export class Composer {
       if (!this.#busy) this.#options.onSubmit()
       return
     }
-    if (!open) return
+    if (!open) {
+      // Nothing shown yet, an answer may still be on its way: it stays away.
+      // The key goes on to the page, as nothing here took it.
+      if (event.key === 'Escape') this.#dismiss()
+      return
+    }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       const step = event.key === 'ArrowDown' ? 1 : -1
