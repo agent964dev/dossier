@@ -3,7 +3,9 @@
 // only, so a replacement component in a kit writes the same files. It
 // renders into the page's own DOM, follows the folder with a watch, and
 // keeps the focused control across every re-render. With `for`, it shows
-// and writes only the threads on that one element of the page.
+// and writes only the threads on that one element of the page. Whom to
+// mention comes from the threads, and for a member of the page's workspace
+// from `dossier.mentionable` too.
 import {
   COMMENT_MENTIONS_MAX,
   COMMENT_TEXT_MAX,
@@ -15,6 +17,8 @@ import {
   type Doc,
   type JsonObject,
   type Me,
+  type Mentionable,
+  type MentionablePerson,
   type Thread,
 } from '@dossier/contracts/bridge'
 import type { Dossier } from '../../../page-client/create-page-client.ts'
@@ -30,7 +34,7 @@ import {
   elementsFor,
   fullTime,
   isThreadDoc,
-  knownEmails,
+  knownPeople,
   labelOf,
   mentionsIn,
   pinText,
@@ -94,7 +98,7 @@ export const TEXT = {
   saving: 'Saving…',
   saved: 'Saved',
   writeSomething: 'Write something to comment.',
-  tooManyMentions: `A comment mentions at most ${COMMENT_MENTIONS_MAX} people.`,
+  tooManyMentions: `A comment mentions at most ${COMMENT_MENTIONS_MAX} people and teams.`,
   offline: ERRORS.offline.message,
   rateLimited: 'Too many sends. Try again in a minute.',
   forbidden: ERRORS.forbidden.message,
@@ -135,6 +139,52 @@ export const claimText = (email: string): string =>
   `Signed in as ${email}. Your comment is back here: send it when it is right.`
 
 type Win = Window & typeof globalThis
+
+/** How long typing rests before Dossier is asked whom to suggest. */
+export const LOOKUP_DELAY_MS = 150
+/** How many answers of whom to suggest an element keeps. */
+const LOOKUP_KEPT = 100
+
+/**
+ * Dossier's answers of whom to suggest, by what follows the @: each asked
+ * once typing rests, kept for the element's life. A failed ask is not kept,
+ * so the next @ asks again.
+ */
+class Lookup {
+  readonly #answers = new Map<string, Mentionable>()
+  #timer: ReturnType<typeof setTimeout> | undefined
+  readonly #ask: () => ((query: string) => Promise<Mentionable>) | null
+
+  constructor(ask: () => ((query: string) => Promise<Mentionable>) | null) {
+    this.#ask = ask
+  }
+
+  get(query: string, ready: () => void): Mentionable | null {
+    const known = this.#answers.get(query)
+    if (known !== undefined) return known
+    const ask = this.#ask()
+    if (ask === null) return null
+    clearTimeout(this.#timer)
+    this.#timer = setTimeout(() => {
+      ask(query).then(
+        (answer) => {
+          if (this.#answers.size >= LOOKUP_KEPT) {
+            this.#answers.delete(this.#answers.keys().next().value!)
+          }
+          this.#answers.set(query, answer)
+          ready()
+        },
+        () => {},
+      )
+    }, LOOKUP_DELAY_MS)
+    return null
+  }
+
+  /** Asks nothing more until the next @. */
+  cancel(): void {
+    clearTimeout(this.#timer)
+  }
+}
 
 type Follower = (value: unknown) => void
 
@@ -379,6 +429,19 @@ export class DossierComments extends HTMLElement {
   readonly #unstored = new Map<string, string>()
   /** The `for` it had when it left, to choose again if that changed meanwhile. */
   #leftFor: string | null | undefined = undefined
+  /** Whom Dossier suggests: only for someone signed in, once it is ready. */
+  readonly #lookup = new Lookup(() => {
+    const dossier = this.#dossier
+    if (
+      dossier === null ||
+      !this.#ready ||
+      this.#me() === null ||
+      typeof dossier.mentionable !== 'function'
+    ) {
+      return null
+    }
+    return (query) => dossier.mentionable(query)
+  })
 
   constructor(dossier: Dossier | null = null) {
     super()
@@ -427,6 +490,7 @@ export class DossierComments extends HTMLElement {
     this.#leftFor = this.#scope()
     this.#stopWatch?.()
     this.#stopWatch = null
+    this.#lookup.cancel()
     this.#parts?.pins.disconnect()
     this.#placing = null
     for (const element of this.#marked.keys()) this.#leaveMark(element)
@@ -561,6 +625,7 @@ export class DossierComments extends HTMLElement {
       label: TEXT.addComment,
       submitLabel: TEXT.comment,
       known: () => this.#known(),
+      lookup: (query, ready) => this.#lookup.get(query, ready),
       onSubmit: () => this.#submitMain(),
     })
     const status = new StatusLine(doc, 'main', () => composer.textarea)
@@ -681,8 +746,8 @@ export class DossierComments extends HTMLElement {
     )
   }
 
-  #known(): readonly string[] {
-    return knownEmails(this.#all, this.#me()?.email ?? null)
+  #known(): readonly MentionablePerson[] {
+    return knownPeople(this.#all, this.#me()?.email ?? null)
   }
 
   #stances(): string[] {
@@ -1101,13 +1166,19 @@ export class DossierComments extends HTMLElement {
     const avatar = doc.createElement('span')
     avatar.className = 'dossier-comments-avatar'
     avatar.setAttribute('aria-hidden', 'true')
-    avatar.textContent = Array.from(comment.by)[0] ?? '?'
+    // The writer's name where Dossier has one, their email beside it on hover.
+    const name =
+      typeof comment.name === 'string' && comment.name !== ''
+        ? comment.name
+        : null
+    avatar.textContent = Array.from(name ?? comment.by)[0] ?? '?'
     const main = doc.createElement('div')
     main.className = 'dossier-comments-main'
     const meta = doc.createElement('p')
     meta.className = 'dossier-comments-meta'
-    const author = this.#span(comment.by)
+    const author = this.#span(name ?? comment.by)
     author.className = 'dossier-comments-author'
+    if (name !== null) author.title = comment.by
     author.id = uid('by')
     article.setAttribute('aria-labelledby', author.id)
     meta.append(author, this.#time(comment.at))
@@ -1626,6 +1697,7 @@ export class DossierComments extends HTMLElement {
       submitLabel: TEXT.reply,
       cancelLabel: TEXT.cancel,
       known: () => this.#known(),
+      lookup: (query, ready) => this.#lookup.get(query, ready),
       onSubmit: () => this.#submitReply(root),
       onCancel: () => this.#closeReply(root),
     })
@@ -1702,6 +1774,7 @@ export class DossierComments extends HTMLElement {
       submitLabel: TEXT.save,
       cancelLabel: TEXT.cancel,
       known: () => this.#known(),
+      lookup: (query, ready) => this.#lookup.get(query, ready),
       onSubmit: () => this.#submitEdit(path, root),
       onCancel: () => this.#endEdit(path),
     })

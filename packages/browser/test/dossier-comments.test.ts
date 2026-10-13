@@ -6,17 +6,20 @@ import {
   type ErrorCode,
   type JsonObject,
   type Me,
+  type Mentionable,
   type Thread,
 } from '@dossier/contracts/bridge'
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
   claimText,
   keptKey,
+  LOOKUP_DELAY_MS,
   MARK,
   TEXT,
   type CommentsStateDetail,
 } from '../src/base/components/dossier-comments/element.ts'
 import {
+  mentionsIn,
   pinFromPoint,
   pinPosition,
   placeThreads,
@@ -56,12 +59,17 @@ const peer = {
   watchers: new Set<(value: readonly Doc<Thread>[]) => void>(),
   /** The next sends reject with these, in order. */
   failures: [] as DossierError[],
+  /** Whom Dossier suggests, and what it was asked. */
+  mentionable: { people: [], teams: [] } as Mentionable,
+  asked: [] as string[],
   reset() {
     this.me = SARA
     this.threads = []
     this.calls = []
     this.watchers.clear()
     this.failures = []
+    this.mentionable = { people: [], teams: [] }
+    this.asked = []
   },
   /** A change in the folder, as the watch reports it. */
   emit(threads: Doc<Thread>[]) {
@@ -112,6 +120,10 @@ const fake = {
   upload: async () => {
     throw new Error('not used')
   },
+  mentionable: async (query: string) => {
+    peer.asked.push(query)
+    return peer.mentionable
+  },
 } as unknown as Dossier
 
 let minute = 0
@@ -130,6 +142,7 @@ const comment = (
     replyTo: null,
     stance: null,
     mentions: [],
+    name: null,
     path: `${FOLDER}${by}/2026-10-10T09-${String(minute).padStart(2, '0')}-00.json`,
     by,
     at: at.toISOString(),
@@ -1196,7 +1209,10 @@ describe('<dossier-comments>', () => {
     type(area, 'Ask @le')
     expect(list.hidden).toBe(false)
     const options = [...list.querySelectorAll('[role="option"]')]
-    expect(options.map((o) => o.textContent)).toEqual([LEE, 'lena@acme.com'])
+    expect(options.map((o) => o.getAttribute('data-mention'))).toEqual([
+      `@${LEE}`,
+      '@lena@acme.com',
+    ])
     expect(area.getAttribute('aria-activedescendant')).toBe(options[0]!.id)
     key(area, 'ArrowDown')
     expect(options[1]!.getAttribute('aria-selected')).toBe('true')
@@ -1208,6 +1224,95 @@ describe('<dossier-comments>', () => {
     key(area, 'Escape')
     expect(list.hidden).toBe(true)
     expect(area.hasAttribute('aria-activedescendant')).toBe(false)
+  })
+
+  test('adds Dossier’s people and teams to those in the threads, by name, and mentions a team as @team:', async () => {
+    peer.threads = [
+      thread(comment(LEE, 'Hi', { name: 'Lee Park', mentions: ['team:Ops'] })),
+    ]
+    peer.mentionable = {
+      people: [
+        { email: LEE, name: null, image: null },
+        {
+          email: 'lena@acme.com',
+          name: 'Lena Saleh',
+          image: 'https://photos.test/lena.jpg',
+        },
+      ],
+      teams: [{ name: 'Lead Design', members: 3 }],
+    }
+    const element = await mount()
+    // A name shows where the email did, the email on hover.
+    const author = q(element, '.dossier-comments-author')
+    expect(author.textContent).toBe('Lee Park')
+    expect(author.title).toBe(LEE)
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    const list = q(mainComposer(element), '[role="listbox"]')
+    type(area, 'Ask @le')
+    // The threads' people at once; Dossier's once typing rests.
+    const mentions = () =>
+      [...list.querySelectorAll('[role="option"]')].map((o) =>
+        o.getAttribute('data-mention'),
+      )
+    expect(mentions()).toEqual([`@${LEE}`])
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual(['le'])
+    expect(mentions()).toEqual([
+      `@${LEE}`,
+      '@lena@acme.com',
+      '@team:"Lead Design"',
+    ])
+    const options = [...list.querySelectorAll('[role="option"]')]
+    expect(
+      options.map((o) => q(o, '.dossier-comments-suggestion-name').textContent),
+    ).toEqual(['Lee Park', 'Lena Saleh', 'Lead Design'])
+    expect(q<HTMLImageElement>(options[1]!, 'img').src).toBe(
+      'https://photos.test/lena.jpg',
+    )
+    expect(
+      q(options[2]!, '.dossier-comments-suggestion-detail').textContent,
+    ).toBe('Team · 3 people')
+    key(area, 'ArrowUp')
+    key(area, 'Enter')
+    expect(area.value).toBe('Ask @team:"Lead Design" ')
+    // The same @ again is answered from what Dossier already said.
+    type(area, 'Ask @team:"Lead Design" and @le')
+    expect(mentions()).toHaveLength(3)
+    expect(peer.asked).toEqual(['le'])
+    type(area, 'Ask @team:"Lead Design" and @lena@acme.com')
+    buttonNamed(element, TEXT.comment)!.click()
+    await settle()
+    expect(peer.sends()[0]?.patch?.mentions).toEqual([
+      'team:Lead Design',
+      'lena@acme.com',
+    ])
+  })
+
+  test('never asks Dossier whom to suggest for a visitor', async () => {
+    peer.me = null
+    peer.threads = [thread(comment(LEE, 'Hi'))]
+    const element = await mount()
+    const area = q<HTMLTextAreaElement>(mainComposer(element), 'textarea')
+    type(area, '@le')
+    await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS + 20))
+    await settle()
+    expect(peer.asked).toEqual([])
+    const list = q(mainComposer(element), '[role="listbox"]')
+    expect(list.querySelectorAll('[role="option"]')).toHaveLength(1)
+  })
+
+  test('reads emails and teams, bare or quoted, as mentions', () => {
+    expect(
+      mentionsIn(
+        'cc @Lee@Acme.com, @team:Design. @team:"Design Ops" @team:"Say \\"hi\\"" @team:design and @team:"" a@b.c',
+      ),
+    ).toEqual([
+      'lee@acme.com',
+      'team:Design',
+      'team:Design Ops',
+      'team:Say "hi"',
+    ])
   })
 
   test('keeps focus and the caret in place when the threads change', async () => {

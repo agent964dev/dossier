@@ -3,6 +3,7 @@ import {
   ERRORS,
   type DocWire,
   type ErrorCode,
+  type Mentionable,
   type RoleName,
 } from '@dossier/contracts/bridge'
 import type {
@@ -151,6 +152,26 @@ const readUploadResult = (body: unknown): UploadResultWire | null =>
         size: body.size,
         type: body.type,
       }
+    : null
+
+const readMentionable = (body: unknown): Mentionable | null =>
+  isRecord(body) &&
+  Array.isArray(body.people) &&
+  body.people.every(
+    (p: unknown) =>
+      isRecord(p) &&
+      typeof p.email === 'string' &&
+      (p.name === null || typeof p.name === 'string') &&
+      (p.image === null || typeof p.image === 'string'),
+  ) &&
+  Array.isArray(body.teams) &&
+  body.teams.every(
+    (t: unknown) =>
+      isRecord(t) &&
+      typeof t.name === 'string' &&
+      typeof t.members === 'number',
+  )
+    ? (body as unknown as Mentionable)
     : null
 
 const isEventWire = (value: unknown): value is EventWire =>
@@ -310,6 +331,12 @@ export const shellApi = (
           body: JSON.stringify(payload),
         },
         (body) => known(isDocWire(body) ? body : null),
+      ),
+    mentionable: ({ tree, page, query }) =>
+      call(
+        `${origin}/_/api/data/mentionable?${new URLSearchParams({ tree, page, q: query })}`,
+        { method: 'GET' },
+        (body) => known(readMentionable(body)),
       ),
     events: ({ tree, after }) =>
       call(

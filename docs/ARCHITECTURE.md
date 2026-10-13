@@ -363,7 +363,7 @@ are.
 ## The page client and the shell
 
 Every composed page loads `client.js`, the page client, as `window.dossier`
-(`read`, `watch`, `write`, `withdraw`, `upload`, `me`, `page`). It talks to the
+(`read`, `watch`, `write`, `withdraw`, `upload`, `mentionable`, `me`, `page`). It talks to the
 shell over a `MessageChannel` port. The page sends a hello, and the shell
 answers once it has confirmed the page: the top page by the path its grant
 named, a nested page by a view of its own for the same person. The shell then
@@ -385,6 +385,39 @@ answers with the result or a `DossierError`.
   uses them.
 - Links to other pages of the tree are handed to the shell, so each page loads
   at the tree's current push.
+
+## Comments and mentions
+
+A page's comments are data files in a folder named after it (`plan.html`
+keeps them in `plan.comments/`): one entry per comment, resolve or reopen in
+each writer's own folder, written through `POST /_/api/data/write` and
+checked by `src/core/comments.ts`. A read of the folder assembles the entries
+into one Doc per thread (`assembleThreads` in `@dossier/contracts`, which an
+exported page uses too). Each comment carries its writer's email (`by`) and
+display name (`name`, null for a deleted account), read from the account
+when the threads are read, never stored in the entry.
+
+A comment's `mentions` hold emails and `team:<name>` for a team. On write,
+`Data` turns them into the people they reach: each email, and, when the
+writer is a member of the page's workspace, the current members of the
+workspace's team of that name, whatever its case. Only those who could open
+the page now get a `mention` event and a `mentions` row (`via` names the
+team that reached them), checked in one statement by `Access.readersAmong`
+and again inside the change's batch by one `Access.couldReadCondition`
+guard. The writer never counts, and an unknown team, or a guest's team
+mention, stays as text. "mentioned you" (`src/core/mentions.ts`) holds while
+the comment still names the person, by email or by the team in `via`, and
+until they open the page.
+
+`GET /_/api/data/mentionable?tree&page&q` gives the composer whom to
+suggest, through the page client's `mentionable` and the shell. It answers
+a member of the page's workspace who reads the page with up to 8 people
+(members, and emails the page or a folder above it is shared with, with
+name and photo) and 8 teams (with a team or workspace share on the page or
+a folder above it, and their member count), each person only if
+`readersAmong` says they could open the page. Anyone else, and a page that
+is missing or unreadable, gets the same empty answer, so the route never
+tells a guest who has access. Like other reads, it is not rate-limited.
 
 ## Changes: events, the tree hub, watch
 

@@ -390,6 +390,12 @@ export const createExportHost = (deps: {
           path: `${name}${path.slice(folder.length)}`,
           treePath: path,
           by: doc.by,
+          // One written here is the exporter's own.
+          name:
+            known?.name ??
+            (kept !== undefined && me !== null && doc.by === me.email
+              ? me.name || null
+              : null),
           at: Number.isNaN(at) ? 0 : at,
           push: doc.push,
           revision: kept?.revision ?? known?.revision ?? 1,
@@ -696,6 +702,9 @@ export const createExportHost = (deps: {
       case 'unwatch':
         watches.delete(request.sub)
         return null
+      case 'mentionable':
+        // Nobody is suggested away from Dossier but those in the threads.
+        return { people: [], teams: [] }
       default:
         // Uploads, and anything else that needs Dossier.
         throw refusal('not_in_export', NOT_IN_EXPORT)

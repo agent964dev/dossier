@@ -35,6 +35,18 @@ Unsent text is kept on the device for each person and each item, and for
 visitors apart. People who may only read see every thread and no way to
 write.
 
+Each comment shows its writer's name, with their email on hover. Typing @
+suggests people to mention by name and email: everyone in the threads, and
+for a member of the page's workspace also the workspace's members, the
+people the page or a folder above it is shared with, and the workspace's
+teams, as far as they can open the page (`dossier.mentionable`). Guests and
+visitors are suggested only the people in the threads. The arrow keys move
+through the list, Enter chooses and Escape closes it. A person goes in as
+`@sara@acme.com`, a team as `@team:Design`, or `@team:"Design Ops"` when
+its name holds a space or other punctuation. A team mention reaches the
+team's members who can open the page, when its writer is a member of the
+workspace. Mentions show "mentioned you" in Dossier and send no email.
+
 The element fires a bubbling `dossier:state` event with
 `{ state: 'saving' | 'saved' | 'failed', error, doc }`, and a bubbling
 `dossier:comments` event with `{ threads }` whenever the threads it shows
@@ -50,8 +62,10 @@ The component never sends anything to an agent and adds no handoff of its
 own; the page decides what its handoff says. Page code reads the threads
 with `dossier.read('plan.comments/')` or `dossier.watch`: one Doc per
 thread, its `data` a `{ root, replies, resolved }` where each comment has
-`by`, `at`, `text`, `anchor`, `stance` and `deleted`. This keeps a handoff of
-the open threads up to date, with the page's link:
+`by` (the writer's email), `name` (their display name, or null), `at`,
+`text`, `anchor`, `stance`, `mentions` (emails, and `team:Design` for a
+team) and `deleted`. This keeps a handoff of the open threads up to date,
+with the page's link:
 
     dossier.watch('plan.comments/', (threads) => {
       const open = threads.filter((t) => !t.data.resolved)
@@ -62,7 +76,7 @@ the open threads up to date, with the page's link:
         ...open.map(({ data: { root, replies } }) =>
           [root, ...replies]
             .filter((c) => !c.deleted)
-            .map((c) => `- ${root.anchor ?? 'page'}: ${c.by}: ${c.text}`)
+            .map((c) => `- ${root.anchor ?? 'page'}: ${c.name ?? c.by}: ${c.text}`)
             .join('\n'),
         ),
       ].join('\n')

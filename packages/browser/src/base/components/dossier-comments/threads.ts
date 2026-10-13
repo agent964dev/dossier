@@ -1,12 +1,20 @@
 // What the comments component works out without changing the page: where
 // each thread belongs, how a pin maps to a point on its element, whom a
-// comment mentions, what an anchor is called, and how times read.
+// comment mentions and whom to suggest, what an anchor is called, and how
+// times read.
 import {
   COMMENT_LABEL_MAX,
   COMMENT_STANCE_MAX,
   COMMENTS_SUFFIX,
+  isTeamNameText,
+  MENTIONABLE_MAX,
+  TEAM_MENTION_PREFIX,
+  teamMentionText,
+  teamOfMention,
   type CommentDoc,
   type Doc,
+  type Mentionable,
+  type MentionablePerson,
   type Thread,
 } from '@dossier/contracts/bridge'
 
@@ -29,8 +37,8 @@ export const DEFAULT_ANCHORS =
   'section[id], article[id], figure[id], h1[id], h2[id], h3[id], h4[id], li[id], tr[id], img[id], svg[id]'
 export const DEFAULT_PINS = 'img[id], svg[id], picture[id], [data-pins][id]'
 
-/** At most this many people are suggested at once while typing @. */
-export const SUGGESTIONS_MAX = 8
+/** At most this many people and teams are suggested at once while typing @. */
+export const SUGGESTIONS_MAX = MENTIONABLE_MAX
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -57,6 +65,8 @@ export const isCommentDoc = (value: unknown): value is CommentDoc =>
   isPin(value.pin) &&
   isTextOrNull(value.replyTo) &&
   isTextOrNull(value.stance) &&
+  // Written before comments carried names: absent.
+  (value.name === undefined || isTextOrNull(value.name)) &&
   Array.isArray(value.mentions) &&
   typeof value.edited === 'boolean' &&
   typeof value.deleted === 'boolean'
@@ -248,14 +258,31 @@ export const movePin = (pin: Pin, dx: number, dy: number): Pin => ({
 export const pinText = (pin: Pin): string =>
   `${Math.round(within(pin.x) * 100)}% across, ${Math.round(within(pin.y) * 100)}% down`
 
-const MENTION = /(^|[^\w.+-])@([\w.+-]+@[\w-]+(?:\.[\w-]+)+)/g
+/**
+ * An @ and what it mentions: a team, quoted (`@team:"Design Ops"`) or bare
+ * (`@team:Design`), or an email.
+ */
+const MENTION =
+  /(^|[^\w.+-])@(?:team:(?:"((?:[^"\\\n]|\\.)*)"|([\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*))|([\w.+-]+@[\w-]+(?:\.[\w-]+)+))/gu
 
-/** The emails a text mentions with @, lower-cased, each once, in order. */
+/**
+ * Whom a text mentions with @, each once, in order: emails lower-cased, and
+ * teams as `team:<name>`, named as written.
+ */
 export const mentionsIn = (text: string): string[] => {
   const out: string[] = []
+  const seen = new Set<string>()
   for (const match of text.matchAll(MENTION)) {
-    const email = match[2]!.toLowerCase()
-    if (!out.includes(email)) out.push(email)
+    const team =
+      match[2] !== undefined
+        ? match[2].replace(/\\(.)/g, '$1')
+        : (match[3] ?? null)
+    if (team !== null && !isTeamNameText(team)) continue
+    const mention =
+      team !== null ? `${TEAM_MENTION_PREFIX}${team}` : match[4]!.toLowerCase()
+    if (seen.has(mention.toLowerCase())) continue
+    seen.add(mention.toLowerCase())
+    out.push(mention)
   }
   return out
 }
@@ -265,43 +292,139 @@ export const mentionAt = (
   text: string,
   caret: number,
 ): { readonly start: number; readonly query: string } | null => {
-  const match = /(?:^|[^\w.+-])@([^\s@]*(?:@[^\s@]*)?)$/.exec(
-    text.slice(0, caret),
-  )
+  const match =
+    /(?:^|[^\w.+-])@(team:"(?:[^"\\\n]|\\.)*|[^\s@]*(?:@[^\s@]*)?)$/.exec(
+      text.slice(0, caret),
+    )
   if (match === null) return null
   const query = match[1]!
   return { start: caret - query.length - 1, query }
 }
 
-/** Known emails that match what follows the @, those that start with it first. */
-export const suggestEmails = (
-  known: readonly string[],
+/** Someone or a team to mention, as the list of suggestions shows them. */
+export type Suggestion =
+  | ({ readonly kind: 'person' } & MentionablePerson)
+  | {
+      readonly kind: 'team'
+      readonly name: string
+      readonly members: number
+    }
+
+/** What choosing a suggestion writes: `@sara@acme.com`, `@team:Design`. */
+export const suggestionText = (suggestion: Suggestion): string =>
+  suggestion.kind === 'person'
+    ? `@${suggestion.email}`
+    : teamMentionText(suggestion.name)
+
+/**
+ * What to look for after an @: its text lower-cased, without `team:` and an
+ * opening quote, and whether it asks for teams alone.
+ */
+export const searchOf = (
   query: string,
-): string[] => {
-  const q = query.toLowerCase()
-  const starts = known.filter((email) => email.startsWith(q))
-  const rest = known.filter(
-    (email) => !email.startsWith(q) && email.includes(q),
-  )
-  return [...starts, ...rest].slice(0, SUGGESTIONS_MAX)
+): { readonly text: string; readonly teamsOnly: boolean } => {
+  const lower = query.toLowerCase()
+  if (!lower.startsWith(TEAM_MENTION_PREFIX)) {
+    return { text: lower, teamsOnly: false }
+  }
+  const rest = lower.slice(TEAM_MENTION_PREFIX.length)
+  return {
+    text: (rest.startsWith('"') ? rest.slice(1) : rest).replace(/\\(.)/g, '$1'),
+    teamsOnly: true,
+  }
 }
 
-/** Everyone in the threads, by who wrote and whom they mentioned, except `me`. */
-export const knownEmails = (
+/** 0 when a word of a field starts with the text, 1 when one only holds it. */
+const rankOf = (text: string, ...fields: (string | null)[]): number | null => {
+  let found: number | null = null
+  for (const field of fields) {
+    if (field === null) continue
+    const value = field.toLowerCase()
+    if (value.startsWith(text) || value.includes(` ${text}`)) return 0
+    if (value.includes(text)) found = 1
+  }
+  return found
+}
+
+/**
+ * The people in the threads and those Dossier gave for the query (`found`,
+ * null until it answers), each once with the fullest details, and the
+ * teams Dossier gave, matching what follows the @: those with a word that
+ * starts with it first, at most SUGGESTIONS_MAX.
+ */
+export const suggestionsFor = (
+  known: readonly MentionablePerson[],
+  found: Mentionable | null,
+  query: string,
+): Suggestion[] => {
+  const { text, teamsOnly } = searchOf(query)
+  const people = new Map<string, MentionablePerson>()
+  for (const person of [...(found?.people ?? []), ...known]) {
+    const email = person.email.toLowerCase()
+    const had = people.get(email)
+    people.set(email, {
+      email,
+      name: had?.name ?? person.name,
+      image: had?.image ?? person.image,
+    })
+  }
+  const ranked: { rank: number; order: number; suggestion: Suggestion }[] = []
+  if (!teamsOnly) {
+    for (const person of people.values()) {
+      const rank = rankOf(text, person.email, person.name)
+      if (rank === null) continue
+      ranked.push({
+        rank,
+        order: ranked.length,
+        suggestion: { kind: 'person', ...person },
+      })
+    }
+  }
+  for (const team of found?.teams ?? []) {
+    const rank = rankOf(text, team.name)
+    if (rank === null) continue
+    ranked.push({
+      rank,
+      order: ranked.length,
+      suggestion: { kind: 'team', name: team.name, members: team.members },
+    })
+  }
+  return ranked
+    .sort((a, b) => a.rank - b.rank || a.order - b.order)
+    .slice(0, SUGGESTIONS_MAX)
+    .map((r) => r.suggestion)
+}
+
+/**
+ * Everyone in the threads, by who wrote (with their names) and whom they
+ * mentioned, except `me`, by name or email.
+ */
+export const knownPeople = (
   threads: readonly Doc<Thread>[],
   me: string | null,
-): string[] => {
-  const out = new Set<string>()
+): MentionablePerson[] => {
+  const out = new Map<string, MentionablePerson>()
+  const add = (email: string, name: string | null) => {
+    const key = email.toLowerCase()
+    const had = out.get(key)
+    out.set(key, { email: key, name: had?.name ?? name, image: null })
+  }
   for (const { data } of threads) {
     for (const comment of [data.root, ...data.replies]) {
-      out.add(comment.by.toLowerCase())
-      for (const email of comment.mentions) {
-        if (typeof email === 'string') out.add(email.toLowerCase())
+      add(comment.by, typeof comment.name === 'string' ? comment.name : null)
+      for (const mention of comment.mentions) {
+        if (typeof mention === 'string' && teamOfMention(mention) === null) {
+          add(mention, null)
+        }
       }
     }
   }
   if (me !== null) out.delete(me.toLowerCase())
-  return [...out].sort()
+  return [...out.values()].sort((a, b) => {
+    const x = (a.name ?? a.email).toLowerCase()
+    const y = (b.name ?? b.email).toLowerCase()
+    return x < y ? -1 : x > y ? 1 : 0
+  })
 }
 
 const MONTHS = [

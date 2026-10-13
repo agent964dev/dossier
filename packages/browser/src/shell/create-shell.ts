@@ -15,6 +15,7 @@ import {
   type FormRef,
   type JsonObject,
   type Me,
+  type Mentionable,
   type PageToShell,
   type PendingSend,
   type RoleName,
@@ -162,6 +163,13 @@ export interface ShellApi {
     readonly as: string | null
   }) => Promise<void>
   readonly write: (payload: WritePayloadWire) => Promise<DocWire>
+  /** Whom the person may mention on a page, for what follows their @. */
+  readonly mentionable: (i: {
+    readonly tree: string
+    /** The page's tree path. */
+    readonly page: string
+    readonly query: string
+  }) => Promise<Mentionable>
   /** The events after `after` that the caller may read. */
   readonly events: (i: {
     readonly tree: string
@@ -899,6 +907,18 @@ export const createShell = (
       case 'unwatch':
         watches.remove(port, request.sub)
         answer(port, request.id, { value: null })
+        return
+      case 'mentionable':
+        // Someone not signed in asks nothing: they are suggested nobody.
+        if (email === null) {
+          answer(port, request.id, { value: { people: [], teams: [] } })
+          return
+        }
+        reply(
+          port,
+          request.id,
+          pageCall(() => api.mentionable({ tree, page, query: request.query })),
+        )
         return
       case 'send':
         void onSend(port, page, request.id, request.send)

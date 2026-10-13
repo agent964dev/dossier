@@ -28,9 +28,13 @@ with replies, resolve and reopen, comments on any `section`, `figure`,
 heading, list item, table row or image with an `id` (`anchors="…"` sets
 which), pins on images and mockups (`pins="…"`), stances on new comments and
 replies (`stances="agree, reopen"`), and @mentions, which show "mentioned you"
-in Dossier and send no email. A comment follows its element into later pushes
-while the `id` stays, and shows under "On an earlier version" once it is gone,
-so keep ids stable. Comments live beside the page in `<page>.comments/`, one
+in Dossier and send no email. Typing @ suggests the people in the threads and,
+to members of the page's workspace, the members, email shares and teams that
+can open the page; `@sara@acme.com` mentions a person, and `@team:Design` (or
+`@team:"Design Ops"` for a name with spaces) the team's members who can open
+the page. Each comment shows its writer's name, their email on hover. A
+comment follows its element into later pushes while the `id` stays, and shows
+under "On an earlier version" once it is gone, so keep ids stable. Comments live beside the page in `<page>.comments/`, one
 file per comment in each writer's folder; `dossier read plan.comments/` prints
 the threads, and `--json` gives one Doc per thread.
 
@@ -42,7 +46,9 @@ threads until opened. A whole-page element on the same page still lists every
 thread and draws the pins; each comment is stored once. Every element fires
 `dossier:comments` with `{ threads }` when its threads change, and page code
 reads them with `dossier.read('plan.comments/')` (see Page client) to build its
-own handoff. The component never sends anything to an agent.
+own handoff. Each comment there carries `by` (the email), `name` (the
+display name, or null) and `mentions`, where a team reads `team:Design`. The
+component never sends anything to an agent.
 
 Base components render into the page itself, with styles any page or kit CSS
 overrides, read the theme variables when the tree sets them (`--primary`,

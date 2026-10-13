@@ -6,6 +6,7 @@ import {
 } from '@effect/platform'
 import { Schema } from 'effect'
 
+import { MENTIONABLE_QUERY_MAX } from './comments.ts'
 import { DossierError } from './errors.ts'
 import { EventTypeSchema } from './events.ts'
 import {
@@ -595,6 +596,21 @@ export const DataReadResult = Schema.Union(
 )
 export type DataReadResult = typeof DataReadResult.Type
 
+/** Whom the viewer may mention on a page; see Mentionable. */
+export const MentionableResult = Schema.Struct({
+  people: Schema.Array(
+    Schema.Struct({
+      email: Schema.String,
+      name: Schema.NullOr(Schema.String),
+      image: Schema.NullOr(Schema.String),
+    }),
+  ),
+  teams: Schema.Array(
+    Schema.Struct({ name: Schema.String, members: Schema.Int }),
+  ),
+})
+export type MentionableResult = typeof MentionableResult.Type
+
 export const WithdrawPayload = Schema.Struct({
   tree: TreeId,
   /** The data file's tree path. */
@@ -703,6 +719,24 @@ export class DataGroup extends HttpApiGroup.make('data')
     HttpApiEndpoint.get('read', '/data/read')
       .setUrlParams(Schema.Struct({ tree: TreeId, path: Schema.String }))
       .addSuccess(DataReadResult),
+  )
+  // Never an error for who asks: a visitor, a guest, and a page that is
+  // missing or unreadable all get nobody.
+  .add(
+    HttpApiEndpoint.get('mentionable', '/data/mentionable')
+      .setUrlParams(
+        Schema.Struct({
+          tree: TreeId,
+          /** The page's tree path: 'plan.html'. */
+          page: Schema.String,
+          /** What follows the @, so far. */
+          q: Schema.optionalWith(
+            Schema.String.pipe(Schema.maxLength(MENTIONABLE_QUERY_MAX)),
+            { default: () => '' },
+          ),
+        }),
+      )
+      .addSuccess(MentionableResult),
   )
   // forbidden | invalid | not_mergeable | closed | too_large | rate_limited |
   // sign_in_required

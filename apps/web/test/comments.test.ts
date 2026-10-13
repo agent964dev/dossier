@@ -43,6 +43,7 @@ import {
   pushAll,
   ref,
   share,
+  team,
   visitorCaller,
   workspace,
 } from './support/trees.ts'
@@ -756,6 +757,158 @@ describe('mentions', () => {
   })
 })
 
+describe('team mentions', () => {
+  it('reach the team’s members who can open the page, for a writer in the workspace, and nobody for a guest or an unknown team', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    // Dana reads the page by email; Gus is in the team and reads nothing.
+    const dana = await person('dana')
+    const gus = await person('gus')
+    await join(ws, dana)
+    await join(ws, gus)
+    await team(ws, 'Design Ops', [dana, gus, owner])
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'plan.html'))!.id,
+      'email',
+      dana.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const sara = await given(tree, 'respond')
+    const danaEmail = dana.email.toLowerCase()
+    const mentioned = () =>
+      rows<{ email: string; via: string | null }>(
+        'select email, via from mentions where tree_id = ? order by event_seq',
+        tree.treeId,
+      )
+
+    // A guest's team mention stays text and reaches nobody.
+    const guest = await write(T0, sara.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('@team:"Design Ops" look', {
+        mentions: ['team:Design Ops', 'team:Nobody'],
+      }),
+    })
+    expect((guest.data as { mentions: string[] }).mentions).toEqual([
+      'team:Design Ops',
+      'team:Nobody',
+    ])
+    expect(await mentioned()).toEqual([])
+
+    // The owner's reaches Dana only, once, whatever the case it is written in.
+    const written = await write(minutes(1), ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('@team:"design ops" look', {
+        mentions: ['team:design ops'],
+      }),
+    })
+    expect(await mentioned()).toEqual([
+      { email: danaEmail, via: 'team:design ops' },
+    ])
+    const events = await rows<{ type: string; path: string }>(
+      `select type, path from events where tree_id = ? and type = 'mention'`,
+      tree.treeId,
+    )
+    expect(events).toEqual([{ type: 'mention', path: written.path }])
+    // "mentioned you" while the comment still names the team.
+    expect(
+      mentionedInTree(
+        await runAs(ownerBrowser, unseenMentions(env.DB, dana)),
+        tree.treeId,
+      ),
+    ).toBe(true)
+    await write(minutes(2), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: [] },
+    })
+    expect(
+      mentionedInTree(
+        await runAs(ownerBrowser, unseenMentions(env.DB, dana)),
+        tree.treeId,
+      ),
+    ).toBe(false)
+    expect(
+      await writeFailure(ownerBrowser, tree, {
+        path: 'plan.comments/',
+        patch: comment('x', { mentions: ['team: padded'] }),
+      }),
+    ).toMatchObject({ code: 'invalid', path: 'mentions' })
+  })
+})
+
+describe('whom a comment may mention', () => {
+  const mentionable = (
+    caller: Caller,
+    tree: FormTree,
+    page: string,
+    query = '',
+  ) =>
+    runAs(
+      caller,
+      Effect.flatMap(Data, (data) =>
+        data.mentionable({ treeId: tree.treeId as TreeId, page, query }),
+      ),
+    )
+
+  it('gives a member the people and teams who can open the page, and nobody to a guest, a visitor, or for a page they cannot open', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const dana = await person('dana')
+    const gus = await person('gus')
+    await join(ws, dana)
+    await join(ws, gus)
+    await exec(
+      'update "user" set name = ?, image = ? where id = ?',
+      'Dana Haddad',
+      'https://lh3.googleusercontent.test/dana',
+      dana.id,
+    )
+    // Design opens the whole tree; Ops has no share; Gus is in Ops alone.
+    const design = await team(ws, 'Design', [dana])
+    await team(ws, 'Ops', [gus])
+    const rootId = (await nodeAt(tree.treeId, ''))!.id
+    await share(tree.treeId, rootId, 'team', design.id, 'read', owner)
+    // A guest shared the tree by email, and one shared only a folder beside the page.
+    const guest = await given(tree, 'read', '', 'guest')
+    await given(tree, 'read', 'questions', 'aside')
+    const danaBrowser = await sessionFor(dana)
+
+    const all = await mentionable(danaBrowser, tree, 'plan.html')
+    expect(all.people.map((p) => p.email).sort()).toEqual(
+      [owner.email.toLowerCase(), guest.email].sort(),
+    )
+    expect(all.teams).toEqual([{ name: 'Design', members: 1 }])
+    // What follows the @ narrows it, by name or email.
+    const ownerSees = await mentionable(ownerBrowser, tree, '/plan.html', 'dan')
+    expect(ownerSees).toEqual({
+      people: [
+        {
+          email: dana.email.toLowerCase(),
+          name: 'Dana Haddad',
+          image: 'https://lh3.googleusercontent.test/dana',
+        },
+      ],
+      teams: [],
+    })
+    expect(
+      (await mentionable(danaBrowser, tree, 'plan.html', 'des')).teams,
+    ).toEqual([{ name: 'Design', members: 1 }])
+    // Gus is a member who cannot open the page: nobody, as for a guest,
+    // a visitor, a missing page and something that is not a page.
+    const nobody = { people: [], teams: [] }
+    expect(await mentionable(await sessionFor(gus), tree, 'plan.html')).toEqual(
+      nobody,
+    )
+    expect(await mentionable(guest.caller, tree, 'plan.html')).toEqual(nobody)
+    expect(await mentionable(visitorCaller(), tree, 'plan.html')).toEqual(
+      nobody,
+    )
+    expect(await mentionable(danaBrowser, tree, 'missing.html')).toEqual(nobody)
+    expect(await mentionable(danaBrowser, tree, 'plan.comments/')).toEqual(
+      nobody,
+    )
+  })
+})
+
 describe('what an agent reads', () => {
   it('reads a comments folder as its threads, and counts a page’s comments', async () => {
     const tree = await pushForms(owner, ws, FILES)
@@ -824,6 +977,8 @@ describe('what page code reads for a handoff', () => {
       root: {
         path: root.path,
         by: sara.email,
+        // The writer's display name beside their email.
+        name: 'handoff',
         at: new Date(T0).toISOString(),
         text: 'Hand the pricing to the agent',
         anchor: 'pricing',

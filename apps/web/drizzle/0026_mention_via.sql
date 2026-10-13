@@ -1,0 +1,1 @@
+ALTER TABLE `mentions` ADD `via` text;

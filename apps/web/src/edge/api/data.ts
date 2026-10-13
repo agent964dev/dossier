@@ -12,7 +12,10 @@ const bodyOf = (source: unknown) =>
         dossierError('invalid', 'The file has no body.', 'Send its bytes.'),
       )
 
-/** Form sends, uploads, withdrawals and data reads, as the viewer. */
+/**
+ * Form sends, uploads, withdrawals, data reads and whom a comment may
+ * mention, as the viewer.
+ */
 export const DataApiLive = HttpApiBuilder.group(
   DossierApi,
   'data',
@@ -81,6 +84,15 @@ export const DataApiLive = HttpApiBuilder.group(
       .handle('read', ({ urlParams }) =>
         Effect.flatMap(Data, (data) =>
           data.read({ treeId: urlParams.tree, path: urlParams.path }),
+        ),
+      )
+      .handle('mentionable', ({ urlParams }) =>
+        Effect.flatMap(Data, (data) =>
+          data.mentionable({
+            treeId: urlParams.tree,
+            page: urlParams.page,
+            query: urlParams.q,
+          }),
         ),
       )
       .handle('write', ({ payload }) =>

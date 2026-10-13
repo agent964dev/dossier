@@ -143,6 +143,10 @@ export const openShell = (
         push: 2,
       }) as DocWire,
   )
+  const mentionable = vi.fn<ShellApi['mentionable']>(async () => ({
+    people: [],
+    teams: [],
+  }))
   const events = vi.fn<ShellApi['events']>(async ({ after }) => ({
     events: [],
     next: after,
@@ -158,7 +162,17 @@ export const openShell = (
     window: win as unknown as Window,
     frame: placeholder,
     boot,
-    api: { view, confirm, read, send, upload, withdraw, write, events },
+    api: {
+      view,
+      confirm,
+      read,
+      send,
+      upload,
+      withdraw,
+      write,
+      mentionable,
+      events,
+    },
     store,
     changes: changes.source,
   })
@@ -218,6 +232,7 @@ export const openShell = (
     upload,
     withdraw,
     write,
+    mentionable,
     events,
     changes,
     reload,

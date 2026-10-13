@@ -900,6 +900,82 @@ describe('teams', () => {
     )
   })
 
+  it('tells who of many emails could read a node in one statement, as couldRead does one by one', async () => {
+    const w = await world()
+    const design = await team(w.ws, 'Design', [w.member])
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'team',
+      design.id,
+      'read',
+      w.creator,
+    )
+    await share(
+      w.treeId,
+      await w.node('plans'),
+      'email',
+      'nobody-yet@example.com',
+      'read',
+      w.creator,
+    )
+    const emails = [
+      w.admin.email,
+      w.otherAdmin.email.toUpperCase(),
+      w.creator.email,
+      w.member.email,
+      w.outsider.email,
+      'nobody-yet@example.com',
+      'stranger@example.com',
+    ]
+    const caller = await agent(w.admin)
+    const found = await runAs(
+      caller,
+      Effect.gen(function* () {
+        const access = yield* Access
+        const resolved = yield* (yield* TreeStore).locate(
+          ref(at(w, 'plans/q3.html')),
+        )
+        if ('missing' in resolved) throw new Error('no page')
+        const node = resolved.node
+        const one: string[] = []
+        for (const email of emails) {
+          if (yield* access.couldRead(email, node))
+            one.push(email.toLowerCase())
+        }
+        const many = yield* access.readersAmong(emails, node)
+        const readers = yield* access.couldReadCondition(one, node)
+        const withOutsider = yield* access.couldReadCondition(
+          [...one, w.outsider.email],
+          node,
+        )
+        return { one, many: [...many].sort(), readers, withOutsider }
+      }),
+    )
+    expect(found.one.sort()).toEqual(
+      [
+        w.admin.email,
+        w.otherAdmin.email,
+        w.creator.email,
+        w.member.email,
+        'nobody-yet@example.com',
+      ]
+        .map((e) => e.toLowerCase())
+        .sort(),
+    )
+    expect(found.many).toEqual(found.one)
+    // The batch's check holds while every one of them reads it, and fails
+    // with anyone who does not.
+    const holds = async (c: { sql: string; binds: unknown[] }) =>
+      (
+        await env.DB.prepare(`select coalesce((${c.sql}), 0) as ok`)
+          .bind(...c.binds)
+          .first<{ ok: number }>()
+      )?.ok
+    expect(await holds(found.readers)).toBe(1)
+    expect(await holds(found.withOutsider)).toBe(0)
+  })
+
   it('fails a commit whose team place went between the check and the batch', async () => {
     const w = await world()
     const design = await team(w.ws, 'Design', [w.member])
