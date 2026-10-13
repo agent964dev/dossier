@@ -80,6 +80,20 @@ describe('failures', () => {
     )
   })
 
+  it('names the cause fetch keeps behind "fetch failed"', async () => {
+    const fetch = stubFetch(() => {
+      throw new TypeError('fetch failed', {
+        cause: new Error('other side closed'),
+      })
+    })
+    current = await harness({ fetch: fetch.fetch, env: ENV })
+
+    expect(await current.run(['whoami'])).toBe(1)
+    expect(current.stderr()).toContain(
+      'dossier: Could not reach dossier.acme.com: fetch failed: other side closed.',
+    )
+  })
+
   it('exits 1 when the answer is not what the contract says', async () => {
     const fetch = stubFetch(() => Response.json({ hello: 'world' }))
     current = await harness({ fetch: fetch.fetch, env: ENV })
