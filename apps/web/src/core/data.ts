@@ -2316,35 +2316,48 @@ export const DataLive: Layer.Layer<
           // Set when the write rests on the page alone: then only its forms
           // decide whether, and in what shape, it may write here.
           let pageForms: readonly FormRow[] | null = null
-          if (existing !== null) {
-            granted = yield* access.require('respond', existing)
-          } else {
-            const above = yield* store.nearest(tree.id, folderOf(path))
-            if (above === null || above.kind !== 'folder') {
-              return yield* Effect.fail(forbidden(path))
+          const above =
+            existing ?? (yield* store.nearest(tree.id, folderOf(path)))
+          if (
+            above === null ||
+            (existing === null && above.kind !== 'folder')
+          ) {
+            return yield* Effect.fail(forbidden(path))
+          }
+          const onNode = yield* access
+            .require('respond', above)
+            .pipe(Effect.either)
+          if (existing !== null && onNode._tag === 'Left') {
+            return yield* Effect.fail(onNode.left)
+          }
+          if (onNode._tag === 'Right') {
+            if (existing !== null) granted = onNode.right
+            else under = onNode.right
+          }
+          // Respond that only a page share carries is held through the page:
+          // its forms alone, open or closed, decide here.
+          if (
+            onNode._tag === 'Left' ||
+            !(yield* access.heldOn(above)).caps.has('respond')
+          ) {
+            const refused = () =>
+              onNode._tag === 'Left' ? onNode.left : forbidden(path)
+            // A respondent through the page alone answers where a form of
+            // the page, or of a layout composed into it, writes.
+            const page = yield* store.fileAt(tree.id, i.page)
+            const held =
+              page === null ? [] : yield* formsHolding(tree, page, path)
+            if (page === null || held.length === 0) {
+              return yield* Effect.fail(refused())
             }
-            const onFolder = yield* access
-              .require('respond', above)
-              .pipe(Effect.either)
-            if (onFolder._tag === 'Right') {
-              under = onFolder.right
-            } else {
-              // A respondent through the page alone answers where a form of
-              // the page, or of a layout composed into it, writes.
-              const page = yield* store.fileAt(tree.id, i.page)
-              const held =
-                page === null ? [] : yield* formsHolding(tree, page, path)
-              if (page === null || held.length === 0) {
-                return yield* Effect.fail(onFolder.left)
-              }
-              under = yield* access.require('respond', page.node)
-              // The page carries the write only where its push and its
-              // share's creator both answer there.
-              if (!(yield* formReaches(tree, page.node, under, path))) {
-                return yield* Effect.fail(onFolder.left)
-              }
-              pageForms = held
+            const onPage = yield* access.require('respond', page.node)
+            // The page carries the write only where its push and its
+            // share's creator both answer there.
+            if (!(yield* formReaches(tree, page.node, onPage, path))) {
+              return yield* Effect.fail(refused())
             }
+            if (onNode._tag === 'Left') under = onPage
+            pageForms = held
           }
           // Every form whose answers hold this path: under a folder target at
           // any depth, a shared file, or a shared file's uploads.

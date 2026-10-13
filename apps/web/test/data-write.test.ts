@@ -962,4 +962,56 @@ describe('a page share’s respondent and the forms of other pages', () => {
     expect(['closed', 'forbidden', 'not_found']).toContain(refused.code)
     expect(await liveValue(tree.treeId, 'poll.json')).toBeFalsy()
   })
+
+  it('keeps to the shared page’s own forms once the target exists', async () => {
+    const tree = await pushForms(owner, ws, {
+      'vote.html': pageWith(
+        '<form action="poll.json"><input name="vote"></form>',
+        'Vote',
+      ),
+      'closed-vote.html': pageWith(
+        '<form action="poll.json" data-closed><input name="vote"></form>',
+        'Closed vote',
+      ),
+      'open-vote.html': pageWith(
+        '<form action="poll.json"><input name="anything"></form>',
+        'Open vote',
+      ),
+    })
+    await writeAs(browser, tree, {
+      page: 'open-vote.html',
+      path: 'poll.json',
+      patch: { anything: 'first' },
+    })
+    const onPage = async (page: string) => {
+      const who = await person(`existing-${page}`)
+      await share(
+        tree.treeId,
+        (await nodeAt(tree.treeId, page))!.id,
+        'email',
+        who.email.toLowerCase(),
+        'respond',
+        owner,
+      )
+      return sessionFor(who)
+    }
+    // A field only another page's form declares stays out.
+    expect(
+      await writeFailure(await onPage('vote.html'), tree, {
+        page: 'vote.html',
+        path: 'poll.json',
+        patch: { anything: 'sneaked in' },
+      }),
+    ).toMatchObject({ code: 'invalid' })
+    // A closed form stays closed, whatever another page's form takes.
+    const closed = await writeFailure(await onPage('closed-vote.html'), tree, {
+      page: 'closed-vote.html',
+      path: 'poll.json',
+      patch: { anything: 'sneaked in' },
+    })
+    expect(['closed', 'forbidden', 'not_found']).toContain(closed.code)
+    expect((await liveValue(tree.treeId, 'poll.json'))?.value).toEqual({
+      anything: 'first',
+    })
+  })
 })
