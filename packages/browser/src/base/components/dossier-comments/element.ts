@@ -892,6 +892,8 @@ export class DossierComments extends HTMLElement {
       const signature = JSON.stringify([
         thread,
         placed.anchorFound,
+        // An item's element leaves out the place the whole page's shows.
+        this.#scope() !== null,
         numbers.get(thread.root.path) ?? null,
         me,
         this.#ready,

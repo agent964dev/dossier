@@ -1498,6 +1498,16 @@ describe('with for: the comments on one item', () => {
     })
   })
 
+  test('names a thread’s item once for is removed', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1', label: 'Step one' })
+    peer.threads = [thread(a)]
+    const { one } = await mountItems()
+    expect(one.querySelector('.dossier-comments-place')).toBeNull()
+    one.removeAttribute('for')
+    await settle()
+    expect(byKey(one, `anchor:${a.path}`)?.textContent).toBe('On Step one')
+  })
+
   test('settles a send against the item it was written for, after for changes', async () => {
     const { one } = await mountItems()
     byKey(one, 'open')!.click()
