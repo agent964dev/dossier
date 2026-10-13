@@ -35,6 +35,7 @@ const COMPONENTS: readonly BaseComponentTag[] = [
   'dossier-diff',
   'dossier-copy',
   'dossier-comments',
+  'dossier-notifications',
 ]
 
 const fail = (logs: readonly unknown[]): never => {

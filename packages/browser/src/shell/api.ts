@@ -4,6 +4,7 @@ import {
   type DocWire,
   type ErrorCode,
   type Mentionable,
+  notificationsListOf,
   type RoleName,
 } from '@dossier/contracts/bridge'
 import type {
@@ -343,6 +344,30 @@ export const shellApi = (
         `${origin}/_/api/events?${new URLSearchParams({ tree, after })}`,
         { method: 'GET' },
         (body) => known(readEvents(body)),
+      ),
+    notifications: ({ tree, before, limit }) => {
+      const query = new URLSearchParams({ tree, limit: String(limit) })
+      if (before !== null) query.set('before', before)
+      return call(
+        `${origin}/_/api/notifications?${query}`,
+        { method: 'GET' },
+        (body) => known(notificationsListOf(body)),
+      )
+    },
+    readNotifications: ({ tree, ids }) =>
+      call(
+        `${origin}/_/api/notifications/read`,
+        {
+          method: 'POST',
+          headers: writeHeaders('application/json'),
+          body: JSON.stringify(
+            ids === 'all' ? { all: true, tree } : { ids, tree },
+          ),
+        },
+        (body) =>
+          isRecord(body) && Number.isInteger(body.unread)
+            ? { value: body.unread as number }
+            : null,
       ),
   }
 }

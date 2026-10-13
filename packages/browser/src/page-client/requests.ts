@@ -34,6 +34,15 @@ export type RequestOp =
   | { readonly op: 'watch'; readonly sub: number; readonly path: string }
   | { readonly op: 'unwatch'; readonly sub: number }
   | { readonly op: 'mentionable'; readonly query: string }
+  | {
+      readonly op: 'notifications'
+      readonly before: string | null
+      readonly limit: number
+    }
+  | {
+      readonly op: 'notifications-read'
+      readonly ids: readonly string[] | 'all'
+    }
 
 /** The shell's answer to a pending send it replayed, by formKey. */
 export type Resumed = Extract<ShellToPage, { type: 'resumed' }>

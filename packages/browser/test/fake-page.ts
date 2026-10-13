@@ -152,6 +152,12 @@ export const openShell = (
     next: after,
     more: false,
   }))
+  const notifications = vi.fn<ShellApi['notifications']>(async () => ({
+    notifications: [],
+    unread: 0,
+    next: null,
+  }))
+  const readNotifications = vi.fn<ShellApi['readNotifications']>(async () => 0)
   const changes = options.changes ?? fakeChanges()
   const reload = vi.spyOn(win.location, 'reload').mockImplementation(() => {})
   const assign = vi.spyOn(win.location, 'assign').mockImplementation(() => {})
@@ -172,6 +178,8 @@ export const openShell = (
       write,
       mentionable,
       events,
+      notifications,
+      readNotifications,
     },
     store,
     changes: changes.source,
@@ -234,6 +242,8 @@ export const openShell = (
     write,
     mentionable,
     events,
+    notifications,
+    readNotifications,
     changes,
     reload,
     assign,

@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
   claimText,
+  HIGHLIGHT_MS,
   keptKey,
   LOOKUP_DELAY_MS,
   MARK,
@@ -2068,5 +2069,166 @@ describe('with for: the comments on one item', () => {
     // Nothing kept for it: still folded, its composer not built.
     expect(mainComposer(back.one)).toBeNull()
     expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+  })
+})
+
+describe('mentions in a comment', () => {
+  const chips = (element: HTMLElement) =>
+    [...element.querySelectorAll('.dossier-comments-mention')].map((chip) => [
+      chip.textContent,
+      chip.getAttribute('title'),
+      chip.classList.contains('dossier-comments-mention-me'),
+    ])
+
+  test('show as chips: a person by name with the email on hover, the viewer marked, a team by its name, and an email nobody names as written', async () => {
+    const said = comment(
+      LEE,
+      '@sara@acme.com and @lee@acme.com, ask @team:Design or @nobody@acme.com; @other@acme.com was not mentioned',
+      {
+        name: 'Lee Park',
+        mentions: ['sara@acme.com', LEE, 'team:Design', 'nobody@acme.com'],
+      },
+    )
+    peer.threads = [thread(said)]
+    const element = await mount()
+    const text = q(element, '.dossier-comments-text')
+    expect(text.textContent).toBe(
+      '@Sara and @Lee Park, ask @Design or @nobody@acme.com; @other@acme.com was not mentioned',
+    )
+    expect(chips(element)).toEqual([
+      ['@Sara', 'sara@acme.com', true],
+      ['@Lee Park', LEE, false],
+      ['@Design', 'Team Design', false],
+    ])
+    // Dossier was asked once for the name it did not know, and gave none.
+    expect(peer.asked).toEqual(['nobody@acme.com'])
+    expect(sheet()).toContain('.dossier-comments-mention-me')
+  })
+
+  test('take a name Dossier gives the viewer, and ask nothing for a visitor', async () => {
+    peer.mentionable = {
+      people: [{ email: 'dana@acme.com', name: 'Dana Ali', image: null }],
+      teams: [],
+    }
+    const said = comment(LEE, 'cc @dana@acme.com', {
+      mentions: ['dana@acme.com'],
+    })
+    peer.threads = [thread(said)]
+    const element = await mount()
+    expect(chips(element)).toEqual([['@Dana Ali', 'dana@acme.com', false]])
+    expect(peer.asked).toEqual(['dana@acme.com'])
+
+    document.body.replaceChildren()
+    peer.me = null
+    peer.asked = []
+    peer.threads = [
+      thread(comment(LEE, 'cc @zed@acme.com', { mentions: ['zed@acme.com'] })),
+    ]
+    const seen = await mount()
+    expect(chips(seen)).toEqual([])
+    expect(q(seen, '.dossier-comments-text').textContent).toBe(
+      'cc @zed@acme.com',
+    )
+    expect(peer.asked).toEqual([])
+  })
+})
+
+describe('a link to a comment', () => {
+  const PAGE_HTML =
+    '<section id="S-1" title="Step one"></section><section id="S-2"></section>'
+  const linkTo = (path: string, anchor: string | null = null) =>
+    `#dossier-comment=${encodeURIComponent(path)}${anchor === null ? '' : `&on=${anchor}`}`
+  const highlighted = (element: HTMLElement) =>
+    [...element.querySelectorAll('[data-highlight]')].map((a) =>
+      a.getAttribute('data-comment'),
+    )
+
+  afterEach(() => {
+    vi.useRealTimers()
+    history.replaceState(null, '', location.pathname)
+  })
+
+  test('opens the whole page’s thread in view, focused, and highlights the comment for a moment', async () => {
+    const root = comment(LEE, 'Root')
+    const reply = comment(SARA.email, 'The reply')
+    peer.threads = [thread(comment(LEE, 'Another')), thread(root, [reply])]
+    const scrolled = vi.fn()
+    vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(
+      scrolled,
+    )
+    history.replaceState(null, '', linkTo(reply.path))
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const element = mount()
+    await vi.advanceTimersByTimeAsync(10)
+    const shown = await element
+    const li = threadOf(shown, root.path)
+    expect(highlighted(shown)).toEqual([reply.path])
+    expect(document.activeElement).toBe(li)
+    expect(scrolled.mock.contexts).toContain(li)
+    await vi.advanceTimersByTimeAsync(HIGHLIGHT_MS)
+    expect(highlighted(shown)).toEqual([])
+  })
+
+  test('opens the item’s own element, with a resolved thread shown and said so', async () => {
+    const done = comment(LEE, 'Done here', { anchor: 'S-1' })
+    peer.threads = [thread(done, [], { resolved: true })]
+    history.replaceState(null, '', linkTo(done.path, 'S-1'))
+    document.body.innerHTML = `${PAGE_HTML}
+      <dossier-comments></dossier-comments>
+      <dossier-comments for="S-1"></dossier-comments>`
+    await settle()
+    const [page, one] =
+      document.querySelectorAll<HTMLElement>('dossier-comments')
+    expect(byKey(one!, 'open')!.getAttribute('aria-expanded')).toBe('true')
+    expect(highlighted(one!)).toEqual([done.path])
+    expect(highlighted(page!)).toEqual([])
+    expect(byKey(one!, 'show-resolved')!.getAttribute('aria-pressed')).toBe(
+      'true',
+    )
+    expect(statusOf(one!)).toBe(TEXT.linkResolved)
+    expect(threadOf(one!, done.path).hidden).toBe(false)
+  })
+
+  test('follows the same link again after the page went somewhere else', async () => {
+    const on = comment(LEE, 'On step one', { anchor: 'S-1' })
+    peer.threads = [thread(on)]
+    document.body.innerHTML = `${PAGE_HTML}
+      <dossier-comments></dossier-comments>
+      <dossier-comments for="S-1"></dossier-comments>`
+    await settle()
+    const one = document.querySelectorAll<HTMLElement>('dossier-comments')[1]!
+    const go = async (hash: string) => {
+      location.hash = hash.slice(1)
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+      await settle()
+    }
+    await go(linkTo(on.path, 'S-1'))
+    const opener = byKey(one, 'open')!
+    expect(opener.getAttribute('aria-expanded')).toBe('true')
+    opener.click()
+    await settle()
+    expect(opener.getAttribute('aria-expanded')).toBe('false')
+    await go('#S-2')
+    await go(linkTo(on.path, 'S-1'))
+    expect(opener.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  test('says when the comment is gone, and follows a link pasted while the page is open', async () => {
+    const here = comment(LEE, 'Still here')
+    peer.threads = [thread(here)]
+    const element = await mount()
+    expect(highlighted(element)).toEqual([])
+    location.hash = linkTo(`${FOLDER}${LEE}/gone.json`).slice(1)
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+    await settle()
+    expect(
+      [...element.querySelectorAll('.dossier-comments-status')].map(
+        (line) => line.textContent,
+      ),
+    ).toEqual(['', TEXT.linkGone])
+    location.hash = linkTo(here.path).slice(1)
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+    await settle()
+    expect(highlighted(element)).toEqual([here.path])
   })
 })

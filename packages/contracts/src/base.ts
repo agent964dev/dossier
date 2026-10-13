@@ -7,6 +7,7 @@ export type BaseComponentTag =
   | 'dossier-diff'
   | 'dossier-copy'
   | 'dossier-comments'
+  | 'dossier-notifications'
 
 /** A library's two builds: the one pages import, and one with no imports. */
 export interface BaseBuilds {

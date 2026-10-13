@@ -10,6 +10,7 @@ import {
   COMMENT_STANCE_MAX,
   COMMENT_TEXT_MAX,
   dossierError,
+  isCommentValue,
   teamOfMention,
   TEAM_MENTION_PREFIX,
   type CommentEntry,
@@ -23,6 +24,7 @@ import { Effect } from 'effect'
 
 import { db } from '../db/client.ts'
 import type { AccessService } from './access.ts'
+import type { ThreadPlace } from './tree-store.ts'
 
 export type CommentWrite =
   | { readonly kind: 'comment'; readonly entry: CommentEntry }
@@ -263,6 +265,47 @@ export const parseCommentRevision = (
     out.mentions = mentions
   }
   return out
+}
+
+/**
+ * Where the thread of `entry` sits, for its notifications: its root's
+ * anchor and label. `files` holds the root, by its path from the page's
+ * folder, when `entry` is a reply.
+ */
+export const threadPlace = (
+  files: readonly { readonly path: string; readonly value: unknown }[],
+  entry: CommentEntry,
+): ThreadPlace => {
+  const root =
+    entry.replyTo === null
+      ? entry
+      : files.find((file) => file.path === entry.replyTo)?.value
+  if (!isCommentValue(root)) return { anchor: null, label: null }
+  return {
+    anchor: typeof root.anchor === 'string' ? root.anchor : null,
+    label: typeof root.label === 'string' ? root.label : null,
+  }
+}
+
+/**
+ * Who wrote in the thread whose root is `root`, lower-cased, each once: the
+ * root's writer, and each reply's while it keeps its text.
+ */
+export const threadWriters = (
+  files: readonly CommentFile[],
+  root: string,
+): string[] => {
+  const out = new Set<string>()
+  for (const file of files) {
+    if (!isCommentValue(file.value)) continue
+    if (
+      file.path === root ||
+      (file.value.replyTo === root && file.value.text !== '')
+    ) {
+      out.add(file.by.toLowerCase())
+    }
+  }
+  return [...out]
 }
 
 /** A deleted comment: the entry with its text and mentions gone. */

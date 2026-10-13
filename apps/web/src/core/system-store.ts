@@ -340,6 +340,11 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
           binds,
         },
         {
+          sql: `${DOOMED_NODES} delete from notifications
+                where ${inDoomed('comment_node_id')} or ${inDoomed('page_node_id')}`,
+          binds,
+        },
+        {
           sql: `${DOOMED_NODES} delete from operations
                 where ${inDoomed('result_node_id')}`,
           binds,
@@ -371,9 +376,9 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
       ])
       return {
         ...ZERO,
-        keysRevoked: changes[10] ?? 0,
-        versions: changes[12] ?? 0,
-        nodes: changes[13] ?? 0,
+        keysRevoked: changes[11] ?? 0,
+        versions: changes[13] ?? 0,
+        nodes: changes[14] ?? 0,
       }
     })
 
@@ -401,6 +406,7 @@ export const makeSystemStore = (bindings: Env): SystemStore => {
       const changes = yield* batch('remove deleted trees', [
         byTree('events'),
         byTree('mentions'),
+        byTree('notifications'),
         byTree('path_aliases'),
         byTree('tree_aliases'),
         byTree('page_needs'),

@@ -287,6 +287,69 @@ export const mentionsIn = (text: string): string[] => {
   return out
 }
 
+/** A run of a comment's text: plain, or one of its mentions as written. */
+export type TextPart =
+  | { readonly kind: 'text'; readonly text: string }
+  | {
+      readonly kind: 'person'
+      /** As written, with its @. */
+      readonly text: string
+      /** Lower-cased. */
+      readonly email: string
+    }
+  | {
+      readonly kind: 'team'
+      readonly text: string
+      readonly name: string
+    }
+
+/**
+ * A comment's text in runs: each @ that names one of the comment's own
+ * `mentions` stands apart, and everything else, an @ it does not name
+ * included, is plain text.
+ */
+export const mentionParts = (
+  text: string,
+  mentions: readonly unknown[],
+): TextPart[] => {
+  const named = new Set(
+    mentions
+      .filter((m): m is string => typeof m === 'string')
+      .map((m) => m.toLowerCase()),
+  )
+  const out: TextPart[] = []
+  let plain = ''
+  let at = 0
+  for (const match of text.matchAll(MENTION)) {
+    const lead = match[1] ?? ''
+    const start = match.index + lead.length
+    const raw = match[0].slice(lead.length)
+    const team =
+      match[2] !== undefined
+        ? match[2].replace(/\\(.)/g, '$1')
+        : (match[3] ?? null)
+    const key =
+      team !== null
+        ? `${TEAM_MENTION_PREFIX}${team}`.toLowerCase()
+        : match[4]!.toLowerCase()
+    if ((team !== null && !isTeamNameText(team)) || !named.has(key)) {
+      continue
+    }
+    plain += text.slice(at, start)
+    if (plain !== '') out.push({ kind: 'text', text: plain })
+    plain = ''
+    out.push(
+      team !== null
+        ? { kind: 'team', text: raw, name: team }
+        : { kind: 'person', text: raw, email: key },
+    )
+    at = start + raw.length
+  }
+  plain += text.slice(at)
+  if (plain !== '') out.push({ kind: 'text', text: plain })
+  return out
+}
+
 /** The @ being typed just before the caret, and what follows it so far. */
 export const mentionAt = (
   text: string,

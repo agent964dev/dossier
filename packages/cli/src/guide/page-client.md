@@ -14,6 +14,9 @@ dossier.write(path, patch, { replace }) // merges into a .json data file; resolv
 dossier.withdraw(path) // your own submission or entry, for good
 dossier.upload(file) // resolves { file, name, size, type }
 dossier.mentionable(query) // { people, teams } you may @mention here
+dossier.notifications.list({ before, limit }) // { notifications, unread, next }
+dossier.notifications.unread() // how many unread, at most 10
+dossier.notifications.read(ids | 'all') // marks them read; resolves the unread count
 ```
 
 `page` holds the page's tree path, its link (the address people open,
@@ -54,6 +57,17 @@ export.
   anyone: members, people the page or a folder above it is shared with, and
   teams whose share or the workspace's opens the page, each only if they can
   open it. A guest or visitor gets `{ people: [], teams: [] }`.
+- `notifications` are the viewer's own on pages of this page's tree: a
+  mention of them or a team they are in, and a reply in a thread they wrote
+  in, only for pages they can open now. The bell in Dossier's own header
+  shows them across every tree; a page sees only its tree's. `list()` gives
+  the newest 20 (`limit` up to 30), and `{ before: next }` the older ones;
+  each is `{ id, type ('mention' or 'reply'), team, actor ({ email, name,
+image } or null), workspace, tree, page ({ path, title }), anchor, label,
+excerpt, link, at, read }`, where `link` opens the comment on its page.
+  `unread()` counts up to 10 ("9+" past nine), and `read(ids)` or
+  `read('all')` marks this tree's read. A visitor has none.
+  `<dossier-notifications>` (see Base layer) is a bell built on them.
 
 A `Doc` is `{ path, data, by, at, push }`: `path` relative to the page, `by` the
 writer's email for data files (for authored files the pusher's email to members

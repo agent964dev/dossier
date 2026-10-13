@@ -28,7 +28,10 @@ with replies, resolve and reopen, comments on any `section`, `figure`,
 heading, list item, table row or image with an `id` (`anchors="…"` sets
 which), pins on images and mockups (`pins="…"`), stances on new comments and
 replies (`stances="agree, reopen"`), and @mentions, which show "mentioned you"
-in Dossier and send no email. Typing @ suggests the people in the threads and,
+in Dossier, notify the person in Dossier's bell, and send no email. A
+comment shows its mentions as chips: a person by name (the email on hover),
+a team by its name, and the viewer's own marked; an email whose name the
+viewer may not learn stays as written. Typing @ suggests the people in the threads and,
 to members of the page's workspace, the members, email shares and teams that
 can open the page; `@sara@acme.com` mentions a person, and `@team:Design` (or
 `@team:"Design Ops"` for a name with spaces) the team's members who can open
@@ -49,6 +52,22 @@ reads them with `dossier.read('plan.comments/')` (see Page client) to build its
 own handoff. Each comment there carries `by` (the email), `name` (the
 display name, or null) and `mentions`, where a team reads `team:Design`. The
 component never sends anything to an agent.
+
+A link to a page with `#dossier-comment=<path>&on=<id>` opens that comment:
+`<path>` is the comment's path from the page's folder, as its Doc names it
+(`plan.comments/sara@acme.com/….json`), and `on` its thread's element id.
+The element whose `for` is that id opens, else the whole page's, the thread
+scrolls into view, and the comment is highlighted for a moment; a resolved
+thread shows with the resolved ones, and a deleted or gone comment is said
+so. Dossier's notifications link this way.
+
+`<dossier-notifications></dossier-notifications>` puts the viewer's bell in a
+page's or layout's own header: the unread count, and the list of their
+notifications on pages of this tree (mentions and replies, newest first,
+"Mark all as read", "Show more"), each opening its comment. Dossier's own
+header shows them across every tree; a page sees only its tree's. It reads
+through `dossier.notifications` and shows nothing to a visitor; pages never
+get it unless they place it.
 
 Base components render into the page itself, with styles any page or kit CSS
 overrides, read the theme variables when the tree sets them (`--primary`,

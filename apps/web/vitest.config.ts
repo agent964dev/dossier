@@ -34,6 +34,7 @@ const EXPORT_FILES: Record<string, { type: string; text: string }> = {
       '_components/dossier-diff.export.js',
       '_components/dossier-copy.export.js',
       '_components/dossier-comments.export.js',
+      '_components/dossier-notifications.export.js',
     ].map((name) => [
       name,
       { type: 'text/javascript; charset=utf-8', text: standIn(name) },
@@ -86,6 +87,11 @@ const TEST_LIBRARIES = {
       live: '_components/dossier-comments.js',
       export: '_components/dossier-comments.export.js',
       doc: '_components/dossier-comments.md',
+    },
+    'dossier-notifications': {
+      live: '_components/dossier-notifications.js',
+      export: '_components/dossier-notifications.export.js',
+      doc: '_components/dossier-notifications.md',
     },
   },
 } satisfies BaseLibraries

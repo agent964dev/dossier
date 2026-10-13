@@ -1,6 +1,7 @@
-// "mentioned you": a mention of the person on a page, in a comment that still
-// names them (by their email, or by the team that reached them), newer than
-// their last Seen by of that page.
+// "mentioned you": an unread notification of a mention of the person on a
+// page, in a comment that still names them (by their email, or by the team
+// that reached them). Reading the notification, or opening the page, reads
+// it.
 import { dossierError, type NodeId, type TreeId } from '@dossier/contracts'
 import { Effect } from 'effect'
 
@@ -11,7 +12,7 @@ export interface UnseenMention {
   readonly path: string
 }
 
-/** Every page on which the person has a mention they have not seen yet. */
+/** Every page on which the person has a mention they have not read yet. */
 export const unseenMentions = (
   DB: D1Database,
   person: { readonly id: string; readonly email: string },
@@ -19,20 +20,18 @@ export const unseenMentions = (
   Effect.tryPromise({
     try: () =>
       DB.prepare(
-        `select distinct m.page_node_id as pageId, p.tree_id as treeId, p.path
-         from mentions m
-           join nodes c on c.id = m.comment_node_id and c.deleted_at is null
+        `select distinct n.page_node_id as pageId, p.tree_id as treeId, p.path
+         from notifications n
+           join nodes c on c.id = n.comment_node_id and c.deleted_at is null
            join node_versions v on v.id = c.current_version_id
-           join nodes p on p.id = m.page_node_id and p.deleted_at is null
+           join nodes p on p.id = n.page_node_id and p.deleted_at is null
            join trees t on t.id = p.tree_id and t.deleted_at is null
-           left join seen_by s on s.node_id = m.page_node_id and s.user_id = ?2
-         where m.email = lower(?1)
-           and (s.last_seen_at is null or m.created_at > s.last_seen_at)
+         where n.email = lower(?1) and n.read_at is null and n.type = 'mention'
            and json_extract(v.json_value, '$.text') <> ''
            and exists (select 1 from json_each(v.json_value, '$.mentions') j
-             where j.value = coalesce(m.via, m.email))`,
+             where j.value = coalesce(n.via, n.email))`,
       )
-        .bind(person.email, person.id)
+        .bind(person.email)
         .all<UnseenMention>(),
     catch: (error) => {
       console.error('A mentions read failed', error)
