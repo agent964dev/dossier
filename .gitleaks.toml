@@ -11,3 +11,7 @@ paths = [
   '''^packages/cli/src/[^/]*\.test\.ts$''',
   '''^packages/cli/test/.*$''',
 ]
+# The Worker test pool's fixed secrets in apps/web/vitest.config.ts.
+regexes = [
+  '''^test-(handle-)?secret-0123456789abcdef(0123456789abcdef)?$''',
+]
