@@ -1419,6 +1419,29 @@ describe('with for: the comments on one item', () => {
     expect(one.querySelector('.dossier-comments-place')).toBeNull()
   })
 
+  test('leaves an item’s mark to the element still counting it when the other leaves', async () => {
+    peer.threads = [thread(comment(LEE, 'First', { anchor: 'S-1' }))]
+    const { page, one } = await mountItems()
+    const item = document.getElementById('S-1')!
+    one.remove()
+    expect(item.getAttribute(MARK)).toBe('1')
+    page.remove()
+    expect(item.hasAttribute(MARK)).toBe(false)
+  })
+
+  test('takes the new item’s own unsent text when for changes', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'About one')
+    one.setAttribute('for', 'S-2')
+    expect(area.value).toBe('')
+    type(area, 'About two')
+    one.setAttribute('for', 'S-1')
+    expect(area.value).toBe('About one')
+  })
+
   test('writes a comment on its item, even before the item is drawn', async () => {
     const { one } = await mountItems()
     byKey(one, 'open')!.click()

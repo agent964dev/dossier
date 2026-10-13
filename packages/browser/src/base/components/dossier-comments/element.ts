@@ -363,7 +363,8 @@ export class DossierComments extends HTMLElement {
   readonly #uis = new Map<string, ThreadUi>()
   readonly #editing = new Map<string, Composer>()
   readonly #confirming = new Set<string>()
-  #marked = new Set<Element>()
+  /** The elements it marks, with the count of open threads on each. */
+  #marked = new Map<Element, number>()
   #marks: readonly PinMark[] = []
   /** The new comment's pin, placed but not sent. */
   #pin: { readonly anchor: string; readonly pin: Pin } | null = null
@@ -413,8 +414,20 @@ export class DossierComments extends HTMLElement {
     this.#stopWatch = null
     this.#parts?.pins.disconnect()
     this.#placing = null
-    for (const element of this.#marked) element.removeAttribute(MARK)
-    this.#marked = new Set()
+    // Another element counting the same one, such as the whole page's
+    // beside an item's, keeps its mark.
+    const others = [...this.ownerDocument.querySelectorAll(TAG)].filter(
+      (other): other is DossierComments =>
+        other !== this && other instanceof DossierComments && other.isConnected,
+    )
+    for (const element of this.#marked.keys()) {
+      const count = others
+        .map((other) => other.#marked.get(element))
+        .find((n) => n !== undefined)
+      if (count === undefined) element.removeAttribute(MARK)
+      else element.setAttribute(MARK, String(count))
+    }
+    this.#marked = new Map()
   }
 
   attributeChangedCallback(
@@ -423,8 +436,15 @@ export class DossierComments extends HTMLElement {
     after: string | null,
   ): void {
     if (before === after || this.#parts === null || !this.isConnected) return
-    // Another element, or none: the threads it shows are chosen again.
-    if (name === 'for' && this.#loaded) this.#take(this.#all)
+    if (name !== 'for') {
+      this.#render()
+      return
+    }
+    // Another element, or none: its own unsent text, kept as it was typed,
+    // and the threads it shows are chosen again.
+    if (this.#ready) this.#parts.composer.text = this.#draft()
+    this.#pin = null
+    if (this.#loaded) this.#take(this.#all)
     else this.#render()
   }
 
@@ -1163,7 +1183,7 @@ export class DossierComments extends HTMLElement {
       const element = anchorElement(doc, thread.data.root.anchor)
       if (element !== null) counts.set(element, (counts.get(element) ?? 0) + 1)
     }
-    for (const element of this.#marked) {
+    for (const element of this.#marked.keys()) {
       if (!counts.has(element)) element.removeAttribute(MARK)
     }
     for (const [element, count] of counts) {
@@ -1171,7 +1191,7 @@ export class DossierComments extends HTMLElement {
         element.setAttribute(MARK, String(count))
       }
     }
-    this.#marked = new Set(counts.keys())
+    this.#marked = counts
   }
 
   #pinMarks(
