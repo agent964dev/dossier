@@ -666,6 +666,11 @@ describe('dossier push', () => {
     let count = 0
     let held = 0
     let most = { count: 0, held: 0 }
+    // Each upload is held until four are in flight, or briefly at the end.
+    let full = () => {}
+    const filled = new Promise<void>((resolve) => {
+      full = resolve
+    })
     const cli = await setUp(async (request) => {
       if (request.method !== 'PUT') return route(request)
       const size = Number(request.headers.get('content-length'))
@@ -675,6 +680,11 @@ describe('dossier push', () => {
         count: Math.max(most.count, count),
         held: Math.max(most.held, held),
       }
+      if (count >= 4) full()
+      await Promise.race([
+        filled,
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ])
       await new Promise((resolve) => setTimeout(resolve, 20))
       count -= 1
       held -= size
