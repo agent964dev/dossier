@@ -1797,6 +1797,9 @@ export const PeopleLive: Layer.Layer<
                 DB.prepare('delete from super_admins where user_id = ?').bind(
                   me.id,
                 ),
+                DB.prepare(
+                  'delete from notifications where email = lower(?)',
+                ).bind(me.email),
                 ...closeStatements(DB, me.id, at, {
                   ...totals,
                   keys: held?.keys ?? 0,

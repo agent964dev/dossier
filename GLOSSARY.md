@@ -169,7 +169,7 @@ Unsent edits in a form, kept in the person's browser until sent.
 _Avoid_: autosave, saved values
 
 **Page client**:
-The small script every page gets (`dossier.read`, `watch`, `write`, `withdraw`, `upload`, `mentionable`, `me`) that acts with the viewer's permissions.
+The small script every page gets (`dossier.read`, `watch`, `write`, `withdraw`, `upload`, `mentionable`, `notifications`, `me`) that acts with the viewer's permissions.
 _Avoid_: SDK, runtime, frame runtime
 
 ### Comments
@@ -193,6 +193,10 @@ _Avoid_: marker, annotation
 **Mention**:
 An @name in a comment that points a person who can open the page to it: `@sara@acme.com`, or `@team:Design` for the members of a team of the page's workspace who can open it. Mentions send no email.
 _Avoid_: tag, ping
+
+**Notification**:
+What the bell in Dossier's header lists for a person: a mention of them or of a team they are in, or a reply in a thread they wrote in, on a page they can open now. Reading it, or opening its page, marks it read. Never sent by email.
+_Avoid_: alert, inbox item, activity
 
 ### Agents
 

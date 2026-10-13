@@ -1104,6 +1104,16 @@ export const PagesLive: Layer.Layer<
                     ).bind(nodeId, person.id, now, HOUR, person.email),
                   ]
                 : []),
+              // Opening the page reads its notifications, and so its
+              // "mentioned you"; a renewal opens nothing new.
+              ...(page && person !== null && !renewal
+                ? [
+                    DB.prepare(
+                      `update notifications set read_at = ?3
+                       where email = lower(?1) and page_node_id = ?2 and read_at is null`,
+                    ).bind(person.email, nodeId, now),
+                  ]
+                : []),
               // Counted under the same conditions as what the view issues, so
               // only a view that stands counts, and one that started again
               // counts once.

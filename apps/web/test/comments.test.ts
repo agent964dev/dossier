@@ -9,7 +9,11 @@ import type {
   Thread,
   TreeId,
 } from '@dossier/contracts'
-import { threadsText, type JsonObject } from '@dossier/contracts/bridge'
+import {
+  commentOfFragment,
+  threadsText,
+  type JsonObject,
+} from '@dossier/contracts/bridge'
 import { env } from 'cloudflare:workers'
 import { Effect, TestClock, TestContext } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -17,13 +21,18 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
   Data,
   mentionedInTree,
+  Notifications,
   Pages,
   People,
   unseenMentions,
   type Caller,
 } from '../src/core/index.ts'
+import CAP_MIGRATION from '../drizzle/0028_notifications_cap.sql?raw'
+import { NOTIFICATIONS_KEPT } from '../src/core/tree-store.ts'
 import { homeModel } from '../src/server/home-model.ts'
 import { listingModel } from '../src/server/listing-model.ts'
+import { Browser, signedIn } from './support/browser.ts'
+import { keySecretFor } from './support/keys.ts'
 import { beforeBatch, count, exec, rows } from './support/d1.ts'
 import {
   pageWith,
@@ -33,7 +42,7 @@ import {
   type FormTree,
 } from './support/forms.ts'
 import { harness, testRuntime } from './support/harness.ts'
-import { runAs, sessionFor } from './support/people.ts'
+import { callerOf, fresh, runAs, sessionFor } from './support/people.ts'
 import {
   agent,
   failureAs,
@@ -882,6 +891,459 @@ describe('team mentions', () => {
   })
 })
 
+describe('notifications', () => {
+  const list = (
+    caller: Caller,
+    before: string | null = null,
+    limit = 20,
+    tree: string | null = null,
+  ) =>
+    runAs(
+      caller,
+      Effect.flatMap(Notifications, (n) =>
+        n.list({ before, limit, tree: tree as TreeId | null }),
+      ),
+    )
+  const markRead = (
+    caller: Caller,
+    which: { ids: readonly string[] } | { all: true },
+    tree: string | null = null,
+  ) =>
+    runAs(
+      caller,
+      Effect.flatMap(Notifications, (n) =>
+        n.markRead({ ...which, tree: tree as TreeId | null }),
+      ),
+    )
+  /** Who is told of what, as rows, oldest first. */
+  const told = (treeId: string) =>
+    rows<{ email: string; type: string; via: string | null }>(
+      `select email, type, via from notifications where tree_id = ?
+       order by created_at, email`,
+      treeId,
+    )
+
+  it('tell whom a comment mentions, a mentioned team’s members, and a thread’s other writers, never its writer', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const dana = await person('dana-n')
+    await join(ws, dana)
+    await team(ws, 'Brand', [dana, owner])
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'plan.html'))!.id,
+      'email',
+      dana.email.toLowerCase(),
+      'read',
+      owner,
+    )
+    const danaEmail = dana.email.toLowerCase()
+    const sara = await given(tree, 'respond', '', 'sara-n')
+    const lina = await given(tree, 'respond', '', 'lina-n')
+    const ownerEmail = owner.email.toLowerCase()
+
+    const root = await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('@team:Brand @sara can you check the price?', {
+        anchor: 'pricing',
+        label: 'Pricing',
+        mentions: ['team:Brand', sara.email],
+      }),
+    })
+    // The owner is in Brand but wrote it.
+    expect(await told(tree.treeId)).toEqual([
+      { email: danaEmail, type: 'mention', via: 'team:Brand' },
+      { email: sara.email, type: 'mention', via: null },
+    ])
+    await exec('delete from notifications where tree_id = ?', tree.treeId)
+
+    // Sara's reply tells the owner, who started the thread.
+    await write(minutes(1), sara.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Done, see the table.', { replyTo: root.path }),
+    })
+    // Lina's tells Sara of the reply and the owner of the mention, once.
+    await write(minutes(2), lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment(`@${ownerEmail} agreed`, {
+        replyTo: root.path,
+        mentions: [ownerEmail],
+      }),
+    })
+    expect(await told(tree.treeId)).toEqual([
+      { email: ownerEmail, type: 'reply', via: null },
+      { email: ownerEmail, type: 'mention', via: null },
+      { email: sara.email, type: 'reply', via: null },
+    ])
+
+    const page = await list(ownerBrowser)
+    expect(page.unread).toBe(2)
+    expect(page.next).toBeNull()
+    expect(page.notifications).toHaveLength(2)
+    const [mention, reply] = page.notifications
+    expect(mention).toMatchObject({
+      type: 'mention',
+      team: null,
+      actor: { email: lina.email, name: 'lina-n', image: null },
+      workspace: ws.name,
+      tree: tree.name,
+      page: { path: 'plan.html', title: 'Plan' },
+      anchor: 'pricing',
+      label: 'Pricing',
+      excerpt: `@${ownerEmail} agreed`,
+      at: minutes(2),
+      read: false,
+    })
+    // The link opens the comment on its page.
+    const link = new URL(mention!.link)
+    expect(link.pathname).toBe(`/${ws.name}/${tree.name}/plan`)
+    expect(commentOfFragment(link.hash)).toEqual({
+      comment: expect.stringMatching(
+        new RegExp(`^plan\\.comments/${lina.email}/.+\\.json$`),
+      ),
+      anchor: 'pricing',
+    })
+    expect(reply).toMatchObject({ type: 'reply', actor: { email: sara.email } })
+
+    // One page at a time, the newest first.
+    const first = await list(ownerBrowser, null, 1)
+    expect(first.notifications.map((n) => n.id)).toEqual([mention!.id])
+    const second = await list(ownerBrowser, first.next, 1)
+    expect(second.notifications.map((n) => n.id)).toEqual([reply!.id])
+    expect(second.next).toBeNull()
+
+    // Reading one, then all; opening the page reads Sara's.
+    expect(await markRead(ownerBrowser, { ids: [mention!.id] })).toBe(1)
+    expect(await markRead(ownerBrowser, { all: true })).toBe(0)
+    expect((await list(ownerBrowser)).notifications.map((n) => n.read)).toEqual(
+      [true, true],
+    )
+    // Nobody reads another's.
+    expect(await markRead(sara.caller, { ids: [reply!.id] })).toBe(1)
+    await at(
+      minutes(3),
+      sara.caller,
+      Effect.flatMap(Pages, (pages) =>
+        pages.view({
+          treeId: tree.treeId as TreeId,
+          path: 'plan',
+          renewal: false,
+        }),
+      ),
+    )
+    expect((await list(sara.caller)).unread).toBe(0)
+  })
+
+  it('list only pages the person can open now, and go with their comment', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', '', 'sara-g')
+    const written = await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Sara, a look?', { mentions: [sara.email] }),
+    })
+    // A guest gets their own, for the page shared with them.
+    expect((await list(sara.caller)).notifications).toHaveLength(1)
+    expect(
+      mentionedInTree(
+        await runAs(ownerBrowser, unseenMentions(env.DB, sara.who)),
+        tree.treeId,
+      ),
+    ).toBe(true)
+
+    // Unshared, it is gone and uncounted; shared again, it is back.
+    await exec(
+      'delete from shares where tree_id = ? and target = ?',
+      tree.treeId,
+      sara.email,
+    )
+    expect(await list(sara.caller)).toEqual({
+      notifications: [],
+      unread: 0,
+      next: null,
+    })
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, ''))!.id,
+      'email',
+      sara.email,
+      'read',
+      owner,
+    )
+    expect((await list(sara.caller)).unread).toBe(1)
+
+    // The comment deleted takes it along, and the label with it.
+    await withdraw(ownerBrowser, tree, written.path)
+    expect(await count('notifications', 'tree_id = ?', tree.treeId)).toBe(0)
+    expect((await list(sara.caller)).unread).toBe(0)
+  })
+
+  it('count an older readable one past ten newer on a page no longer open', async () => {
+    const open = await pushForms(owner, ws, FILES)
+    const lost = await pushForms(owner, ws, FILES)
+    const sara = await person('sara-c')
+    const saraEmail = sara.email.toLowerCase()
+    for (const tree of [open, lost]) {
+      await share(
+        tree.treeId,
+        (await nodeAt(tree.treeId, ''))!.id,
+        'email',
+        saraEmail,
+        'respond',
+        owner,
+      )
+    }
+    const saraBrowser = await sessionFor(sara)
+    await write(T0, ownerBrowser, open, {
+      path: 'plan.comments/',
+      patch: comment('Older, still open', { mentions: [saraEmail] }),
+    })
+    // Ten newer ones on a page she then loses.
+    for (let n = 0; n < 10; n += 1) {
+      await write(minutes(1 + n), ownerBrowser, lost, {
+        path: 'plan.comments/',
+        patch: comment(`Newer ${n}`, { mentions: [saraEmail] }),
+      })
+    }
+    await exec(
+      'delete from shares where tree_id = ? and target = ?',
+      lost.treeId,
+      saraEmail,
+    )
+    const listed = await list(saraBrowser)
+    expect(listed.notifications.map((n) => [n.excerpt, n.read])).toEqual([
+      ['Older, still open', false],
+    ])
+    expect(listed.unread).toBe(1)
+  })
+
+  it('keep one per person and comment, however its mentions change', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const dana = await person('dana-u')
+    await join(ws, dana)
+    await team(ws, 'Uplift', [dana])
+    const danaEmail = dana.email.toLowerCase()
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, ''))!.id,
+      'email',
+      danaEmail,
+      'read',
+      owner,
+    )
+    const danaBrowser = await sessionFor(dana)
+    const written = await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Dana?', { mentions: [danaEmail] }),
+    })
+    // The team she is in, added beside her own email, tells her nothing new.
+    await write(minutes(1), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: [danaEmail, 'team:Uplift'] },
+    })
+    expect(await count('notifications', 'email = ?', danaEmail)).toBe(1)
+    await markRead(danaBrowser, { all: true })
+    // Taken away and given back: told again, once.
+    await write(minutes(2), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: [] },
+    })
+    await write(minutes(3), ownerBrowser, tree, {
+      path: written.path,
+      patch: { mentions: [danaEmail] },
+    })
+    const listed = await list(danaBrowser)
+    expect(listed.notifications.map((n) => [n.read, n.at])).toEqual([
+      [false, minutes(3)],
+    ])
+    expect(listed.unread).toBe(1)
+    expect(await count('notifications', 'email = ?', danaEmail)).toBe(1)
+  })
+
+  it('keep a person’s newest few hundred', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', '', 'sara-k')
+    await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('First.', { mentions: [sara.email] }),
+    })
+    const page = (await nodeAt(tree.treeId, 'plan.html'))!.id
+    const folder = (await nodeAt(tree.treeId, 'plan.comments'))!.id
+    // Older ones on as many comments, long deleted: rows to keep or drop.
+    await exec(
+      `insert into nodes (id, tree_id, parent_id, name, path, depth, kind,
+         origin, created_at, deleted_at)
+       with recursive n(i) as (select 0 union all select i + 1 from n where i < ?3 - 1)
+       select 'old' || i, ?1, ?2, 'old' || i || '.json',
+         'plan.comments/old' || i || '.json', 2, 'file', 'data', 0, 1 from n`,
+      tree.treeId,
+      folder,
+      NOTIFICATIONS_KEPT,
+    )
+    await exec(
+      `insert into notifications (id, email, type, tree_id, page_node_id,
+         comment_node_id, actor_id, created_at)
+       select id, ?1, 'mention', ?2, ?3, id, ?4, cast(substr(id, 4) as integer)
+       from nodes where tree_id = ?2 and substr(id, 1, 3) = 'old'`,
+      sara.email,
+      tree.treeId,
+      page,
+      owner.id,
+    )
+    expect(await count('notifications', 'email = ?', sara.email)).toBe(
+      NOTIFICATIONS_KEPT + 1,
+    )
+    // As the backfill left them, 0028 keeps the newest 300; Sara's own,
+    // from the write above, is among them.
+    await exec(CAP_MIGRATION)
+    expect(await count('notifications', 'email = ?', sara.email)).toBe(
+      NOTIFICATIONS_KEPT,
+    )
+    expect(await count('notifications', "id = 'old0'")).toBe(0)
+    expect(await count('notifications', "id = 'old1'")).toBe(1)
+    await write(minutes(1), ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Second.', { mentions: [sara.email] }),
+    })
+    expect(await count('notifications', 'email = ?', sara.email)).toBe(
+      NOTIFICATIONS_KEPT,
+    )
+    expect(await count('notifications', "id = 'old0'")).toBe(0)
+  })
+
+  it('give a page only its own tree’s, while the screens get every tree’s', async () => {
+    const a = await pushForms(owner, ws, FILES)
+    const b = await pushForms(owner, ws, FILES)
+    const sara = await person('sara-t')
+    const saraEmail = sara.email.toLowerCase()
+    for (const tree of [a, b]) {
+      await share(
+        tree.treeId,
+        (await nodeAt(tree.treeId, ''))!.id,
+        'email',
+        saraEmail,
+        'respond',
+        owner,
+      )
+    }
+    const saraBrowser = await sessionFor(sara)
+    await write(T0, ownerBrowser, a, {
+      path: 'plan.comments/',
+      patch: comment('In A', { mentions: [saraEmail] }),
+    })
+    await write(minutes(1), ownerBrowser, b, {
+      path: 'plan.comments/',
+      patch: comment('In B', { mentions: [saraEmail] }),
+    })
+    const excerpts = async (tree: string | null) =>
+      (await list(saraBrowser, null, 20, tree)).notifications.map(
+        (n) => n.excerpt,
+      )
+    expect(await excerpts(null)).toEqual(['In B', 'In A'])
+    expect(await excerpts(a.treeId)).toEqual(['In A'])
+    expect((await list(saraBrowser, null, 0, a.treeId)).unread).toBe(1)
+    // Marking from tree A, even by B's id, reads only A's.
+    const inB = (await list(saraBrowser, null, 20, b.treeId)).notifications[0]!
+    expect(await markRead(saraBrowser, { ids: [inB.id] }, a.treeId)).toBe(1)
+    expect(await markRead(saraBrowser, { all: true }, a.treeId)).toBe(0)
+    expect((await list(saraBrowser)).notifications.map((n) => n.read)).toEqual([
+      false,
+      true,
+    ])
+    expect((await list(saraBrowser)).unread).toBe(1)
+  })
+
+  it('give a key scoped to a page none of its comments, and let only a whole, writable key mark them read', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', '', 'sara-s')
+    await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Sara, a look?', { mentions: [sara.email] }),
+    })
+    const page = (await nodeAt(tree.treeId, 'plan.html'))!.id
+    const scoped = await agent(sara.who, { scope: page })
+    const readOnly = await agent(sara.who, { readOnly: true })
+    const whole = await agent(sara.who)
+    // The page is in its reach; the comments beside it are not.
+    expect(await list(scoped)).toEqual({
+      notifications: [],
+      unread: 0,
+      next: null,
+    })
+    expect((await list(whole)).unread).toBe(1)
+    for (const key of [scoped, readOnly]) {
+      expect(
+        await failureAs(
+          key,
+          Effect.flatMap(Notifications, (n) =>
+            n.markRead({ all: true, tree: null }),
+          ),
+        ),
+      ).toMatchObject({ code: 'forbidden' })
+    }
+    expect((await list(sara.caller)).unread).toBe(1)
+    expect(await markRead(whole, { all: true })).toBe(0)
+  })
+
+  it('answer the API for the signed-in person only', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const browser = await signedIn(fresh('example.com', 'api'))
+    const them = (await callerOf(browser)).person!
+    const email = them.email.toLowerCase()
+    await share(
+      tree.treeId,
+      (await nodeAt(tree.treeId, 'plan.html'))!.id,
+      'email',
+      email,
+      'respond',
+      owner,
+    )
+    await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment(`@${email} hello`, { mentions: [email] }),
+    })
+    const listed = await browser.fetch('/_/api/notifications', {
+      purpose: 'read',
+    })
+    expect(listed.status).toBe(200)
+    const body = (await listed.json()) as {
+      notifications: { id: string; at: string; type: string }[]
+      unread: number
+      next: string | null
+    }
+    expect(body).toMatchObject({ unread: 1, next: null })
+    expect(body.notifications[0]).toMatchObject({
+      type: 'mention',
+      at: new Date(T0).toISOString(),
+    })
+    const count_ = await browser.fetch('/_/api/notifications?limit=0', {
+      purpose: 'read',
+    })
+    expect(await count_.json()).toEqual({
+      notifications: [],
+      unread: 1,
+      next: null,
+    })
+    // A write without the CSRF header is a visitor's, refused.
+    const forged = await browser.fetch('/_/api/notifications/read', {
+      method: 'POST',
+      purpose: 'read',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ all: true }),
+    })
+    expect(forged.status).toBe(401)
+    const marked = await browser.fetch('/_/api/notifications/read', {
+      method: 'POST',
+      purpose: 'write',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: [body.notifications[0]!.id] }),
+    })
+    expect(await marked.json()).toEqual({ unread: 0 })
+    const visitor = await new Browser().fetch('/_/api/notifications', {
+      purpose: 'read',
+    })
+    expect(visitor.status).toBe(401)
+  })
+})
+
 describe('whom a comment may mention', () => {
   const mentionable = (
     caller: Caller,
@@ -974,6 +1436,150 @@ describe('whom a comment may mention', () => {
     expect(found.people.map((p) => p.email)).toEqual([
       reader.email.toLowerCase(),
     ])
+  })
+})
+
+describe('comments agents write', () => {
+  const ask = (
+    caller: Caller,
+    i: { path: string; text: string } & JsonObject,
+  ) =>
+    runAs(
+      caller,
+      Effect.flatMap(Data, (data) =>
+        data.comment({
+          ref: ref(i.path),
+          text: i.text,
+          anchor: typeof i.on === 'string' ? i.on : null,
+          replyTo: typeof i.replyTo === 'string' ? i.replyTo : null,
+          stance: null,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+
+  it('are marked as an agent’s from the key alone, never from what a browser sends', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', '', 'sara-a')
+    const lina = await given(tree, 'respond', '', 'lina-a')
+    const saraKey = await agent(sara.who)
+    // Lina starts a thread in the browser.
+    const root = await write(T0, lina.caller, tree, {
+      path: 'plan.comments/',
+      patch: comment('Per pallet or per truck?', {
+        anchor: 'pricing',
+        label: 'Pricing',
+      }),
+    })
+    // Sara's agent replies, mentioning the owner, through the CLI's route.
+    const reply = await ask(saraKey, {
+      path: `${ws.name}/${tree.name}/plan`,
+      text: `Per truck. @${owner.email.toLowerCase()}`,
+      replyTo: root.path,
+    })
+    expect(reply.page).toBe('plan.html')
+    expect(reply.comment).toMatch(
+      new RegExp(`^plan\\.comments/${sara.email}/.+\\.json$`),
+    )
+    expect(reply.doc.data).toMatchObject({
+      agent: true,
+      replyTo: root.path,
+      mentions: [owner.email.toLowerCase()],
+    })
+    const [thread] = await threadsOf(lina.caller, tree)
+    expect(thread!.data.root.agent).toBe(false)
+    expect(thread!.data.replies.map((r) => [r.by, r.agent])).toEqual([
+      [sara.email, true],
+    ])
+    // Lina hears of the reply and the owner of the mention; Sara of nothing.
+    expect(
+      await rows<{ email: string; type: string; via: string | null }>(
+        `select email, type, via from notifications where tree_id = ?
+         order by type desc`,
+        tree.treeId,
+      ),
+    ).toEqual([
+      { email: lina.email, type: 'reply', via: null },
+      { email: owner.email.toLowerCase(), type: 'mention', via: null },
+    ])
+    const linaHears = await runAs(
+      lina.caller,
+      Effect.flatMap(Notifications, (n) =>
+        n.list({ before: null, limit: 20, tree: null }),
+      ),
+    )
+    expect(linaHears.notifications.map((n) => [n.type, n.agent])).toEqual([
+      ['reply', true],
+    ])
+    expect(
+      threadsText({ folder: 'plan.comments', threads: [thread!] }),
+    ).toContain(`Reply from ${sara.email} (agent) · `)
+
+    // A browser cannot claim it; an agent's edit keeps it.
+    expect(
+      await writeFailure(lina.caller, tree, {
+        path: 'plan.comments/',
+        patch: comment('I am an agent.', { agent: true }),
+      }),
+    ).toMatchObject({ code: 'invalid', path: 'agent' })
+    await write(minutes(5), sara.caller, tree, {
+      path: reply.doc.path,
+      patch: { text: 'Per truck, from December.' },
+    })
+    const [after] = await threadsOf(lina.caller, tree)
+    expect(after!.data.replies[0]).toMatchObject({
+      agent: true,
+      text: 'Per truck, from December.',
+    })
+  })
+
+  it('answer a page the key cannot open as not found, and take the route with a key', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const outsider = await person('outsider-a')
+    const failure = await failureAs(
+      await agent(outsider),
+      Effect.flatMap(Data, (data) =>
+        data.comment({
+          ref: ref(`${ws.name}/${tree.name}/plan`),
+          text: 'Hello?',
+          anchor: null,
+          replyTo: null,
+          stance: null,
+          opId: crypto.randomUUID() as OpId,
+        }),
+      ),
+    )
+    expect(failure).toMatchObject({ code: 'not_found' })
+    expect(
+      await count('nodes', "tree_id = ? and origin = 'data'", tree.treeId),
+    ).toBe(0)
+
+    const key = await keySecretFor(owner)
+    const response = await new Browser().fetch('/_/api/comment', {
+      method: 'POST',
+      purpose: 'none',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        path: `${ws.name}/${tree.name}/plan`,
+        text: 'From the CLI.',
+        on: 'pricing',
+        opId: crypto.randomUUID(),
+      }),
+    })
+    expect(response.status).toBe(201)
+    const body = (await response.json()) as {
+      comment: string
+      link: string
+      doc: { data: { agent: boolean; anchor: string } }
+    }
+    expect(body.doc.data).toMatchObject({ agent: true, anchor: 'pricing' })
+    expect(commentOfFragment(new URL(body.link).hash)).toEqual({
+      comment: body.comment,
+      anchor: 'pricing',
+    })
   })
 })
 

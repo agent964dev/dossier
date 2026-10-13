@@ -1056,6 +1056,50 @@ export const mentions = sqliteTable(
 )
 
 /**
+ * A person's notifications: a mention of them or a team that reached them,
+ * or a reply in a thread they wrote in. Written in the comment's own batch,
+ * deleted with the comment, at most NOTIFICATIONS_KEPT per person. Reads
+ * check the page's access every time.
+ */
+export const notifications = sqliteTable(
+  'notifications',
+  {
+    id: text('id').primaryKey(),
+    /** Lower-cased: whom it is for, signed in yet or not. */
+    email: text('email').notNull(),
+    type: text('type').notNull(),
+    treeId: text('tree_id')
+      .notNull()
+      .references(() => trees.id),
+    pageNodeId: text('page_node_id')
+      .notNull()
+      .references(() => nodes.id),
+    commentNodeId: text('comment_node_id')
+      .notNull()
+      .references(() => nodes.id),
+    /** The thread's anchor and its label, as the thread's root holds them. */
+    anchor: text('anchor'),
+    label: text('label'),
+    /** A mention through a team: the comment's `team:<name>`. */
+    via: text('via'),
+    actorId: text('actor_id').notNull(),
+    createdAt: integer('created_at').notNull(),
+    readAt: integer('read_at'),
+  },
+  (t) => [
+    check('notifications_type_check', sql`${t.type} in ('mention', 'reply')`),
+    index('notifications_email_idx').on(t.email, t.createdAt),
+    index('notifications_unread_idx').on(t.email, t.readAt),
+    index('notifications_page_idx').on(t.pageNodeId),
+    // One per person and comment: a mention given again tells them again.
+    uniqueIndex('notifications_comment_email_unique').on(
+      t.commentNodeId,
+      t.email,
+    ),
+  ],
+)
+
+/**
  * Where a moved node was: one row for every node a move takes along, the
  * moved node and everything below it, deleted nodes included. A frame pinned
  * before the move still finds each at its old path, and an old link

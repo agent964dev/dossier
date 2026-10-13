@@ -214,6 +214,7 @@ const PRICING: Thread = {
     push: 3,
     edited: false,
     deleted: false,
+    agent: false,
   },
   replies: [
     {
@@ -231,6 +232,8 @@ const PRICING: Thread = {
       push: 3,
       edited: true,
       deleted: false,
+      // Written with the CLI, through Lina's agent key.
+      agent: true,
     },
   ],
   resolved: true,
@@ -290,7 +293,7 @@ describe('dossier read of a comments folder', () => {
         '',
         '> Per pallet or per truck?',
         '',
-        'Reply from lina@acme.com · 10 Oct 2026, 10:02 UTC · push 3 · agree · edited',
+        'Reply from lina@acme.com (agent) · 10 Oct 2026, 10:02 UTC · push 3 · agree · edited',
         '',
         '> Per truck from December.',
         '> The old price holds until then.',
@@ -321,5 +324,104 @@ describe('dossier read of a comments folder', () => {
     expect(threadsText({ folder: 'a/plan.comments', threads: [] })).toBe(
       'No comments yet.\n',
     )
+  })
+})
+
+describe('dossier comment', () => {
+  const written = (over: Record<string, unknown> = {}) => ({
+    comment: 'plan.comments/sara@acme.com/2026-10-13T09-00-00.json',
+    page: 'plan.html',
+    link: 'https://dossier.acme.com/agent964/acme/plan#dossier-comment=plan.comments%2Fsara%40acme.com%2F2026-10-13T09-00-00.json&on=pricing',
+    doc: {
+      path: 'plan.comments/sara@acme.com/2026-10-13T09-00-00.json',
+      data: { text: 'Per truck. @lina@acme.com', agent: true },
+      by: 'sara@acme.com',
+      at: '2026-10-13T09:00:00.000Z',
+      push: 3,
+    },
+    ...over,
+  })
+
+  it('comments on an element with its text, and prints the path --reply-to takes and the link', async () => {
+    const cli = await setUp(() => Response.json(written(), { status: 201 }))
+
+    expect(
+      await cli.run([
+        'comment',
+        'agent964/acme/plan',
+        '--on',
+        'pricing',
+        '--stance',
+        'agree',
+        'Per truck. @lina@acme.com',
+      ]),
+    ).toBe(0)
+    expect(cli.stdout()).toBe(
+      [
+        'Commented on plan.html: plan.comments/sara@acme.com/2026-10-13T09-00-00.json',
+        written().link,
+        '',
+      ].join('\n'),
+    )
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.method).toBe('POST')
+    expect(requests[0]?.url.pathname).toBe('/_/api/comment')
+    expect(requests[0]?.headers.get('authorization')).toBe('Bearer dsk_one')
+    expect(requests[0]?.body).toMatchObject({
+      path: 'agent964/acme/plan',
+      text: 'Per truck. @lina@acme.com',
+      on: 'pricing',
+      stance: 'agree',
+    })
+    expect(typeof (requests[0]!.body as { opId: unknown }).opId).toBe('string')
+  })
+
+  it('replies in a thread with text from stdin', async () => {
+    const fetch = stubFetch(() =>
+      Response.json(
+        written({ comment: 'plan.comments/sara@acme.com/r.json' }),
+        {
+          status: 201,
+        },
+      ),
+    )
+    requests = fetch.requests
+    current = await harness({
+      fetch: fetch.fetch,
+      env: ENV,
+      stdin: 'Done.\nSee the table.\n',
+    })
+    const thread = 'plan.comments/lina@acme.com/2026-10-10T09-14-03.json'
+
+    expect(
+      await current.run([
+        'comment',
+        'agent964/acme/plan',
+        '--reply-to',
+        thread,
+        '-',
+      ]),
+    ).toBe(0)
+    expect(current.stdout().split('\n')[0]).toBe(
+      'Replied on plan.html: plan.comments/sara@acme.com/r.json',
+    )
+    expect(requests[0]?.body).toMatchObject({
+      text: 'Done.\nSee the table.\n',
+      replyTo: thread,
+    })
+  })
+
+  it('answers a page it cannot open as nothing there, exit 3, and refuses no text before asking', async () => {
+    const cli = await setUp(() =>
+      errorResponse('not_found', 'Nothing is here, or you cannot open it.'),
+    )
+
+    expect(await cli.run(['comment', 'agent964/acme/secret', 'Hi'])).toBe(3)
+    expect(cli.stderr()).toContain(
+      'Nothing at agent964/acme/secret, or you cannot read it.',
+    )
+    requests.length = 0
+    expect(await cli.run(['comment', 'agent964/acme/plan', '  '])).toBe(2)
+    expect(requests).toHaveLength(0)
   })
 })

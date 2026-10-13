@@ -224,6 +224,12 @@ export {
   type UnseenMention,
 } from './mentions.ts'
 export {
+  Notifications,
+  type NotificationsPage,
+  type NotificationsService,
+  type NotificationView,
+} from './notifications.ts'
+export {
   Search,
   type SearchPage,
   type SearchResult,

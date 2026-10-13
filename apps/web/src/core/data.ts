@@ -13,6 +13,7 @@ import {
   MAX_DEPTH,
   MENTIONABLE_MAX,
   MENTIONABLE_QUERY_MAX,
+  mentionsIn,
   type MentionableResult,
   type AuthoredSeq,
   type DataReadResult,
@@ -58,6 +59,8 @@ import {
   parseCommentRevision,
   parseCommentWrite,
   readThreads,
+  threadPlace,
+  threadWriters,
 } from './comments.ts'
 import { newId } from './ids.ts'
 import {
@@ -265,6 +268,41 @@ export interface DataService {
     i: WritePayload,
   ) => Effect.Effect<
     DocWire,
+    DossierError<
+      | 'forbidden'
+      | 'invalid'
+      | 'not_mergeable'
+      | 'closed'
+      | 'too_large'
+      | 'rate_limited'
+      | 'sign_in_required'
+      | 'not_found'
+      | 'unavailable'
+    >,
+    CurrentCaller | Background
+  >
+  /**
+   * `dossier comment`: a comment on the page a link names, or a reply in
+   * one of its threads, written as `write` writes the comment component's,
+   * at the tree's current push. Its mentions are read from its text. A page
+   * that is missing or unreadable is not_found alike.
+   */
+  readonly comment: (i: {
+    readonly ref: LinkRef
+    readonly text: string
+    readonly anchor: string | null
+    /** A thread's root, from the page's folder or as a tree path. */
+    readonly replyTo: string | null
+    readonly stance: string | null
+    readonly opId: OpId
+  }) => Effect.Effect<
+    {
+      readonly doc: DocWire
+      /** The page's tree path. */
+      readonly page: string
+      /** The comment's path from the page's folder, as replies name it. */
+      readonly comment: string
+    },
     DossierError<
       | 'forbidden'
       | 'invalid'
@@ -2033,9 +2071,13 @@ export const DataLive: Layer.Layer<
                 }
                 return reached
               })
-            const mentionable = (mentions: readonly string[]) =>
+            const mentionable = (
+              mentions: readonly string[],
+              except: ReadonlySet<string> = new Set(),
+            ) =>
               Effect.gen(function* () {
                 const reached = yield* reachedBy(mentions)
+                for (const known of except) reached.delete(known)
                 const readers = yield* access.readersAmong(
                   [...reached.keys()],
                   page.node,
@@ -2068,12 +2110,13 @@ export const DataLive: Layer.Layer<
                 const again = yield* replay()
                 if (again !== null) return again
                 const existing = new Map<string, string>()
-                for (const file of yield* commentFiles(
+                const files = yield* commentFiles(
                   bindings,
                   tree.id,
                   folder,
                   null,
-                )) {
+                )
+                for (const file of files) {
                   if (!isCommentValue(file.value)) continue
                   existing.set(file.path, file.value.replyTo ?? file.path)
                 }
@@ -2087,8 +2130,15 @@ export const DataLive: Layer.Layer<
                     dossierError('invalid', parsed.invalid, null, parsed.path),
                   )
                 }
+                // A comment written with an agent key is an agent's: Dossier
+                // says so from how the writer came, never from the patch.
+                const byAgent = (yield* CurrentCaller).via.kind === 'agent'
                 const json = (
-                  parsed.kind === 'comment' ? parsed.entry : parsed.mark
+                  parsed.kind === 'comment'
+                    ? byAgent
+                      ? { ...parsed.entry, agent: true }
+                      : parsed.entry
+                    : parsed.mark
                 ) as JsonObject
                 const stamp = entryStamp(yield* Clock.currentTimeMillis)
                 let path = `${own}/${stamp}.json`
@@ -2126,6 +2176,23 @@ export const DataLive: Layer.Layer<
                   parsed.kind === 'comment'
                     ? yield* mentionable(parsed.entry.mentions)
                     : []
+                const thread =
+                  parsed.kind === 'comment'
+                    ? threadPlace(files, parsed.entry)
+                    : { anchor: null, label: null }
+                // A reply tells everyone else who wrote in its thread, but
+                // those it mentions, who hear of the mention instead.
+                const replied =
+                  parsed.kind === 'comment' && parsed.entry.replyTo !== null
+                    ? yield* access.readersAmong(
+                        threadWriters(files, parsed.entry.replyTo).filter(
+                          (writer) =>
+                            writer !== email &&
+                            !mentioned.some((m) => m.email === writer),
+                        ),
+                        page.node,
+                      )
+                    : new Set<string>()
                 yield* limits.requireStorage(
                   tree.workspaceId,
                   new TextEncoder().encode(JSON.stringify(json)).length,
@@ -2154,7 +2221,19 @@ export const DataLive: Layer.Layer<
                       })
                       cs.event({ type: 'comment', path, node })
                       for (const m of mentioned) {
-                        cs.mention(granted, { comment: node, path, ...m })
+                        cs.mention(granted, {
+                          comment: node,
+                          path,
+                          thread,
+                          ...m,
+                        })
+                      }
+                      for (const writer of replied) {
+                        cs.notifyReply(granted, {
+                          comment: node,
+                          email: writer,
+                          thread,
+                        })
                       }
                       return { version }
                     }),
@@ -2209,12 +2288,34 @@ export const DataLive: Layer.Layer<
                 }
                 const mine = yield* access.require('withdraw-own', file.node)
                 const before = new Set(value.mentions)
+                // Only those no mention of it reached before: a team beside
+                // someone's own email tells them nothing new.
                 const added =
                   parsed.mentions === undefined
                     ? []
                     : yield* mentionable(
                         parsed.mentions.filter((m) => !before.has(m)),
+                        new Set((yield* reachedBy(value.mentions)).keys()),
                       )
+                // A reply's thread is placed where its root is.
+                const root =
+                  added.length === 0 || value.replyTo === null
+                    ? null
+                    : yield* liveData(
+                        tree.id,
+                        `${folder}${value.replyTo.slice(fromPageFolder(folder).length)}`,
+                      )
+                const thread = threadPlace(
+                  root === null
+                    ? []
+                    : [
+                        {
+                          path: value.replyTo!,
+                          value: parseJson(root.version.jsonValue),
+                        },
+                      ],
+                  value,
+                )
                 // Whom the comment names now, so someone it named twice
                 // stays named when one of the two goes.
                 const still =
@@ -2246,6 +2347,7 @@ export const DataLive: Layer.Layer<
                         cs.mention(granted, {
                           comment: mine,
                           path: target,
+                          thread,
                           ...m,
                         })
                       }
@@ -2773,6 +2875,62 @@ export const DataLive: Layer.Layer<
           }
         }
         return { files, comments: kept }
+      })
+
+    const commentOn: DataService['comment'] = (i) =>
+      Effect.gen(function* () {
+        const asked =
+          i.ref.path === ''
+            ? `${i.ref.workspace}/${i.ref.tree}`
+            : `${i.ref.workspace}/${i.ref.tree}/${i.ref.path}`
+        yield* signedIn('Sign in to comment.')
+        const resolved = yield* store.resolve(i.ref)
+        // Missing, unreadable and not a page all answer alike.
+        if (
+          'missing' in resolved ||
+          resolved.kind !== 'page' ||
+          resolved.node.origin !== 'authored'
+        ) {
+          return yield* Effect.fail(notFound(asked))
+        }
+        yield* access
+          .require('read', resolved.node)
+          .pipe(
+            Effect.mapError((e) =>
+              e.code === 'not_found' ? notFound(asked) : e,
+            ),
+          )
+        const page = resolved.node.path
+        const folder = commentsFolderOf(page)
+        const name = fromPageFolder(folder.slice(0, -1))
+        const dir = page.slice(0, page.lastIndexOf('/') + 1)
+        // A reply names its thread from the page's folder, as `--json`
+        // shows it, or by its tree path.
+        const replyTo =
+          i.replyTo === null
+            ? null
+            : dir !== '' && i.replyTo.startsWith(`${dir}${name}/`)
+              ? i.replyTo.slice(dir.length)
+              : i.replyTo
+        const doc = yield* write({
+          tree: resolved.tree.id,
+          page,
+          path: folder,
+          patch: {
+            text: i.text,
+            anchor: i.anchor,
+            label: null,
+            pin: null,
+            replyTo,
+            stance: i.stance,
+            mentions: mentionsIn(i.text),
+          },
+          replace: false,
+          opId: i.opId,
+          seq: resolved.tree.authoredSeq as AuthoredSeq,
+          as: null,
+        })
+        return { doc, page, comment: doc.path.slice(dir.length) }
       })
 
     const mentionable: DataService['mentionable'] = (i) =>
@@ -3433,6 +3591,7 @@ export const DataLive: Layer.Layer<
       mineCounts,
       deleteComment,
       write,
+      comment: commentOn,
       read,
       mentionable,
       pageForms,

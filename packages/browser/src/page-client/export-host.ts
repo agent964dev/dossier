@@ -705,6 +705,11 @@ export const createExportHost = (deps: {
       case 'mentionable':
         // Nobody is suggested away from Dossier but those in the threads.
         return { people: [], teams: [] }
+      case 'notifications':
+        // Notifications live in Dossier; a file has none to show.
+        return { notifications: [], unread: 0, next: null }
+      case 'notifications-read':
+        return 0
       default:
         // Uploads, and anything else that needs Dossier.
         throw refusal('not_in_export', NOT_IN_EXPORT)

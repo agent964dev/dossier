@@ -25,6 +25,7 @@ export type {
   BaseLibraries,
 } from './base.ts'
 export * from './comments.ts'
+export * from './notifications.ts'
 export * from './search.ts'
 
 export type Json =
@@ -550,6 +551,24 @@ export type PageToShell =
       readonly op: 'mentionable'
       readonly query: string
     }
+  /**
+   * The viewer's notifications, older than `before`, `limit` at most; a
+   * limit of 0 asks only how many are unread.
+   */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'notifications'
+      readonly before: string | null
+      readonly limit: number
+    }
+  /** Marks the viewer's notifications read: these, or all. */
+  | {
+      readonly type: 'request'
+      readonly id: number
+      readonly op: 'notifications-read'
+      readonly ids: readonly string[] | 'all'
+    }
   /** A form's unsent values, or null once there are none. */
   | {
       readonly type: 'draft'
@@ -712,6 +731,13 @@ export const isPageToShell = (data: unknown): data is PageToShell => {
           return Number.isInteger(data.sub)
         case 'mentionable':
           return isString(data.query)
+        case 'notifications':
+          return (
+            (data.before === null || isString(data.before)) &&
+            Number.isInteger(data.limit)
+          )
+        case 'notifications-read':
+          return data.ids === 'all' || isStringList(data.ids)
         default:
           return false
       }

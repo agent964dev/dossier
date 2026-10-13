@@ -4,6 +4,9 @@ import {
   pageOfCommentsFolder,
   MENTIONABLE_MAX,
   MENTIONABLE_QUERY_MAX,
+  NOTIFICATIONS_PAGE_DEFAULT,
+  NOTIFICATIONS_PAGE_MAX,
+  notificationsListOf,
   DossierError,
   ERRORS,
   docFromWire,
@@ -17,6 +20,7 @@ import {
   type JsonObject,
   type Me,
   type Mentionable,
+  type NotificationsList,
   type PageBootstrap,
   type PageErrorCode,
   type PageOp,
@@ -41,6 +45,23 @@ export interface Uploaded {
 
 export type WatchValue = Doc | Doc[] | null
 
+/**
+ * The viewer's own notifications on pages of this page's tree, as Dossier's
+ * screens show them: only what they can open now; the shell names the tree,
+ * so a page never sees another tree's. A visitor has none.
+ */
+export interface PageNotifications {
+  /** Newest first: `limit` (20, at most 30) older than `before`, a `next`. */
+  list(opts?: {
+    readonly before?: string | null
+    readonly limit?: number
+  }): Promise<NotificationsList>
+  /** How many are unread, at most 10: past nine reads "9+". */
+  unread(): Promise<number>
+  /** Marks these read, or every one; resolves with how many stay unread. */
+  read(ids: readonly string[] | 'all'): Promise<number>
+}
+
 export interface PageData {
   readonly read: (path: string) => Promise<Doc | Doc[] | null>
   readonly watch: (
@@ -55,6 +76,7 @@ export interface PageData {
   readonly withdraw: (path: string) => Promise<void>
   readonly upload: (file: File | Blob) => Promise<Uploaded>
   readonly mentionable: (query: string) => Promise<Mentionable>
+  readonly notifications: PageNotifications
   /** Takes the shell's `changed` messages. */
   readonly changed: (message: Changed) => void
   /** The page is going away: the shell stops watching for it. */
@@ -630,6 +652,85 @@ export const createPageData = (deps: {
       return mentionableOf(value)
     })
 
+  // Notifications --------------------------------------------------------
+
+  const noNotifications: NotificationsList = {
+    notifications: [],
+    unread: 0,
+    next: null,
+  }
+
+  /** The viewer's notifications through the shell; nothing for a visitor. */
+  const askNotifications = (before: string | null, limit: number) =>
+    gate(async () => {
+      if (deps.me() === null) return noNotifications
+      let value: unknown
+      try {
+        value = await requests.request({ op: 'notifications', before, limit })
+      } catch (error) {
+        const result = outcome(error, 'read', 'notifications')
+        if (result.kind === 'error') throw result.error
+        return noNotifications
+      }
+      const list = notificationsListOf(value)
+      if (list === null) {
+        throw fail('unavailable', ERRORS.unavailable.message, 'notifications')
+      }
+      return list
+    })
+
+  const notifications: PageData['notifications'] = {
+    list: (opts = {}) => {
+      const before = opts.before ?? null
+      const limit = opts.limit ?? NOTIFICATIONS_PAGE_DEFAULT
+      if (before !== null && typeof before !== 'string') {
+        return Promise.reject(
+          fail('invalid', 'before is what next gave.', String(before)),
+        )
+      }
+      if (
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > NOTIFICATIONS_PAGE_MAX
+      ) {
+        return Promise.reject(
+          fail(
+            'invalid',
+            `A limit is a whole number from 1 to ${NOTIFICATIONS_PAGE_MAX}.`,
+            String(limit),
+          ),
+        )
+      }
+      return askNotifications(before, limit)
+    },
+    unread: () => askNotifications(null, 0).then((list) => list.unread),
+    read: (ids) =>
+      gate(async () => {
+        if (
+          ids !== 'all' &&
+          (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string'))
+        ) {
+          throw fail(
+            'invalid',
+            "Mark a list of a notification's ids, or 'all'.",
+            String(ids),
+          )
+        }
+        if (deps.me() === null) return 0
+        try {
+          const value = await requests.request({
+            op: 'notifications-read',
+            ids: ids === 'all' ? 'all' : [...ids],
+          })
+          return typeof value === 'number' ? value : 0
+        } catch (error) {
+          const result = outcome(error, 'read', 'notifications')
+          if (result.kind === 'error') throw result.error
+          return 0
+        }
+      }),
+  }
+
   // Watching -------------------------------------------------------------
 
   const watch: PageData['watch'] = (input, onChange) => {
@@ -702,6 +803,7 @@ export const createPageData = (deps: {
     withdraw,
     upload,
     mentionable,
+    notifications,
     changed,
     leave,
     back,

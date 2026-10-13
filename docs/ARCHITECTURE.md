@@ -37,7 +37,7 @@ Nothing imports `apps/web`, and no package imports the CLI.
   library selectors with no imports at all.
 - **browser** is the code that runs in browsers: the shell, the page client,
   the base layout, the base components (`<dossier-copy>`, `<dossier-diff>`,
-  `<dossier-comments>`) and the libraries (Mermaid, Shiki, KaTeX) with single
+  `<dossier-comments>`, `<dossier-notifications>`) and the libraries (Mermaid, Shiki, KaTeX) with single
   file builds for export. `bun scripts/build.ts` writes it to `dist/base/`. The
   Worker never imports it as code: `apps/web/vite.config.ts` runs the build and
   ships the output as Static Assets.
@@ -363,7 +363,7 @@ are.
 ## The page client and the shell
 
 Every composed page loads `client.js`, the page client, as `window.dossier`
-(`read`, `watch`, `write`, `withdraw`, `upload`, `mentionable`, `me`, `page`). It talks to the
+(`read`, `watch`, `write`, `withdraw`, `upload`, `mentionable`, `notifications`, `me`, `page`). It talks to the
 shell over a `MessageChannel` port. The page sends a hello, and the shell
 answers once it has confirmed the page: the top page by the path its grant
 named, a nested page by a view of its own for the same person. The shell then
@@ -405,9 +405,47 @@ the page now get a `mention` event and a `mentions` row (`via` names the
 team that reached them), checked in one statement by `Access.readersAmong`
 and again inside the change's batch by one `Access.couldReadCondition`
 guard. The writer never counts, and an unknown team, or a guest's team
-mention, stays as text. "mentioned you" (`src/core/mentions.ts`) holds while
-the comment still names the person, by email or by the team in `via`, and
-until they open the page.
+mention, stays as text.
+
+Agents comment with `dossier comment`, through `POST /_/api/comment`: the
+Worker resolves the page the target names (missing and unreadable alike),
+reads mentions from the text (`mentionsIn` in `@dossier/contracts`, as the
+composer does) and writes through `Data.write` at the tree's current push,
+so access, mentions and notifications are the component's. A comment written
+by an `agent` caller carries `agent: true` in its entry. Only the Worker sets
+it, from the caller's `via`; a write that names `agent` is refused, and a
+revision keeps it. Comment Docs, `threadsText` ("(agent)") and
+notifications carry it.
+
+Each `mentions` row comes with a row in `notifications`, written in the same
+batch; so does a reply, for everyone else who wrote in its thread and could
+open the page (`Access.readersAmong`), unless the reply mentions them. A row
+names its person by email, its type (`mention` or `reply`), the page and
+comment nodes, the thread's anchor and label, the actor, and when it was
+read. Blanking a comment deletes its rows, the purge deletes them with their
+nodes, deleting an account deletes the person's, and each change keeps a
+person's newest 300. `src/core/notifications.ts` reads them for
+`GET /_/api/notifications` (20 a page, keyset by time and id; `limit=0` only
+counts) and marks them with `POST /_/api/notifications/read`, by id or all,
+which an agent key limited to a node or to reading may not do.
+Every read shows only rows whose comment still has its text, whose mention
+still names the person, and whose page and comment both pass
+`Access.require('read')` now (a key scoped to a page reaches no comment);
+missing and unreadable look the same. The unread count reads the unread
+rows newest first, 50 at a time by an index, with the access of their pages,
+until it finds ten readable ones or has read 300 rows. Opening a page
+(its view, not a renewal) reads that page's notifications. "mentioned you"
+(`src/core/mentions.ts`) is an unread mention notification whose comment
+still names the person, by email or by the team in `via`. Dossier's screens
+show a bell in the header (`src/components/notification-bell.tsx`) that asks
+the count on focus and every minute, across every tree. Pages may place
+`<dossier-notifications>`, which reads through the page client and the
+shell, and sees only the page's own tree: the shell adds its own tree to
+every notifications call (`tree=` on both routes), never one the page names,
+and the routes then list, count and mark only that tree's. Page code could
+read those comments anyway, so a page learns nothing from other trees or
+workspaces. A notification's link carries `#dossier-comment=<path>&on=<id>`,
+which `<dossier-comments>` opens.
 
 `GET /_/api/data/mentionable?tree&page&q` gives the composer whom to
 suggest, through the page client's `mentionable` and the shell. It answers

@@ -961,3 +961,43 @@ describe('shellApi write and events', () => {
     ).resolves.toEqual(grant)
   })
 })
+
+describe('notifications through the shell', () => {
+  test('reach only the shell’s own tree, whatever the page sends', async () => {
+    const it = await started()
+    const list = { notifications: [], unread: 0, next: null }
+    it.notifications.mockResolvedValue(list)
+    await it.ask(it.top, {
+      op: 'notifications',
+      before: null,
+      limit: 20,
+      tree: 'another-tree',
+    })
+    await it.ask(it.nested, {
+      op: 'notifications-read',
+      ids: 'all',
+      tree: 'another-tree',
+    })
+    expect(it.notifications.mock.calls).toEqual([
+      [{ tree: 't1', before: null, limit: 20 }],
+    ])
+    expect(it.readNotifications.mock.calls).toEqual([
+      [{ tree: 't1', ids: 'all' }],
+    ])
+    expect(it.results(it.top).at(-1)).toMatchObject({ ok: true, value: list })
+
+    // And the API is asked for that tree alone.
+    const fetch = vi.fn(async () => Response.json(list))
+    await shellApi(
+      fetch as unknown as typeof globalThis.fetch,
+      'https://main.test',
+    ).notifications({
+      tree: 't1',
+      before: 'c1',
+      limit: 0,
+    })
+    expect((fetch.mock.calls[0] as unknown[])[0]).toBe(
+      'https://main.test/_/api/notifications?tree=t1&limit=0&before=c1',
+    )
+  })
+})

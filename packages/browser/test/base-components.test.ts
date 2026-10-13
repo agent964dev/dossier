@@ -1,4 +1,9 @@
 // @vitest-environment happy-dom
+import type {
+  DossierNotification,
+  Me,
+  NotificationsList,
+} from '@dossier/contracts/bridge'
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
   COPIED_FOR,
@@ -10,6 +15,11 @@ import {
   DossierDiff,
   UNIFIED_BELOW_PX,
 } from '../src/base/components/dossier-diff.ts'
+import {
+  define as defineNotifications,
+  TEXT,
+} from '../src/base/components/dossier-notifications.ts'
+import type { Dossier } from '../src/page-client/create-page-client.ts'
 
 const PAGE = 'https://t1.content.test/_/v/HANDLE/3/rich/copy'
 
@@ -492,4 +502,388 @@ describe('<dossier-diff>', () => {
     const scoped = /^:where\((.*)\)$/.exec(rule![1]!.trim())![1]!
     for (const line of lines) expect(line.matches(scoped)).toBe(true)
   }, 20_000)
+})
+
+describe('<dossier-notifications>', () => {
+  const note = (
+    n: number,
+    over: Partial<DossierNotification> = {},
+  ): DossierNotification => ({
+    id: `n${n}`,
+    type: 'mention',
+    team: null,
+    actor: { email: 'sara@acme.com', name: 'Sara Haddad', image: null },
+    workspace: 'acme',
+    tree: 'plans',
+    page: { path: 'a/plan.html', title: 'Plan' },
+    anchor: 'S-1',
+    label: 'Pricing',
+    excerpt: 'Can you check the price?',
+    link: `https://main.test/acme/plans/a/plan#dossier-comment=plan.comments%2Fsara%40acme.com%2F${n}.json&on=S-1`,
+    at: new Date(Date.now() - n * 60 * 60_000).toISOString(),
+    read: false,
+    agent: false,
+    ...over,
+  })
+
+  /** The page client the bell reads through. */
+  const viewer = {
+    me: { email: 'lee@acme.com', name: 'Lee', role: 'read' } as Me | null,
+    pages: [] as NotificationsList[],
+    unread: 0,
+    /** What marking read answers: how many stay unread. */
+    left: 0,
+    /** Marking read fails. */
+    refuse: false,
+    /** Answers wait here, by what was asked, until a test lets them go. */
+    hold: false,
+    held: [] as { what: string; go: () => void }[],
+    list: vi.fn(),
+    read: vi.fn(),
+  }
+  /** An answer, at once or once its test lets it go. */
+  const answer = <T>(what: string, value: () => T): Promise<T> =>
+    viewer.hold
+      ? new Promise<T>((resolve) => {
+          viewer.held.push({ what, go: () => resolve(value()) })
+        })
+      : Promise.resolve(value())
+  /** Lets the held answer to `what` go. */
+  const letGo = async (what: string) => {
+    viewer.held.find((h) => h.what === what)!.go()
+    await settle()
+  }
+  const dossier = {
+    get me() {
+      return viewer.me
+    },
+    ready: Promise.resolve(),
+    notifications: {
+      list: (opts: { before?: string | null }) => {
+        viewer.list(opts)
+        // The page as it stands when asked.
+        const page =
+          viewer.pages[opts.before == null ? 0 : 1] ?? viewer.pages[0]!
+        return answer('list', () => page)
+      },
+      unread: () => {
+        const asked = viewer.unread
+        return answer('count', () => asked)
+      },
+      read: (ids: readonly string[] | 'all') => {
+        viewer.read(ids)
+        if (viewer.refuse) return Promise.reject(new Error('unavailable'))
+        const left = viewer.left
+        return answer(ids === 'all' ? 'all' : 'one', () => left)
+      },
+    },
+  } as unknown as Dossier
+
+  beforeAll(() => {
+    defineNotifications(customElements, dossier)
+  })
+  afterEach(() => {
+    viewer.me = { email: 'lee@acme.com', name: 'Lee', role: 'read' }
+    viewer.pages = []
+    viewer.unread = 0
+    viewer.left = 0
+    viewer.refuse = false
+    viewer.hold = false
+    viewer.held = []
+    viewer.list.mockReset()
+    viewer.read.mockReset()
+  })
+
+  const bell = async () => {
+    const element = place(
+      '<header><dossier-notifications></dossier-notifications></header>',
+    ).firstElementChild as HTMLElement
+    await settle()
+    return {
+      element,
+      button: element.querySelector('button')!,
+      badge: element.querySelector<HTMLElement>(
+        '.dossier-notifications-badge',
+      )!,
+      panel: element.querySelector<HTMLElement>('[role="dialog"]')!,
+    }
+  }
+
+  const buttonNamed = (root: ParentNode, name: string) =>
+    [...root.querySelectorAll('button')].find((b) => b.textContent === name)!
+
+  test('shows its unread count, 9+ past nine, in a name screen readers hear, and nothing to a visitor', async () => {
+    viewer.unread = 3
+    const { element, button, badge } = await bell()
+    expect(element.hidden).toBe(false)
+    expect(badge.textContent).toBe('3')
+    expect(badge.getAttribute('aria-hidden')).toBe('true')
+    expect(button.textContent).toContain('Notifications, 3 unread')
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    viewer.unread = 10
+    window.dispatchEvent(new Event('focus'))
+    await settle()
+    expect(badge.textContent).toBe('9+')
+    expect(button.textContent).toContain('Notifications, more than 9 unread')
+    viewer.me = null
+    const visitor = await bell()
+    expect(visitor.element.hidden).toBe(true)
+  })
+
+  test('lists the newest first with who, what, where, an excerpt and when, unread marked, then older ones and all read', async () => {
+    viewer.unread = 2
+    viewer.pages = [
+      {
+        notifications: [
+          note(1),
+          note(2, {
+            type: 'reply',
+            actor: { email: 'kai@acme.com', name: null, image: null },
+            anchor: null,
+            label: null,
+            read: true,
+          }),
+        ],
+        unread: 2,
+        next: 'cursor-1',
+      },
+      {
+        notifications: [note(30, { team: 'Design', agent: true })],
+        unread: 2,
+        next: null,
+      },
+    ]
+    const { button, panel } = await bell()
+    button.click()
+    await settle()
+    expect(panel.hidden).toBe(false)
+    expect(button.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement?.textContent).toBe('Notifications')
+    const items = () => [
+      ...panel.querySelectorAll<HTMLAnchorElement>(
+        '.dossier-notifications-item',
+      ),
+    ]
+    expect(items().map((a) => a.textContent)).toEqual([
+      'SUnread: Sara Haddad mentioned youPlan · PricingCan you check the price?1 h ago',
+      'kkai@acme.com replied to your threadPlanCan you check the price?2 h ago',
+    ])
+    expect(items()[0]!.hasAttribute('data-unread')).toBe(true)
+    expect(items()[1]!.hasAttribute('data-unread')).toBe(false)
+    expect(items()[0]!.getAttribute('href')).toBe(note(1).link)
+
+    const more = buttonNamed(panel, 'Show more')
+    more.click()
+    await settle()
+    expect(viewer.list).toHaveBeenLastCalledWith({ before: 'cursor-1' })
+    expect(items()).toHaveLength(3)
+    expect(items()[2]!.textContent).toContain(
+      'Sara Haddad Agent mentioned Design',
+    )
+    expect(
+      items()[2]!.querySelector('.dossier-notifications-agent')?.textContent,
+    ).toBe('Agent')
+    expect(more.hidden).toBe(true)
+
+    buttonNamed(panel, 'Mark all as read').click()
+    await settle()
+    expect(viewer.read).toHaveBeenCalledWith('all')
+    expect(items().some((a) => a.hasAttribute('data-unread'))).toBe(false)
+    expect(button.textContent).not.toContain('unread')
+  })
+
+  test('reads one when it is chosen, says all caught up when there are none, and closes on Escape with focus back on the bell', async () => {
+    viewer.unread = 1
+    viewer.pages = [{ notifications: [note(1)], unread: 1, next: null }]
+    const { button, panel, badge } = await bell()
+    button.click()
+    await settle()
+    const item = panel.querySelector<HTMLAnchorElement>('a')!
+    item.addEventListener('click', (event) => event.preventDefault())
+    item.click()
+    expect(viewer.read).toHaveBeenCalledWith(['n1'])
+    // The count Dossier answers.
+    await settle()
+    expect(badge.hidden).toBe(true)
+
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    )
+    expect(panel.hidden).toBe(true)
+    expect(document.activeElement).toBe(button)
+
+    viewer.pages = [{ notifications: [], unread: 0, next: null }]
+    button.click()
+    await settle()
+    const empty = panel.querySelector<HTMLElement>(
+      '.dossier-notifications-empty',
+    )!
+    expect(empty.hidden).toBe(false)
+    expect(empty.textContent).toBe("You're all caught up")
+    // Pressing elsewhere closes it too.
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    expect(panel.hidden).toBe(true)
+  })
+
+  test('takes the count Dossier answers when one is chosen, and shows that row read', async () => {
+    viewer.unread = 10
+    viewer.left = 10
+    viewer.pages = [
+      { notifications: [note(1), note(2)], unread: 10, next: null },
+    ]
+    const { button, panel, badge } = await bell()
+    button.click()
+    await settle()
+    const row = panel.querySelector<HTMLAnchorElement>('a')!
+    row.addEventListener('click', (event) => event.preventDefault())
+    row.click()
+    await settle()
+    // Ten or more stay unread: still "9+", never one less than the cap.
+    expect(badge.textContent).toBe('9+')
+    expect(row.hasAttribute('data-unread')).toBe(false)
+    expect(row.textContent).not.toContain('Unread:')
+    row.click()
+    await settle()
+    expect(viewer.read.mock.calls).toEqual([[['n1']]])
+  })
+
+  describe('answers that come late', () => {
+    /** An open bell with two unread, whose next answers wait. */
+    const opened = async () => {
+      viewer.unread = 2
+      viewer.left = 2
+      viewer.pages = [
+        { notifications: [note(1), note(2)], unread: 2, next: null },
+      ]
+      const it = await bell()
+      it.button.click()
+      await settle()
+      viewer.hold = true
+      const markAll = () =>
+        it.panel
+          .querySelector<HTMLButtonElement>('.dossier-notifications-mark-all')!
+          .click()
+      const unreadRows = () =>
+        it.panel.querySelectorAll('.dossier-notifications-item[data-unread]')
+          .length
+      return { ...it, markAll, unreadRows }
+    }
+
+    test('one read, then all: the one’s answer never brings a count back', async () => {
+      const it = await opened()
+      const row = it.panel.querySelector<HTMLAnchorElement>('a')!
+      row.addEventListener('click', (event) => event.preventDefault())
+      row.click()
+      viewer.left = 0
+      it.markAll()
+      await letGo('all')
+      await letGo('one')
+      expect(it.badge.hidden).toBe(true)
+      expect(it.unreadRows()).toBe(0)
+    })
+
+    test('a list asked before all were read never brings them back unread', async () => {
+      const it = await opened()
+      // Asked again on focus while open.
+      window.dispatchEvent(new Event('focus'))
+      viewer.left = 0
+      it.markAll()
+      await letGo('all')
+      await letGo('list')
+      expect(it.unreadRows()).toBe(0)
+      expect(it.badge.hidden).toBe(true)
+    })
+
+    test('a count asked before all were read never brings it back', async () => {
+      viewer.unread = 2
+      viewer.pages = [
+        { notifications: [note(1), note(2)], unread: 2, next: null },
+      ]
+      const { button, panel, badge } = await bell()
+      viewer.hold = true
+      // Closed: the count is asked again on focus.
+      window.dispatchEvent(new Event('focus'))
+      button.click()
+      await letGo('list')
+      panel
+        .querySelector<HTMLButtonElement>('.dossier-notifications-mark-all')!
+        .click()
+      await letGo('all')
+      await letGo('count')
+      expect(badge.hidden).toBe(true)
+    })
+  })
+
+  test('puts rows back unread and says so when marking them read fails', async () => {
+    viewer.unread = 2
+    viewer.refuse = true
+    viewer.pages = [
+      { notifications: [note(1), note(2)], unread: 2, next: null },
+    ]
+    const { button, panel, badge } = await bell()
+    button.click()
+    await settle()
+    const unreadRows = () =>
+      [...panel.querySelectorAll('.dossier-notifications-item')].filter((a) =>
+        a.hasAttribute('data-unread'),
+      ).length
+    const first = panel.querySelector<HTMLAnchorElement>('a')!
+    first.addEventListener('click', (event) => event.preventDefault())
+    first.click()
+    await settle()
+    expect(unreadRows()).toBe(2)
+    expect(panel.textContent).toContain(TEXT.readFailed)
+    // Still unread, so it is tried again.
+    panel.querySelector<HTMLAnchorElement>('a')!.click()
+    expect(viewer.read).toHaveBeenCalledTimes(2)
+    await settle()
+
+    panel
+      .querySelector<HTMLButtonElement>('.dossier-notifications-mark-all')!
+      .click()
+    await settle()
+    expect(unreadRows()).toBe(2)
+    expect(badge.textContent).toBe('2')
+    expect(panel.textContent).toContain(TEXT.readFailed)
+  })
+
+  test('keeps focus on the same notification when the list refreshes', async () => {
+    viewer.unread = 2
+    viewer.pages = [
+      { notifications: [note(1), note(2)], unread: 2, next: null },
+    ]
+    const { button, panel } = await bell()
+    button.click()
+    await settle()
+    const second = () =>
+      panel.querySelectorAll<HTMLAnchorElement>(
+        '.dossier-notifications-item',
+      )[1]!
+    second().focus()
+    expect(document.activeElement).toBe(second())
+    // A new one arrives; the list is asked again on focus.
+    viewer.pages = [
+      { notifications: [note(0), note(1), note(2)], unread: 3, next: null },
+    ]
+    window.dispatchEvent(new Event('focus'))
+    await settle()
+    const focused = document.activeElement as HTMLAnchorElement
+    expect(focused.classList.contains('dossier-notifications-item')).toBe(true)
+    expect(focused.getAttribute('href')).toBe(note(2).link)
+  })
+
+  test('renders into the page’s DOM with zero-specificity styles that follow dir', async () => {
+    const { element } = await bell()
+    expect(element.shadowRoot).toBeNull()
+    const css =
+      document.querySelector('style[data-dossier-base="dossier-notifications"]')
+        ?.textContent ?? ''
+    const list = selectors(css)
+    expect(list.length).toBeGreaterThan(0)
+    for (const selector of list) {
+      expect(selector.startsWith(':where(')).toBe(true)
+    }
+    expect(css).not.toMatch(PHYSICAL)
+    expectBaseLayerFirst()
+  })
 })

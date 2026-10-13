@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 
 import { Route as Root } from '../routes/__root'
 import { Avatar, shownName, type SignedInPerson } from './avatar'
+import { NotificationBell } from './notification-bell'
 
 /** The deployment's name and logo, as the Look sets them. */
 export interface HeaderBrand {
@@ -14,7 +15,8 @@ export interface HeaderBrand {
 
 /**
  * The glass header: the Look's logo and name, an optional control beside
- * it (the workspace menu on the home), and the account chip when signed in.
+ * it (the workspace menu on the home), and when signed in search, the
+ * notification bell and the account chip.
  * `brand` stands in for the saved Look, as the Look screen's preview does.
  */
 export function AppHeader({
@@ -78,6 +80,7 @@ export function AppHeader({
             >
               <Search aria-hidden className="size-4" />
             </Link>
+            <NotificationBell />
             <Account
               person={person ?? { email, name: '', image: null }}
               narrow={beside !== undefined}

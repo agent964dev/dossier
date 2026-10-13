@@ -23,7 +23,13 @@ vi.mock('@tanstack/react-router', () => ({
       {children}
     </a>
   ),
+  // The header's bell refreshes the screen after marking all read.
+  useRouter: () => ({ invalidate: async () => {} }),
 }))
+// The bell asks for its count: nobody has any here.
+vi.stubGlobal('fetch', async () =>
+  Response.json({ notifications: [], unread: 0, next: null }),
+)
 vi.mock('../../src/routes/__root', () => ({
   Route: { useLoaderData: () => undefined },
 }))

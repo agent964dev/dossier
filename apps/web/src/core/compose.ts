@@ -15,6 +15,7 @@ import { Pages, PagesLive } from './pages.ts'
 import { People, PeopleLive } from './people.ts'
 import { Purge, PurgeLive } from './purge.ts'
 import { Push, PushLive } from './push.ts'
+import { Notifications, NotificationsLive } from './notifications.ts'
 import { Search, SearchLive } from './search.ts'
 import { Settings, SettingsLive } from './settings.ts'
 import { Shares, SharesLive } from './shares.ts'
@@ -46,6 +47,7 @@ export type CoreServices =
   | Shares
   | Purge
   | Search
+  | Notifications
   | Webhooks
 
 /** The seams a test may replace. */
@@ -93,6 +95,7 @@ export const makeLayer = (
     data,
     WatchLive,
     SearchLive,
+    NotificationsLive,
     WebhooksLive,
   ).pipe(Layer.provideMerge(auth))
 }

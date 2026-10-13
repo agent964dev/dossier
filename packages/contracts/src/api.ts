@@ -7,6 +7,10 @@ import {
 import { Schema } from 'effect'
 
 import { MENTIONABLE_QUERY_MAX } from './comments.ts'
+import {
+  NOTIFICATIONS_PAGE_DEFAULT,
+  NOTIFICATIONS_PAGE_MAX,
+} from './notifications.ts'
 import { DossierError } from './errors.ts'
 import { EventTypeSchema } from './events.ts'
 import {
@@ -900,6 +904,119 @@ export class SearchGroup extends HttpApiGroup.make('search')
       .addSuccess(SearchResponse),
   ) {}
 
+/** `dossier comment`: a comment, or a reply, on the page a target names. */
+export const CommentPayload = Schema.Struct({
+  /** '<workspace>/<tree>/<page>', or a link on this deployment. */
+  path: Schema.String,
+  /** The comment; its @mentions are read from it. */
+  text: Schema.String,
+  /** The id of the element it is on; none for the whole page. */
+  on: Schema.optional(Schema.String),
+  /** A thread's root, from the page's folder or as a tree path. */
+  replyTo: Schema.optional(Schema.String),
+  stance: Schema.optional(Schema.String),
+  opId: OpId,
+})
+export type CommentPayload = typeof CommentPayload.Type
+
+export const CommentResponse = Schema.Struct({
+  /** The comment's path from the page's folder, as `--reply-to` takes it. */
+  comment: Schema.String,
+  /** The page's tree path. */
+  page: Schema.String,
+  /** The page's link, opening the comment. */
+  link: Schema.String,
+  /** The stored entry, its path inside the tree. */
+  doc: DocWire,
+})
+export type CommentResponse = typeof CommentResponse.Type
+
+export class CommentsGroup extends HttpApiGroup.make('comments')
+  // The comment component's write, as the caller: written with an agent
+  // key, it is an agent's. not_found | sign_in_required | forbidden |
+  // invalid | rate_limited
+  .add(
+    HttpApiEndpoint.post('comment', '/comment')
+      .setPayload(CommentPayload)
+      .addSuccess(CommentResponse, { status: 201 }),
+  ) {}
+
+/** One of the caller's notifications; see DossierNotification. */
+export const NotificationWire = Schema.Struct({
+  id: Schema.String,
+  type: Schema.Literal('mention', 'reply'),
+  team: Schema.NullOr(Schema.String),
+  actor: Schema.NullOr(
+    Schema.Struct({
+      email: Schema.String,
+      name: Schema.NullOr(Schema.String),
+      image: Schema.NullOr(Schema.String),
+    }),
+  ),
+  workspace: Schema.String,
+  tree: Schema.String,
+  page: Schema.Struct({ path: Schema.String, title: Schema.String }),
+  anchor: Schema.NullOr(Schema.String),
+  label: Schema.NullOr(Schema.String),
+  excerpt: Schema.String,
+  link: Schema.String,
+  /** ISO 8601. */
+  at: Schema.String,
+  read: Schema.Boolean,
+  /** An agent wrote the comment, with its person's agent key. */
+  agent: Schema.Boolean,
+})
+
+export const NotificationsResponse = Schema.Struct({
+  notifications: Schema.Array(NotificationWire),
+  /** At most NOTIFICATIONS_UNREAD_MAX: a bell reads it as "9+". */
+  unread: Schema.Int,
+  /** The `before` of older ones; null when there are none. */
+  next: Schema.NullOr(Schema.String),
+})
+export type NotificationsResponse = typeof NotificationsResponse.Type
+
+export class NotificationsGroup extends HttpApiGroup.make('notifications')
+  // Only what the caller can open now; with tree, only that tree's, as a
+  // page's shell asks. limit=0 answers the unread count alone.
+  // sign_in_required | invalid
+  .add(
+    HttpApiEndpoint.get('list', '/notifications')
+      .setUrlParams(
+        Schema.Struct({
+          before: Schema.optional(Schema.String),
+          tree: Schema.optional(TreeId),
+          limit: Schema.optionalWith(
+            Schema.NumberFromString.pipe(
+              Schema.int(),
+              Schema.between(0, NOTIFICATIONS_PAGE_MAX),
+            ),
+            { default: () => NOTIFICATIONS_PAGE_DEFAULT },
+          ),
+        }),
+      )
+      .addSuccess(NotificationsResponse),
+  )
+  // Marks the caller's own, by id or all, with tree only that tree's;
+  // answers the unread count. An agent key limited to a node or to
+  // reading is refused. sign_in_required | forbidden | invalid
+  .add(
+    HttpApiEndpoint.post('read', '/notifications/read')
+      .setPayload(
+        Schema.Union(
+          Schema.Struct({
+            ids: Schema.Array(Schema.String).pipe(Schema.maxItems(100)),
+            tree: Schema.optional(TreeId),
+          }),
+          Schema.Struct({
+            all: Schema.Literal(true),
+            tree: Schema.optional(TreeId),
+          }),
+        ),
+      )
+      .addSuccess(Schema.Struct({ unread: Schema.Int })),
+  ) {}
+
 export class DossierApi extends HttpApi.make('dossier')
   .add(SystemGroup)
   .add(MeGroup)
@@ -914,5 +1031,7 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(ExportGroup)
   .add(HistoryGroup)
   .add(SearchGroup)
+  .add(NotificationsGroup)
+  .add(CommentsGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

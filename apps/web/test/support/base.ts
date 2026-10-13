@@ -52,6 +52,11 @@ const LIBRARIES: BaseLibraries = {
       export: '_components/dossier-comments.export.js',
       doc: '_components/dossier-comments.md',
     },
+    'dossier-notifications': {
+      live: '_components/dossier-notifications.js',
+      export: '_components/dossier-notifications.export.js',
+      doc: '_components/dossier-notifications.md',
+    },
   },
 }
 

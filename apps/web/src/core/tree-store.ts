@@ -305,6 +305,15 @@ export type OperationResult =
   | { readonly state: 'stored'; readonly version: VersionRow }
   | { readonly state: 'withdrawn' }
 
+/** Where a thread sits: its root's anchor and label, null on the whole page. */
+export interface ThreadPlace {
+  readonly anchor: string | null
+  readonly label: string | null
+}
+
+/** How many notifications a person keeps; a change drops the oldest past it. */
+export const NOTIFICATIONS_KEPT = 300
+
 /** The steps of one change; nothing runs until the change commits. */
 export interface ChangeSet {
   /** Fails the change if an authored file under `path` changed after `base`. */
@@ -371,8 +380,9 @@ export interface ChangeSet {
     blanked: CommentEntry,
   ) => VersionHandle
   /**
-   * A 'mention' event at `path` and the mentions row keyed by that event's
-   * seq, for a comment on the page the grant is on.
+   * A 'mention' event at `path`, the mentions row keyed by that event's
+   * seq, and the person's notification, for a comment on the page the
+   * grant is on.
    */
   readonly mention: (
     page: Granted<'comment'>,
@@ -387,6 +397,20 @@ export interface ChangeSet {
        * one that several mentions share is checked once.
        */
       readonly reads: Statement
+      /** The thread's anchor and label, for the notification. */
+      readonly thread: ThreadPlace
+    },
+  ) => void
+  /**
+   * A notification of a reply for someone who wrote in its thread, on the
+   * page the grant is on. Its access is checked again whenever it is read.
+   */
+  readonly notifyReply: (
+    page: Granted<'comment'>,
+    n: {
+      readonly comment: NodeHandle | NodeRow
+      readonly email: string
+      readonly thread: ThreadPlace
     },
   ) => void
   /** Fails the change unless what the grant rests on still holds. */
@@ -2378,6 +2402,15 @@ export const TreeStoreLive: Layer.Layer<
           readonly email: string
           readonly via: string | null
         }[] = []
+        /** Notifications, one per person and comment. */
+        const notified: {
+          readonly type: 'mention' | 'reply'
+          readonly commentId: string
+          readonly pageId: NodeId
+          readonly email: string
+          readonly via: string | null
+          readonly thread: ThreadPlace
+        }[] = []
         /** Whose sockets the revoked shares close, as the batch read them. */
         const closing: (CloseSockets | null)[] = []
         let authored = 0
@@ -3483,6 +3516,10 @@ export const TreeStoreLive: Layer.Layer<
                 sql: 'delete from mentions where comment_node_id = ?',
                 binds: [comment.id],
               },
+              {
+                sql: 'delete from notifications where comment_node_id = ?',
+                binds: [comment.id],
+              },
             )
             return makeVersionHandle(versionId, comment.id)
           },
@@ -3497,14 +3534,37 @@ export const TreeStoreLive: Layer.Layer<
               mentionGuards.push(m.reads)
             }
             events.push({ type: 'mention', path: m.path, node: m.comment })
+            const commentId = isHandle(m.comment)
+              ? handleId(m.comment)
+              : m.comment.id
             mentioned.push({
               event: events.length - 1,
-              commentId: isHandle(m.comment)
-                ? handleId(m.comment)
-                : m.comment.id,
+              commentId,
               pageId: page.id,
               email: m.email.toLowerCase(),
               via: m.via ?? null,
+            })
+            notified.push({
+              type: 'mention',
+              commentId,
+              pageId: page.id,
+              email: m.email.toLowerCase(),
+              via: m.via ?? null,
+              thread: m.thread,
+            })
+          },
+
+          notifyReply: (page, n) => {
+            bases.push(...everyBasis(page.basis, person.id))
+            notified.push({
+              type: 'reply',
+              commentId: isHandle(n.comment)
+                ? handleId(n.comment)
+                : n.comment.id,
+              pageId: page.id,
+              email: n.email.toLowerCase(),
+              via: null,
+              thread: n.thread,
             })
           },
 
@@ -3514,25 +3574,30 @@ export const TreeStoreLive: Layer.Layer<
 
           remention: (comment, m) => {
             if (m.reached.size === 0) return
-            writes.push({
-              sql: `update mentions set via = (
-                      select json_extract(r.value, '$[1]') from json_each(?2) r
-                      where json_extract(r.value, '$[0]') = mentions.email)
-                    where comment_node_id = ?1
-                      and email in (select json_extract(r.value, '$[0]') from json_each(?2) r)
-                      and not exists (select 1 from json_each(?3) k
-                        where k.value = coalesce(mentions.via, mentions.email))`,
-              binds: [
-                comment.id,
-                JSON.stringify(
-                  [...m.reached].map(([email, via]) => [
-                    email.toLowerCase(),
-                    via,
-                  ]),
-                ),
-                JSON.stringify(m.mentions),
-              ],
-            })
+            const binds = [
+              comment.id,
+              JSON.stringify(
+                [...m.reached].map(([email, via]) => [
+                  email.toLowerCase(),
+                  via,
+                ]),
+              ),
+              JSON.stringify(m.mentions),
+            ]
+            // The mentions rows and their notifications alike.
+            for (const table of ['mentions', 'notifications']) {
+              writes.push({
+                sql: `update ${table} set via = (
+                        select json_extract(r.value, '$[1]') from json_each(?2) r
+                        where json_extract(r.value, '$[0]') = ${table}.email)
+                      where comment_node_id = ?1
+                        ${table === 'notifications' ? "and type = 'mention'" : ''}
+                        and email in (select json_extract(r.value, '$[0]') from json_each(?2) r)
+                        and not exists (select 1 from json_each(?3) k
+                          where k.value = coalesce(${table}.via, ${table}.email))`,
+                binds,
+              })
+            }
           },
 
           guardCommentText: (comment) => {
@@ -3809,6 +3874,48 @@ export const TreeStoreLive: Layer.Layer<
               now,
             ],
           })),
+          // One per person and comment: a mention given again (after it was
+          // taken away, or over a reply's) tells them again, unread.
+          ...notified.map((n) => ({
+            sql: `insert into notifications (id, email, type, tree_id, page_node_id,
+                      comment_node_id, anchor, label, via, actor_id, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict (comment_node_id, email) do update set
+                      type = excluded.type, via = excluded.via,
+                      anchor = excluded.anchor, label = excluded.label,
+                      actor_id = excluded.actor_id,
+                      created_at = excluded.created_at, read_at = null`,
+            binds: [
+              newId(),
+              n.email,
+              n.type,
+              t,
+              n.pageId,
+              n.commentId,
+              n.thread.anchor,
+              n.thread.label,
+              n.via,
+              person.id,
+              now,
+            ],
+          })),
+          // Each person keeps their newest NOTIFICATIONS_KEPT.
+          ...(notified.length === 0
+            ? []
+            : [
+                {
+                  sql: `delete from notifications where id in (
+                          select id from (select id, row_number() over (
+                              partition by email order by created_at desc, id desc) as n
+                            from notifications
+                            where email in (select value from json_each(?1)))
+                          where n > ?2)`,
+                  binds: [
+                    JSON.stringify([...new Set(notified.map((n) => n.email))]),
+                    NOTIFICATIONS_KEPT,
+                  ],
+                },
+              ]),
           {
             sql: 'delete from change_guards where substr(id, 1, ?) = ?',
             binds: [guardId.length + 1, `${guardId}:`],

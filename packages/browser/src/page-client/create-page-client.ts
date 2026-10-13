@@ -12,7 +12,7 @@ import {
   type Mentionable,
   type PageBootstrap,
 } from '@dossier/contracts/bridge'
-import { createPageData } from './data.ts'
+import { createPageData, type PageNotifications } from './data.ts'
 import { startForms, type FormsController } from './forms.ts'
 import { startKit } from './kit.ts'
 import { trackLocation } from './location.ts'
@@ -88,6 +88,11 @@ export interface Dossier {
    * anyone else, nobody.
    */
   mentionable(query: string): Promise<Mentionable>
+  /**
+   * Your own notifications in this page's tree: mentions of you or your teams,
+   * and replies in threads you wrote in, only for pages you can open now.
+   */
+  readonly notifications: PageNotifications
 }
 
 export type HostPort = Pick<
@@ -255,5 +260,6 @@ export const createPageClient = (deps: {
     withdraw: data.withdraw,
     upload: data.upload,
     mentionable: data.mentionable,
+    notifications: data.notifications,
   }) as Dossier
 }

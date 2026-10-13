@@ -1,3 +1,4 @@
+import { comment } from './comment.ts'
 import { exportPage } from './export.ts'
 import { diff } from './diff.ts'
 import { log } from './log.ts'
@@ -30,6 +31,7 @@ export const verbs = [
   ls,
   read,
   exportPage,
+  comment,
   search,
   watch,
   log,

@@ -75,11 +75,31 @@ export const STYLES = `
   color: var(--muted-foreground, inherit);
 }
 :where(.dossier-comments-author) { font-weight: 600; color: inherit; }
+:where(.dossier-comments-agent) {
+  font-size: 0.75em; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; border: 1px solid ${BORDER};
+  border-radius: 0.375em; padding-inline: 0.375em;
+}
 :where(.dossier-comments-stance) {
   font-size: 0.875em; border: 1px solid ${BORDER}; border-radius: 999px;
   padding-block: 0; padding-inline: 0.5em;
 }
 :where(.dossier-comments-text) { margin: 0; white-space: pre-wrap; }
+:where(.dossier-comments-mention) {
+  font-weight: 600; border-radius: 0.375em;
+  padding-block: 0.0625em; padding-inline: 0.25em;
+  background: color-mix(in srgb, var(--primary, currentColor) 16%, transparent);
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+:where(.dossier-comments-mention-me) {
+  background: color-mix(in srgb, var(--primary, currentColor) 30%, transparent);
+  box-shadow: inset 0 0 0 1px var(--primary, currentColor);
+}
+:where(.dossier-comments-comment[data-highlight]) {
+  border-radius: var(--radius, 0.375rem);
+  background: color-mix(in srgb, var(--primary, currentColor) 12%, transparent);
+  outline: 2px solid var(--ring, currentColor); outline-offset: 0.375em;
+}
 :where(.dossier-comments-deleted) {
   margin: 0; font-style: italic; color: var(--muted-foreground, inherit);
 }
@@ -201,6 +221,9 @@ export const STYLES = `
 @media (prefers-reduced-motion: no-preference) {
   :where(.dossier-comments-button, .dossier-comments-pin) {
     transition: background-color 120ms ease, border-color 120ms ease;
+  }
+  :where(.dossier-comments-comment) {
+    transition: background-color 600ms ease, outline-color 600ms ease;
   }
 }
 `

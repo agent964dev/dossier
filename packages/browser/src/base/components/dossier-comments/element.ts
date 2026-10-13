@@ -7,6 +7,7 @@
 // mention comes from the threads, and for a member of the page's workspace
 // from `dossier.mentionable` too.
 import {
+  commentOfFragment,
   COMMENT_MENTIONS_MAX,
   COMMENT_TEXT_MAX,
   DossierError,
@@ -36,6 +37,7 @@ import {
   isThreadDoc,
   knownPeople,
   labelOf,
+  mentionParts,
   mentionsIn,
   pinText,
   placeThreads,
@@ -104,7 +106,35 @@ export const TEXT = {
   forbidden: ERRORS.forbidden.message,
   unavailable: ERRORS.unavailable.message,
   notInDossier: 'Comments show when this page is open in Dossier.',
+  linkGone: 'The comment this link opens is no longer here.',
+  linkDeleted: 'The comment this link opens was deleted.',
+  linkResolved: 'The thread this link opens is resolved.',
+  agent: 'Agent',
 } as const
+
+/** How long a comment a link opens stays highlighted. */
+export const HIGHLIGHT_MS = 2500
+
+/**
+ * The fragment each document's elements last followed, and the navigation
+ * that brought it (null for the page's own load), so one element opens a
+ * link's comment once per navigation: the item's element with its `for`,
+ * else the whole page's. Going back to the same link follows it again.
+ */
+const followed = new WeakMap<
+  Document,
+  { readonly hash: string; readonly by: Event | null }
+>()
+
+/**
+ * Display names of people comments mention, as Dossier gave them to the
+ * viewer through `dossier.mentionable`: asked once per email for every
+ * element of the page. Null when Dossier gave none.
+ */
+const mentionNames = new WeakMap<
+  Dossier,
+  Map<string, Promise<string | null> | string | null>
+>()
 
 export const tooLong = (length: number): string =>
   `A comment holds at most ${COMMENT_TEXT_MAX.toLocaleString('en-US')} characters; this one has ${length.toLocaleString('en-US')}.`
@@ -513,6 +543,14 @@ export class DossierComments extends HTMLElement {
   } | null = null
   /** The `for` it had when it left, to choose again if that changed meanwhile. */
   #leftFor: string | null | undefined = undefined
+  /** The comment a link opened, highlighted for a moment. */
+  #highlight: string | null = null
+  #highlightTimer: ReturnType<typeof setTimeout> | undefined
+  /** Bumped when Dossier names someone a comment mentions. */
+  #namesSeen = 0
+  /** The emails whose names it waits for. */
+  readonly #awaiting = new Set<string>()
+  readonly #onHash = (event: Event): void => this.#followLink(event)
   /** Whom Dossier suggests: only for someone signed in, once it is ready. */
   readonly #lookup = new Lookup(() => {
     const dossier = this.#dossier
@@ -551,6 +589,8 @@ export class DossierComments extends HTMLElement {
     this.#stopWatch = follow(dossier, this.#folder(), (value) => {
       if (session === this.#session) this.#fromWatch(value)
     })
+    // A link to a comment pasted while the page is open.
+    this.ownerDocument.defaultView?.addEventListener('hashchange', this.#onHash)
     dossier.ready.then(
       () => {
         if (session !== this.#session) return
@@ -581,6 +621,16 @@ export class DossierComments extends HTMLElement {
     this.#leftFor = this.#scope()
     this.#stopWatch?.()
     this.#stopWatch = null
+    this.ownerDocument.defaultView?.removeEventListener(
+      'hashchange',
+      this.#onHash,
+    )
+    clearTimeout(this.#highlightTimer)
+    // A highlight whose timer will not run again goes with it.
+    this.#highlight = null
+    for (const element of this.querySelectorAll('[data-highlight]')) {
+      element.removeAttribute('data-highlight')
+    }
     this.#lookup.cancel()
     this.#body?.pins.disconnect()
     this.#placing = null
@@ -938,6 +988,7 @@ export class DossierComments extends HTMLElement {
     this.#render()
     this.#announce()
     this.#claimKept()
+    this.#followLink()
   }
 
   /** Tells the page its threads changed, so it can build on them live. */
@@ -1102,6 +1153,7 @@ export class DossierComments extends HTMLElement {
         numbers.get(thread.root.path) ?? null,
         me,
         this.#ready,
+        this.#namesSeen,
         ui.reply !== null,
         comments.map((c) => [
           this.#editing.has(c.path),
@@ -1292,7 +1344,11 @@ export class DossierComments extends HTMLElement {
     const own = this.#isOwn(comment)
     const article = doc.createElement('article')
     article.className = 'dossier-comments-comment'
+    article.setAttribute('data-comment', comment.path)
     if (own) article.setAttribute('data-own', '')
+    if (comment.path === this.#highlight) {
+      article.setAttribute('data-highlight', '')
+    }
     const avatar = doc.createElement('span')
     avatar.className = 'dossier-comments-avatar'
     avatar.setAttribute('aria-hidden', 'true')
@@ -1311,7 +1367,14 @@ export class DossierComments extends HTMLElement {
     if (name !== null) author.title = comment.by
     author.id = uid('by')
     article.setAttribute('aria-labelledby', author.id)
-    meta.append(author, this.#time(comment.at))
+    meta.append(author)
+    // Written with the CLI, through the person's agent key.
+    if (comment.agent === true) {
+      const agent = this.#span(TEXT.agent)
+      agent.className = 'dossier-comments-agent'
+      meta.append(agent)
+    }
+    meta.append(this.#time(comment.at))
     if (comment.edited && !comment.deleted) {
       const edited = this.#span(TEXT.edited)
       edited.className = 'dossier-comments-edited'
@@ -1337,8 +1400,9 @@ export class DossierComments extends HTMLElement {
       const text = doc.createElement('p')
       text.className = 'dossier-comments-text'
       text.dir = 'auto'
-      // Comment text is only ever text: mentions and markup stay as written.
-      text.textContent = comment.text
+      // Comment text is only ever text: markup stays as written, and only
+      // the comment's own mentions become chips.
+      this.#fillText(text, comment)
       main.append(text)
     }
 
@@ -1374,6 +1438,202 @@ export class DossierComments extends HTMLElement {
     }
     article.append(avatar, main)
     return article
+  }
+
+  /**
+   * A comment's text, its mentions as chips: a person by their name, their
+   * email on hover, the viewer's own marked; a team by its name. An email
+   * whose name the viewer may not learn stays as written.
+   */
+  #fillText(element: HTMLElement, comment: CommentDoc): void {
+    const doc = this.ownerDocument
+    const me = this.#me()?.email.toLowerCase() ?? null
+    const nodes: Node[] = []
+    for (const part of mentionParts(comment.text, comment.mentions)) {
+      if (part.kind === 'text') {
+        nodes.push(doc.createTextNode(part.text))
+        continue
+      }
+      const chip = doc.createElement('span')
+      chip.className = 'dossier-comments-mention'
+      chip.dir = 'auto'
+      if (part.kind === 'team') {
+        chip.classList.add('dossier-comments-mention-team')
+        chip.textContent = `@${part.name}`
+        chip.title = `Team ${part.name}`
+        chip.setAttribute('data-mention', `team:${part.name}`)
+      } else {
+        const name = this.#nameOf(part.email)
+        if (name === null) {
+          nodes.push(doc.createTextNode(part.text))
+          continue
+        }
+        chip.textContent = `@${name}`
+        chip.title = part.email
+        chip.setAttribute('data-mention', part.email)
+        if (part.email === me) chip.classList.add('dossier-comments-mention-me')
+      }
+      nodes.push(chip)
+    }
+    element.replaceChildren(...nodes)
+  }
+
+  /**
+   * The name of someone a comment mentions, as far as the viewer may know
+   * it: their own, a writer's in the threads, or what Dossier answers a
+   * signed-in viewer through `dossier.mentionable`, which names nobody to
+   * guests. Null while unknown, so the email stays as written.
+   */
+  #nameOf(email: string): string | null {
+    const me = this.#me()
+    if (me !== null && me.email.toLowerCase() === email) {
+      return me.name.trim() === '' ? me.email : me.name
+    }
+    const known = this.#known().find((p) => p.email === email)
+    if (known !== undefined && known.name !== null && known.name !== '') {
+      return known.name
+    }
+    const dossier = this.#dossier
+    if (
+      dossier === null ||
+      !this.#ready ||
+      me === null ||
+      typeof dossier.mentionable !== 'function'
+    ) {
+      return null
+    }
+    let names = mentionNames.get(dossier)
+    if (names === undefined) {
+      names = new Map()
+      mentionNames.set(dossier, names)
+    }
+    const had = names.get(email)
+    if (typeof had === 'string' || had === null) return had
+    if (had === undefined) {
+      const asking = dossier.mentionable(email).then(
+        (found) => {
+          const person = found.people.find(
+            (p) => p.email.toLowerCase() === email,
+          )
+          const name =
+            person?.name !== null &&
+            person?.name !== undefined &&
+            person.name !== ''
+              ? person.name
+              : null
+          names.set(email, name)
+          return name
+        },
+        () => {
+          // Asked again by the next render that needs it.
+          names.delete(email)
+          return null
+        },
+      )
+      names.set(email, asking)
+    }
+    if (!this.#awaiting.has(email)) {
+      this.#awaiting.add(email)
+      void (names.get(email) as Promise<string | null>).then((name) => {
+        this.#awaiting.delete(email)
+        if (name === null) return
+        // Counted even while out of the page, so its threads take the name
+        // when it comes back; drawn only while it is in it.
+        this.#namesSeen += 1
+        // Whatever session asked, it draws now if it is in the page.
+        if (this.isConnected) this.#render()
+      })
+    }
+    return null
+  }
+
+  /**
+   * Opens the comment the page's link names in its fragment
+   * (`#dossier-comment=<path>&on=<anchor>`): the item's element whose `for`
+   * is the thread's anchor, else the whole page's element, opens the
+   * thread, shows it when resolved, scrolls it into view and highlights the
+   * comment for a moment. A comment gone, deleted or resolved is said so.
+   */
+  #followLink(by: Event | null = null): void {
+    const doc = this.ownerDocument
+    const win = doc.defaultView
+    if (win === null || !this.#loaded || !this.isConnected) return
+    const hash = win.location.hash
+    const wanted = commentOfFragment(hash)
+    if (wanted === null) return
+    const claim = followed.get(doc)
+    // Followed already: on this navigation, or, re-rendering, on any.
+    if (claim?.hash === hash && (by === null || claim.by === by)) return
+    const thread = this.#all.find(
+      ({ data }) =>
+        data.root.path === wanted.comment ||
+        data.replies.some((r) => r.path === wanted.comment),
+    )
+    const anchor =
+      thread === undefined ? wanted.anchor : thread.data.root.anchor
+    const scope = this.#scope()
+    if (scope !== null) {
+      if (scope !== anchor) return
+    } else if (anchor !== null && this.#itemElement(anchor) !== null) {
+      // The item's own element opens it.
+      return
+    }
+    followed.set(doc, { hash, by })
+    const comment =
+      thread === undefined
+        ? undefined
+        : [thread.data.root, ...thread.data.replies].find(
+            (c) => c.path === wanted.comment,
+          )
+    if (scope !== null) this.#open = true
+    if (thread?.data.resolved === true) this.#showResolved = true
+    clearTimeout(this.#highlightTimer)
+    this.#highlight = comment?.path ?? null
+    this.#render()
+    const body = this.#ensureBody()
+    const note =
+      comment === undefined
+        ? TEXT.linkGone
+        : comment.deleted
+          ? TEXT.linkDeleted
+          : thread?.data.resolved === true
+            ? TEXT.linkResolved
+            : null
+    const ui =
+      thread === undefined ? undefined : this.#uis.get(thread.data.root.path)
+    // Said beside the thread, or where the element's own sends are.
+    if (note !== null) (ui?.status ?? body.status).say(note)
+    if (ui !== undefined && ui.element.closest('details') === body.earlier) {
+      body.earlier.open = true
+    }
+    const article =
+      comment === undefined
+        ? null
+        : ([...this.querySelectorAll('[data-comment]')].find(
+            (element) => element.getAttribute('data-comment') === comment.path,
+          ) ?? null)
+    article?.setAttribute('data-highlight', '')
+    const target = ui?.element ?? this
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: this.#smooth(), block: 'center' })
+    }
+    focusElement(ui?.element ?? body.status.line)
+    if (this.#highlight !== null) {
+      this.#highlightTimer = setTimeout(() => {
+        this.#highlight = null
+        for (const element of this.querySelectorAll('[data-highlight]')) {
+          element.removeAttribute('data-highlight')
+        }
+      }, HIGHLIGHT_MS)
+    }
+  }
+
+  /** The connected item's element on this page whose `for` is `anchor`. */
+  #itemElement(anchor: string): Element | null {
+    for (const element of this.ownerDocument.querySelectorAll(`${TAG}[for]`)) {
+      if (element.getAttribute('for')?.trim() === anchor) return element
+    }
+    return null
   }
 
   /** The reply composer's stance choice follows the page's stances. */

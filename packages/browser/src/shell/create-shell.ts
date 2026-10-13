@@ -16,6 +16,7 @@ import {
   type JsonObject,
   type Me,
   type Mentionable,
+  type NotificationsList,
   type PageToShell,
   type PendingSend,
   type RoleName,
@@ -176,6 +177,20 @@ export interface ShellApi {
     /** A cursor a view or this route gave, handed back as it came. */
     readonly after: string
   }) => Promise<EventsResponseWire>
+  /**
+   * The person's notifications in one tree, newest first; limit 0 counts
+   * the unread. A page reaches only its own tree's.
+   */
+  readonly notifications: (i: {
+    readonly tree: string
+    readonly before: string | null
+    readonly limit: number
+  }) => Promise<NotificationsList>
+  /** Marks the person's notifications in one tree read; answers the unread. */
+  readonly readNotifications: (i: {
+    readonly tree: string
+    readonly ids: readonly string[] | 'all'
+  }) => Promise<number>
 }
 
 export interface ShellDeps {
@@ -918,6 +933,40 @@ export const createShell = (
           port,
           request.id,
           pageCall(() => api.mentionable({ tree, page, query: request.query })),
+        )
+        return
+      // A page sees its viewer's notifications in its own tree only: the
+      // shell names the tree, never the page, so no page reads another
+      // tree's comments, names or paths through it.
+      case 'notifications':
+        // Someone not signed in has none, and asks nothing.
+        if (email === null) {
+          answer(port, request.id, {
+            value: { notifications: [], unread: 0, next: null },
+          })
+          return
+        }
+        reply(
+          port,
+          request.id,
+          pageCall(() =>
+            api.notifications({
+              tree,
+              before: request.before,
+              limit: request.limit,
+            }),
+          ),
+        )
+        return
+      case 'notifications-read':
+        if (email === null) {
+          answer(port, request.id, { value: 0 })
+          return
+        }
+        reply(
+          port,
+          request.id,
+          pageCall(() => api.readNotifications({ tree, ids: request.ids })),
         )
         return
       case 'send':

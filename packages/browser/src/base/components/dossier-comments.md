@@ -35,7 +35,12 @@ Unsent text is kept on the device for each person and each item, and for
 visitors apart. People who may only read see every thread and no way to
 write.
 
-Each comment shows its writer's name, with their email on hover. Typing @
+Each comment shows its writer's name, with their email on hover. Agents
+comment too, with `dossier comment` and their person's agent key; their
+comments carry an "Agent" badge beside the name
+(`.dossier-comments-agent`), and stay their person's to edit or delete.
+Dossier marks them from the key alone, so no page or person can claim it.
+Typing @
 suggests people to mention by name and email: everyone in the threads, and
 for a member of the page's workspace also the workspace's members, the
 people the page or a folder above it is shared with, and the workspace's
@@ -45,7 +50,24 @@ through the list, Enter chooses and Escape closes it. A person goes in as
 `@sara@acme.com`, a team as `@team:Design`, or `@team:"Design Ops"` when
 its name holds a space or other punctuation. A team mention reaches the
 team's members who can open the page, when its writer is a member of the
-workspace. Mentions show "mentioned you" in Dossier and send no email.
+workspace. Mentions show "mentioned you" in Dossier, notify the person in
+Dossier's bell (and `<dossier-notifications>`), and send no email. In a
+comment, each of its mentions shows as a chip, `.dossier-comments-mention`:
+a person by their name with the email on hover, a team
+(`.dossier-comments-mention-team`) by its name, and a mention of the viewer
+marked more strongly (`.dossier-comments-mention-me`). A name comes from the
+threads or, for a member of the page's workspace, from Dossier; an email
+whose name the viewer may not learn stays as written.
+
+A link to the page whose fragment is `#dossier-comment=<path>&on=<id>` opens
+that comment: `<path>` is the comment's path from the page's folder, as in
+its Doc (`plan.comments/sara@acme.com/….json`), and `on` the id of its
+thread's element, if any. The element whose `for` is that id opens, else
+the whole page's element; the thread scrolls into view, takes focus, and
+the comment is highlighted for a moment (`data-highlight`, without motion
+when the viewer asks for less). A resolved thread shows with the resolved
+ones, and a comment deleted or gone is said so in the status line. Dossier's
+notifications link this way, and the link works pasted anywhere.
 
 The element fires a bubbling `dossier:state` event with
 `{ state: 'saving' | 'saved' | 'failed', error, doc }`, and a bubbling
@@ -53,7 +75,9 @@ The element fires a bubbling `dossier:state` event with
 change: every thread, or with `for` those on its element. Parts:
 `.dossier-comments-header`, `.dossier-comments-open` (the folded button),
 `.dossier-comments-count`, `.dossier-comments-thread`,
-`.dossier-comments-comment`, `.dossier-comments-composer`,
+`.dossier-comments-comment` (with `data-comment`, its path),
+`.dossier-comments-mention`, `.dossier-comments-agent`,
+`.dossier-comments-composer`,
 `.dossier-comments-status`, `.dossier-comments-pins`,
 `.dossier-comments-pin`; an element with `for` carries
 `.dossier-comments-item`.
@@ -64,7 +88,7 @@ with `dossier.read('plan.comments/')` or `dossier.watch`: one Doc per
 thread, its `data` a `{ root, replies, resolved }` where each comment has
 `by` (the writer's email), `name` (their display name, or null), `at`,
 `text`, `anchor`, `stance`, `mentions` (emails, and `team:Design` for a
-team) and `deleted`. This keeps a handoff of the open threads up to date,
+team), `deleted` and `agent` (true when an agent wrote it). This keeps a handoff of the open threads up to date,
 with the page's link:
 
     dossier.watch('plan.comments/', (threads) => {

@@ -20,6 +20,7 @@ What Dossier keeps
 - What you publish: the files you or your agents push, every earlier version of them, and who pushed each version and when.
 - What you send: the answers you send through forms on pages, the files you upload with them, and the data pages write for you, with who wrote each and when.
 - Comments: the comments you write, and the people you mention in them.
+- Notifications: when someone mentions you or a team you are in, or replies in a thread you wrote in, Dossier keeps a notification for you, and whether you have read it: your newest 300 at most. It goes when its comment is deleted.
 - Seen by: when you open a page, Dossier records that you opened it and when, and shows that to the people who may see who opened the page. A page that anyone may open also counts its views, without names.
 - History: each tree keeps a record of its changes (pushes, answers, comments, shares, moves and deletions) and who made them. Admins of a workspace can have these changes sent to addresses they choose.
 - Visitors: when you open a public page without signing in, Dossier sets a random cookie so that it can show the page to that browser. The cookie names no one.
