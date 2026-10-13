@@ -32,6 +32,7 @@ const setUp = async () => {
     'guide/index.html': '<title>Guide</title>',
     'guide/setup.html': '<title>Setup</title>',
     'notes.html': '<title>Notes</title>',
+    'drafts/idea.html': '<title>Idea</title>',
   })) as CommitResult
   const root = (await nodeAt(pushed.treeId, ''))!.id
   await share(pushed.treeId, root, 'email', reader.email, 'read', admin)
@@ -55,6 +56,15 @@ describe('the Files screen', () => {
     const guide = owners.pages.find((p) => p.path === 'guide/')!
     expect(guide.files).toBe(`/_/files/${ws.name}/site/guide/`)
     expect(owners.pages.find((p) => p.path === 'notes.html')!.files).toBeNull()
+    // An ordinary folder's row keeps to Files; the listing's row opens its link.
+    expect(owners.folders.find((f) => f.name === 'drafts')!.files).toBe(
+      `/_/files/${ws.name}/site/drafts/`,
+    )
+    const listed = await runAs(
+      admin,
+      listingModel({ workspace: ws.name, tree: 'site', path: '' }),
+    )
+    expect(listed.folders.find((f) => f.name === 'drafts')!.files).toBeNull()
 
     // The folder's own page is listed, and its crumbs stay in Files: the
     // folders above open as pages.

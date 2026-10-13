@@ -393,7 +393,7 @@ export function ListingScreen({
                     </RowIcon>
                     <div className={COLUMNS}>
                       <Link
-                        to={new URL(folder.link).pathname}
+                        to={folder.files ?? new URL(folder.link).pathname}
                         className={`${NAME_LINK} font-mono`}
                       >
                         {folder.name}/

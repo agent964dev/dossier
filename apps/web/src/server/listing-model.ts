@@ -70,6 +70,11 @@ export interface ListingView {
   readonly folders: readonly {
     readonly name: string
     readonly link: string
+    /**
+     * On the Files screen, the folder's Files listing, where its row goes so
+     * the screen stays in Files. Null elsewhere: the row opens its link.
+     */
+    readonly files: string | null
     readonly target: string
     readonly pages: number
     readonly push: PushStamp | null
@@ -218,6 +223,10 @@ export const listingModel = (data: {
       .map((e) => ({
         name: e.name,
         link: at(e.path, 'folder'),
+        files:
+          data.files === true
+            ? filesLink(ref.workspace, ref.tree, segmentsOf(e.path))
+            : null,
         target: targetOf(e.path, true),
         pages: e.pages ?? 0,
         push: stamp(e.push),
