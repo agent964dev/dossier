@@ -1002,6 +1002,32 @@ describe('<dossier-comments>', () => {
     })
   })
 
+  test('keeps the placed pin when for is set to nothing', async () => {
+    const element = await mount('<img id="shot" alt="">')
+    const image = document.getElementById('shot')!
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 50, 400, 200),
+    )
+    byKey(element, 'pin-button:main')!.click()
+    q(element, '.dossier-comments-pin-target').dispatchEvent(
+      new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 260,
+        clientY: 94,
+      }),
+    )
+    element.setAttribute('for', ' ')
+    await settle()
+    type(q(mainComposer(element), 'textarea'), 'Here')
+    q<HTMLButtonElement>(mainComposer(element), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[0]!.patch).toMatchObject({
+      anchor: 'shot',
+      pin: { x: 0.4, y: 0.22 },
+    })
+  })
+
   test('draws a numbered, focusable marker per pinned thread at its point, the same in a right-to-left page', async () => {
     document.documentElement.setAttribute('dir', 'rtl')
     const first = comment(LEE, 'Logo', {

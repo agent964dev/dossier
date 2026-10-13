@@ -469,8 +469,12 @@ export class DossierComments extends HTMLElement {
   #rescope(): void {
     if (this.#ready) this.#parts!.composer.text = this.#draft()
     if (this.#scope() === null) {
-      this.#pin = this.#pagePin
-      this.#pagePin = null
+      // Back to the whole page: its waiting pin, if one waits. A `for` that
+      // names nothing leaves the page's own pin alone.
+      if (this.#pagePin !== null) {
+        this.#pin = this.#pagePin
+        this.#pagePin = null
+      }
     } else if (this.#pin !== null) {
       this.#pagePin = this.#pin
       this.#pin = null
