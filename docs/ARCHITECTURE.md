@@ -426,9 +426,11 @@ read. Blanking a comment deletes its rows, the purge deletes them with their
 nodes, deleting an account deletes the person's, and each change keeps a
 person's newest 300. `src/core/notifications.ts` reads them for
 `GET /_/api/notifications` (20 a page, keyset by time and id; `limit=0` only
-counts) and marks them with `POST /_/api/notifications/read`, by id or all.
+counts) and marks them with `POST /_/api/notifications/read`, by id or all,
+which an agent key limited to a node or to reading may not do.
 Every read shows only rows whose comment still has its text, whose mention
-still names the person, and whose page passes `Access.require('read')` now;
+still names the person, and whose page and comment both pass
+`Access.require('read')` now (a key scoped to a page reaches no comment);
 missing and unreadable look the same. The unread count reads the unread
 rows newest first, 50 at a time by an index, with the access of their pages,
 until it finds ten readable ones or has read 300 rows. Opening a page

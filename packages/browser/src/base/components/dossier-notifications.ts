@@ -31,6 +31,7 @@ export const TEXT = {
   unread: 'Unread',
   agent: 'Agent',
   failed: 'Notifications could not load. Try again in a moment.',
+  readFailed: 'Could not mark them as read. Try again.',
 } as const
 
 const STYLES = `
@@ -408,6 +409,8 @@ export class DossierNotifications extends HTMLElement {
   #readAll(): void {
     const dossier = this.#dossier
     if (dossier === null) return
+    const before = { items: this.#items, unread: this.#unread }
+    this.#parts!.status.textContent = ''
     this.#items = this.#items.map((n) => ({ ...n, read: true }))
     this.#unread = 0
     this.#renderCount()
@@ -422,9 +425,13 @@ export class DossierNotifications extends HTMLElement {
         this.#renderCount()
       },
       () => {
-        if (session === this.#session) {
-          this.#parts!.status.textContent = TEXT.failed
-        }
+        if (session !== this.#session) return
+        // Not read after all: as they were, and said so.
+        this.#items = before.items
+        this.#unread = before.unread
+        this.#renderCount()
+        this.#renderList()
+        this.#parts!.status.textContent = TEXT.readFailed
       },
     )
   }
@@ -443,6 +450,7 @@ export class DossierNotifications extends HTMLElement {
     link.removeAttribute('data-unread')
     link.querySelector('.dossier-notifications-unread')?.remove()
     const parts = this.#parts!
+    parts.status.textContent = ''
     parts.markAll.hidden = this.#unread <= 1 && this.#items.every((n) => n.read)
     const session = this.#session
     this.#dossier?.notifications.read([id]).then(
@@ -451,7 +459,15 @@ export class DossierNotifications extends HTMLElement {
         this.#unread = unread
         this.#renderCount()
       },
-      () => {},
+      () => {
+        if (session !== this.#session) return
+        // Not read after all: unread again, so it can be tried again.
+        this.#items = this.#items.map((n) =>
+          n.id === id ? { ...n, read: false } : n,
+        )
+        this.#renderList()
+        parts.status.textContent = TEXT.readFailed
+      },
     )
   }
 

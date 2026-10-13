@@ -15,7 +15,10 @@ import {
   DossierDiff,
   UNIFIED_BELOW_PX,
 } from '../src/base/components/dossier-diff.ts'
-import { define as defineNotifications } from '../src/base/components/dossier-notifications.ts'
+import {
+  define as defineNotifications,
+  TEXT,
+} from '../src/base/components/dossier-notifications.ts'
 import type { Dossier } from '../src/page-client/create-page-client.ts'
 
 const PAGE = 'https://t1.content.test/_/v/HANDLE/3/rich/copy'
@@ -530,6 +533,8 @@ describe('<dossier-notifications>', () => {
     unread: 0,
     /** What marking read answers: how many stay unread. */
     left: 0,
+    /** Marking read fails. */
+    refuse: false,
     list: vi.fn(),
     read: vi.fn(),
   }
@@ -548,7 +553,9 @@ describe('<dossier-notifications>', () => {
       unread: () => Promise.resolve(viewer.unread),
       read: (ids: readonly string[] | 'all') => {
         viewer.read(ids)
-        return Promise.resolve(viewer.left)
+        return viewer.refuse
+          ? Promise.reject(new Error('unavailable'))
+          : Promise.resolve(viewer.left)
       },
     },
   } as unknown as Dossier
@@ -561,6 +568,7 @@ describe('<dossier-notifications>', () => {
     viewer.pages = []
     viewer.unread = 0
     viewer.left = 0
+    viewer.refuse = false
     viewer.list.mockReset()
     viewer.read.mockReset()
   })
@@ -716,6 +724,39 @@ describe('<dossier-notifications>', () => {
     row.click()
     await settle()
     expect(viewer.read.mock.calls).toEqual([[['n1']]])
+  })
+
+  test('puts rows back unread and says so when marking them read fails', async () => {
+    viewer.unread = 2
+    viewer.refuse = true
+    viewer.pages = [
+      { notifications: [note(1), note(2)], unread: 2, next: null },
+    ]
+    const { button, panel, badge } = await bell()
+    button.click()
+    await settle()
+    const unreadRows = () =>
+      [...panel.querySelectorAll('.dossier-notifications-item')].filter((a) =>
+        a.hasAttribute('data-unread'),
+      ).length
+    const first = panel.querySelector<HTMLAnchorElement>('a')!
+    first.addEventListener('click', (event) => event.preventDefault())
+    first.click()
+    await settle()
+    expect(unreadRows()).toBe(2)
+    expect(panel.textContent).toContain(TEXT.readFailed)
+    // Still unread, so it is tried again.
+    panel.querySelector<HTMLAnchorElement>('a')!.click()
+    expect(viewer.read).toHaveBeenCalledTimes(2)
+    await settle()
+
+    panel
+      .querySelector<HTMLButtonElement>('.dossier-notifications-mark-all')!
+      .click()
+    await settle()
+    expect(unreadRows()).toBe(2)
+    expect(badge.textContent).toBe('2')
+    expect(panel.textContent).toContain(TEXT.readFailed)
   })
 
   test('keeps focus on the same notification when the list refreshes', async () => {

@@ -116,8 +116,12 @@ export function NotificationBell() {
   useEffect(() => {
     let live = true
     const count = () => {
+      // Dropped when a mark read or a first page came after it was asked.
+      const asked = generation.current
       void ask({ limit: '0' }).then((page) => {
-        if (live && page !== null) setUnread(page.unread)
+        if (live && page !== null && asked === generation.current) {
+          setUnread(page.unread)
+        }
       })
     }
     count()

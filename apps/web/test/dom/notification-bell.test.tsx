@@ -49,6 +49,8 @@ const calls: { url: string; init: RequestInit | undefined }[] = []
 let gate: ((before: string) => Promise<void>) | null = null
 /** What marking read answers, when not the usual. */
 let readAnswer: { status: number; unread: number } | null = null
+/** Holds count answers until it resolves. */
+let countGate: (() => Promise<void>) | null = null
 
 let host: HTMLDivElement
 let root: Root
@@ -59,6 +61,7 @@ beforeEach(() => {
   calls.length = 0
   gate = null
   readAnswer = null
+  countGate = null
   invalidate.mockClear()
   vi.stubGlobal(
     'fetch',
@@ -76,7 +79,13 @@ beforeEach(() => {
         return Response.json({ unread })
       }
       const before = url.searchParams.get('before') ?? ''
-      if (url.searchParams.get('limit') !== '0') await gate?.(before)
+      if (url.searchParams.get('limit') === '0') {
+        // The count as it stands when asked, answered when let through.
+        const asked = unread
+        await countGate?.()
+        return Response.json({ notifications: [], next: null, unread: asked })
+      }
+      await gate?.(before)
       const page =
         url.searchParams.get('limit') === '0'
           ? { notifications: [], next: null }
@@ -252,6 +261,30 @@ describe('the notification bell', () => {
     await release()
     await settle()
     expect(rows().some((a) => a.hasAttribute('data-unread'))).toBe(false)
+    expect(badge()).toBeNull()
+  })
+
+  it('never lets a count asked before Mark all as read bring the old count back', async () => {
+    unread = 3
+    pages = { '': { notifications: [note(1)], next: null } }
+    act(() => root.render(<NotificationBell />))
+    await settle()
+    act(() => bell().click())
+    await settle()
+    let release = () => {}
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    countGate = () => waiting
+    // Asked again on focus, while there are still three.
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await act(async () => buttonNamed('Mark all as read')!.click())
+    await settle()
+    expect(badge()).toBeNull()
+    await act(async () => release())
+    await settle()
     expect(badge()).toBeNull()
   })
 

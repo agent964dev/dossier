@@ -27,6 +27,7 @@ import {
   unseenMentions,
   type Caller,
 } from '../src/core/index.ts'
+import CAP_MIGRATION from '../drizzle/0028_notifications_cap.sql?raw'
 import { NOTIFICATIONS_KEPT } from '../src/core/tree-store.ts'
 import { homeModel } from '../src/server/home-model.ts'
 import { listingModel } from '../src/server/listing-model.ts'
@@ -1190,6 +1191,14 @@ describe('notifications', () => {
     expect(await count('notifications', 'email = ?', sara.email)).toBe(
       NOTIFICATIONS_KEPT + 1,
     )
+    // As the backfill left them, 0028 keeps the newest 300; Sara's own,
+    // from the write above, is among them.
+    await exec(CAP_MIGRATION)
+    expect(await count('notifications', 'email = ?', sara.email)).toBe(
+      NOTIFICATIONS_KEPT,
+    )
+    expect(await count('notifications', "id = 'old0'")).toBe(0)
+    expect(await count('notifications', "id = 'old1'")).toBe(1)
     await write(minutes(1), ownerBrowser, tree, {
       path: 'plan.comments/',
       patch: comment('Second.', { mentions: [sara.email] }),
@@ -1240,6 +1249,38 @@ describe('notifications', () => {
       true,
     ])
     expect((await list(saraBrowser)).unread).toBe(1)
+  })
+
+  it('give a key scoped to a page none of its comments, and let only a whole, writable key mark them read', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', '', 'sara-s')
+    await write(T0, ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Sara, a look?', { mentions: [sara.email] }),
+    })
+    const page = (await nodeAt(tree.treeId, 'plan.html'))!.id
+    const scoped = await agent(sara.who, { scope: page })
+    const readOnly = await agent(sara.who, { readOnly: true })
+    const whole = await agent(sara.who)
+    // The page is in its reach; the comments beside it are not.
+    expect(await list(scoped)).toEqual({
+      notifications: [],
+      unread: 0,
+      next: null,
+    })
+    expect((await list(whole)).unread).toBe(1)
+    for (const key of [scoped, readOnly]) {
+      expect(
+        await failureAs(
+          key,
+          Effect.flatMap(Notifications, (n) =>
+            n.markRead({ all: true, tree: null }),
+          ),
+        ),
+      ).toMatchObject({ code: 'forbidden' })
+    }
+    expect((await list(sara.caller)).unread).toBe(1)
+    expect(await markRead(whole, { all: true })).toBe(0)
   })
 
   it('answer the API for the signed-in person only', async () => {

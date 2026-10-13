@@ -998,8 +998,8 @@ export class NotificationsGroup extends HttpApiGroup.make('notifications')
       .addSuccess(NotificationsResponse),
   )
   // Marks the caller's own, by id or all, with tree only that tree's;
-  // answers the unread count.
-  // sign_in_required | invalid
+  // answers the unread count. An agent key limited to a node or to
+  // reading is refused. sign_in_required | forbidden | invalid
   .add(
     HttpApiEndpoint.post('read', '/notifications/read')
       .setPayload(

@@ -88,7 +88,11 @@ export interface NotificationsService {
     i: ({ readonly ids: readonly string[] } | { readonly all: true }) & {
       readonly tree: NotificationScope
     },
-  ) => Effect.Effect<number, DossierError<'sign_in_required'>, CurrentCaller>
+  ) => Effect.Effect<
+    number,
+    DossierError<'sign_in_required' | 'forbidden'>,
+    CurrentCaller
+  >
 }
 
 export class Notifications extends Context.Tag('Notifications')<
@@ -131,6 +135,7 @@ interface Row {
   readonly createdAt: number
   readonly readAt: number | null
   readonly pageId: NodeId
+  readonly commentId: NodeId
   readonly pagePath: string
   readonly commentPath: string
   readonly text: string
@@ -213,12 +218,12 @@ export const NotificationsLive: Layer.Layer<
       return { id: person.id, email: person.email.toLowerCase() }
     })
 
-    /** Which of these pages the caller opens now, each asked once. */
-    const readablePages = (ids: readonly NodeId[]) =>
+    /** Which of these nodes the caller opens now, each asked once. */
+    const readableNodes = (ids: readonly NodeId[]) =>
       Effect.gen(function* () {
         const wanted = [...new Set(ids)]
         if (wanted.length === 0) return new Set<string>()
-        const raw = yield* read('A notification pages read', () =>
+        const raw = yield* read('A notification nodes read', () =>
           DB.prepare(
             'select * from nodes where id in (select value from json_each(?))',
           )
@@ -249,7 +254,8 @@ export const NotificationsLive: Layer.Layer<
         for (let scanned = 0; scanned < UNREAD_SCAN; scanned += SCAN) {
           const rows = yield* read('A notifications count', () =>
             DB.prepare(
-              `select n.id, n.created_at as createdAt, n.page_node_id as pageId
+              `select n.id, n.created_at as createdAt, n.page_node_id as pageId,
+                 n.comment_node_id as commentId
                from notifications n ${LIVE}
                where n.email = ?1 and n.read_at is null and ${STANDS}
                  and (?2 is null or p.tree_id = ?2)
@@ -258,16 +264,28 @@ export const NotificationsLive: Layer.Layer<
                order by n.created_at desc, n.id desc limit ${SCAN}`,
             )
               .bind(email, tree, from?.at ?? null, from?.id ?? '')
-              .all<{ id: string; createdAt: number; pageId: NodeId }>(),
+              .all<{
+                id: string
+                createdAt: number
+                pageId: NodeId
+                commentId: NodeId
+              }>(),
           )
           const found = rows.results
           const asked = found
-            .map((r) => r.pageId)
+            .flatMap((r) => [r.pageId, r.commentId])
             .filter((id) => !opens.has(id))
-          const open = yield* readablePages(asked)
+          const open = yield* readableNodes(asked)
           for (const id of asked) opens.set(id, open.has(id))
           for (const row of found) {
-            if (opens.get(row.pageId) === true) readable += 1
+            // The page and its comment both, as a key scoped to the page
+            // reaches the page alone.
+            if (
+              opens.get(row.pageId) === true &&
+              opens.get(row.commentId) === true
+            ) {
+              readable += 1
+            }
             if (readable === UNREAD_MAX) return readable
             from = { at: row.createdAt, id: row.id }
           }
@@ -300,7 +318,8 @@ export const NotificationsLive: Layer.Layer<
             DB.prepare(
               `select n.id, n.type, n.via, n.anchor, n.label,
                  n.created_at as createdAt, n.read_at as readAt,
-                 p.id as pageId, p.path as pagePath, c.path as commentPath,
+                 p.id as pageId, c.id as commentId, p.path as pagePath,
+                 c.path as commentPath,
                  json_extract(v.json_value, '$.text') as text,
                  coalesce(json_extract(v.json_value, '$.agent'), 0) as agent,
                  u.email as actorEmail,
@@ -322,9 +341,11 @@ export const NotificationsLive: Layer.Layer<
               .all<Row>(),
           )
           const found = rows.results
-          const opens = yield* readablePages(found.map((r) => r.pageId))
+          const opens = yield* readableNodes(
+            found.flatMap((r) => [r.pageId, r.commentId]),
+          )
           for (const row of found) {
-            if (opens.has(row.pageId)) {
+            if (opens.has(row.pageId) && opens.has(row.commentId)) {
               if (shown.length === limit) {
                 more = true
                 break
@@ -390,6 +411,19 @@ export const NotificationsLive: Layer.Layer<
     const markRead: NotificationsService['markRead'] = (i) =>
       Effect.gen(function* () {
         const me = yield* signedIn
+        // A person's inbox: an agent key limited to a node, or to reading,
+        // never changes it.
+        const { via } = yield* CurrentCaller
+        if (via.kind === 'agent' && (via.scope !== null || via.readOnly)) {
+          return yield* Effect.fail(
+            dossierError(
+              'forbidden',
+              'This agent key cannot mark notifications read.',
+              'Use a key with no limits, or the bell in Dossier.',
+              null,
+            ),
+          )
+        }
         const now = yield* Clock.currentTimeMillis
         // A page's call reaches only its own tree's.
         if ('all' in i) {
