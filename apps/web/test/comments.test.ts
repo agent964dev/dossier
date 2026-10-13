@@ -799,6 +799,50 @@ describe('what an agent reads', () => {
   })
 })
 
+describe('what page code reads for a handoff', () => {
+  it('gives a page-share respondent each thread with its root, replies, resolved and every comment’s fields', async () => {
+    const tree = await pushForms(owner, ws, FILES)
+    const sara = await given(tree, 'respond', 'plan.html', 'handoff')
+    const root = await write(T0, sara.caller, tree, {
+      path: 'plan.comments/',
+      // A stance on a thread's first comment, as a new comment offers it.
+      patch: comment('Hand the pricing to the agent', {
+        anchor: 'pricing',
+        label: 'Pricing',
+        stance: 'reopen',
+      }),
+    })
+    await write(minutes(1), ownerBrowser, tree, {
+      path: 'plan.comments/',
+      patch: comment('Agreed.', { replyTo: root.path }),
+    })
+    const [only, ...rest] = await threadsOf(sara.caller, tree)
+    expect(rest).toEqual([])
+    expect(only?.path).toBe(root.path)
+    expect(only?.data).toMatchObject({
+      resolved: false,
+      root: {
+        path: root.path,
+        by: sara.email,
+        at: new Date(T0).toISOString(),
+        text: 'Hand the pricing to the agent',
+        anchor: 'pricing',
+        stance: 'reopen',
+        deleted: false,
+      },
+      replies: [
+        {
+          by: owner.email.toLowerCase(),
+          text: 'Agreed.',
+          anchor: null,
+          stance: null,
+          deleted: false,
+        },
+      ],
+    })
+  })
+})
+
 describe('changes that race a comment', () => {
   it('never brings back a comment deleted while its edit was on the way', async () => {
     const tree = await pushForms(owner, ws, FILES)

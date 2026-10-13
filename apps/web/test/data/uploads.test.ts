@@ -3,6 +3,7 @@ import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import { Data, Pages, type Caller } from '../../src/core/index.ts'
+import { dataViews } from '../../src/server/responses.ts'
 import { Browser, signedIn } from '../support/browser.ts'
 import { count, exec, rows } from '../support/d1.ts'
 import {
@@ -452,5 +453,51 @@ describe('reading answers', () => {
         )
       ).code,
     ).toBe('forbidden')
+  })
+
+  it('shows a shared file’s upload as its name, with no download, and its JSON folded', async () => {
+    const page = 'plan.html'
+    const tree = await pushForms(owner, ws, {
+      [page]: pageWith(
+        '<form action="plan.json"><input name="doc" type="file"><button>Save</button></form>',
+      ),
+    })
+    const form = await formRef(tree, page, 'plan.json')
+    const stored = await uploadAs(browser, tree, {
+      page,
+      form,
+      field: 'doc',
+      name: 'plan.pdf',
+      bytes: PDF,
+    })
+    const { path: _, ...value } = stored
+    await sendAs(browser, tree, { page, form, entries: [['doc', value]] })
+    const found = await runAs(
+      browser,
+      Effect.flatMap(Data, (d) =>
+        d.responses(ref(`${ws.name}/${tree.name}/${page}`)),
+      ),
+    )
+    const shared = found.forms[0]!
+    const [doc] = shared.shared!
+    const { sharedCellOf } = dataViews({ workspace: ws.name, tree: tree.name })
+    // Who changed it last may not be who uploaded it: two people's files with
+    // the same name, size and type read as one value.
+    expect(sharedCellOf(doc!.value, 'file')).toEqual({ text: 'plan.pdf' })
+    expect(sharedCellOf({ a: 1 }, 'json')).toEqual({
+      summary: '1 key',
+      json: JSON.stringify({ a: 1 }, null, 2),
+    })
+  })
+
+  it('shows a JSON field’s object folded, with its keys counted, and other values as text', () => {
+    const { cellOf } = dataViews({ workspace: 'w', tree: 't' })
+    const notes = { 'S-1': { text: 'Check' }, 'S-2': { text: 'Fine' } }
+    expect(cellOf(notes, 'json', '')).toEqual({
+      summary: '2 keys',
+      json: JSON.stringify(notes, null, 2),
+    })
+    expect(cellOf({ a: 1 }, 'hidden', '')).toEqual({ text: '{"a":1}' })
+    expect(cellOf(undefined, 'json', '')).toEqual({ text: '' })
   })
 })

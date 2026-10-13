@@ -324,6 +324,30 @@ describe('prefill', () => {
     expect(shared.form(2).lastElementChild?.localName).toBe('output')
   })
 
+  test('a JSON field takes its stored object as JSON text, and a send carries that text', async () => {
+    const it = open({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="notes" data-type="json" value="{}">
+          <input type="hidden" name="other" data-type="json" value='{"keep":1}'>
+          <input name="name">
+          <button>Send</button>
+        </form>`,
+    })
+    await flush()
+    const notes = { 'S-108': { text: 'Check the dates', reopen: true } }
+    await it.answer(it.requests('read')[0]!.id, wire({ notes, name: 'Sara' }))
+    expect(JSON.parse(it.field('[name=notes]').value)).toEqual(notes)
+    // A field the stored answer does not name keeps its own value.
+    expect(it.field('[name=other]').value).toBe('{"keep":1}')
+    await submit(it)
+    expect(sendsOf(it)[0]!.entries).toEqual([
+      ['notes', JSON.stringify(notes)],
+      ['other', '{"keep":1}'],
+      ['name', 'Sara'],
+    ])
+  })
+
   test('forms that say off, and numbers the page does not list, are left alone', async () => {
     const it = open({
       body: `
@@ -802,6 +826,31 @@ describe('withdrawing', () => {
     expect(it.status()).toBe('Your answer was withdrawn.')
     expect(it.form().getAttribute('data-state')).toBe('idle')
   })
+
+  test('a JSON field goes back to the page’s own value; another hidden field stays', async () => {
+    const it = open({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="notes" data-type="json" value="{}">
+          <input type="hidden" name="source" value="page">
+          <button>Send</button>
+          <button type="button" data-dossier-withdraw>Withdraw</button>
+        </form>`,
+    })
+    await flush()
+    await it.answer(
+      it.requests('read')[0]!.id,
+      wire({ notes: { a: 1 }, source: 'stored' }),
+    )
+    expect(it.field('[name=notes]').value).toBe('{"a":1}')
+    const withdraw = it.field<HTMLButtonElement>('[data-dossier-withdraw]')
+    withdraw.click()
+    withdraw.click()
+    await flush()
+    await it.answer(it.requests('withdraw')[0]!.id, null)
+    expect(it.field('[name=notes]').value).toBe('{}')
+    expect(it.field('[name=source]').value).toBe('stored')
+  })
 })
 
 describe('entries, roles and resumed sends', () => {
@@ -823,6 +872,29 @@ describe('entries, roles and resumed sends', () => {
     })
     expect(it.field('[name=idea]').value).toBe('')
     expect(it.status(3)).toBe('Sent on 12 Oct at 15:00')
+  })
+
+  test('an entries form’s JSON field starts the next entry from the page’s own value', async () => {
+    const it = open({
+      body: `
+        <form data-dossier-form="3">
+          <input type="hidden" name="notes" data-type="json" value='{"start":1}'>
+          <button>Add</button>
+        </form>`,
+      forms: [ENTRIES],
+    })
+    await flush()
+    type(it, '[name=notes]', '{"start":1,"more":2}')
+    await submit(it, 3)
+    await it.answer(it.requests('send')[0]!.id, {
+      doc: wire(
+        { notes: { start: 1, more: 2 } },
+        '2026-10-12T15:00:00',
+        'questions/ideas/x.json',
+      ),
+      replayed: false,
+    })
+    expect(it.field('[name=notes]').value).toBe('{"start":1}')
   })
 
   test('a viewer who can only read sees every field locked', async () => {

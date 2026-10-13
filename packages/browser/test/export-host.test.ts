@@ -256,8 +256,10 @@ describe('install in a page downloaded as one file', () => {
 
   test('is exported and ready at once, as its exporter, leaving the window name alone', async () => {
     const page = openExport({ name: 'dossier-boot:{"v":1,"me":null}' })
+    // The link it was exported from, which a handoff can name.
     expect(page.dossier.page).toEqual({
       path: '/questions/plan.html',
+      link: 'https://main.test/agent964/acme/questions/plan',
       push: 2,
       embedded: false,
       exported: true,
@@ -398,6 +400,59 @@ describe('forms in a page downloaded as one file', () => {
     })
   })
 
+  test('a JSON field is kept as its object, as Dossier stores it', async () => {
+    const page = openExport({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="nested" data-type="json">
+          <input name="name">
+          <button>Send</button>
+        </form>`,
+    })
+    await flush()
+    // The prefill put the stored object in the field as its JSON text.
+    const field = page.form(1).querySelector('input[name="nested"]')!
+    expect(JSON.parse((field as HTMLInputElement).value)).toEqual({
+      a: 1,
+      b: 2,
+    })
+    page.form(1).submit()
+    await flush()
+    expect(await page.dossier.read('answers/~.json')).toMatchObject({
+      data: { name: 'Sara', nested: { a: 1, b: 2 } },
+    })
+  })
+
+  test('a JSON field merges as Dossier merges it, its nulls gone at every depth', async () => {
+    const page = openExport({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="nested" data-type="json">
+          <button>Send</button>
+        </form>
+        <form data-dossier-form="2">
+          <input type="hidden" name="extra" data-type="json">
+          <button>Add</button>
+        </form>`,
+    })
+    await flush()
+    const field = (n: number, name: string) =>
+      page.form(n).querySelector(`input[name="${name}"]`) as HTMLInputElement
+    field(1, 'nested').value = '{"a":null,"c":{"d":null,"e":1}}'
+    page.form(1).submit()
+    await flush()
+    expect((await page.dossier.read('answers/~.json'))?.data).toEqual({
+      name: 'Sara',
+      notes: 'first',
+      nested: { b: 2, c: { e: 1 } },
+    })
+    field(2, 'extra').value = '{"x":{"y":null},"z":1}'
+    page.form(2).submit()
+    await flush()
+    const [entry] = (await page.dossier.read('ideas/~/')) as { data: unknown }[]
+    expect(entry?.data).toEqual({ extra: { x: {}, z: 1 } })
+  })
+
   test('a plain form’s file field keeps only the file’s name, size and type', async () => {
     const storage = memoryStorage()
     const page = openExport({ storage, body: FORM_BODY })
@@ -432,6 +487,30 @@ describe('forms in a page downloaded as one file', () => {
         cv: { name: 'cv.pdf', size: 6, type: 'application/pdf' },
       },
     })
+  })
+
+  test('a file chosen in place of a stored upload replaces it, never naming the old upload', async () => {
+    const page = openExport({ body: FORM_BODY })
+    await flush()
+    const old = {
+      file: 'old-cv.pdf',
+      name: 'old-cv.pdf',
+      size: 3,
+      type: 'application/pdf',
+    }
+    await page.dossier.write('answers/~.json', { cv: old })
+    const input = page.form(1).querySelector('input[name="cv"]')!
+    const file = new page.win.File(['%PDF-1'], 'new-cv.pdf', {
+      type: 'application/pdf',
+    })
+    ;(input as unknown as { files: unknown }).files = [file]
+    page.form(1).submit()
+    await flush()
+    expect(await page.dossier.read('answers/~.json')).toMatchObject({
+      data: { cv: { name: 'new-cv.pdf', size: 6, type: 'application/pdf' } },
+    })
+    const saved = await page.dossier.read('answers/~.json')
+    expect(saved?.data).not.toHaveProperty('cv.file')
   })
 
   test('an entries form adds an entry in the sender’s own folder', async () => {

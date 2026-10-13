@@ -61,10 +61,20 @@ export interface ListingView {
     readonly mentioned: boolean
     /** The page as one file that works offline; null for a visitor. */
     readonly download: string | null
+    /**
+     * A folder page's Files screen: its listing, whatever its `index.html`.
+     * Null for a page that is a file.
+     */
+    readonly files: string | null
   }[]
   readonly folders: readonly {
     readonly name: string
     readonly link: string
+    /**
+     * On the Files screen, the folder's Files listing, where its row goes so
+     * the screen stays in Files. Null elsewhere: the row opens its link.
+     */
+    readonly files: string | null
     readonly target: string
     readonly pages: number
     readonly push: PushStamp | null
@@ -119,11 +129,24 @@ const segmentsOf = (path: string) => (path === '' ? [] : path.split('/'))
 const notFound = () =>
   dossierError('not_found', 'Nothing is here, or you cannot open it.')
 
+/** `/_/files/<workspace>/<tree>/<path>/`: a folder's listing, always. */
+export const filesLink = (
+  workspace: string,
+  tree: string,
+  segments: readonly string[],
+) =>
+  `/_/files/${[workspace, tree, ...segments].map(encodeURIComponent).join('/')}/`
+
 /** The listing screen's read model, as its server function runs it. */
 export const listingModel = (data: {
   readonly workspace: string
   readonly tree: string
   readonly path: string
+  /**
+   * For the Files screen: its crumbs stay in it, since a folder above may
+   * open as its page at its link.
+   */
+  readonly files?: boolean
 }) =>
   Effect.gen(function* () {
     const caller = yield* CurrentCaller
@@ -175,6 +198,9 @@ export const listingModel = (data: {
           path: folder ? `${e.name}/` : e.name,
           link,
           target: targetOf(e.path, folder),
+          files: folder
+            ? filesLink(ref.workspace, ref.tree, segmentsOf(e.path))
+            : null,
           push: stamp(e.push),
           responses:
             answered === null
@@ -197,6 +223,10 @@ export const listingModel = (data: {
       .map((e) => ({
         name: e.name,
         link: at(e.path, 'folder'),
+        files:
+          data.files === true
+            ? filesLink(ref.workspace, ref.tree, segmentsOf(e.path))
+            : null,
         target: targetOf(e.path, true),
         pages: e.pages ?? 0,
         push: stamp(e.push),
@@ -213,6 +243,10 @@ export const listingModel = (data: {
         push: stamp(e.push),
       }))
     const segments = segmentsOf(ref.path)
+    const crumbAt = (crumb: readonly string[]) =>
+      data.files === true
+        ? filesLink(ref.workspace, ref.tree, crumb)
+        : at(crumb.join('/'), 'folder')
     const crumbs = [
       // A visitor has no workspace home to go to.
       ...(me === null
@@ -223,10 +257,10 @@ export const listingModel = (data: {
               href: `/?w=${encodeURIComponent(ref.workspace)}`,
             },
           ]),
-      { name: ref.tree, href: at('', 'folder') },
+      { name: ref.tree, href: crumbAt([]) },
       ...segments.slice(0, -1).map((name, index) => ({
         name,
-        href: at(segments.slice(0, index + 1).join('/'), 'folder'),
+        href: crumbAt(segments.slice(0, index + 1)),
       })),
     ]
     const nothing =

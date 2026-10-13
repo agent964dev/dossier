@@ -6,7 +6,7 @@ API from page code is refused.
 
 ```ts
 dossier.me // { email, name, role } of the viewer, or null for a visitor
-dossier.page // { path, push, embedded, exported }
+dossier.page // { path, link, push, embedded, exported }
 await dossier.ready // resolves once the page client can answer
 dossier.read(path) // a file: Doc or null; a folder ('answers/'): Doc[]
 dossier.watch(path, onChange) // calls back at once, then after each change; returns stop()
@@ -15,8 +15,11 @@ dossier.withdraw(path) // your own submission or entry, for good
 dossier.upload(file) // resolves { file, name, size, type }
 ```
 
-`page` holds the page's tree path, the push it was rendered from, whether it is
-embedded in another page, and whether it runs from an export.
+`page` holds the page's tree path, its link (the address people open,
+`https://<deployment>/<workspace>/<tree>/<path>`, which a handoff can name; an
+exported file keeps the link it was exported from), the push it was rendered
+from, whether it is embedded in another page, and whether it runs from an
+export.
 
 - `read(path)` of a file gives a `Doc`, or `null`; missing and unreadable look
   the same. A folder path ends in `/` and gives a `Doc[]` of every readable file
@@ -35,7 +38,9 @@ embedded in another page, and whether it runs from an export.
   adds `ideas/sara@acme.com/<UTC time>.json`. People with respond can write a
   shared file such as `layout.json`. Page code never writes authored files, `_`
   files, pages or another person's files; a write into a form's target is
-  checked against the form, and refused when the form is closed.
+  checked against the form, and refused when the form is closed. Only the
+  fields the form names may be written there; a JSON field (see Forms) takes
+  any JSON object page code draws, merged key by key.
 - `withdraw(path)` deletes your own submission or entry with every revision,
   leaving a line in history.
 - `upload(file)` stores a file beside the page, at
@@ -82,3 +87,26 @@ never stored twice.
 
 Forms stay automatic: a plain `<form>` needs no page code (see Forms), and
 `data-dossier="manual"` or `"off"` hands it to page code.
+
+A page's comments read like any folder: `read('plan.comments/')` on
+`plan.html` gives one `Doc` per thread, its `data` a `{ root, replies,
+resolved }` where each comment has `by`, `at`, `text`, `anchor`, `stance` and
+`deleted`, and `watch` follows them. The page decides what its handoff says.
+This one copies the open threads, with the page's link:
+
+```js
+const stop = dossier.watch('plan.comments/', (threads) => {
+  const open = threads.filter((t) => !t.data.resolved)
+  // Or only those marked for the agent:
+  // .filter((t) => t.data.root.stance === 'for the agent')
+  handoff.textContent = [
+    `Comments on ${dossier.page.link}`,
+    ...open.map(({ data: { root, replies } }) =>
+      [root, ...replies]
+        .filter((c) => !c.deleted)
+        .map((c) => `- ${root.anchor ?? 'page'}: ${c.by}: ${c.text}`)
+        .join('\n'),
+    ),
+  ].join('\n')
+})
+```

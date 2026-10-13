@@ -216,6 +216,20 @@ const listOf = (value: unknown): string[] => {
   return text === null || value === null ? [] : [text]
 }
 
+/** A hidden input marked `data-type="json"`, as the push reads it. */
+const isJsonField = (control: Control): boolean =>
+  control.localName === 'input' &&
+  (control as HTMLInputElement).type === 'hidden' &&
+  (control.getAttribute('data-type') ?? '').trim().toLowerCase() === 'json'
+
+/** A JSON field's stored object as its text, or null to leave it. */
+const jsonTextOf = (value: unknown): string | null =>
+  isRecord(value)
+    ? JSON.stringify(value)
+    : typeof value === 'string'
+      ? value
+      : null
+
 const unfilled = (control: Control): boolean =>
   control.localName === 'button' ||
   (control.localName === 'input' &&
@@ -299,6 +313,11 @@ interface Managed {
   readonly typed: Set<string>
   /** The stored uploads of each file field, kept when its input stays empty. */
   readonly uploads: Map<string, readonly UploadRef[]>
+  /**
+   * Each JSON field's value as the page wrote it, before any prefill or
+   * draft: a hidden field's reset keeps whatever was set since.
+   */
+  readonly jsonStart: ReadonlyMap<HTMLInputElement, string>
   /**
    * The last attempt, with its own op ID and how many edits it holds: Try
    * again and an unchanged resend repeat it exactly; anything changed since
@@ -452,6 +471,11 @@ export const startForms = (deps: {
             input.checked = listOf(value).includes(input.value)
             continue
           }
+          if (isJsonField(input)) {
+            const text = has ? jsonTextOf(value) : null
+            if (text !== null) input.value = text
+            continue
+          }
         }
         if (unfilled(control)) continue
         if (control.localName === 'select') {
@@ -548,6 +572,13 @@ export const startForms = (deps: {
       m.last !== null &&
       sameEntries(m.last.request.entries, entries) &&
       JSON.stringify(m.last.request.submitter) === JSON.stringify(submitter)
+    const json = [
+      ...new Set(
+        controlsOf(m.form)
+          .filter((control) => control.name !== '' && isJsonField(control))
+          .map((control) => control.name),
+      ),
+    ]
     const request: SendRequest = options.again ??
       (unchanged ? m.last!.request : null) ?? {
         form: { host: m.info.host, target: m.info.target, id: m.info.id },
@@ -555,6 +586,7 @@ export const startForms = (deps: {
         entries,
         submitter,
         opId: newOpId(),
+        ...(json.length === 0 ? {} : { json }),
       }
     const edits =
       options.again !== undefined || unchanged ? m.last!.edits : m.edits
@@ -657,6 +689,11 @@ export const startForms = (deps: {
     }
   }
 
+  /** Each JSON field back to the value the page wrote. */
+  const resetJson = (m: Managed): void => {
+    for (const [input, value] of m.jsonStart) input.value = value
+  }
+
   const succeeded = (
     m: Managed,
     value: unknown,
@@ -673,6 +710,7 @@ export const startForms = (deps: {
     if (m.info.kind === 'entries') {
       if (!changedSince) {
         m.form.reset()
+        resetJson(m)
         forgetUploads(m)
       }
     } else if (wire !== null) {
@@ -800,6 +838,7 @@ export const startForms = (deps: {
           m.last = null
           forgetUploads(m)
           clearFields(m.form)
+          resetJson(m)
           requests.draft(m.key, null)
           if (m.closed) {
             setStatus(m, m.closedText)
@@ -937,6 +976,11 @@ export const startForms = (deps: {
       edits: 0,
       typed: new Set(),
       uploads: new Map(),
+      jsonStart: new Map(
+        controlsOf(form)
+          .filter(isJsonField)
+          .map((input) => [input as HTMLInputElement, input.value]),
+      ),
       last: null,
       settled: false,
       attempted: false,

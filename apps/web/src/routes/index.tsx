@@ -1,10 +1,17 @@
-import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  redirect,
+  useNavigate,
+  useRouter,
+} from '@tanstack/react-router'
 import { FileText, Folder, Info } from 'lucide-react'
 import { useState } from 'react'
 
 import { LocalTime } from '../components/local-time'
 import { MentionedBadge } from '../components/mentioned-badge'
+import { MenuButton, MenuLink, RowMenu } from '../components/row-menu'
 import { SearchField } from '../components/search-field'
+import { ShareDialog } from '../components/share-dialog'
 import { AppHeader } from '../components/app-header'
 import { LandingPage } from '../components/landing-page'
 import { SectionLabel } from '../components/section-label'
@@ -67,6 +74,8 @@ function Trees({
   workspace: string
   trees: readonly HomeTree[]
 }) {
+  const router = useRouter()
+  const [sharing, setSharing] = useState<string | null>(null)
   return (
     <section aria-labelledby="trees-label" className="flex flex-col gap-3">
       <SectionLabel id="trees-label" count={trees.length}>
@@ -81,12 +90,16 @@ function Trees({
           .
         </p>
       ) : (
-        <ul className="divide-y divide-border/80 overflow-hidden rounded-xl border border-border bg-card">
+        // Not overflow-hidden: a row's menu opens past the list's edge.
+        <ul className="divide-y divide-border/80 rounded-xl border border-border bg-card">
           {trees.map((tree) => (
-            <li key={tree.name}>
+            <li
+              key={tree.name}
+              className="flex items-center gap-1 pr-2.5 transition-colors duration-200 ease-agent first:rounded-t-xl last:rounded-b-xl hover:bg-neutral-800/40"
+            >
               <a
                 href={tree.href}
-                className="flex items-center gap-3 px-3.5 py-3 outline-none transition-colors duration-200 ease-agent hover:bg-neutral-800/40 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-lg py-3 pl-3.5 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
               >
                 <span
                   aria-hidden
@@ -108,10 +121,26 @@ function Trees({
                   {tree.mentioned ? <MentionedBadge className="mt-1" /> : null}
                 </span>
               </a>
+              <RowMenu label={`More for ${tree.name}/`}>
+                {tree.can.share ? (
+                  <MenuButton onSelect={() => setSharing(tree.href)}>
+                    Share
+                  </MenuButton>
+                ) : null}
+                {tree.can.history && tree.history !== null ? (
+                  <MenuLink href={tree.history}>History</MenuLink>
+                ) : null}
+                <MenuLink href={tree.files}>Files</MenuLink>
+              </RowMenu>
             </li>
           ))}
         </ul>
       )}
+      <ShareDialog
+        link={sharing}
+        onClose={() => setSharing(null)}
+        onChanged={() => void router.invalidate()}
+      />
     </section>
   )
 }

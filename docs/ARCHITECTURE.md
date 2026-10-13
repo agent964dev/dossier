@@ -349,6 +349,13 @@ person's own answer with its revisions, leaving a line in history. Data file
 size, upload size and workspace storage are limits a super admin can change;
 storage is checked by a guard row inside the batch.
 
+A JSON field (a hidden input marked `data-type="json"`) is one field like any
+other: it is recorded in the form's schema with type `json`, its value must be
+a JSON object (`validateValues` and `validateSend` refuse anything else), and
+it can never be required. It goes through the same target, owner and form
+checks as the form's other fields, so it changes what a value may hold, never
+where a write may go.
+
 People who may read a page's answers see them at
 `/_/responses/<workspace>/<tree>/<page>`, and a listing shows how many there
 are.
@@ -365,6 +372,8 @@ answers with the result or a `DossierError`.
 
 - Page-code writes are RFC 7396 merge patches into `.json` data files. Local
   writes show at once and roll back on refusal.
+- `page.link` is the page's link from the bootstrap, the address people open;
+  an export keeps the link it was exported from.
 - A request with no answer is sent again with the same operation ID after 1, 3
   and 9 seconds, then fails `unavailable`. Nothing is sent while offline.
 - The shell keeps form drafts and sends made offline per viewer in IndexedDB

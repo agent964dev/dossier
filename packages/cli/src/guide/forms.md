@@ -57,6 +57,29 @@ sends only when page code lets a submit through. Each managed form carries
 `dossier:state`; its status line is an `<output data-dossier-status>` styled by
 the page.
 
+State a page's script draws, such as a note on each of 500 items, goes in a JSON
+field: a hidden input marked `data-type="json"`, optionally with a JSON object
+as its starting `value`. It holds one JSON object under its name, in the
+person's file or the shared file, wherever the form's other fields go, and the
+data file's 1 MiB limit bounds it. Page code merges into it with `write`:
+
+```html
+<form action="review/">
+  <input type="hidden" name="notes" data-type="json" value="{}" />
+</form>
+<script>
+  dossier.write('review/~.json', {
+    notes: { 'S-108': { text: 'Check the dates', reopen: true } },
+  })
+</script>
+```
+
+The merge follows RFC 7396 like every write, so `{ notes: { 'S-108': null } }`
+removes one note. A value that is not a JSON object is refused with `invalid`,
+and a push refuses a JSON field marked `required` or with a `value` that is not
+an object. A plain send carries the field's `value` as JSON text, and prefill
+puts the stored object back in it. The responses screen shows it folded.
+
 Each data file is plain JSON keyed by field name. `dossier read answers/` gives
 every file with who wrote it, when and the push they saw. People who can read
 the folder see a page's responses in Dossier, and a listing shows "3 responses"

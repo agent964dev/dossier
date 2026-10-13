@@ -51,6 +51,22 @@ export const describeRead = (result: ReadResult): string => {
 export const readPath = (ref: LinkRef): string =>
   ref.folder && ref.path !== '' ? `${targetString(ref)}/` : targetString(ref)
 
+/**
+ * A read that finds nothing, worded the same whether nothing is there or the
+ * key cannot read it. A path that may name a folder also says that a form's
+ * folder does not exist before its first answer.
+ */
+export const notFoundMessage = (ref: LinkRef): string => {
+  const last = ref.path.slice(ref.path.lastIndexOf('/') + 1)
+  const mayBeFolder = ref.path !== '' && (ref.folder || !last.includes('.'))
+  return (
+    `Nothing at ${readPath(ref)}, or you cannot read it.` +
+    (mayBeFolder
+      ? ' A folder a form writes to appears with its first answer.'
+      : '')
+  )
+}
+
 export const read = Command.make(
   'read',
   {
@@ -75,7 +91,7 @@ export const read = Command.make(
             Effect.fail(
               dossierError(
                 'not_found',
-                `Stopped. ${readPath(ref)} was not found, or you cannot open it.`,
+                notFoundMessage(ref),
                 (error as DossierError).fix,
                 (error as DossierError).path,
               ),

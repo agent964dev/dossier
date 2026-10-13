@@ -787,6 +787,67 @@ describe('validateValues', () => {
   })
 })
 
+describe('a JSON field', () => {
+  const [form] = analyze(
+    '<form action="notes/"><input type="hidden" name="notes" data-type="json" value=\'{"a":1}\'><input type="hidden" name="plain" data-type="text"><input name="title"></form>',
+  ).forms
+  const schema = formSchema(form!)
+
+  it('is a hidden input marked data-type="json", its value kept as written', () => {
+    expect(
+      schema.fields.map((f) => ({
+        name: f.name,
+        type: f.type,
+        value: f.value,
+      })),
+    ).toEqual([
+      { name: 'notes', type: 'json', value: '{"a":1}' },
+      { name: 'plain', type: 'hidden', value: null },
+      { name: 'title', type: 'text', value: null },
+    ])
+  })
+
+  it('takes any JSON object page code writes, and refuses every other value', () => {
+    const notes = { 'S-108': { text: 'Check', reopen: true }, list: [1] }
+    expect(validateValues([schema], { notes })).toEqual({
+      ok: true,
+      values: { notes },
+    })
+    expect(validateValues([schema], { notes: null }).ok).toBe(true)
+    for (const wrong of ['{"a":1}', [1], 3, true]) {
+      expect(validateValues([schema], { notes: wrong }), String(wrong)).toEqual(
+        {
+          ok: false,
+          problems: [
+            { field: 'notes', message: 'Use a JSON object for this field.' },
+          ],
+        },
+      )
+    }
+    // The other fields keep their own rules.
+    expect(validateValues([schema], { title: { a: 1 } }).ok).toBe(false)
+    expect(validateValues([schema], { plain: { a: 1 } }).ok).toBe(false)
+  })
+
+  it('parses the JSON text a plain send carries, and leaves empty text out', () => {
+    expect(
+      validateSend(schema, [['notes', '{"S-1":{"text":"x"}}']], null),
+    ).toEqual({ ok: true, values: { notes: { 'S-1': { text: 'x' } } } })
+    expect(validateSend(schema, [['notes', '']], null)).toEqual({
+      ok: true,
+      values: {},
+    })
+    for (const wrong of ['[1]', '"text"', '{nope', 'null']) {
+      expect(validateSend(schema, [['notes', wrong]], null), wrong).toEqual({
+        ok: false,
+        problems: [
+          { field: 'notes', message: 'Use a JSON object for this field.' },
+        ],
+      })
+    }
+  })
+})
+
 describe('the step base of a date without min', () => {
   const sent = (input: string, text: string) => {
     const [form] = analyze(`<form action="a/">${input}</form>`).forms

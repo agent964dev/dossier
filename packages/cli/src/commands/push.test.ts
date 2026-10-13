@@ -1,11 +1,21 @@
 import { createHash } from 'node:crypto'
-import { cp, readFile, realpath } from 'node:fs/promises'
+import {
+  cp,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { ErrorCode } from '@dossier/contracts'
-import { afterEach, describe, expect, it } from 'vitest'
+import { Duration } from 'effect'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { TRANSFER_TIMEOUT } from '../client.ts'
 import {
   errorResponse,
   type Harness,
@@ -80,7 +90,10 @@ const plan = (over: Record<string, unknown> = {}) => ({
 
 interface Deployment {
   readonly stage?: (request: SeenRequest) => Response
-  readonly blob?: (request: SeenRequest, attempt: number) => Response
+  readonly blob?: (
+    request: SeenRequest,
+    attempt: number,
+  ) => Response | Promise<Response>
   readonly missing?: readonly string[]
   readonly plan?: ReturnType<typeof plan>
 }
@@ -509,6 +522,183 @@ describe('dossier push', () => {
     expect(await cli.run(['push', FIXTURE, 'agent964/acme'])).toBe(0)
     expect(cli.sleeps).toEqual([2_000, 4_000])
     expect(sequence().filter((line) => line.startsWith('PUT'))).toHaveLength(3)
+  })
+
+  it('uploads again after a network error, a 503 or a 429, waiting longer each time', async () => {
+    const cli = await setUp(
+      pushing({
+        missing: [await sha('logo.svg')],
+        blob: (_, attempt) => {
+          if (attempt === 1) {
+            throw new TypeError('fetch failed', {
+              cause: new Error(
+                'Stream closed with error code NGHTTP2_ENHANCE_YOUR_CALM',
+              ),
+            })
+          }
+          if (attempt === 2) return new Response('busy', { status: 503 })
+          if (attempt === 3) {
+            return new Response(null, {
+              status: 429,
+              headers: { 'retry-after': '7' },
+            })
+          }
+          return new Response(null, { status: 201 })
+        },
+      }),
+    )
+
+    expect(await cli.run(['push', FIXTURE, 'agent964/acme'])).toBe(0)
+    expect(cli.sleeps).toEqual([1_000, 2_000, 7_000])
+    expect(sequence().filter((line) => line.startsWith('PUT'))).toHaveLength(4)
+    expect(sequence().at(-1)).toBe('POST /_/api/pushes/psh_1/commit')
+  })
+
+  it('stops after 6 tries, naming the cause fetch hides, and commits nothing', async () => {
+    const cli = await setUp(
+      pushing({
+        missing: [await sha('logo.svg')],
+        blob: () => {
+          throw new TypeError('fetch failed', {
+            cause: new Error('other side closed'),
+          })
+        },
+      }),
+    )
+
+    expect(await cli.run(['push', FIXTURE, 'agent964/acme'])).toBe(1)
+    expect(cli.stderr()).toContain(
+      'dossier: Could not reach dossier.acme.com after 6 tries: fetch failed: other side closed.',
+    )
+    expect(cli.sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 16_000])
+    expect(sequence()).not.toContain('POST /_/api/pushes/psh_1/commit')
+  })
+
+  it('gives up on an error answer whose body stalls, within the transfer timeout, and cancels it', async () => {
+    let cancelled = false
+    const cli = await setUp(
+      pushing({
+        missing: [await sha('logo.svg')],
+        blob: (request) =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                request.signal?.addEventListener('abort', () => {
+                  cancelled = true
+                  controller.error(new Error('aborted'))
+                })
+              },
+            }),
+            { status: 400 },
+          ),
+      }),
+    )
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const run = cli.run(['push', FIXTURE, 'agent964/acme'])
+      // The upload is answered; then its body stalls past the timeout.
+      while (!sequence().some((line) => line.startsWith('PUT'))) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      await vi.advanceTimersByTimeAsync(Duration.toMillis(TRANSFER_TIMEOUT))
+      expect(await run).toBe(1)
+      expect(cli.stderr()).toContain('did not answer within 5 minutes')
+      expect(cancelled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['a 503', () => new Response('busy', { status: 503 })],
+    ['a purge', () => errorResponse('blob_reclaiming')],
+  ])(
+    'stops the wait after %s when another upload fails',
+    async (_, waiting) => {
+      const logo = await sha('logo.svg')
+      const signals: (AbortSignal | undefined)[] = []
+      let waited = () => {}
+      const waits = new Promise<void>((resolve) => {
+        waited = resolve
+      })
+      const fetch = stubFetch(
+        pushing({
+          missing: [logo, await sha('plan.html')],
+          // The other upload fails once the first is waiting.
+          blob: (request) =>
+            request.url.pathname.endsWith(logo)
+              ? waiting()
+              : waits.then(() => errorResponse('forbidden')),
+        }),
+      )
+      requests = fetch.requests
+      current = await harness({
+        fetch: fetch.fetch,
+        env: ENV,
+        // A wait ends only when it is stopped.
+        sleep: (_ms, signal) => {
+          signals.push(signal)
+          waited()
+          return new Promise((resolve) =>
+            signal?.addEventListener('abort', () => resolve()),
+          )
+        },
+      })
+      expect(await current.run(['push', FIXTURE, 'agent964/acme'])).toBe(3)
+      expect(signals).not.toEqual([])
+      expect(signals.every((signal) => signal?.aborted === true)).toBe(true)
+    },
+  )
+
+  it('holds at most 4 uploads and 16 MiB in flight', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'dossier-push-'))
+    const sizes = [6, 6, 6, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1].map((mib) =>
+      Math.round(mib * 1024 * 1024),
+    )
+    const hashes = await Promise.all(
+      sizes.map(async (size, i) => {
+        const content = Buffer.alloc(size, i)
+        await writeFile(join(folder, `f${i}.bin`), content)
+        return createHash('sha256').update(content).digest('hex')
+      }),
+    )
+    const route = pushing({ missing: hashes })
+    let count = 0
+    let held = 0
+    let most = { count: 0, held: 0 }
+    // Each upload is held until four are in flight, or briefly at the end.
+    let full = () => {}
+    const filled = new Promise<void>((resolve) => {
+      full = resolve
+    })
+    const cli = await setUp(async (request) => {
+      if (request.method !== 'PUT') return route(request)
+      const size = Number(request.headers.get('content-length'))
+      count += 1
+      held += size
+      most = {
+        count: Math.max(most.count, count),
+        held: Math.max(most.held, held),
+      }
+      if (count >= 4) full()
+      await Promise.race([
+        filled,
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ])
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      count -= 1
+      held -= size
+      return route(request)
+    })
+
+    try {
+      expect(await cli.run(['push', folder, 'agent964/acme'])).toBe(0)
+    } finally {
+      await rm(folder, { recursive: true, force: true })
+    }
+    expect(sequence().filter((line) => line.startsWith('PUT'))).toHaveLength(9)
+    expect(most.count).toBe(4)
+    expect(most.held).toBeLessThanOrEqual(16 * 1024 * 1024)
   })
 
   it('reads a link on the deployment as the target', async () => {

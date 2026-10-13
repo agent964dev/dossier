@@ -31,6 +31,8 @@ export interface SeenRequest {
   readonly headers: Headers
   readonly body: unknown
   readonly redirect: RequestRedirect | undefined
+  /** The caller's own signal, which aborts the request and its answer. */
+  readonly signal: AbortSignal | null
 }
 
 export type Route = (request: SeenRequest) => Response | Promise<Response>
@@ -56,6 +58,7 @@ export const stubFetch = (route: Route) => {
       headers: request.headers,
       body,
       redirect: init?.redirect,
+      signal: init?.signal ?? null,
     }
     requests.push(seen)
     return route(seen)

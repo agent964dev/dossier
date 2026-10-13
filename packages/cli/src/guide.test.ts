@@ -100,7 +100,7 @@ describe('the agent guide', () => {
       const markdown = cli.stdout()
       for (const call of [
         'dossier.me',
-        'dossier.page // { path, push, embedded, exported }',
+        'dossier.page // { path, link, push, embedded, exported }',
         'await dossier.ready',
         'dossier.read(path)',
         'dossier.watch(path, onChange)',

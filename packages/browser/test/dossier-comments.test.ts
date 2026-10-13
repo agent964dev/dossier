@@ -820,6 +820,32 @@ describe('<dossier-comments>', () => {
     expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Per truck.')
   })
 
+  test('waits for the threads before giving a kept reply back', async () => {
+    const root = comment(LEE, 'Price?')
+    sessionStorage.setItem(
+      keptKey(PAGE),
+      JSON.stringify(keptFor('Per truck.', root.path)),
+    )
+    // The watch answers only after the page client is ready.
+    vi.spyOn(fake, 'watch').mockImplementation((_, onChange) => {
+      peer.watchers.add(onChange as never)
+      return () => peer.watchers.delete(onChange as never)
+    })
+    const element = await mount()
+    expect(sessionStorage.getItem(keptKey(PAGE))).not.toBeNull()
+    peer.emit([thread(root)])
+    await settle()
+    const form = q<HTMLFormElement>(
+      threadOf(element, root.path),
+      '.dossier-comments-composer',
+    )
+    expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Per truck.')
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(element), 'textarea').value,
+    ).toBe('')
+    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
+  })
+
   test('keeps each person’s unsent text apart, and a visitor’s apart from both', async () => {
     let element = await mount()
     type(
@@ -967,6 +993,32 @@ describe('<dossier-comments>', () => {
       }),
     )
     expect(element.querySelector('.dossier-comments-pin-target')).toBeNull()
+    type(q(mainComposer(element), 'textarea'), 'Here')
+    q<HTMLButtonElement>(mainComposer(element), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[0]!.patch).toMatchObject({
+      anchor: 'shot',
+      pin: { x: 0.4, y: 0.22 },
+    })
+  })
+
+  test('keeps the placed pin when for is set to nothing', async () => {
+    const element = await mount('<img id="shot" alt="">')
+    const image = document.getElementById('shot')!
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 50, 400, 200),
+    )
+    byKey(element, 'pin-button:main')!.click()
+    q(element, '.dossier-comments-pin-target').dispatchEvent(
+      new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 260,
+        clientY: 94,
+      }),
+    )
+    element.setAttribute('for', ' ')
+    await settle()
     type(q(mainComposer(element), 'textarea'), 'Here')
     q<HTMLButtonElement>(mainComposer(element), 'button[type="submit"]').click()
     await settle()
@@ -1321,5 +1373,443 @@ describe('anchor labels', () => {
       ['d', 'Heading D'],
       ['e', '#e'],
     ])
+  })
+})
+
+describe('stances on a new comment', () => {
+  test('offers the page’s stances on a new comment, and nothing without them', async () => {
+    let element = await mount('', 'stances="reopen, for the agent"')
+    const form = mainComposer(element)
+    const stance = byKey(form, 'stance:main') as HTMLSelectElement
+    expect([...stance.options].map((o) => o.value)).toEqual([
+      '',
+      'reopen',
+      'for the agent',
+    ])
+    stance.value = 'for the agent'
+    type(q(form, 'textarea'), 'Hand this over.')
+    peer.calls = []
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    expect(peer.calls[0]?.patch).toMatchObject({
+      text: 'Hand this over.',
+      replyTo: null,
+      stance: 'for the agent',
+    })
+    // Sent: the choice goes back to none with the text.
+    expect(stance.value).toBe('')
+    element.remove()
+    element = await mount()
+    expect(byKey(mainComposer(element), 'stance:main')).toBeUndefined()
+  })
+})
+
+describe('with for: the comments on one item', () => {
+  const PAGE_HTML =
+    '<section id="S-1" title="Step one"></section><section id="S-2"></section>'
+
+  /** A whole-page element, then one under each item. */
+  const mountItems = async (attrs = '') => {
+    document.body.innerHTML = `${PAGE_HTML}
+      <dossier-comments ${attrs}></dossier-comments>
+      <dossier-comments for="S-1" ${attrs}></dossier-comments>
+      <dossier-comments for="S-2" ${attrs}></dossier-comments>`
+    await settle()
+    const [page, one, two] = document.querySelectorAll('dossier-comments')
+    return {
+      page: page as HTMLElement,
+      one: one as HTMLElement,
+      two: two as HTMLElement,
+    }
+  }
+
+  const rootsIn = (element: HTMLElement) =>
+    [...element.querySelectorAll('.dossier-comments-thread')].map((li) =>
+      li.getAttribute('data-root'),
+    )
+
+  test('shows only its item’s threads, folded to a Comment button with a count, and the page’s element shows them all', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    const b = comment(LEE, 'Second', { anchor: 'S-2' })
+    const done = comment(LEE, 'Done', { anchor: 'S-1' })
+    const whole = comment(LEE, 'Whole page')
+    peer.threads = [
+      thread(a),
+      thread(b),
+      thread(done, [], { resolved: true }),
+      thread(whole),
+    ]
+    const { page, one, two } = await mountItems()
+    // One watch for the folder, however many elements show it.
+    expect(peer.calls.filter((c) => c.op === 'watch')).toHaveLength(1)
+    expect(rootsIn(page)).toEqual([whole.path, a.path, b.path])
+    expect(rootsIn(one)).toEqual([a.path])
+    expect(rootsIn(two)).toEqual([b.path])
+    expect(one.classList.contains('dossier-comments-item')).toBe(true)
+    expect(page.classList.contains('dossier-comments-item')).toBe(false)
+    // Folded: its button and count, no title, list or composer.
+    const opener = byKey(one, 'open')!
+    expect(opener.hidden).toBe(false)
+    expect(opener.getAttribute('aria-expanded')).toBe('false')
+    expect(opener.textContent).toBe('Comment1 open')
+    expect(q(one, '.dossier-comments-title').hidden).toBe(true)
+    expect(q(one, '.dossier-comments-threads').hidden).toBe(true)
+    expect(mainComposer(one).hidden).toBe(true)
+    expect(byKey(page, 'open')!.hidden).toBe(true)
+    // Its item's mark counts its open threads, as the page's element does.
+    expect(document.getElementById('S-1')!.getAttribute(MARK)).toBe('1')
+    opener.click()
+    await settle()
+    expect(opener.getAttribute('aria-expanded')).toBe('true')
+    expect(q(one, '.dossier-comments-threads').hidden).toBe(false)
+    expect(mainComposer(one).hidden).toBe(false)
+    // No place picker, no pins: it comments on its item.
+    expect(byKey(mainComposer(one), 'on:main')!.closest('label')!.hidden).toBe(
+      true,
+    )
+    expect(byKey(one, 'pin-button:main')!.hidden).toBe(true)
+    expect(one.querySelector('.dossier-comments-place')).toBeNull()
+  })
+
+  test('leaves an item’s mark to the element still counting it when the other leaves', async () => {
+    peer.threads = [thread(comment(LEE, 'First', { anchor: 'S-1' }))]
+    const { page, one } = await mountItems()
+    const item = document.getElementById('S-1')!
+    one.remove()
+    expect(item.getAttribute(MARK)).toBe('1')
+    page.remove()
+    expect(item.hasAttribute(MARK)).toBe(false)
+  })
+
+  test('leaves an item’s mark to the element still counting it when the other moves to another item', async () => {
+    peer.threads = [thread(comment(LEE, 'First', { anchor: 'S-1' }))]
+    const { one } = await mountItems()
+    const item = document.getElementById('S-1')!
+    one.setAttribute('for', 'S-2')
+    await settle()
+    expect(item.getAttribute(MARK)).toBe('1')
+  })
+
+  test('takes the new item’s own unsent text when for changes', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'About one')
+    one.setAttribute('for', 'S-2')
+    expect(area.value).toBe('')
+    type(area, 'About two')
+    one.setAttribute('for', 'S-1')
+    expect(area.value).toBe('About one')
+  })
+
+  test('takes the new item’s own unsent text when for changes while it is away', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'About one')
+    one.remove()
+    one.setAttribute('for', 'S-2')
+    document.body.append(one)
+    await settle()
+    expect(area.value).toBe('')
+    type(area, 'About two')
+    peer.calls = []
+    q<HTMLButtonElement>(mainComposer(one), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.calls[0]?.patch).toMatchObject({
+      text: 'About two',
+      anchor: 'S-2',
+    })
+  })
+
+  test('keeps unsent text storage refuses, for when for comes back to its item', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError')
+    })
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'About one')
+    one.setAttribute('for', 'S-2')
+    expect(area.value).toBe('')
+    one.setAttribute('for', 'S-1')
+    expect(area.value).toBe('About one')
+  })
+
+  test('an element that joins the folder’s watch never takes its older value after a newer one', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    peer.threads = [thread(a)]
+    await mountItems()
+    const late = document.createElement('dossier-comments')
+    document.body.append(late)
+    // The newer value comes before the one the late element was queued.
+    const b = comment(LEE, 'Second', { anchor: 'S-2' })
+    peer.emit([thread(a), thread(b)])
+    await settle()
+    expect(rootsIn(late)).toEqual([a.path, b.path])
+  })
+
+  test('keeps an edit’s unsaved text on a thread for leaves, for when it comes back', async () => {
+    const mine = comment(SARA.email, 'First take', { anchor: 'S-1' })
+    peer.threads = [thread(mine)]
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    byKey(one, `edit:${mine.path}`)!.click()
+    const editor = () =>
+      one.querySelector<HTMLTextAreaElement>(
+        `[data-composer="edit:${mine.path}"] textarea`,
+      )
+    type(editor()!, 'Second take')
+    one.setAttribute('for', 'S-2')
+    await settle()
+    expect(editor()).toBeNull()
+    one.setAttribute('for', 'S-1')
+    await settle()
+    expect(editor()?.value).toBe('Second take')
+  })
+
+  test('keeps a thread’s failed send in its status line when for leaves and comes back', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1' })
+    peer.threads = [thread(a)]
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    peer.failures.push(
+      new DossierError({
+        code: 'offline',
+        message: 'Not sent. Try again.',
+        fix: null,
+        path: null,
+      }),
+    )
+    byKey(one, `resolve:${a.path}`)!.click()
+    await settle()
+    const said = statusOf(threadOf(one, a.path))
+    expect(said).not.toBe('')
+    one.setAttribute('for', 'S-2')
+    await settle()
+    one.setAttribute('for', 'S-1')
+    await settle()
+    expect(statusOf(threadOf(one, a.path))).toBe(said)
+  })
+
+  test('keeps the whole page’s placed pin while for names an item, and gives it back', async () => {
+    document.body.innerHTML = `${PAGE_HTML}<img id="mockup" title="Mockup" alt="">
+      <dossier-comments></dossier-comments>`
+    await settle()
+    const element = document.querySelector('dossier-comments') as HTMLElement
+    const form = mainComposer(element)
+    byKey(form, 'pin-button:main')!.click()
+    key(document.activeElement!, 'Enter')
+    type(q(form, 'textarea'), 'Move this')
+    element.setAttribute('for', 'S-1')
+    await settle()
+    element.removeAttribute('for')
+    await settle()
+    expect(q<HTMLTextAreaElement>(form, 'textarea').value).toBe('Move this')
+    const note = byKey(form, 'remove-pin:main')!.parentElement!
+    expect(note.hidden).toBe(false)
+    expect(note.textContent).toContain(
+      'Pinned at 50% across, 50% down on Mockup',
+    )
+    peer.calls = []
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[0]!.patch).toMatchObject({
+      anchor: 'mockup',
+      pin: { x: 0.5, y: 0.5 },
+    })
+  })
+
+  test('gives back no pin a comment took when it was sent while for named an item', async () => {
+    document.body.innerHTML = `${PAGE_HTML}<img id="mockup" title="Mockup" alt="">
+      <dossier-comments></dossier-comments>`
+    await settle()
+    const element = document.querySelector('dossier-comments') as HTMLElement
+    const form = mainComposer(element)
+    byKey(form, 'pin-button:main')!.click()
+    key(document.activeElement!, 'Enter')
+    type(q(form, 'textarea'), 'Move this')
+    let finish = () => {}
+    const write = fake.write
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path, patch) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }),
+    )
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    element.setAttribute('for', 'S-1')
+    finish()
+    await settle()
+    element.removeAttribute('for')
+    await settle()
+    expect(byKey(form, 'remove-pin:main')!.parentElement!.hidden).toBe(true)
+    type(q(form, 'textarea'), 'Something else')
+    peer.calls = []
+    q<HTMLButtonElement>(form, 'button[type="submit"]').click()
+    await settle()
+    expect(peer.sends()[0]!.patch).toMatchObject({ pin: null })
+  })
+
+  test('names a thread’s item once for is removed', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1', label: 'Step one' })
+    peer.threads = [thread(a)]
+    const { one } = await mountItems()
+    expect(one.querySelector('.dossier-comments-place')).toBeNull()
+    one.removeAttribute('for')
+    await settle()
+    expect(byKey(one, `anchor:${a.path}`)?.textContent).toBe('On Step one')
+  })
+
+  test('settles a send against the item it was written for, after for changes', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    const area = q<HTMLTextAreaElement>(mainComposer(one), 'textarea')
+    type(area, 'Same words')
+    let finish = () => {}
+    const write = fake.write
+    vi.spyOn(fake, 'write').mockImplementationOnce(
+      (path, patch) =>
+        new Promise((resolve) => {
+          finish = () => resolve(write(path, patch))
+        }),
+    )
+    q<HTMLButtonElement>(mainComposer(one), 'button[type="submit"]').click()
+    await settle()
+    one.setAttribute('for', 'S-2')
+    type(area, 'Same words')
+    finish()
+    await settle()
+    // The other item's text stays, and the sent item's draft is gone.
+    expect(area.value).toBe('Same words')
+    one.setAttribute('for', 'S-1')
+    expect(area.value).toBe('')
+    one.setAttribute('for', 'S-2')
+    expect(area.value).toBe('Same words')
+  })
+
+  test('writes a comment on its item, even before the item is drawn', async () => {
+    const { one } = await mountItems()
+    byKey(one, 'open')!.click()
+    await settle()
+    type(q(mainComposer(one), 'textarea'), 'Check the dates')
+    peer.calls = []
+    q<HTMLButtonElement>(mainComposer(one), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.calls[0]).toEqual({
+      op: 'write',
+      path: FOLDER,
+      patch: {
+        text: 'Check the dates',
+        anchor: 'S-1',
+        label: 'Step one',
+        pin: null,
+        replyTo: null,
+        stance: null,
+        mentions: [],
+      },
+    })
+    document.body.innerHTML =
+      '<dossier-comments for="later"></dossier-comments>'
+    await settle()
+    const later = document.querySelector('dossier-comments') as HTMLElement
+    byKey(later, 'open')!.click()
+    await settle()
+    type(q(mainComposer(later), 'textarea'), 'Before it is drawn')
+    peer.calls = []
+    q<HTMLButtonElement>(mainComposer(later), 'button[type="submit"]').click()
+    await settle()
+    expect(peer.calls[0]?.patch).toMatchObject({
+      anchor: 'later',
+      label: null,
+    })
+  })
+
+  test('shows a thread whose item is gone under “On an earlier version”', async () => {
+    const gone = comment(LEE, 'Was here', { anchor: 'S-9', label: 'Old step' })
+    peer.threads = [thread(gone)]
+    document.body.innerHTML = '<dossier-comments for="S-9"></dossier-comments>'
+    await settle()
+    const element = document.querySelector('dossier-comments') as HTMLElement
+    byKey(element, 'open')!.click()
+    await settle()
+    const earlier = q<HTMLDetailsElement>(element, '.dossier-comments-earlier')
+    expect(earlier.hidden).toBe(false)
+    expect(rootsIn(element)).toEqual([gone.path])
+    expect(q(element, '.dossier-comments-place').textContent).toBe(
+      'On Old step',
+    )
+  })
+
+  test('tells the page its threads with dossier:comments, each element its own', async () => {
+    const a = comment(LEE, 'First', { anchor: 'S-1', stance: 'reopen' })
+    peer.threads = [thread(a)]
+    const seen: { for: string | null; roots: string[] }[] = []
+    document.addEventListener('dossier:comments', (event) => {
+      const detail = (event as CustomEvent<{ threads: Doc<Thread>[] }>).detail
+      seen.push({
+        for: (event.target as Element).getAttribute('for'),
+        roots: detail.threads.map((t) => t.data.root.path),
+      })
+    })
+    await mountItems()
+    expect(seen).toEqual([
+      { for: null, roots: [a.path] },
+      { for: 'S-1', roots: [a.path] },
+      { for: 'S-2', roots: [] },
+    ])
+    seen.length = 0
+    const b = comment(LEE, 'Second', { anchor: 'S-2' })
+    peer.emit([thread(a), thread(b)])
+    await settle()
+    // Only the elements whose threads changed.
+    expect(seen).toEqual([
+      { for: null, roots: [a.path, b.path] },
+      { for: 'S-2', roots: [b.path] },
+    ])
+  })
+
+  test('keeps unsent text per item, and gives a visitor’s kept comment back only to its own element', async () => {
+    const { one, two } = await mountItems()
+    for (const element of [one, two]) byKey(element, 'open')!.click()
+    await settle()
+    type(q(mainComposer(one), 'textarea'), 'On one')
+    type(q(mainComposer(two), 'textarea'), 'On two')
+    document.body.replaceChildren()
+    const again = await mountItems()
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(again.one), 'textarea').value,
+    ).toBe('On one')
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(again.two), 'textarea').value,
+    ).toBe('On two')
+    // Opened by the text left in it.
+    expect(byKey(again.one, 'open')!.getAttribute('aria-expanded')).toBe('true')
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(again.page), 'textarea').value,
+    ).toBe('')
+    document.body.replaceChildren()
+    sessionStorage.clear()
+    sessionStorage.setItem(
+      keptKey(PAGE),
+      JSON.stringify({ ...keptFor('Kept on two'), anchor: 'S-2', for: 'S-2' }),
+    )
+    const back = await mountItems()
+    expect(
+      q<HTMLTextAreaElement>(mainComposer(back.two), 'textarea').value,
+    ).toBe('Kept on two')
+    for (const other of [back.page, back.one]) {
+      expect(
+        q<HTMLTextAreaElement>(mainComposer(other), 'textarea').value,
+      ).toBe('')
+    }
+    expect(sessionStorage.getItem(keptKey(PAGE))).toBeNull()
   })
 })

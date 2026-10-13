@@ -249,6 +249,38 @@ describe('checkPush', () => {
     ])
   })
 
+  it('refuses a JSON field marked required, or with a value that is not a JSON object', () => {
+    const check = checkPush(
+      [
+        file(
+          'plan.html',
+          '<form action="a/"><input type="hidden" name="notes" data-type="json" required></form>\n' +
+            '<form action="b/"><input type="hidden" name="notes" data-type="json" value="[1]"></form>\n' +
+            '<form action="c/"><input type="hidden" name="notes" data-type="json" value=\'{"a":1}\'></form>',
+        ),
+      ],
+      treeOf(),
+    )
+    expect(check.problems).toEqual([
+      {
+        code: 'json_field',
+        path: 'plan.html',
+        line: 1,
+        message:
+          'plan.html: the form on line 1 has the JSON field notes marked required, which a JSON field cannot be: page code fills it.',
+        fix: 'Remove required from the JSON field.',
+      },
+      {
+        code: 'json_field',
+        path: 'plan.html',
+        line: 2,
+        message:
+          'plan.html: the form on line 2 has the JSON field notes, whose value is not a JSON object.',
+        fix: 'Leave value out, or write a JSON object in it, such as value="{}".',
+      },
+    ])
+  })
+
   it('refuses a <base> element', () => {
     const check = checkPush(
       [file('_layout.html', fixture('base.html'))],
@@ -313,7 +345,8 @@ describe('checkPush', () => {
                 '<form action="x"></form>\n' +
                 '<form action="a%2Fb/"></form>\n' +
                 '<form action="y/" data-closes="2026-10-20T18:00"></form>\n' +
-                '<form action="z/"></form><form action="z/"></form>',
+                '<form action="z/"></form><form action="z/"></form>\n' +
+                '<form action="j/"><input type="hidden" name="j" data-type="json" required></form>',
             ),
             file(`${'d/'.repeat(32)}x.html`, ''),
           ],
@@ -329,6 +362,7 @@ describe('checkPush', () => {
       'form_action_authored',
       'form_action_kind',
       'closes_without_offset',
+      'json_field',
       'forms_need_ids',
       'too_deep',
       'bad_name',

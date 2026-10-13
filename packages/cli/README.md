@@ -102,6 +102,9 @@ on stdout. A failure prints
 | 5    | conflict                     |
 | 6    | refused by a rule or a limit |
 
+When the reader of its output stops early, as in `dossier read … | head`, a
+verb ends quietly with 141, as a Unix tool does on a closed pipe.
+
 ## Update
 
 ```sh

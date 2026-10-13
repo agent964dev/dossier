@@ -60,11 +60,20 @@ export const LIMITS = {
 } as const
 
 /**
- * Files in flight at once, up or down: each waits mostly on the network, so
- * more at once finish a push of many small files sooner. A push holds at most
- * 500 MiB in all, which also bounds the bytes read into memory at once.
+ * Downloads in flight at once: each waits mostly on the network, so more at
+ * once finish a pull of many small files sooner.
  */
 const IN_FLIGHT = 32
+/**
+ * Uploads in flight at once, and the bytes they hold between them (a larger
+ * file takes all of them). Node's fetch sends them as streams of one HTTP/2
+ * connection, and Cloudflare resets the streams in flight with
+ * ENHANCE_YOUR_CALM when many request bodies arrive at once: a push of 229
+ * media files met it within seconds at 32 or 8 at once, and rarely at 4.
+ * `rawCall` tries a reset upload again.
+ */
+const UPLOADS_IN_FLIGHT = 4
+const UPLOAD_BYTES_IN_FLIGHT = 16 * MiB
 /** Uploads a purge holds are tried again this many times, waiting longer. */
 const RECLAIM_TRIES = 5
 const RECLAIM_WAIT_MS = 2_000
@@ -520,7 +529,7 @@ const upload = (
       if (!isCode(answer.left, 'blob_reclaiming') || tries >= RECLAIM_TRIES) {
         return yield* Effect.fail(answer.left)
       }
-      yield* Effect.promise(() => wait(RECLAIM_WAIT_MS * tries))
+      yield* Effect.promise((signal) => wait(RECLAIM_WAIT_MS * tries, signal))
     }
   })
 
@@ -614,10 +623,15 @@ const pushWith = (
           )
         : Effect.succeed(file)
     })
-    yield* Effect.forEach(missing, (file) => upload(remote, pushId, file), {
-      concurrency: IN_FLIGHT,
-      discard: true,
-    })
+    const bytesInFlight = yield* Effect.makeSemaphore(UPLOAD_BYTES_IN_FLIGHT)
+    yield* Effect.forEach(
+      missing,
+      (file) =>
+        bytesInFlight.withPermits(
+          Math.max(1, Math.min(file.size, UPLOAD_BYTES_IN_FLIGHT)),
+        )(upload(remote, pushId, file)),
+      { concurrency: UPLOADS_IN_FLIGHT, discard: true },
+    )
     const commit = yield* callApi(remote.deployment, remote.key, (client) =>
       client.pushes.commit({ path: { pushId } }),
     )

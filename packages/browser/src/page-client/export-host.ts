@@ -212,7 +212,11 @@ const commentEntryOf = (
   return entry as unknown as JsonObject
 }
 
-/** A send's values: one value as it is, a repeated name as a list. */
+/**
+ * A send's values: one value as it is, a repeated name as a list, and a
+ * JSON field's text as its object, as Dossier stores it; empty text leaves
+ * the field out.
+ */
 const valuesOf = (send: SendRequest): JsonObject => {
   const values = new Map<string, Json>()
   const valueOf = (value: SendValue): Json => {
@@ -239,34 +243,39 @@ const valuesOf = (send: SendRequest): JsonObject => {
   if (send.submitter !== null) {
     values.set(send.submitter.name, send.submitter.value)
   }
+  for (const name of send.json ?? []) {
+    const text = values.get(name)
+    if (!isText(text)) continue
+    if (text.trim() === '') {
+      values.delete(name)
+      continue
+    }
+    let value: unknown = null
+    try {
+      value = JSON.parse(text)
+    } catch {
+      value = null
+    }
+    if (!isJsonObject(value)) {
+      throw refusal('invalid', 'Use a JSON object for this field.', name)
+    }
+    values.set(name, value)
+  }
   return Object.fromEntries(values)
 }
 
-/** What a file field keeps of each file: its name, size and type. */
-const isFileInfo = (value: unknown): boolean => {
-  const files = Array.isArray(value) ? value : [value]
-  return (
-    files.length > 0 &&
-    files.every(
-      (file) =>
-        isJsonObject(file) &&
-        isText(file.name) &&
-        typeof file.size === 'number' &&
-        isText(file.type),
-    )
-  )
-}
-
 /**
- * A person's answers sent again: a file field left empty keeps the files
- * the answer named, as a stored upload stays in Dossier.
+ * The answer a send merges into, without the fields it gives files: a file
+ * field's value replaces what it held, so a file chosen here never keeps the
+ * stored upload it replaces.
  */
-const withKeptFiles = (values: JsonObject, before: unknown): JsonObject => {
-  if (!isJsonObject(before)) return values
-  const kept = Object.entries(before).filter(
-    ([name, value]) => !Object.hasOwn(values, name) && isFileInfo(value),
-  )
-  return kept.length === 0 ? values : { ...Object.fromEntries(kept), ...values }
+const mergeBase = (send: SendRequest, existing: unknown): JsonObject => {
+  if (!isJsonObject(existing)) return {}
+  const base = { ...existing }
+  for (const [name, value] of send.entries) {
+    if (!isText(value)) delete base[name]
+  }
+  return base
 }
 
 /** The port the page client talks to, answered by the export host. */
@@ -620,20 +629,23 @@ export const createExportHost = (deps: {
     const values = valuesOf(request)
     const target = bare(info.target)
     let doc: DocWire
+    // Each merges as Dossier's send does: into the answer before it, or
+    // into nothing, a JSON field's nulls gone at every depth.
     if (info.kind === 'person') {
       const path = join(target, `${email}.json`)
-      doc = keep(path, docFor(path, withKeptFiles(values, current(path)?.data)))
+      const existing = current(path)?.data
+      doc = keep(
+        path,
+        docFor(path, applyMergePatch(mergeBase(request, existing), values)),
+      )
     } else if (info.kind === 'entries') {
       const path = newEntry(join(target, email))
-      doc = keep(path, docFor(path, values))
+      doc = keep(path, docFor(path, applyMergePatch({}, values)))
     } else {
       const existing = current(target)?.data
       doc = keep(
         target,
-        docFor(
-          target,
-          applyMergePatch(isJsonObject(existing) ? existing : {}, values),
-        ),
+        docFor(target, applyMergePatch(mergeBase(request, existing), values)),
       )
     }
     return { doc, replayed: false }

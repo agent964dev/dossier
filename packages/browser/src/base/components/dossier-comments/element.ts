@@ -2,7 +2,8 @@
 // folder beside the page and written through the page client's public calls
 // only, so a replacement component in a kit writes the same files. It
 // renders into the page's own DOM, follows the folder with a watch, and
-// keeps the focused control across every re-render.
+// keeps the focused control across every re-render. With `for`, it shows
+// and writes only the threads on that one element of the page.
 import {
   COMMENT_MENTIONS_MAX,
   COMMENT_TEXT_MAX,
@@ -46,6 +47,15 @@ export interface CommentsStateDetail {
   readonly state: 'saving' | 'saved' | 'failed'
   readonly error: DossierError | null
   readonly doc: Doc | null
+}
+
+/**
+ * The detail of the bubbling `dossier:comments` event, fired whenever the
+ * threads an element shows change: every thread of the page, or with `for`
+ * those on its element, as `dossier.read('<page>.comments/')` gives them.
+ */
+export interface CommentsDetail {
+  readonly threads: readonly Doc<Thread>[]
 }
 
 export const TEXT = {
@@ -104,10 +114,15 @@ export const keptKey = (pagePath: string): string => `${TAG}:${pagePath}`
 /**
  * Where the new comment's unsent text waits in sessionStorage, so a send
  * that failed, or a reload, never loses what was typed: one per person,
- * and one for visitors, so nobody finds another's text.
+ * and one for visitors, so nobody finds another's text; and one per item
+ * for an element with `for`.
  */
-export const draftKey = (pagePath: string, viewer: string | null): string =>
-  `${TAG}-draft:${viewer === null ? 'visitor' : `person:${viewer.toLowerCase()}`}:${pagePath}`
+export const draftKey = (
+  pagePath: string,
+  viewer: string | null,
+  scope: string | null = null,
+): string =>
+  `${TAG}-draft:${viewer === null ? 'visitor' : `person:${viewer.toLowerCase()}`}:${pagePath}${scope === null ? '' : `#${scope}`}`
 
 /**
  * How long a comment kept for sign-in goes on its own once its person is
@@ -120,6 +135,69 @@ export const claimText = (email: string): string =>
   `Signed in as ${email}. Your comment is back here: send it when it is right.`
 
 type Win = Window & typeof globalThis
+
+type Follower = (value: unknown) => void
+
+interface Feed {
+  readonly followers: Set<Follower>
+  stop: () => void
+  /** The watch's last value, for an element that joins after it came. */
+  last: { readonly value: unknown } | null
+}
+
+/**
+ * One watch per comments folder, however many elements show it: a page with
+ * an element under each of its items reads the folder once per change.
+ */
+const feeds = new WeakMap<Dossier, Map<string, Feed>>()
+
+const follow = (
+  dossier: Dossier,
+  folder: string,
+  follower: Follower,
+): (() => void) => {
+  let byFolder = feeds.get(dossier)
+  if (byFolder === undefined) {
+    byFolder = new Map()
+    feeds.set(dossier, byFolder)
+  }
+  const known = byFolder.get(folder)
+  const feed: Feed = known ?? {
+    followers: new Set(),
+    stop: () => {},
+    last: null,
+  }
+  feed.followers.add(follower)
+  if (known === undefined) {
+    byFolder.set(folder, feed)
+    feed.stop = dossier.watch(folder, (value) => {
+      feed.last = { value }
+      // As they are now: one that leaves or joins meanwhile changes nothing.
+      for (const each of Array.from(feed.followers)) {
+        try {
+          each(value)
+        } catch (error) {
+          queueMicrotask(() => {
+            throw error
+          })
+        }
+      }
+    })
+  } else if (feed.last !== null) {
+    const last = feed.last
+    // Only while it is still the latest: a newer value already reached it.
+    queueMicrotask(() => {
+      if (feed.last === last && feed.followers.has(follower)) {
+        follower(last.value)
+      }
+    })
+  }
+  return () => {
+    if (!feed.followers.delete(follower) || feed.followers.size > 0) return
+    feed.stop()
+    if (byFolder.get(folder) === feed) byFolder.delete(folder)
+  }
+}
 
 interface ThreadUi {
   readonly root: string
@@ -134,6 +212,10 @@ interface ThreadUi {
 
 interface Parts {
   readonly pins: PinLayer
+  readonly title: HTMLHeadingElement
+  /** With `for`: opens and folds the element, and counts its open threads. */
+  readonly opener: HTMLButtonElement
+  readonly openerCount: HTMLSpanElement
   readonly count: HTMLSpanElement
   readonly toggle: HTMLButtonElement
   readonly empty: HTMLParagraphElement
@@ -142,6 +224,7 @@ interface Parts {
   readonly earlierSummary: HTMLElement
   readonly earlierList: HTMLUListElement
   readonly composer: Composer
+  readonly onField: HTMLLabelElement
   readonly on: HTMLSelectElement
   readonly pinButton: HTMLButtonElement
   readonly pinNote: HTMLDivElement
@@ -246,7 +329,12 @@ const focusElement = (element: HTMLElement): void => {
 }
 
 export class DossierComments extends HTMLElement {
-  static readonly observedAttributes = ['anchors', 'pins', 'stances'] as const
+  static readonly observedAttributes = [
+    'anchors',
+    'pins',
+    'stances',
+    'for',
+  ] as const
 
   readonly #dossier: Dossier | null
   #parts: Parts | null = null
@@ -255,7 +343,16 @@ export class DossierComments extends HTMLElement {
   #session = 0
   #ready = false
   #loaded = false
+  /** Every thread of the page. */
+  #all: readonly Doc<Thread>[] = []
+  /** The threads it shows: every one, or with `for` those on its element. */
   #threads: readonly Doc<Thread>[] = []
+  /** What the last `dossier:comments` event carried. */
+  #announced = ''
+  /** With `for`: the element is open rather than folded to its button. */
+  #open = false
+  /** The new comment's stance choice, when the page offers stances. */
+  #mainStance: HTMLSelectElement | null = null
   #showResolved = false
   /** Bumped by every read and applied watch value; older reads are dropped. */
   #generation = 0
@@ -269,12 +366,19 @@ export class DossierComments extends HTMLElement {
   readonly #uis = new Map<string, ThreadUi>()
   readonly #editing = new Map<string, Composer>()
   readonly #confirming = new Set<string>()
-  #marked = new Set<Element>()
+  /** The elements it marks, with the count of open threads on each. */
+  #marked = new Map<Element, number>()
   #marks: readonly PinMark[] = []
   /** The new comment's pin, placed but not sent. */
   #pin: { readonly anchor: string; readonly pin: Pin } | null = null
+  /** The whole page's pin, kept while `for` names an item. */
+  #pagePin: { readonly anchor: string; readonly pin: Pin } | null = null
   #placing: { readonly target: Element; readonly pin: Pin } | null = null
   #anchors = ''
+  /** Unsent text storage refused, by draft key. */
+  readonly #unstored = new Map<string, string>()
+  /** The `for` it had when it left, to choose again if that changed meanwhile. */
+  #leftFor: string | null | undefined = undefined
 
   constructor(dossier: Dossier | null = null) {
     super()
@@ -286,14 +390,19 @@ export class DossierComments extends HTMLElement {
     const parts = this.#parts!
     const session = ++this.#session
     parts.pins.connect()
-    this.#render()
+    // `for` changed while it was away, unseen: chosen again as on a change.
+    if (this.#leftFor !== undefined && this.#leftFor !== this.#scope()) {
+      this.#rescope()
+    } else {
+      this.#render()
+    }
     const dossier = this.#dossier
     if (dossier === null) {
       parts.status.say(TEXT.notInDossier)
       return
     }
     this.#stopWatch?.()
-    this.#stopWatch = dossier.watch(this.#folder(), (value) => {
+    this.#stopWatch = follow(dossier, this.#folder(), (value) => {
       if (session === this.#session) this.#fromWatch(value)
     })
     dossier.ready.then(
@@ -302,6 +411,8 @@ export class DossierComments extends HTMLElement {
         this.#ready = true
         // Who is viewing is known now: their own unsent text comes back.
         if (parts.composer.text === '') parts.composer.text = this.#draft()
+        // An item's element opens on the text someone left unsent in it.
+        if (parts.composer.text !== '') this.#open = true
         this.#render()
         this.#claimKept()
       },
@@ -313,21 +424,63 @@ export class DossierComments extends HTMLElement {
 
   disconnectedCallback(): void {
     this.#session += 1
+    this.#leftFor = this.#scope()
     this.#stopWatch?.()
     this.#stopWatch = null
     this.#parts?.pins.disconnect()
     this.#placing = null
-    for (const element of this.#marked) element.removeAttribute(MARK)
-    this.#marked = new Set()
+    for (const element of this.#marked.keys()) this.#leaveMark(element)
+    this.#marked = new Map()
+  }
+
+  /**
+   * Gives up its mark on an element. Another element counting the same one,
+   * such as the whole page's beside an item's, keeps its mark.
+   */
+  #leaveMark(element: Element): void {
+    const count = [...this.ownerDocument.querySelectorAll(TAG)]
+      .filter(
+        (other): other is DossierComments =>
+          other !== this &&
+          other instanceof DossierComments &&
+          other.isConnected,
+      )
+      .map((other) => other.#marked.get(element))
+      .find((n) => n !== undefined)
+    if (count === undefined) element.removeAttribute(MARK)
+    else element.setAttribute(MARK, String(count))
   }
 
   attributeChangedCallback(
-    _name: string,
+    name: string,
     before: string | null,
     after: string | null,
   ): void {
     if (before === after || this.#parts === null || !this.isConnected) return
-    this.#render()
+    if (name === 'for') this.#rescope()
+    else this.#render()
+  }
+
+  /**
+   * Another element, or none: its own unsent text, kept as it was typed,
+   * and the threads it shows are chosen again. The whole page's pin waits
+   * while an item is shown, as the threads' own state does in `#forget`.
+   */
+  #rescope(): void {
+    if (this.#ready) this.#parts!.composer.text = this.#draft()
+    if (this.#scope() === null) {
+      // Back to the whole page: its waiting pin, if one waits. A `for` that
+      // names nothing leaves the page's own pin alone.
+      if (this.#pagePin !== null) {
+        this.#pin = this.#pagePin
+        this.#pagePin = null
+      }
+    } else if (this.#pin !== null) {
+      this.#pagePin = this.#pin
+      this.#pin = null
+    }
+    if (this.#loaded) this.#take(this.#all)
+    else this.#render()
   }
 
   // Building ---------------------------------------------------------------
@@ -370,7 +523,21 @@ export class DossierComments extends HTMLElement {
       this.#showResolved = !this.#showResolved
       this.#render()
     })
-    header.append(title, count, toggle)
+    const opener = button(doc, '', 'open', 'dossier-comments-open')
+    opener.setAttribute('aria-expanded', 'false')
+    opener.hidden = true
+    const openerText = doc.createElement('span')
+    openerText.textContent = TEXT.comment
+    const openerCount = doc.createElement('span')
+    openerCount.className = 'dossier-comments-count'
+    openerCount.dir = 'auto'
+    openerCount.hidden = true
+    opener.replaceChildren(openerText, openerCount)
+    opener.addEventListener('click', () => {
+      this.#open = !this.#open
+      this.#render()
+    })
+    header.append(title, opener, count, toggle)
 
     const empty = doc.createElement('p')
     empty.className = 'dossier-comments-empty'
@@ -451,6 +618,9 @@ export class DossierComments extends HTMLElement {
     )
     this.#parts = {
       pins,
+      title,
+      opener,
+      openerCount,
       count,
       toggle,
       empty,
@@ -459,6 +629,7 @@ export class DossierComments extends HTMLElement {
       earlierSummary,
       earlierList,
       composer,
+      onField,
       on,
       pinButton,
       pinNote,
@@ -485,6 +656,12 @@ export class DossierComments extends HTMLElement {
     return commentsFolder(this.#dossier!.page.path)
   }
 
+  /** The id of the one element it comments on (`for`), or null for the page. */
+  #scope(): string | null {
+    const id = this.getAttribute('for')?.trim() ?? ''
+    return id === '' ? null : id
+  }
+
   /** May write: a person who may respond, or a visitor who will sign in. */
   #canWrite(): boolean {
     const me = this.#me()
@@ -505,7 +682,7 @@ export class DossierComments extends HTMLElement {
   }
 
   #known(): readonly string[] {
-    return knownEmails(this.#threads, this.#me()?.email ?? null)
+    return knownEmails(this.#all, this.#me()?.email ?? null)
   }
 
   #stances(): string[] {
@@ -582,9 +759,28 @@ export class DossierComments extends HTMLElement {
   }
 
   #take(docs: readonly unknown[]): void {
-    this.#threads = docs.filter(isThreadDoc)
+    this.#all = docs.filter(isThreadDoc)
+    const scope = this.#scope()
+    this.#threads =
+      scope === null
+        ? this.#all
+        : this.#all.filter((doc) => doc.data.root.anchor === scope)
     this.#loaded = true
     this.#render()
+    this.#announce()
+    this.#claimKept()
+  }
+
+  /** Tells the page its threads changed, so it can build on them live. */
+  #announce(): void {
+    const signature = JSON.stringify(this.#threads)
+    if (signature === this.#announced) return
+    this.#announced = signature
+    const win = this.ownerDocument.defaultView as Win
+    const detail: CommentsDetail = { threads: this.#threads }
+    this.dispatchEvent(
+      new win.CustomEvent('dossier:comments', { bubbles: true, detail }),
+    )
   }
 
   // Rendering --------------------------------------------------------------
@@ -600,17 +796,27 @@ export class DossierComments extends HTMLElement {
     const all = [...placed.current, ...placed.earlier]
     const open = all.filter((thread) => !thread.doc.data.resolved).length
     const resolved = all.length - open
+    // With `for`: a compact element, folded to its button until opened.
+    const scoped = this.#scope() !== null
+    const unfolded = !scoped || this.#open
+    this.classList.toggle('dossier-comments-item', scoped)
 
-    parts.count.hidden = !this.#loaded || all.length === 0
+    parts.title.hidden = scoped
+    parts.opener.hidden = !scoped
+    parts.opener.setAttribute('aria-expanded', String(this.#open))
+    parts.openerCount.hidden = !this.#loaded || open === 0
+    parts.openerCount.textContent = `${open} open`
+    parts.count.hidden = scoped || !this.#loaded || all.length === 0
     parts.count.textContent = `${open} open`
-    parts.toggle.hidden = resolved === 0
+    parts.toggle.hidden = resolved === 0 || !unfolded
     parts.toggle.textContent = `${TEXT.showResolved} (${resolved})`
     parts.toggle.setAttribute('aria-pressed', String(this.#showResolved))
 
     const current = placed.current.filter(shown)
     const earlier = placed.earlier.filter(shown)
+    // Pins are drawn and numbered by the whole page's element only.
     const numbers = new Map<string, number>()
-    for (const thread of current) {
+    for (const thread of scoped ? [] : current) {
       const { root } = thread.doc.data
       if (root.pin !== null && root.anchor !== null) {
         numbers.set(root.path, numbers.size + 1)
@@ -618,15 +824,17 @@ export class DossierComments extends HTMLElement {
     }
     this.#fill(parts.list, current, numbers)
     this.#fill(parts.earlierList, earlier, numbers)
-    parts.earlier.hidden = earlier.length === 0
+    parts.list.hidden = !unfolded
+    parts.earlier.hidden = earlier.length === 0 || !unfolded
     parts.earlierSummary.textContent = `${TEXT.earlier} (${earlier.length})`
-    parts.empty.hidden = !this.#loaded || current.length + earlier.length > 0
+    parts.empty.hidden =
+      !unfolded || !this.#loaded || current.length + earlier.length > 0
     parts.empty.textContent = all.length === 0 ? TEXT.empty : TEXT.noneOpen
     this.#forget()
 
     this.#renderComposer()
     this.#markAnchors(placed.current)
-    this.#marks = this.#pinMarks(current, numbers)
+    this.#marks = scoped ? [] : this.#pinMarks(current, numbers)
     this.#drawPins()
     this.#restoreFocus(focus)
   }
@@ -634,14 +842,25 @@ export class DossierComments extends HTMLElement {
   #renderComposer(): void {
     const parts = this.#parts!
     const doc = this.ownerDocument
-    const writable = this.#canWrite()
+    const scoped = this.#scope() !== null
+    const writable = this.#canWrite() && (!scoped || this.#open)
     parts.composer.form.hidden = !writable
     parts.visitorNote.hidden = !(writable && this.#me() === null)
+    // An item's element comments on its item: no choice of place, no pins.
+    parts.onField.hidden = scoped
+    this.#mainStance = this.#stanceField(
+      parts.composer,
+      this.#mainStance,
+      'main',
+    )
     this.#refreshAnchors()
-    if (this.#pin !== null && anchorElement(doc, this.#pin.anchor) === null) {
+    if (
+      this.#pin !== null &&
+      (scoped || anchorElement(doc, this.#pin.anchor) === null)
+    ) {
       this.#pin = null
     }
-    const targets = this.#pinTargets()
+    const targets = scoped ? [] : this.#pinTargets()
     if (!writable || targets.length === 0) this.#placing = null
     parts.pinButton.hidden = targets.length === 0
     parts.pinButton.textContent =
@@ -691,6 +910,8 @@ export class DossierComments extends HTMLElement {
       const signature = JSON.stringify([
         thread,
         placed.anchorFound,
+        // An item's element leaves out the place the whole page's shows.
+        this.#scope() !== null,
         numbers.get(thread.root.path) ?? null,
         me,
         this.#ready,
@@ -716,20 +937,31 @@ export class DossierComments extends HTMLElement {
     arrange(list, wanted)
   }
 
-  /** Drops the state of threads that are gone, unless something waits there. */
+  /**
+   * Drops the state of threads gone from the page, unless something waits
+   * there. A thread `for` no longer shows keeps its reply, edits, delete
+   * question and status, for when it shows again.
+   */
   #forget(): void {
     if (!this.#loaded) return
-    const roots = new Set(this.#threads.map((doc) => doc.data.root.path))
+    const roots = new Set(this.#all.map((doc) => doc.data.root.path))
     for (const [root, ui] of this.#uis) {
       if (roots.has(root) || ui.reply !== null || ui.status.busy) continue
       ui.element.remove()
       this.#uis.delete(root)
     }
+    const live = new Set(
+      this.#all.flatMap(({ data }) =>
+        [data.root, ...data.replies]
+          .filter((c) => !c.deleted)
+          .map((c) => c.path),
+      ),
+    )
     for (const path of this.#editing.keys()) {
-      const live = this.#threads.some(({ data }) =>
-        [data.root, ...data.replies].some((c) => c.path === path && !c.deleted),
-      )
-      if (!live) this.#editing.delete(path)
+      if (!live.has(path)) this.#editing.delete(path)
+    }
+    for (const path of this.#confirming) {
+      if (!live.has(path)) this.#confirming.delete(path)
     }
   }
 
@@ -778,6 +1010,8 @@ export class DossierComments extends HTMLElement {
     place.className = 'dossier-comments-place'
     if (root.anchor === null) {
       place.append(this.#span(TEXT.onWholePage))
+    } else if (this.#scope() !== null && placed.anchorFound) {
+      // An item's element sits with its item: the place goes without saying.
     } else {
       const name = root.label ?? `#${root.anchor}`
       if (placed.anchorFound) {
@@ -806,7 +1040,8 @@ export class DossierComments extends HTMLElement {
         place.append(this.#time(thread.resolvedAt))
       }
     }
-    nodes.push(place, this.#comment(root, ui.root))
+    if (place.childElementCount > 0) nodes.push(place)
+    nodes.push(this.#comment(root, ui.root))
 
     if (thread.replies.length > 0) {
       const replies = doc.createElement('ul')
@@ -942,26 +1177,36 @@ export class DossierComments extends HTMLElement {
 
   /** The reply composer's stance choice follows the page's stances. */
   #syncStances(ui: ThreadUi): void {
-    const composer = ui.reply
-    if (composer === null) return
+    if (ui.reply === null) return
+    ui.stance = this.#stanceField(ui.reply, ui.stance, ui.root)
+  }
+
+  /**
+   * A composer's stance choice, rebuilt only when the page's stances change;
+   * none when the page offers none.
+   */
+  #stanceField(
+    composer: Composer,
+    have: HTMLSelectElement | null,
+    key: string,
+  ): HTMLSelectElement | null {
     const stances = this.#stances()
-    const have = ui.stance === null ? [] : [...ui.stance.options].slice(1)
+    const options = have === null ? [] : [...have.options].slice(1)
     if (
-      have.length === stances.length &&
-      have.every((option, index) => option.value === stances[index])
+      options.length === stances.length &&
+      options.every((option, index) => option.value === stances[index])
     ) {
-      return
+      return have
     }
-    const value = ui.stance?.value ?? ''
-    ui.stance?.closest('label')?.remove()
-    ui.stance = null
-    if (stances.length === 0) return
+    const value = have?.value ?? ''
+    have?.closest('label')?.remove()
+    if (stances.length === 0) return null
     const doc = this.ownerDocument
     const field = doc.createElement('label')
     field.className = 'dossier-comments-field'
     const select = doc.createElement('select')
     select.className = 'dossier-comments-select'
-    select.setAttribute('data-key', `stance:${ui.root}`)
+    select.setAttribute('data-key', `stance:${key}`)
     select.append(
       this.#option('', TEXT.noStance),
       ...stances.map((stance) => this.#option(stance, stance)),
@@ -969,7 +1214,13 @@ export class DossierComments extends HTMLElement {
     select.value = stances.includes(value) ? value : ''
     field.append(this.#span(TEXT.stance), select)
     composer.extras.append(field)
-    ui.stance = select
+    return select
+  }
+
+  /** The stance chosen in a select, if the page still offers it. */
+  #chosen(select: HTMLSelectElement | null): string | null {
+    const value = select?.value ?? ''
+    return this.#stances().includes(value) ? value : null
   }
 
   /** Each anchored element carries how many open threads it has. */
@@ -981,15 +1232,15 @@ export class DossierComments extends HTMLElement {
       const element = anchorElement(doc, thread.data.root.anchor)
       if (element !== null) counts.set(element, (counts.get(element) ?? 0) + 1)
     }
-    for (const element of this.#marked) {
-      if (!counts.has(element)) element.removeAttribute(MARK)
+    for (const element of this.#marked.keys()) {
+      if (!counts.has(element)) this.#leaveMark(element)
     }
     for (const [element, count] of counts) {
       if (element.getAttribute(MARK) !== String(count)) {
         element.setAttribute(MARK, String(count))
       }
     }
-    this.#marked = new Set(counts.keys())
+    this.#marked = counts
   }
 
   #pinMarks(
@@ -1106,7 +1357,7 @@ export class DossierComments extends HTMLElement {
     if (saved.root !== null) {
       near.push(`reply:${saved.root}`, `thread:${saved.root}`)
     }
-    near.push('show-resolved', 'title')
+    near.push('show-resolved', 'open', 'title')
     for (const each of near) {
       const element = this.#byKey(each)
       if (element !== null) {
@@ -1305,35 +1556,54 @@ export class DossierComments extends HTMLElement {
     const text = composer.text.trim()
     const mentions = mentionsIn(text)
     if (!this.#check(text, mentions, composer, status)) return
-    const element = anchorElement(this.ownerDocument, parts.on.value || null)
-    const anchor = element === null ? null : element.id
+    const scope = this.#scope()
+    const element = anchorElement(
+      this.ownerDocument,
+      scope ?? (parts.on.value || null),
+    )
+    // An item's element comments on its item, even before it is drawn.
+    const anchor = scope ?? (element === null ? null : element.id)
     const placed =
-      anchor !== null && this.#pin?.anchor === anchor ? this.#pin : null
+      scope === null && anchor !== null && this.#pin?.anchor === anchor
+        ? this.#pin
+        : null
     const pin = placed?.pin ?? null
+    const stance = this.#chosen(this.#mainStance)
     const entry: CommentEntry = {
       text,
       anchor,
       label: element === null ? null : labelOf(element),
       pin,
       replyTo: null,
-      stance: null,
+      stance,
       mentions,
     }
-    if (this.#me() === null) {
+    const me = this.#me()
+    if (me === null) {
       this.#keepAndSignIn(entry, status)
       return
     }
+    const draft = draftKey(this.#dossier!.page.path, me.email, scope)
     this.#send({
       status,
       composer,
       again: () => this.#submitMain(),
       run: () => this.#dossier!.write(this.#folder(), entryJson(entry)),
       done: () => {
-        // What was typed since the send stays.
-        if (composer.text.trim() === text) composer.text = ''
-        this.#keepDraft()
-        // Only the pin this comment took: one placed since stays.
+        // What was typed since the send stays, as does another item's text
+        // the composer shows since `for` changed.
+        if (this.#scope() === scope && composer.text.trim() === text) {
+          composer.text = ''
+          const select = this.#mainStance
+          if (select !== null && select.value === (stance ?? '')) {
+            select.value = ''
+          }
+        }
+        if (this.#readDraft(draft).trim() === text) this.#putDraft(draft, '')
+        // Only the pin this comment took, wherever it waits: one placed
+        // since stays.
         if (placed !== null && this.#pin === placed) this.#pin = null
+        if (placed !== null && this.#pagePin === placed) this.#pagePin = null
         this.#render()
       },
     })
@@ -1382,14 +1652,13 @@ export class DossierComments extends HTMLElement {
     const mentions = mentionsIn(text)
     if (!this.#check(text, mentions, composer, ui.status)) return
     const thread = this.#thread(root)
-    const chosen = ui.stance?.value ?? ''
     const entry: CommentEntry = {
       text,
       anchor: thread?.root.anchor ?? null,
       label: thread?.root.label ?? null,
       pin: null,
       replyTo: root,
-      stance: this.#stances().includes(chosen) ? chosen : null,
+      stance: this.#chosen(ui.stance),
       mentions,
     }
     if (this.#me() === null) {
@@ -1541,12 +1810,17 @@ export class DossierComments extends HTMLElement {
     try {
       this.#storage()?.setItem(
         keptKey(dossier.page.path),
-        // When the press started the round trip to sign-in, spent once.
-        JSON.stringify({ ...entryJson(entry), keptAt: Date.now() }),
+        // When the press started the round trip to sign-in, spent once,
+        // and the element it was written in: the page's, or an item's.
+        JSON.stringify({
+          ...entryJson(entry),
+          keptAt: Date.now(),
+          ...(this.#scope() === null ? {} : { for: this.#scope() }),
+        }),
       )
       // The text now waits as the kept comment, never also as a draft.
       if (entry.replyTo === null) {
-        this.#storage()?.removeItem(draftKey(dossier.page.path, null))
+        this.#putDraft(draftKey(dossier.page.path, null, this.#scope()), '')
       }
     } catch {
       // Storage is full or refused: sign-in still goes on.
@@ -1573,30 +1847,55 @@ export class DossierComments extends HTMLElement {
     const dossier = this.#dossier
     // Before the viewer is known, text could land under someone else.
     if (dossier === null || !this.#ready) return
-    const key = draftKey(dossier.page.path, this.#me()?.email ?? null)
+    this.#putDraft(
+      draftKey(dossier.page.path, this.#me()?.email ?? null, this.#scope()),
+      text,
+    )
+  }
+
+  /**
+   * Keeps `text` as the draft at `key`, or drops it when blank. Storage that
+   * is full or refused leaves it here, so a change of `for` still keeps it.
+   */
+  #putDraft(key: string, text: string): void {
+    const blank = text.trim() === ''
     try {
-      if (text.trim() === '') this.#storage()?.removeItem(key)
-      else this.#storage()?.setItem(key, text)
+      const storage = this.#storage()
+      if (storage !== null) {
+        if (blank) storage.removeItem(key)
+        else storage.setItem(key, text)
+        this.#unstored.delete(key)
+        return
+      }
     } catch {
-      // Storage is full or refused: the text stays in the composer.
+      // Kept below instead.
+    }
+    if (blank) this.#unstored.delete(key)
+    else this.#unstored.set(key, text)
+  }
+
+  #readDraft(key: string): string {
+    const unstored = this.#unstored.get(key)
+    if (unstored !== undefined) return unstored
+    try {
+      return this.#storage()?.getItem(key) ?? ''
+    } catch {
+      return ''
     }
   }
 
   #draft(): string {
     const dossier = this.#dossier
     if (dossier === null) return ''
-    try {
-      return (
-        this.#storage()?.getItem(
-          draftKey(dossier.page.path, this.#me()?.email ?? null),
-        ) ?? ''
-      )
-    } catch {
-      return ''
-    }
+    return this.#readDraft(
+      draftKey(dossier.page.path, this.#me()?.email ?? null, this.#scope()),
+    )
   }
 
-  /** The comment a visitor kept before signing in, taken out once. */
+  /**
+   * The comment a visitor kept before signing in, taken out once, by the
+   * element it was written in: the page's, or the one for its item.
+   */
   #takeKept(): {
     readonly entry: CommentEntry
     readonly keptAt: number | null
@@ -1606,20 +1905,28 @@ export class DossierComments extends HTMLElement {
     let raw: string | null = null
     try {
       raw = storage?.getItem(key) ?? null
-      if (raw !== null) storage?.removeItem(key)
     } catch {
       return null
     }
     if (raw === null) return null
+    let value: unknown = null
     try {
-      const value: unknown = JSON.parse(raw)
-      const entry = keptEntry(value)
-      if (entry === null) return null
-      const at = isRecord(value) ? value.keptAt : null
-      return { entry, keptAt: typeof at === 'number' ? at : null }
+      value = JSON.parse(raw)
+    } catch {
+      value = null
+    }
+    const kept =
+      isRecord(value) && typeof value.for === 'string' ? value.for : null
+    if (value !== null && kept !== this.#scope()) return null
+    try {
+      storage?.removeItem(key)
     } catch {
       return null
     }
+    const entry = keptEntry(value)
+    if (entry === null) return null
+    const at = isRecord(value) ? value.keptAt : null
+    return { entry, keptAt: typeof at === 'number' ? at : null }
   }
 
   /**
@@ -1629,6 +1936,8 @@ export class DossierComments extends HTMLElement {
    * in to send themselves, since they may not be the one who wrote it.
    */
   #claimKept(): void {
+    // A kept reply finds its thread only once the threads are read.
+    if (!this.#ready || !this.#loaded) return
     const me = this.#me()
     if (me === null || this.#dossier === null) return
     const kept = this.#takeKept()
@@ -1646,15 +1955,19 @@ export class DossierComments extends HTMLElement {
   #restoreKept(entry: CommentEntry, note: string | null): void {
     const parts = this.#parts!
     const root = entry.replyTo
+    this.#open = true
     if (root === null || this.#thread(root) === null) {
       parts.composer.text = entry.text
       const element = anchorElement(this.ownerDocument, entry.anchor)
       this.#render()
       parts.on.value = element === null ? '' : element.id
       this.#pin =
-        element !== null && entry.pin !== null
+        this.#scope() === null && element !== null && entry.pin !== null
           ? { anchor: element.id, pin: entry.pin }
           : null
+      if (this.#mainStance !== null && entry.stance !== null) {
+        this.#mainStance.value = entry.stance
+      }
       this.#keepDraft()
       this.#render()
       if (note !== null) parts.status.say(note)
