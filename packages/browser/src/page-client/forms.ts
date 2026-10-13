@@ -314,6 +314,11 @@ interface Managed {
   /** The stored uploads of each file field, kept when its input stays empty. */
   readonly uploads: Map<string, readonly UploadRef[]>
   /**
+   * Each JSON field's value as the page wrote it, before any prefill or
+   * draft: a hidden field's reset keeps whatever was set since.
+   */
+  readonly jsonStart: ReadonlyMap<HTMLInputElement, string>
+  /**
    * The last attempt, with its own op ID and how many edits it holds: Try
    * again and an unchanged resend repeat it exactly; anything changed since
    * is a new attempt with a new op ID.
@@ -684,6 +689,11 @@ export const startForms = (deps: {
     }
   }
 
+  /** Each JSON field back to the value the page wrote. */
+  const resetJson = (m: Managed): void => {
+    for (const [input, value] of m.jsonStart) input.value = value
+  }
+
   const succeeded = (
     m: Managed,
     value: unknown,
@@ -700,6 +710,7 @@ export const startForms = (deps: {
     if (m.info.kind === 'entries') {
       if (!changedSince) {
         m.form.reset()
+        resetJson(m)
         forgetUploads(m)
       }
     } else if (wire !== null) {
@@ -827,6 +838,7 @@ export const startForms = (deps: {
           m.last = null
           forgetUploads(m)
           clearFields(m.form)
+          resetJson(m)
           requests.draft(m.key, null)
           if (m.closed) {
             setStatus(m, m.closedText)
@@ -964,6 +976,11 @@ export const startForms = (deps: {
       edits: 0,
       typed: new Set(),
       uploads: new Map(),
+      jsonStart: new Map(
+        controlsOf(form)
+          .filter(isJsonField)
+          .map((input) => [input as HTMLInputElement, input.value]),
+      ),
       last: null,
       settled: false,
       attempted: false,

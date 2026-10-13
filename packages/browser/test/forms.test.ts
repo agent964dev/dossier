@@ -826,6 +826,31 @@ describe('withdrawing', () => {
     expect(it.status()).toBe('Your answer was withdrawn.')
     expect(it.form().getAttribute('data-state')).toBe('idle')
   })
+
+  test('a JSON field goes back to the page’s own value; another hidden field stays', async () => {
+    const it = open({
+      body: `
+        <form data-dossier-form="1">
+          <input type="hidden" name="notes" data-type="json" value="{}">
+          <input type="hidden" name="source" value="page">
+          <button>Send</button>
+          <button type="button" data-dossier-withdraw>Withdraw</button>
+        </form>`,
+    })
+    await flush()
+    await it.answer(
+      it.requests('read')[0]!.id,
+      wire({ notes: { a: 1 }, source: 'stored' }),
+    )
+    expect(it.field('[name=notes]').value).toBe('{"a":1}')
+    const withdraw = it.field<HTMLButtonElement>('[data-dossier-withdraw]')
+    withdraw.click()
+    withdraw.click()
+    await flush()
+    await it.answer(it.requests('withdraw')[0]!.id, null)
+    expect(it.field('[name=notes]').value).toBe('{}')
+    expect(it.field('[name=source]').value).toBe('stored')
+  })
 })
 
 describe('entries, roles and resumed sends', () => {
@@ -847,6 +872,29 @@ describe('entries, roles and resumed sends', () => {
     })
     expect(it.field('[name=idea]').value).toBe('')
     expect(it.status(3)).toBe('Sent on 12 Oct at 15:00')
+  })
+
+  test('an entries form’s JSON field starts the next entry from the page’s own value', async () => {
+    const it = open({
+      body: `
+        <form data-dossier-form="3">
+          <input type="hidden" name="notes" data-type="json" value='{"start":1}'>
+          <button>Add</button>
+        </form>`,
+      forms: [ENTRIES],
+    })
+    await flush()
+    type(it, '[name=notes]', '{"start":1,"more":2}')
+    await submit(it, 3)
+    await it.answer(it.requests('send')[0]!.id, {
+      doc: wire(
+        { notes: { start: 1, more: 2 } },
+        '2026-10-12T15:00:00',
+        'questions/ideas/x.json',
+      ),
+      replayed: false,
+    })
+    expect(it.field('[name=notes]').value).toBe('{"start":1}')
   })
 
   test('a viewer who can only read sees every field locked', async () => {
