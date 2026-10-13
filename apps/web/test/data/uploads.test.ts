@@ -455,6 +455,43 @@ describe('reading answers', () => {
     ).toBe('forbidden')
   })
 
+  it('links a shared file’s upload to the folder it is stored in', async () => {
+    const page = 'plan.html'
+    const tree = await pushForms(owner, ws, {
+      [page]: pageWith(
+        '<form action="plan.json"><input name="doc" type="file"><button>Save</button></form>',
+      ),
+    })
+    const form = await formRef(tree, page, 'plan.json')
+    const stored = await uploadAs(browser, tree, {
+      page,
+      form,
+      field: 'doc',
+      name: 'plan.pdf',
+      bytes: PDF,
+    })
+    const { path: _, ...value } = stored
+    await sendAs(browser, tree, { page, form, entries: [['doc', value]] })
+    const found = await runAs(
+      browser,
+      Effect.flatMap(Data, (d) =>
+        d.responses(ref(`${ws.name}/${tree.name}/${page}`)),
+      ),
+    )
+    const shared = found.forms[0]!
+    const [doc] = shared.shared!
+    const { cellOf, sharedOwnOf } = dataViews({
+      workspace: ws.name,
+      tree: tree.name,
+    })
+    const cell = cellOf(doc!.value, 'file', sharedOwnOf(shared.form, doc!.by))
+    if (!('download' in cell)) throw new Error('no download link')
+    expect(cell.file).toBe('plan.pdf')
+    const file = await ownerBrowser.fetch(cell.download, { purpose: 'read' })
+    expect(file.status).toBe(200)
+    expect(await file.text()).toBe(PDF)
+  })
+
   it('shows a JSON field’s object folded, with its keys counted, and other values as text', () => {
     const { cellOf } = dataViews({ workspace: 'w', tree: 't' })
     const notes = { 'S-1': { text: 'Check' }, 'S-2': { text: 'Fine' } }
