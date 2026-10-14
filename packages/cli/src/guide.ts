@@ -12,6 +12,7 @@ import history from './guide/history.md' with { type: 'text' }
 import kitFiles from './guide/kit-files.md' with { type: 'text' }
 import layouts from './guide/layouts.md' with { type: 'text' }
 import liveData from './guide/live-data.md' with { type: 'text' }
+import merging from './guide/merging.md' with { type: 'text' }
 import pageClient from './guide/page-client.md' with { type: 'text' }
 import reading from './guide/reading.md' with { type: 'text' }
 import sharing from './guide/sharing.md' with { type: 'text' }
@@ -60,6 +61,7 @@ const CONVENTIONS: readonly string[] = [
   sharing,
   exporting,
   history,
+  merging,
 ]
 
 /** A convention file: its `## Title` line, then its Markdown. */

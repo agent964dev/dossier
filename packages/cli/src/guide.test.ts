@@ -21,6 +21,7 @@ const TITLES = [
   'Sharing',
   'Export',
   'History',
+  'Working from more than one machine',
 ]
 
 describe('the agent guide', () => {
@@ -247,6 +248,35 @@ describe('the agent guide', () => {
         'ends its team shares',
       ]) {
         expect(history).toContain(phrase)
+      }
+    } finally {
+      await cli.cleanup()
+    }
+  })
+
+  it('gives agents the merge workflow: pull --merge, resolve, push', async () => {
+    const fetch = stubFetch(() => new Response(null, { status: 500 }))
+    const cli = await harness({ fetch: fetch.fetch })
+    try {
+      expect(await cli.run(['--agent-info'])).toBe(0)
+      const markdown = cli.stdout()
+      expect(markdown).toContain(
+        'dossier pull [--merge] [--json] <target> <dir>',
+      )
+      expect(markdown).toContain('| 7 | merge conflicts to resolve |')
+      const merging = markdown.slice(
+        markdown.indexOf('\n## Working from more than one machine\n'),
+      )
+      for (const phrase of [
+        'dossier pull --merge agent964/acme ./site',
+        'before you start work',
+        'whenever a push\n   exits 5',
+        'remove the marker lines',
+        'delete the `.theirs` file',
+        'even with\n`--force`',
+        "never writes people's data",
+      ]) {
+        expect(merging).toContain(phrase)
       }
     } finally {
       await cli.cleanup()

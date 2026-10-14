@@ -18,6 +18,7 @@ export const EXIT_MEANINGS: Readonly<Record<ExitCode, string>> = {
   4: 'not signed in or key refused',
   5: 'conflict',
   6: 'refused by a rule or a limit',
+  7: 'merge conflicts to resolve',
 }
 
 /** Every verb takes it, so `whoami --json` and `--json whoami` agree. */
@@ -35,9 +36,10 @@ export interface CliFailure {
 
 /** A failure the CLI finds itself, before or around a request. */
 export class CliProblem extends Data.TaggedError('CliProblem')<{
-  readonly exit: 1 | 2
+  readonly exit: 1 | 2 | 7
   readonly message: string
   readonly fix: string | null
+  readonly path?: string | null
 }> {}
 
 /** The command line asks for something that cannot work: exit 2. */
@@ -47,6 +49,10 @@ export const usage = (message: string, fix: string | null = null) =>
 /** Something went wrong on this side: exit 1. */
 export const problem = (message: string, fix: string | null = null) =>
   new CliProblem({ exit: 1, message, fix })
+
+/** Files a merge left in conflict are not resolved yet: exit 7. */
+export const unresolved = (message: string, fix: string, path: string) =>
+  new CliProblem({ exit: 7, message, fix, path })
 
 export const spanText = (span: Span.Span): string => {
   switch (span._tag) {
@@ -98,10 +104,15 @@ export const failureFrom = (error: unknown): CliFailure => {
   if (error instanceof CliProblem) {
     return {
       exit: error.exit,
-      code: error.exit === 2 ? 'usage' : 'unavailable',
+      code:
+        error.exit === 2
+          ? 'usage'
+          : error.exit === 7
+            ? 'conflict'
+            : 'unavailable',
       message: error.message,
       fix: error.fix,
-      path: null,
+      path: error.path ?? null,
     }
   }
   if (ValidationError.isValidationError(error)) {
@@ -133,6 +144,10 @@ export interface Output {
   readonly note: (text: string) => void
   /** Text to stderr, or `{ error: { code: exit, … } }` to stdout. */
   readonly fail: (failure: CliFailure) => ExitCode
+  /** Ends a run that succeeded with another exit code than 0. */
+  readonly exitWith: (code: ExitCode) => void
+  /** 0, or what `exitWith` set. */
+  readonly exitCode: () => ExitCode
 }
 
 const line = (text: string) => (text.endsWith('\n') ? text : `${text}\n`)
@@ -150,37 +165,44 @@ export const jsonRequested = (
   return flags.includes('--json') || truthy(env.DOSSIER_JSON)
 }
 
-export const makeOutput = (io: CliIo, json: boolean): Output => ({
-  json,
-  result: (text, value) =>
-    json
-      ? io.stdout(line(JSON.stringify(value, null, 2)))
-      : io.stdout(line(text)),
-  exact: (text, value) =>
-    json ? io.stdout(line(JSON.stringify(value, null, 2))) : io.stdout(text),
-  note: (text) => (json ? io.stderr(line(text)) : io.stdout(line(text))),
-  fail: (failure) => {
-    if (json) {
-      io.stdout(
-        line(
-          JSON.stringify(
-            {
-              error: {
-                code: failure.exit,
-                message: failure.message,
-                fix: failure.fix,
-                path: failure.path,
+export const makeOutput = (io: CliIo, json: boolean): Output => {
+  let exit: ExitCode = 0
+  return {
+    json,
+    exitWith: (code) => {
+      exit = code
+    },
+    exitCode: () => exit,
+    result: (text, value) =>
+      json
+        ? io.stdout(line(JSON.stringify(value, null, 2)))
+        : io.stdout(line(text)),
+    exact: (text, value) =>
+      json ? io.stdout(line(JSON.stringify(value, null, 2))) : io.stdout(text),
+    note: (text) => (json ? io.stderr(line(text)) : io.stdout(line(text))),
+    fail: (failure) => {
+      if (json) {
+        io.stdout(
+          line(
+            JSON.stringify(
+              {
+                error: {
+                  code: failure.exit,
+                  message: failure.message,
+                  fix: failure.fix,
+                  path: failure.path,
+                },
               },
-            },
-            null,
-            2,
+              null,
+              2,
+            ),
           ),
-        ),
-      )
-    } else {
-      io.stderr(line(`dossier: ${failure.message}`))
-      if (failure.fix !== null) io.stderr(line(failure.fix))
-    }
-    return failure.exit
-  },
-})
+        )
+      } else {
+        io.stderr(line(`dossier: ${failure.message}`))
+        if (failure.fix !== null) io.stderr(line(failure.fix))
+      }
+      return failure.exit
+    },
+  }
+}

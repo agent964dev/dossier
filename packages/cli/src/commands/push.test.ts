@@ -296,7 +296,8 @@ describe('dossier push', () => {
     expect(cli.stderr()).toBe(
       'dossier: Someone pushed plans/q3.html to agent964/acme since this ' +
         'folder last pulled or pushed.\n' +
-        'Pull first, or push with --force to replace their changes.\n',
+        `Run \`dossier pull --merge agent964/acme ${FIXTURE}\`, resolve any ` +
+        'conflicts it reports, then push again.\n',
     )
     expect(sequence()).toEqual(['POST /_/api/pushes'])
   })

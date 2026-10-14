@@ -84,7 +84,7 @@ export const runCli = (
   const run = Command.run(dossier, { name: 'dossier', version: VERSION })
   const program = Console.consoleWith((base) =>
     run(['node', 'dossier', ...argv]).pipe(
-      Effect.as<ExitCode>(0),
+      Effect.map((): ExitCode => output.exitCode()),
       Effect.catchAllCause((cause) =>
         Effect.sync(() => exitFor(output, io, Cause.squash(cause))),
       ),

@@ -74,6 +74,12 @@ log in again.
 and local folder, the push each folder last pulled or pushed. `dossier push`
 uses it to notice that someone else pushed in between.
 
+`bases/` sits beside them too, with one folder for each local folder. It keeps
+the files as that folder last pulled, pushed or merged them: every file's hash,
+and the content of the text files. `dossier pull --merge` starts from this copy.
+It is one copy per folder, replaced at each sync, never a history. Removing it
+is safe: the next merge then treats every difference as a conflict.
+
 ### Environment variables
 
 | Variable                      | Effect                                                                                                                                               |
@@ -247,7 +253,13 @@ it, print as warnings.
 
 A member's first push to a tree name the workspace does not have creates the
 tree. A push into an existing path exits 5 if someone pushed there since this
-folder last pulled or pushed; pull first, or push again with `--force`.
+folder last pulled or pushed. Run `dossier pull --merge` to bring their changes
+in and keep yours, then push again. `--force` replaces what is there instead.
+
+A push exits 7 and sends nothing while a file that `dossier pull --merge` left
+in conflict is not resolved: a text file that still has its conflict markers,
+or a `.theirs` file still in the folder. `--force` does not change this. The
+message names each file.
 
 ```text
 added    plans/q3.html
@@ -264,13 +276,14 @@ shares. `--json` prints `{ "push", "link", "added", "changed", "deleted", "ignor
 ### `dossier pull`
 
 ```sh
-dossier pull [--json] <target> <dir>
+dossier pull [--merge] [--json] <target> <dir>
 ```
 
 Copies a node of a tree into a local folder: every file you can read at or
 below it, `_` files included. Data files people wrote through forms are written
 read-only (mode 0444). The CLI records the push it pulled, so a later
-`dossier push` from that folder knows its base.
+`dossier push` from that folder knows its base. A plain pull overwrites local
+changes; `--merge` keeps them.
 
 Pull refuses to write through a symbolic link on the way to any file, and
 writes each file to a temporary file before renaming it into place.
@@ -280,6 +293,91 @@ pulled   plan.html
 pulled   questions/index.html
 Pulled 2 files into ./acme at push 12.
 ```
+
+`--json` prints `{ "written", "unchanged", "seq", "push", "dir" }`.
+
+#### Merging with `--merge`
+
+`dossier pull --merge <target> <dir>` brings the tree's changes into a folder
+and keeps the folder's own. Use it when more than one machine or agent pushes
+the same node:
+
+1. Run `dossier pull --merge` before you start work, and again whenever a push
+   exits 5 because someone pushed in between.
+2. If it exits 7, resolve each conflict it lists.
+3. Push.
+
+The merge compares three versions of each file: the base (the file as this
+folder last pulled, pushed or merged it, kept in `bases/`), the folder's file
+now, and the tree's file now.
+
+| Folder since the base | Tree since the base | Result                                             | Line                  |
+| --------------------- | ------------------- | -------------------------------------------------- | --------------------- |
+| not changed           | changed or added    | the tree's file is written                         | `taken`               |
+| not changed           | deleted             | the file is deleted                                | `deleted`             |
+| changed or added      | not changed         | the folder's file stays                            | `kept`                |
+| deleted               | not changed         | the file stays deleted                             | `kept (deleted here)` |
+| the same change       | the same change     | nothing to do                                      |                       |
+| changed (text)        | changed (text)      | the lines are merged                               | `merged`, `conflict`  |
+| changed (binary)      | changed (binary)    | the folder's file stays; the tree's goes beside it | `conflict`            |
+| deleted               | changed             | the tree's file comes back                         | `conflict`            |
+| changed               | deleted             | the folder's file stays                            | `conflict`            |
+
+Where both sides changed the same lines of a text file, both versions stay,
+between git-style markers:
+
+```text
+<<<<<<< local
+Status: review
+=======
+Status: approved
+>>>>>>> push 14
+```
+
+Keep the right lines and remove the marker lines. A binary file both sides
+changed keeps the folder's version, and the tree's is written beside it as
+`<name>.theirs.<ext>`, such as `logo.theirs.png`; keep one and delete the
+`.theirs` file. A file changed on one side and deleted on the other is resolved
+by keeping it or deleting it; the next push sends either.
+
+```text
+kept     draft.html
+conflict logo.png  (both sides changed it; the tree's version is in logo.theirs.png)
+taken    new.html
+deleted  notes.html
+merged   plan.html
+Merged the tree at push 14 into ./acme; 1 conflict to resolve, then push.
+```
+
+A merge never writes or deletes people's data (form answers, comments,
+uploads), nor any file that a push leaves out (see `dossier push`). Afterwards
+the folder's base is the tree as merged, so the next push is not refused for
+the changes just merged in. `--merge` takes a folder, not a single file.
+
+A folder with no copy of its last sync, such as one pulled by an older CLI, is
+merged as if both sides had added every file. Identical files need nothing,
+and every text file that differs becomes one conflict. An empty folder fills as
+with a plain pull, without people's data. A copy counts only when it matches
+the sync `heads.json` records, and a text file whose copy is missing or damaged
+becomes one conflict; a merge never guesses a base.
+
+The merge checks each file again just before it replaces or deletes it. If you
+edited the file while the merge ran, the merge stops and keeps your edit; run
+it again. It also stops, before it changes anything, where the tree's file
+would land on something else in the folder: a folder of the same name, or, on
+a file system that ignores letter case (as macOS does by default), a file whose
+name differs only in case. A file the tree only renamed by letter case is
+followed. A merge that stops part way keeps the conflicts it already wrote, so
+push still waits for them.
+
+The merge exits 0 when nothing is left to resolve and 7 when conflicts remain.
+While they remain, `dossier push` and another `dossier pull --merge` exit 7 and
+name the files. A plain `dossier pull` does not clear them.
+
+`--json` prints `{ "files", "unchanged", "conflicts", "base", "seq", "push", "dir" }`.
+Each file has `path` and `result`. A conflict also has `conflict` (`text`,
+`binary`, `deleted-here` or `deleted-there`) and `fix`, and a binary conflict
+has `theirs`. `base` is false when the folder had no copy of its last sync.
 
 ### `dossier rm`
 
@@ -662,9 +760,14 @@ per event.
 | 4    | not signed in or key refused |
 | 5    | conflict                     |
 | 6    | refused by a rule or a limit |
+| 7    | merge conflicts to resolve   |
 
 Not found and no access are the same answer, exit 3, so a path you cannot read
 looks like one that does not exist.
+
+Exit 7 comes from the CLI, not the deployment. `dossier pull --merge` exits 7
+when it leaves conflicts. `dossier push` and `dossier pull --merge` exit 7, and
+change nothing, while those conflicts are not resolved.
 
 Some of the deployment's error codes and their exits:
 
@@ -704,6 +807,6 @@ Prints the guide for agents as Markdown: what a deployment, workspace and tree
 are, every verb with its usage and flags, the exit codes, and the conventions
 for writing pages (kits, layouts, themes, components, the base layer,
 embedding, forms, the page client, live data, agent versions, reading,
-sharing, export and history). The verbs and flags come from the same
+sharing, export, history, and working from more than one machine). The verbs and flags come from the same
 declarations as `--help`, so the guide always matches the installed CLI.
 `--json` gives the same guide as JSON.

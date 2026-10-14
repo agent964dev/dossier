@@ -3,9 +3,9 @@
 /**
  * The CLI's exit codes: 0 success · 1 failure · 2 usage · 3 not found or no
  * access · 4 not signed in or key refused · 5 conflict · 6 refused by a rule
- * or a limit.
+ * or a limit · 7 merge conflicts to resolve.
  */
-export type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 6
+export type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7
 
 /**
  * Every error code Dossier answers with, its HTTP status and its CLI exit

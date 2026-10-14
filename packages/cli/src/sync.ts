@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { lstatSync } from 'node:fs'
 import {
   chmod,
   constants,
@@ -22,6 +23,7 @@ import {
   isNodeName,
   isPageFile,
   type LinkRef,
+  type LsResponse,
   type PushNumber,
   type PushPlanWire,
   type Sha256,
@@ -41,12 +43,20 @@ import {
 } from '@dossier/html'
 import { Context, Effect, Either, Layer, Schema } from 'effect'
 
+import {
+  type BaseKey,
+  type BaseStore,
+  baseStore,
+  type Conflict,
+  openConflicts,
+} from './bases.ts'
 import { callApi, rawCall } from './client.ts'
 import { updateJsonFile } from './config.ts'
 import { attempt, type Deployment } from './deployment.ts'
-import { IGNORE_FILE, ignoreRule } from './ignore.ts'
+import { IGNORE_FILE, type IgnoreRule, ignoreRule } from './ignore.ts'
 import { Cli, sleep } from './io.ts'
-import { type CliProblem, problem } from './render.ts'
+import { decide, mergeText, textOf, theirsPath } from './merge.ts'
+import { type CliProblem, problem, unresolved, usage } from './render.ts'
 
 export type SyncError = DossierError | CliProblem
 
@@ -142,6 +152,34 @@ export interface PullOutcome {
   readonly dir: string
 }
 
+/** One file a merge changed, kept or could not merge. */
+export interface MergeFile {
+  /** Inside the folder. */
+  readonly path: string
+  readonly result: 'taken' | 'kept' | 'merged' | 'conflict' | 'deleted'
+  /** A conflict's kind; null for any other result. */
+  readonly conflict: Conflict['kind'] | null
+  /** A binary conflict: where theirs was written, inside the folder. */
+  readonly theirs: string | null
+  /** Kept: the folder deleted it, and it stays deleted. */
+  readonly deletedHere: boolean
+}
+
+export interface MergeOutcome {
+  /** Sorted by path; files both sides hold alike are not listed. */
+  readonly files: readonly MergeFile[]
+  /** Files both sides hold alike. */
+  readonly unchanged: number
+  readonly conflicts: number
+  /** Whether the folder had a base copy; without one, every difference is a conflict. */
+  readonly base: boolean
+  readonly seq: AuthoredSeq
+  /** The newest push among the merged entries. */
+  readonly push: PushNumber | null
+  /** The local folder's absolute path. */
+  readonly dir: string
+}
+
 export interface SyncService {
   /**
    * `at` is the path inside the tree the folder is pushed to, so its pages'
@@ -164,6 +202,14 @@ export interface SyncService {
     readonly target: LinkRef
     readonly dir: string
   }) => Effect.Effect<PullOutcome, SyncError>
+  /**
+   * Brings the tree's changes into the folder and keeps the folder's own:
+   * a three-way merge per file against the base copy of the last sync.
+   */
+  readonly merge: (i: {
+    readonly target: LinkRef
+    readonly dir: string
+  }) => Effect.Effect<MergeOutcome, SyncError>
 }
 
 /** The deployment Sync talks to, and the agent key it acts with there. */
@@ -544,13 +590,126 @@ const saveHead = (heads: HeadStore, key: HeadKey, head: Head) =>
       ),
   })
 
+const baseKeyOf = (key: HeadKey): BaseKey => ({
+  deployment: key.deployment,
+  node: nodeKey(key),
+  folder: key.folder,
+})
+
+/**
+ * Files a merge left in conflict and nobody resolved yet stop the next push
+ * and the next merge, with or without --force.
+ */
+const refuseOpen = (
+  bases: BaseStore,
+  key: HeadKey,
+  next: 'push' | 'merge',
+): Effect.Effect<void, SyncError> =>
+  Effect.gen(function* () {
+    const copy = yield* attempt(() => bases.get(baseKeyOf(key)))
+    const pending = yield* attempt(() =>
+      openConflicts(key.folder, copy?.conflicts ?? []),
+    )
+    const [first] = pending
+    if (first === undefined) return
+    const files = pending.length === 1 ? 'A file' : `${pending.length} files`
+    return yield* Effect.fail(
+      unresolved(
+        `${files} from dossier pull --merge ${pending.length === 1 ? 'is' : 'are'} ` +
+          `not resolved: ${pending.map((o) => o.reason).join('; ')}.`,
+        'In a text file, keep the right lines and remove the marker lines; ' +
+          'for a binary file, keep one version and delete its .theirs file. ' +
+          `Then ${next === 'push' ? 'push' : 'run dossier pull --merge'} again.`,
+        first.conflict.path,
+      ),
+    )
+  })
+
+/**
+ * Keeps the files as the base of the next merge: every hash, and the bytes
+ * of the text files. `bytesOf` answers a file's bytes, or null when they
+ * are not at hand.
+ */
+const saveBase = (
+  bases: BaseStore,
+  key: HeadKey,
+  head: Head,
+  files: ReadonlyMap<string, Sha256>,
+  bytesOf: (path: string, sha256: Sha256) => Promise<Uint8Array | null>,
+  conflicts: readonly Conflict[],
+) =>
+  Effect.tryPromise({
+    try: async () => {
+      const texts = new Map<Sha256, Uint8Array>()
+      for (const [path, sha256] of files) {
+        if (texts.has(sha256)) continue
+        const bytes = await bytesOf(path, sha256)
+        if (
+          bytes !== null &&
+          sha256Of(bytes) === sha256 &&
+          textOf(bytes) !== null
+        ) {
+          texts.set(sha256, bytes)
+        }
+      }
+      await bases.set(
+        baseKeyOf(key),
+        {
+          treeId: head.treeId,
+          seq: head.seq,
+          files: Object.fromEntries(files),
+          conflicts,
+        },
+        texts,
+      )
+    },
+    catch: (error) =>
+      problem(
+        'The tree is up to date with this folder, but this machine could ' +
+          `not keep the copy the next merge starts from: ${messageOf(error)}`,
+        'The next dossier pull --merge treats every difference as a ' +
+          'conflict. Pull or push the folder again to keep the copy.',
+      ),
+  })
+
+/** Reads a file in the folder, or null when it is not there. */
+const bytesAt = (abs: string) => readFile(abs).catch(() => null)
+
+/** The pushed files as the base: all but those the tree keeps as data. */
+const savePushed = (
+  bases: BaseStore,
+  key: HeadKey,
+  head: Head,
+  local: LocalPlan,
+  plan: PushPlanWire,
+) => {
+  const prefix = key.path === '' ? '' : `${key.path}/`
+  const data = new Set(
+    plan.ignored.map((ignored) =>
+      ignored.path.startsWith(prefix)
+        ? ignored.path.slice(prefix.length)
+        : ignored.path,
+    ),
+  )
+  const kept = local.files.filter((file) => !data.has(file.path))
+  const abs = new Map(kept.map((file) => [file.path, file.abs]))
+  return saveBase(
+    bases,
+    key,
+    head,
+    new Map(kept.map((file) => [file.path, file.sha256])),
+    (path) => bytesAt(abs.get(path) ?? ''),
+    [],
+  )
+}
+
 const pushWith = (
   remote: RemoteService,
   heads: HeadStore,
+  bases: BaseStore,
   i: Parameters<SyncService['push']>[0],
 ): Effect.Effect<PushOutcome, SyncError, Cli> =>
   Effect.gen(function* () {
-    const local = yield* planFolder(i.dir, i.target.path)
     const folder = yield* attempt(() => realpath(i.dir))
     const key: HeadKey = {
       deployment: remote.deployment.id,
@@ -559,6 +718,8 @@ const pushWith = (
       path: i.target.path,
       folder,
     }
+    yield* refuseOpen(bases, key, 'push')
+    const local = yield* planFolder(i.dir, i.target.path)
     const base = i.force ? null : yield* attempt(() => heads.get(key))
     const stage = yield* callApi(remote.deployment, remote.key, (client) =>
       client.pushes.stage({
@@ -596,10 +757,9 @@ const pushWith = (
     }
     if (stage.pushId === null) {
       if (stage.tree !== null) {
-        yield* saveHead(heads, key, {
-          treeId: stage.tree.id,
-          seq: stage.tree.seq,
-        })
+        const head = { treeId: stage.tree.id, seq: stage.tree.seq }
+        yield* saveHead(heads, key, head)
+        yield* savePushed(bases, key, head, local, stage.plan)
       }
       return {
         number: stage.tree?.push ?? null,
@@ -635,7 +795,9 @@ const pushWith = (
     const commit = yield* callApi(remote.deployment, remote.key, (client) =>
       client.pushes.commit({ path: { pushId } }),
     )
-    yield* saveHead(heads, key, { treeId: commit.treeId, seq: commit.seq })
+    const head = { treeId: commit.treeId, seq: commit.seq }
+    yield* saveHead(heads, key, head)
+    yield* savePushed(bases, key, head, local, commit.plan)
     return {
       number: commit.number,
       link: commit.link,
@@ -754,9 +916,140 @@ const sameLocal = async (path: string, entry: EntryWire): Promise<boolean> => {
   return sha256Of(await readFile(path)) === entry.sha256
 }
 
+/** A listed entry and where it lands inside the folder. */
+interface Placed {
+  readonly entry: EntryWire
+  /** Inside the folder, with `/` between segments. */
+  readonly rel: string
+  readonly abs: string
+}
+
+/** Where each listed entry lands inside the folder, checked name by name. */
+const placeAll = (
+  remote: RemoteService,
+  ls: LsResponse,
+  folder: string,
+): Effect.Effect<Placed[], CliProblem> => {
+  const prefix = ls.path === '' ? '' : `${ls.path}/`
+  return Effect.forEach(ls.entries, (entry) => {
+    const inside =
+      entry.path === ls.path
+        ? entry.name
+        : prefix === '' || entry.path.startsWith(prefix)
+          ? entry.path.slice(prefix.length)
+          : null
+    const segments = inside === null ? [] : inside.split('/')
+    if (segments.length === 0 || !segments.every(isNodeName)) {
+      return Effect.fail(
+        problem(
+          `${remote.deployment.id} listed ${entry.path}, which is not ` +
+            'inside the pulled folder.',
+          'Run `dossier update`, then pull again.',
+        ),
+      )
+    }
+    return Effect.succeed({
+      entry,
+      rel: segments.join('/'),
+      abs: join(folder, ...segments),
+    })
+  })
+}
+
+/**
+ * Nothing is written through a link: every folder on the way to a path, and
+ * the path itself, must not be a symbolic link.
+ */
+const noLinks = (
+  folder: string,
+  paths: readonly { readonly rel: string; readonly shown: string }[],
+) =>
+  Effect.forEach(
+    paths,
+    ({ rel, shown }) =>
+      attempt(() => linkOnTheWay(folder, rel)).pipe(
+        Effect.flatMap((link) =>
+          link === null
+            ? Effect.void
+            : Effect.fail(
+                problem(
+                  `${link} in ${folder} is a symbolic link, so ${shown} ` +
+                    'is not pulled through it.',
+                  'Remove the link, or pull into another folder.',
+                ),
+              ),
+        ),
+      ),
+    { discard: true },
+  )
+
+/** A listed file's bytes, checked against the hash the listing gave. */
+const download = (remote: RemoteService, ls: LsResponse, entry: EntryWire) =>
+  Effect.gen(function* () {
+    const response = yield* rawCall(remote.deployment, remote.key, {
+      method: 'GET',
+      path:
+        '/_/api/file?path=' +
+        encodeURIComponent(
+          `${ls.tree.workspace}/${ls.tree.name}/${entry.path}`,
+        ),
+      accept: '*/*',
+    })
+    const bytes = new Uint8Array(yield* attempt(() => response.arrayBuffer()))
+    if (entry.sha256 !== null && sha256Of(bytes) !== entry.sha256) {
+      return yield* Effect.fail(
+        problem(
+          `${entry.path} arrived different from what ` +
+            `${remote.deployment.id} listed.`,
+          'Pull again.',
+        ),
+      )
+    }
+    return bytes
+  })
+
+/** Whether a path in the folder is people's data in the tree, or below it. */
+const dataTest = (placed: readonly Placed[]) => {
+  const data = new Set(
+    placed.filter(({ entry }) => entry.kind === 'data').map(({ rel }) => rel),
+  )
+  return (rel: string) => {
+    const segments = rel.split('/')
+    return segments.some((_, i) => data.has(segments.slice(0, i + 1).join('/')))
+  }
+}
+
+/** Whether push leaves a path out: the path itself, or a folder above it. */
+const ignoredBy = (rule: IgnoreRule) => (rel: string) => {
+  const segments = rel.split('/')
+  return segments.some((_, i) =>
+    rule(segments.slice(0, i + 1).join('/'), i < segments.length - 1),
+  )
+}
+
+const newestPush = (ls: LsResponse): PushNumber | null => {
+  const pushes = ls.entries.flatMap((entry) =>
+    entry.push === null ? [] : [entry.push.number],
+  )
+  return pushes.length === 0 ? null : (Math.max(...pushes) as PushNumber)
+}
+
+const headKeyOf = (
+  remote: RemoteService,
+  target: LinkRef,
+  folder: string,
+): HeadKey => ({
+  deployment: remote.deployment.id,
+  workspace: target.workspace,
+  tree: target.tree,
+  path: target.path,
+  folder,
+})
+
 const pullWith = (
   remote: RemoteService,
   heads: HeadStore,
+  bases: BaseStore,
   i: Parameters<SyncService['pull']>[0],
 ): Effect.Effect<PullOutcome, SyncError, Cli> =>
   Effect.gen(function* () {
@@ -766,52 +1059,10 @@ const pullWith = (
     )
     yield* attempt(() => mkdir(i.dir, { recursive: true }))
     const folder = yield* attempt(() => realpath(i.dir))
-    const prefix = ls.path === '' ? '' : `${ls.path}/`
-
-    /** Where an entry lands inside the pulled folder, checked name by name. */
-    const placed = (entry: EntryWire) => {
-      const inside =
-        entry.path === ls.path
-          ? entry.name
-          : prefix === '' || entry.path.startsWith(prefix)
-            ? entry.path.slice(prefix.length)
-            : null
-      const segments = inside === null ? [] : inside.split('/')
-      if (segments.length === 0 || !segments.every(isNodeName)) {
-        return Effect.fail(
-          problem(
-            `${remote.deployment.id} listed ${entry.path}, which is not ` +
-              'inside the pulled folder.',
-            'Run `dossier update`, then pull again.',
-          ),
-        )
-      }
-      return Effect.succeed({
-        entry,
-        rel: segments.join('/'),
-        abs: join(folder, ...segments),
-      })
-    }
-    const all = yield* Effect.forEach(ls.entries, placed)
-    // Nothing is written through a link: every folder on the way to an
-    // entry, and the entry itself, must not be a symbolic link.
-    yield* Effect.forEach(
-      all,
-      ({ entry, rel }) =>
-        attempt(() => linkOnTheWay(folder, rel)).pipe(
-          Effect.flatMap((link) =>
-            link === null
-              ? Effect.void
-              : Effect.fail(
-                  problem(
-                    `${link} in ${folder} is a symbolic link, so ${entry.path} ` +
-                      'is not pulled through it.',
-                    'Remove the link, or pull into another folder.',
-                  ),
-                ),
-          ),
-        ),
-      { discard: true },
+    const all = yield* placeAll(remote, ls, folder)
+    yield* noLinks(
+      folder,
+      all.map(({ entry, rel }) => ({ rel, shown: entry.path })),
     )
     yield* Effect.forEach(
       all.filter(({ entry }) => entry.folder),
@@ -830,27 +1081,7 @@ const pullWith = (
             }
             return null
           }
-          const response = yield* rawCall(remote.deployment, remote.key, {
-            method: 'GET',
-            path:
-              '/_/api/file?path=' +
-              encodeURIComponent(
-                `${ls.tree.workspace}/${ls.tree.name}/${entry.path}`,
-              ),
-            accept: '*/*',
-          })
-          const bytes = new Uint8Array(
-            yield* attempt(() => response.arrayBuffer()),
-          )
-          if (entry.sha256 !== null && sha256Of(bytes) !== entry.sha256) {
-            return yield* Effect.fail(
-              problem(
-                `${entry.path} arrived different from what ` +
-                  `${remote.deployment.id} listed.`,
-                'Pull again.',
-              ),
-            )
-          }
+          const bytes = yield* download(remote, ls, entry)
           yield* attempt(() =>
             writeInside(folder, rel, bytes, entry.kind === 'data'),
           )
@@ -861,26 +1092,339 @@ const pullWith = (
     const written = fetched
       .filter((rel): rel is string => rel !== null)
       .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    yield* attempt(() =>
-      heads.set(
-        {
-          deployment: remote.deployment.id,
-          workspace: i.target.workspace,
-          tree: i.target.tree,
-          path: i.target.path,
-          folder,
-        },
-        { treeId: ls.tree.id, seq: ls.seq },
-      ),
+    const key = headKeyOf(remote, i.target, folder)
+    const head = { treeId: ls.tree.id, seq: ls.seq }
+    yield* attempt(() => heads.set(key, head))
+    // The authored files as pulled are the next merge's base; a conflict a
+    // merge left that the pull did not settle stays open.
+    const isData = dataTest(all)
+    const authored = files.filter(
+      ({ entry, rel }) => entry.sha256 !== null && !isData(rel),
     )
-    const pushes = ls.entries.flatMap((entry) =>
-      entry.push === null ? [] : [entry.push.number],
+    const absOf = new Map(authored.map((p) => [p.rel, p.abs]))
+    const previous = yield* attempt(() => bases.get(baseKeyOf(key)))
+    const pending = yield* attempt(() =>
+      openConflicts(folder, previous?.conflicts ?? []),
+    )
+    yield* saveBase(
+      bases,
+      key,
+      head,
+      new Map(authored.map(({ entry, rel }) => [rel, entry.sha256!])),
+      (path) => bytesAt(absOf.get(path) ?? ''),
+      pending.map((o) => o.conflict),
     )
     return {
       written,
       unchanged: files.length - written.length,
       seq: ls.seq,
-      push: pushes.length === 0 ? null : (Math.max(...pushes) as PushNumber),
+      push: newestPush(ls),
+      dir: folder,
+    }
+  })
+
+// ------------------------------------------------------------------- merge
+
+/** Whether anything, even a broken link, holds a path inside the folder. */
+const existsInside = (root: string, rel: string): boolean => {
+  try {
+    lstatSync(join(root, rel))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Deletes a file inside the folder, through no link. */
+const removeInside = async (root: string, rel: string): Promise<void> => {
+  if ((await linkOnTheWay(root, rel)) !== null) throw throughLink(root, rel)
+  await rm(join(root, rel), { force: true })
+}
+
+const mergeWith = (
+  remote: RemoteService,
+  heads: HeadStore,
+  bases: BaseStore,
+  i: Parameters<SyncService['merge']>[0],
+): Effect.Effect<MergeOutcome, SyncError, Cli> =>
+  Effect.gen(function* () {
+    const target = targetString(i.target)
+    yield* attempt(() => mkdir(i.dir, { recursive: true }))
+    const folder = yield* attempt(() => realpath(i.dir))
+    const key = headKeyOf(remote, i.target, folder)
+    const baseKey = baseKeyOf(key)
+    yield* refuseOpen(bases, key, 'merge')
+    const ls = yield* callApi(remote.deployment, remote.key, (client) =>
+      client.files.ls({ urlParams: { path: target, depth: 'all' } }),
+    )
+    if (ls.entries.some((entry) => entry.path === ls.path && !entry.folder)) {
+      return yield* Effect.fail(
+        usage(
+          `${target} is a file; dossier pull --merge merges a folder.`,
+          'Give the folder it is in, as it is pushed.',
+        ),
+      )
+    }
+    const placed = yield* placeAll(remote, ls, folder)
+    // People's data, and what push leaves out, are never merged.
+    const isData = dataTest(placed)
+    const isIgnored = ignoredBy(yield* attempt(() => ignoreRule(folder)))
+    const merged = (rel: string) => !isData(rel) && !isIgnored(rel)
+    const theirs = new Map(
+      placed
+        .filter(({ entry, rel }) => !entry.folder && merged(rel))
+        .map((p) => [p.rel, p]),
+    )
+    const { files: found } = yield* attempt(() => walk(folder))
+    const ours = new Map(
+      yield* Effect.forEach(
+        found.filter((file) => !isData(file.path)),
+        (file) =>
+          Effect.map(
+            attempt(() => readFile(file.abs)),
+            (bytes) =>
+              [file.path, { abs: file.abs, sha: sha256Of(bytes) }] as const,
+          ),
+        { concurrency: 4 },
+      ),
+    )
+    const copy = yield* attempt(() => bases.get(baseKey))
+    const synced = yield* attempt(() => heads.get(key))
+    // The copy counts only as the sync heads.json records: one older than
+    // the last sync, or from another tree of the same name, is no base.
+    const baseFiles =
+      copy !== null &&
+      synced !== null &&
+      copy.treeId === ls.tree.id &&
+      synced.treeId === copy.treeId &&
+      synced.seq === copy.seq
+        ? copy.files
+        : null
+    const baseOf = (rel: string): Sha256 | null | undefined =>
+      baseFiles === null
+        ? undefined
+        : Object.hasOwn(baseFiles, rel)
+          ? (baseFiles[rel] ?? null)
+          : null
+    // An authored file always has a hash.
+    const theirSha = (rel: string) => theirs.get(rel)?.entry.sha256 ?? null
+    const paths = [
+      ...new Set([
+        ...theirs.keys(),
+        ...ours.keys(),
+        ...Object.keys(baseFiles ?? {}).filter(merged),
+      ]),
+    ].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    const steps = paths.map((rel) => ({
+      rel,
+      step: decide(baseOf(rel), ours.get(rel)?.sha ?? null, theirSha(rel)),
+    }))
+    const touched = steps.filter(({ step }) =>
+      ['take', 'delete', 'merge', 'restore'].includes(step),
+    )
+    yield* noLinks(
+      folder,
+      touched.map(({ rel }) => ({ rel, shown: rel })),
+    )
+    // Where file names ignore letter case, a new path can be a file the
+    // folder holds under another case. Only one this merge deletes first
+    // may be replaced; anything else stops the merge before it changes a file.
+    const deleting = new Set(
+      steps.filter(({ step }) => step === 'delete').map(({ rel }) => rel),
+    )
+    for (const { rel, step } of steps) {
+      if (step !== 'take' && step !== 'restore') continue
+      if (ours.has(rel) || !existsInside(folder, rel)) continue
+      const alias = [...ours.keys()].find(
+        (path) => path !== rel && path.toLowerCase() === rel.toLowerCase(),
+      )
+      if (alias === undefined) {
+        return yield* Effect.fail(
+          problem(
+            `${rel} in the tree is where ${folder} holds a folder or a file ` +
+              'the merge does not change.',
+            'Move it out of the way, then run dossier pull --merge again.',
+          ),
+        )
+      }
+      if (!deleting.has(alias)) {
+        return yield* Effect.fail(
+          problem(
+            `${rel} in the tree is the same file on this machine as ` +
+              `${alias} in ${folder}: file names here ignore letter case.`,
+            'Rename one so the names differ by more than letter case, then ' +
+              'run dossier pull --merge again.',
+          ),
+        )
+      }
+    }
+    const fetched = new Map(
+      yield* Effect.forEach(
+        touched.filter(({ step }) => step !== 'delete'),
+        ({ rel }) =>
+          Effect.map(
+            download(remote, ls, theirs.get(rel)!.entry),
+            (bytes) => [rel, bytes] as const,
+          ),
+        { concurrency: IN_FLIGHT },
+      ),
+    )
+    const push = newestPush(ls)
+    const label = push === null ? 'the tree' : `push ${push}`
+    const files: MergeFile[] = []
+    const conflicts: Conflict[] = []
+    const reserved = new Set(paths)
+    let unchanged = 0
+    /**
+     * A file is replaced or deleted only while it still holds what the
+     * merge planned from: an edit made since stops the merge instead.
+     */
+    const unchangedSincePlan = (rel: string) =>
+      Effect.gen(function* () {
+        const now = yield* attempt(() => bytesAt(join(folder, rel)))
+        const was = ours.get(rel)?.sha ?? null
+        if ((now === null ? null : sha256Of(now)) === was) return
+        return yield* Effect.fail(
+          problem(
+            `${rel} changed while dossier pull --merge ran, so the merge ` +
+              'stopped before replacing it.',
+            'Run dossier pull --merge again.',
+          ),
+        )
+      })
+    const write = (rel: string, bytes: Uint8Array) =>
+      Effect.zipRight(
+        unchangedSincePlan(rel),
+        attempt(() => writeInside(folder, rel, bytes, false)),
+      )
+    const line = (
+      rel: string,
+      result: MergeFile['result'],
+      more: Partial<MergeFile> = {},
+    ) =>
+      files.push({
+        path: rel,
+        result,
+        conflict: null,
+        theirs: null,
+        deletedHere: false,
+        ...more,
+      })
+    const conflict = (
+      rel: string,
+      kind: Conflict['kind'],
+      at: string | null,
+    ) => {
+      conflicts.push({ path: rel, kind, theirs: at })
+      line(rel, 'conflict', { conflict: kind, theirs: at })
+    }
+    // Deletions go first, so a file renamed only in letter case is written
+    // after its old name is gone.
+    const ordered = [
+      ...steps.filter(({ step }) => step === 'delete'),
+      ...steps.filter(({ step }) => step !== 'delete'),
+    ]
+    const apply = Effect.forEach(
+      ordered,
+      ({ rel, step }) =>
+        Effect.gen(function* () {
+          switch (step) {
+            case 'nothing':
+              unchanged += 1
+              break
+            case 'keep':
+              line(rel, 'kept', { deletedHere: !ours.has(rel) })
+              break
+            case 'take':
+              yield* write(rel, fetched.get(rel)!)
+              line(rel, 'taken')
+              break
+            case 'delete':
+              yield* unchangedSincePlan(rel)
+              yield* attempt(() => removeInside(folder, rel))
+              line(rel, 'deleted')
+              break
+            case 'restore':
+              yield* write(rel, fetched.get(rel)!)
+              conflict(rel, 'deleted-here', null)
+              break
+            case 'hold':
+              conflict(rel, 'deleted-there', null)
+              break
+            case 'merge': {
+              const theirBytes = fetched.get(rel)!
+              yield* unchangedSincePlan(rel)
+              const ourBytes = yield* attempt(() =>
+                readFile(ours.get(rel)!.abs),
+              )
+              const ourText = textOf(ourBytes)
+              const theirText = textOf(theirBytes)
+              if (ourText !== null && theirText !== null) {
+                // Without the base's text, as when the folder had no copy, the
+                // two texts are one conflict, never a guess.
+                const sha = baseOf(rel)
+                const baseText =
+                  sha === undefined || sha === null
+                    ? null
+                    : yield* attempt(() => bases.text(baseKey, sha))
+                const result = mergeText(baseText, ourText, theirText, label)
+                if (result.text !== ourText) {
+                  yield* write(rel, new TextEncoder().encode(result.text))
+                }
+                if (result.conflicts === 0) line(rel, 'merged')
+                else conflict(rel, 'text', null)
+              } else {
+                const at = theirsPath(
+                  rel,
+                  (path) => reserved.has(path) || existsInside(folder, path),
+                )
+                reserved.add(at)
+                yield* attempt(() => writeInside(folder, at, theirBytes, false))
+                conflict(rel, 'binary', at)
+              }
+              break
+            }
+          }
+        }),
+      { discard: true },
+    )
+    const head = { treeId: ls.tree.id, seq: ls.seq }
+    // A merge that stops part way keeps the conflicts it already wrote, so
+    // push still waits for them.
+    yield* apply.pipe(
+      Effect.tapError(() =>
+        conflicts.length === 0
+          ? Effect.void
+          : Effect.ignore(
+              attempt(() => bases.addConflicts(baseKey, conflicts, head)),
+            ),
+      ),
+    )
+    files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    // The tree as merged is the next merge's base.
+    yield* saveBase(
+      bases,
+      key,
+      head,
+      new Map([...theirs].map(([rel, p]) => [rel, p.entry.sha256!])),
+      async (rel, sha256) => {
+        const got = fetched.get(rel)
+        if (got !== undefined) return got
+        const mine = ours.get(rel)
+        if (mine?.sha === sha256) return bytesAt(mine.abs)
+        const text = await bases.text(baseKey, sha256)
+        return text === null ? null : new TextEncoder().encode(text)
+      },
+      conflicts,
+    )
+    yield* attempt(() => heads.set(key, head))
+    return {
+      files,
+      unchanged,
+      conflicts: conflicts.length,
+      base: baseFiles !== null,
+      seq: ls.seq,
+      push,
       dir: folder,
     }
   })
@@ -894,12 +1438,17 @@ export const SyncLive: Layer.Layer<Sync, never, Cli | Remote> = Layer.effect(
     const cli = yield* Cli
     const remote = yield* Remote
     const heads = headStore(cli.io.configPath)
+    const bases = baseStore(cli.io.configPath)
     return {
       plan: planFolder,
       push: (i) =>
-        pushWith(remote, heads, i).pipe(Effect.provideService(Cli, cli)),
+        pushWith(remote, heads, bases, i).pipe(Effect.provideService(Cli, cli)),
       pull: (i) =>
-        pullWith(remote, heads, i).pipe(Effect.provideService(Cli, cli)),
+        pullWith(remote, heads, bases, i).pipe(Effect.provideService(Cli, cli)),
+      merge: (i) =>
+        mergeWith(remote, heads, bases, i).pipe(
+          Effect.provideService(Cli, cli),
+        ),
     }
   }),
 )
