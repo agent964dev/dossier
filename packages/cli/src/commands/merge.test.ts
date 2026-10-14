@@ -524,6 +524,19 @@ describe('dossier pull --merge', () => {
     expect(cli.stderr()).toContain('a.html still has conflict markers')
   })
 
+  it('stops before writing a file where the folder holds a file on its way', async () => {
+    const { cli, tree, read, write, exists } = await setUp()
+    await write('notes', 'mine\n')
+    tree.set({ 'a.html': page('<p>A</p>'), 'notes/b.html': page('<p>B</p>') })
+
+    expect(await cli.run(['pull', '--merge', 'agent964/acme', 'site'])).toBe(1)
+    expect(cli.stderr()).toContain(
+      'notes/b.html in the tree needs a folder where',
+    )
+    expect(await read('notes')).toBe('mine\n')
+    expect(await exists('a.html')).toBe(false)
+  })
+
   it('stops before writing a file where the folder holds a folder', async () => {
     const { cli, tree, read, write } = await setUp()
     await write('z/x.html', page('<p>Mine</p>'))

@@ -1234,6 +1234,22 @@ const mergeWith = (
     )
     for (const { rel, step } of steps) {
       if (step !== 'take' && step !== 'restore') continue
+      // A file where the tree's path needs a folder stops it too, unless
+      // this merge deletes that file first.
+      const segments = rel.split('/')
+      for (let n = 1; n < segments.length; n += 1) {
+        const above = segments.slice(0, n).join('/')
+        if (deleting.has(above) || !existsInside(folder, above)) continue
+        if (!lstatSync(join(folder, above)).isDirectory()) {
+          return yield* Effect.fail(
+            problem(
+              `${rel} in the tree needs a folder where ${folder} holds the ` +
+                `file ${above}.`,
+              'Move it out of the way, then run dossier pull --merge again.',
+            ),
+          )
+        }
+      }
       if (ours.has(rel) || !existsInside(folder, rel)) continue
       const alias = [...ours.keys()].find(
         (path) => path !== rel && path.toLowerCase() === rel.toLowerCase(),
