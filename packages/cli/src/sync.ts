@@ -1424,11 +1424,27 @@ const mergeWith = (
     // A merge that stops part way, or cannot keep its base, still keeps the
     // conflicts it wrote, so push waits for them.
     yield* Effect.zipRight(apply, save).pipe(
-      Effect.tapError(() =>
+      Effect.catchAll((error) =>
         conflicts.length === 0
-          ? Effect.void
-          : Effect.ignore(
-              attempt(() => bases.addConflicts(baseKey, conflicts, head)),
+          ? Effect.fail(error)
+          : attempt(() => bases.addConflicts(baseKey, conflicts, head)).pipe(
+              Effect.zipRight(Effect.fail(error)),
+              // When even that cannot be written, say which files hold
+              // conflicts: push cannot know of them.
+              Effect.catchTag('CliProblem', (unrecorded) =>
+                unrecorded === error
+                  ? Effect.fail(error)
+                  : Effect.fail(
+                      problem(
+                        'The merge stopped, and this machine could not record ' +
+                          'the conflicts it left in ' +
+                          `${conflicts.map((c) => c.theirs ?? c.path).join(', ')}: ` +
+                          `${unrecorded.message}`,
+                        'Resolve those files before you push; push cannot see ' +
+                          'these conflicts. Then run dossier pull --merge again.',
+                      ),
+                    ),
+              ),
             ),
       ),
     )
