@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "es-module-lexer": "2.3.2",
+    "es-module-lexer": "3.0.3",
     "hast-util-from-parse5": "8.0.3",
     "hast-util-to-mdast": "10.1.2",
     "mdast-util-gfm": "3.1.0",
