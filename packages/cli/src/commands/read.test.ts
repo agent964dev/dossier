@@ -425,3 +425,97 @@ describe('dossier comment', () => {
     expect(requests).toHaveLength(0)
   })
 })
+
+describe('dossier comment --resolve and --reopen', () => {
+  const THREAD = 'plan.comments/lina@acme.com/2026-10-10T09-14-03.json'
+  const LINK = `https://dossier.acme.com/agent964/acme/plan#dossier-comment=${encodeURIComponent(THREAD)}&on=pricing`
+  const marked = (over: Record<string, unknown> = {}) => ({
+    thread: THREAD,
+    page: 'plan.html',
+    resolved: true,
+    changed: true,
+    link: LINK,
+    ...over,
+  })
+
+  it('resolves a thread named on its own, and prints the thread and its link', async () => {
+    const cli = await setUp(() => Response.json(marked()))
+
+    expect(
+      await cli.run(['comment', '--resolve', `agent964/acme/${THREAD}`]),
+    ).toBe(0)
+    expect(cli.stdout()).toBe(
+      [`Resolved ${THREAD} on plan.html.`, LINK, ''].join('\n'),
+    )
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.method).toBe('POST')
+    expect(requests[0]?.url.pathname).toBe('/_/api/comment/thread')
+    expect(requests[0]?.headers.get('authorization')).toBe('Bearer dsk_one')
+    expect(requests[0]?.body).toMatchObject({
+      thread: `agent964/acme/${THREAD}`,
+      resolved: true,
+    })
+    expect(requests[0]?.body).not.toHaveProperty('page')
+    expect(typeof (requests[0]!.body as { opId: unknown }).opId).toBe('string')
+  })
+
+  it('reopens a thread named from the page’s folder, with the page', async () => {
+    const cli = await setUp(() => Response.json(marked({ resolved: false })))
+
+    expect(
+      await cli.run(['comment', 'agent964/acme/plan', '--reopen', THREAD]),
+    ).toBe(0)
+    expect(cli.stdout().split('\n')[0]).toBe(`Reopened ${THREAD} on plan.html.`)
+    expect(requests[0]?.body).toMatchObject({
+      page: 'agent964/acme/plan',
+      thread: THREAD,
+      resolved: false,
+    })
+  })
+
+  it('takes the link that opens the thread, and says when it already was resolved', async () => {
+    const cli = await setUp(() => Response.json(marked({ changed: false })))
+
+    expect(await cli.run(['comment', '--resolve', LINK, '--json'])).toBe(0)
+    expect(JSON.parse(cli.stdout())).toEqual(marked({ changed: false }))
+    expect(requests[0]?.body).toMatchObject({
+      page: 'agent964/acme/plan',
+      thread: THREAD,
+      resolved: true,
+    })
+    expect(await cli.run(['comment', '--resolve', LINK])).toBe(0)
+    expect(cli.stdout().split('\n')[0]).toBe(
+      `${THREAD} on plan.html was already resolved.`,
+    )
+  })
+
+  it.each([
+    [['comment', '--resolve', THREAD, '--reopen', THREAD]],
+    [['comment', 'agent964/acme/plan', '--resolve', THREAD, 'Done.']],
+    [['comment', 'agent964/acme/plan', '--resolve', THREAD, '--on', 'x']],
+    [['comment', 'agent964/acme/plan']],
+    [['comment']],
+  ])('refuses %j before asking, exit 2', async (argv) => {
+    const cli = await setUp(() => Response.json(marked()))
+
+    expect(await cli.run(argv)).toBe(2)
+    expect(requests).toHaveLength(0)
+  })
+
+  it.each([
+    ['not_found', 3],
+    ['forbidden', 3],
+    ['invalid', 6],
+  ] as const)('exits %s as %i', async (code, exit) => {
+    const cli = await setUp(() => errorResponse(code, 'Not this time.'))
+
+    expect(
+      await cli.run(['comment', '--resolve', `agent964/acme/${THREAD}`]),
+    ).toBe(exit)
+    if (code === 'not_found') {
+      expect(cli.stderr()).toContain(
+        `Nothing at agent964/acme/${THREAD}, or you cannot read it.`,
+      )
+    }
+  })
+})

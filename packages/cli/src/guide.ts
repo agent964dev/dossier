@@ -151,7 +151,7 @@ export const guideMarkdown = (g: Guide): string => {
       '`DOSSIER_JSON=1`) and then prints one JSON value on stdout; a failure ' +
       'prints `{ "error": { "code": <exit code>, "message", "fix", "path" } }`.',
     'To act with an agent key from settings, set both `DOSSIER_DEPLOYMENT` ' +
-      'and `DOSSIER_KEY`.',
+      'and `DOSSIER_KEY`. Start with `dossier ls` to see where you can work.',
     '',
     ...(about === undefined ? [] : section(about)),
     '## Verbs',

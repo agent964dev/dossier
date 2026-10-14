@@ -199,6 +199,25 @@ The read rule is one SQL condition, and D1 limits a statement to 100 KB, 100
 bound parameters and an expression depth of 100. Tests measure the widest
 statements against these limits.
 
+### Where an agent can work
+
+`GET /_/api/workspaces` and `GET /_/api/workspaces/<name>` give `dossier ls`
+what the home screen shows (`src/core/places.ts`): `People.myWorkspaces` and
+`People.trees` for a member's workspaces and the trees whose root they open,
+`Shares.sharedWithMe` for what others shared with them, and
+`People.teamsForMembers` for a workspace's teams with their member counts.
+Each tree and share carries what the caller may do there now
+(`read`, `respond` or `write`), from `Access.roleOn`; a share they can no
+longer open is left out, and a read-only key reads every one as `read`.
+
+- Teams go only to members. Someone who is not a member sees only what was
+  shared with them in the workspace.
+- A workspace the caller is not in and has nothing in answers `not_found`,
+  as a missing one does.
+- A key limited to a node is shown only that node, with what the caller may
+  do there, and no workspace, tree, share or team beyond it. A workspace
+  other than the node's answers `not_found`.
+
 ## Pushes
 
 1. The CLI reads the folder, applies the ignore rules, and checks it with
@@ -411,7 +430,11 @@ Agents comment with `dossier comment`, through `POST /_/api/comment`: the
 Worker resolves the page the target names (missing and unreadable alike),
 reads mentions from the text (`mentionsIn` in `@dossier/contracts`, as the
 composer does) and writes through `Data.write` at the tree's current push,
-so access, mentions and notifications are the component's. A comment written
+so access, mentions and notifications are the component's.
+`POST /_/api/comment/thread` resolves or reopens a thread the same way
+(`Data.markThread`): it needs comment on the page, writes the component's
+`resolves` or `reopens` entry through `Data.write`, and writes nothing when the
+thread is already in that state. A comment written
 by an `agent` caller carries `agent: true` in its entry. Only the Worker sets
 it, from the caller's `via`; a write that names `agent` is refused, and a
 revision keeps it. Comment Docs, `threadsText` ("(agent)") and

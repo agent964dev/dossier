@@ -40,7 +40,9 @@ export const dossier = Command.make(
     }),
 ).pipe(
   Command.withDescription(
-    'Sign in to a Dossier deployment and act there with an agent key.',
+    'Sign in to a Dossier deployment and act there with an agent key. ' +
+      'Run dossier ls to see your workspaces, their trees, what you may do ' +
+      'in each, and what is shared with you.',
   ),
   Command.withSubcommands(verbs),
 )

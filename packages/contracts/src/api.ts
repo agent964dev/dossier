@@ -931,6 +931,35 @@ export const CommentResponse = Schema.Struct({
 })
 export type CommentResponse = typeof CommentResponse.Type
 
+/** `dossier comment --resolve` and `--reopen`: a thread's state. */
+export const ThreadMarkPayload = Schema.Struct({
+  /**
+   * The thread's root comment: '<workspace>/<tree>/<tree path>' or a link;
+   * with `page`, its path from the page's folder or in the tree, as
+   * `--reply-to` takes it.
+   */
+  thread: Schema.String,
+  /** '<workspace>/<tree>/<page>', or a link on this deployment. */
+  page: Schema.optional(Schema.String),
+  /** true resolves the thread, false reopens it. */
+  resolved: Schema.Boolean,
+  opId: OpId,
+})
+export type ThreadMarkPayload = typeof ThreadMarkPayload.Type
+
+export const ThreadMarkResponse = Schema.Struct({
+  /** The thread's root from the page's folder, as `--reply-to` takes it. */
+  thread: Schema.String,
+  /** The page's tree path. */
+  page: Schema.String,
+  resolved: Schema.Boolean,
+  /** false when the thread already was resolved, or open: nothing written. */
+  changed: Schema.Boolean,
+  /** The page's link, opening the thread. */
+  link: Schema.String,
+})
+export type ThreadMarkResponse = typeof ThreadMarkResponse.Type
+
 export class CommentsGroup extends HttpApiGroup.make('comments')
   // The comment component's write, as the caller: written with an agent
   // key, it is an agent's. not_found | sign_in_required | forbidden |
@@ -939,6 +968,126 @@ export class CommentsGroup extends HttpApiGroup.make('comments')
     HttpApiEndpoint.post('comment', '/comment')
       .setPayload(CommentPayload)
       .addSuccess(CommentResponse, { status: 201 }),
+  )
+  // The comment component's Resolve and Reopen, as the caller: whoever may
+  // comment on the page. not_found | sign_in_required | forbidden |
+  // invalid | rate_limited
+  .add(
+    HttpApiEndpoint.post('thread', '/comment/thread')
+      .setPayload(ThreadMarkPayload)
+      .addSuccess(ThreadMarkResponse),
+  ) {}
+
+/** What the caller may do at a node: open it, answer it, or change it. */
+export const CanSchema = Schema.Literal('read', 'respond', 'write')
+export type Can = typeof CanSchema.Type
+
+/** A tree of a workspace, with what the caller may do at its root. */
+export const TreePlace = Schema.Struct({
+  name: Schema.String,
+  /** As the CLI takes it: 'agent964/acme/'. */
+  target: Schema.String,
+  link: Schema.String,
+  can: CanSchema,
+})
+export type TreePlace = typeof TreePlace.Type
+
+/** Something someone else shared with the caller, as the home screen lists it. */
+export const SharedPlace = Schema.Struct({
+  workspace: Schema.String,
+  tree: Schema.String,
+  /** Inside the tree: '' for its root. */
+  path: Schema.String,
+  kind: Schema.Literal('folder', 'page', 'file'),
+  title: Schema.String,
+  /** As the CLI takes it: 'agent964/acme/questions/'. */
+  target: Schema.String,
+  link: Schema.String,
+  /** What the caller may do there now. */
+  can: CanSchema,
+  /** ISO 8601. */
+  sharedAt: Schema.String,
+  /** An open form at or below it has nothing of the caller's yet. */
+  waiting: Schema.Boolean,
+  /** A mention of the caller waits unseen on a page at or below it. */
+  mentioned: Schema.Boolean,
+})
+export type SharedPlace = typeof SharedPlace.Type
+
+/**
+ * The node an agent key is limited to. Such a key is shown only this: no
+ * workspaces, trees, teams or shares beyond it.
+ */
+export const ScopePlace = Schema.Struct({
+  /** As the CLI takes it: 'agent964/acme/plans/'. */
+  target: Schema.String,
+  workspace: Schema.String,
+  /** Null while the node is gone or the key's person cannot open it. */
+  link: Schema.NullOr(Schema.String),
+  can: Schema.NullOr(CanSchema),
+})
+export type ScopePlace = typeof ScopePlace.Type
+
+export const WorkspacePlace = Schema.Struct({
+  name: Schema.String,
+  role: Schema.Literal('admin', 'member'),
+  /** A suspended workspace opens nothing until a super admin lifts it. */
+  suspended: Schema.Boolean,
+  /** Its trees the caller can open at the root, by name. */
+  trees: Schema.Array(TreePlace),
+})
+export type WorkspacePlace = typeof WorkspacePlace.Type
+
+/** `dossier ls`: where the caller can work. */
+export const WorkspacesResponse = Schema.Struct({
+  /** The caller's agent key is limited to one node; null for all. */
+  scope: Schema.NullOr(ScopePlace),
+  /** The caller's workspaces, by name. */
+  workspaces: Schema.Array(WorkspacePlace),
+  /** What others shared with the caller, newest first. */
+  shared: Schema.Array(SharedPlace),
+})
+export type WorkspacesResponse = typeof WorkspacesResponse.Type
+
+/** A team of a workspace, as `team:<name>` and `@team:<name>` name it. */
+export const TeamPlace = Schema.Struct({
+  name: Schema.String,
+  members: Schema.Int,
+})
+export type TeamPlace = typeof TeamPlace.Type
+
+/** `dossier ls <workspace>`: one workspace, as far as the caller sees it. */
+export const WorkspaceResponse = Schema.Struct({
+  name: Schema.String,
+  /** Null for someone who is not a member and only has shares in it. */
+  role: Schema.NullOr(Schema.Literal('admin', 'member')),
+  suspended: Schema.Boolean,
+  /** Members: its trees the caller can open at the root, by name. */
+  trees: Schema.Array(TreePlace),
+  /** What others shared with the caller in it, newest first. */
+  shared: Schema.Array(SharedPlace),
+  /** Members only, by name; null for anyone else. */
+  teams: Schema.NullOr(Schema.Array(TeamPlace)),
+  /** The caller makes a tree by pushing to a new tree name. */
+  createsTrees: Schema.Boolean,
+  /** As in WorkspacesResponse. */
+  scope: Schema.NullOr(ScopePlace),
+})
+export type WorkspaceResponse = typeof WorkspaceResponse.Type
+
+export class WorkspacesGroup extends HttpApiGroup.make('workspaces')
+  // As the home screen: the caller's workspaces and their trees, and what
+  // others shared with them. A key limited to a node sees only that node.
+  // sign_in_required
+  .add(
+    HttpApiEndpoint.get('list', '/workspaces').addSuccess(WorkspacesResponse),
+  )
+  // A workspace the caller is not a member of and has no share in answers
+  // as a missing one. not_found | sign_in_required
+  .add(
+    HttpApiEndpoint.get('get', '/workspaces/:name')
+      .setPath(Schema.Struct({ name: Schema.String }))
+      .addSuccess(WorkspaceResponse),
   ) {}
 
 /** One of the caller's notifications; see DossierNotification. */
@@ -1033,5 +1182,6 @@ export class DossierApi extends HttpApi.make('dossier')
   .add(SearchGroup)
   .add(NotificationsGroup)
   .add(CommentsGroup)
+  .add(WorkspacesGroup)
   .addError(DossierError)
   .prefix('/_/api') {}

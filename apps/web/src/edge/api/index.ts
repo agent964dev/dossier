@@ -26,6 +26,7 @@ import { SearchApiLive } from './search.ts'
 import { SharesApiLive } from './shares.ts'
 import { SystemLive } from './system.ts'
 import { ViewLive } from './view.ts'
+import { WorkspacesApiLive } from './workspaces.ts'
 
 export type ApiHandler = (
   request: Request,
@@ -54,6 +55,7 @@ const build = async (runtime: CoreRuntime): Promise<ApiHandler> => {
       SearchApiLive,
       NotificationsApiLive,
       CommentsApiLive,
+      WorkspacesApiLive,
     ]),
     Layer.provide(Layer.succeedContext(core.context)),
     // Every request passes its own caller and background; these only

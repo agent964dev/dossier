@@ -162,11 +162,15 @@ describe('the agent guide', () => {
         '[--share text...] [--json] <dir> <target>',
     )
     expect(markdown).toContain('dossier pull [--json] <target> <dir>')
-    expect(markdown).toContain('dossier ls [--json] <target>')
+    expect(markdown).toContain('dossier ls [--json] [<target>]')
     expect(markdown).toContain(
       'dossier share [--remove] [--json] <path> [<target>] [<role>]',
     )
     expect(markdown).toContain('dossier watch [--next] [--json] <target>')
+    expect(markdown).toContain(
+      'dossier comment [--on text] [--reply-to text] [--stance text] ' +
+        '[--resolve text] [--reopen text] [--json] [<page>] [<text>]',
+    )
     expect(markdown).toContain(
       'dossier export [(-o, --output text)] [--json] <link>',
     )
@@ -248,7 +252,7 @@ describe('the frame', () => {
     current = await harness({ fetch: fetch.fetch })
 
     expect(await current.run(['--version'])).toBe(0)
-    expect(current.stdout()).toBe('1.0.3\n')
+    expect(current.stdout()).toBe('1.0.4\n')
   })
 
   it('ends quietly with 141 when the reader of its output goes away', () => {
