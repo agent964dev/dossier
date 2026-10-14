@@ -1771,6 +1771,20 @@ describe('threads agents resolve and reopen', () => {
       resolved: true,
     })
     expect(notComments.status).toBe(400)
+    // A thread's shape that names no thread answers as a reply does, and
+    // nothing is written: as for a thread the caller cannot read.
+    const nothing = await route(key, {
+      thread: `${base}/plan.comments/${lina.who.email}/2020-01-01T00-00-00.json`,
+      resolved: true,
+    })
+    expect(nothing.status).toBe(400)
+    expect(nothing.body.error).toMatchObject({ code: 'invalid' })
+    expect(nothing.body.error).toMatchObject({
+      message: (ofReply.body.error as { message: string }).message.replace(
+        reply.path,
+        `plan.comments/${lina.who.email}/2020-01-01T00-00-00.json`,
+      ),
+    })
 
     const asked = await write(minutes(2), lina.caller, tree, {
       page: 'questions/index.html',

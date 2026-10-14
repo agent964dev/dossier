@@ -3018,8 +3018,20 @@ export const DataLive: Layer.Layer<
           folder.slice(0, -1),
         )
         const found = threads.find((t) => t.data.root.path === thread)
-        const anchor = found?.data.root.anchor ?? null
-        if (found !== undefined && found.data.resolved === i.resolved) {
+        // A thread the caller cannot read, one that is not there, and a
+        // reply all answer alike, and nothing is written for them.
+        if (found === undefined) {
+          return yield* Effect.fail(
+            dossierError(
+              'invalid',
+              `${thread} is not a thread in ${name}/.`,
+              null,
+              thread,
+            ),
+          )
+        }
+        const anchor = found.data.root.anchor ?? null
+        if (found.data.resolved === i.resolved) {
           return { page, thread, anchor, changed: false }
         }
         yield* write({
