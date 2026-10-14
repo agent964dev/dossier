@@ -56,7 +56,7 @@ where its data and comments are.
 | `whoami`  | Show the person, deployment and agent key this CLI acts with.              |
 | `update`  | Update the CLI to the latest npm release, or check with `--check`.         |
 | `push`    | Publish a local folder to a node of a tree, all at once.                   |
-| `pull`    | Copy a node of a tree into a local folder.                                 |
+| `pull`    | Copy a node of a tree into a local folder; `--merge` keeps local changes.  |
 | `rm`      | Delete a file, a folder or a tree, restorable within the retention period. |
 | `mv`      | Move or rename a file or folder, or move a tree to another workspace.      |
 | `share`   | List, give or take away read, respond or write on a node.                  |
@@ -101,6 +101,7 @@ on stdout. A failure prints
 | 4    | not signed in or key refused |
 | 5    | conflict                     |
 | 6    | refused by a rule or a limit |
+| 7    | merge conflicts to resolve   |
 
 When the reader of its output stops early, as in `dossier read … | head`, a
 verb ends quietly with 141, as a Unix tool does on a closed pipe.

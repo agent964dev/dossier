@@ -134,7 +134,7 @@ describe('failures', () => {
 })
 
 describe('the agent guide', () => {
-  it('lists every verb with exit codes 0 to 6', async () => {
+  it('lists every verb with exit codes 0 to 7', async () => {
     const fetch = stubFetch(() => new Response(null, { status: 500 }))
     current = await harness({ fetch: fetch.fetch })
 
@@ -161,7 +161,7 @@ describe('the agent guide', () => {
       'dossier push [(-m, --message text)] [--dry-run] [--force] ' +
         '[--share text...] [--json] <dir> <target>',
     )
-    expect(markdown).toContain('dossier pull [--json] <target> <dir>')
+    expect(markdown).toContain('dossier pull [--merge] [--json] <target> <dir>')
     expect(markdown).toContain('dossier ls [--json] [<target>]')
     expect(markdown).toContain(
       'dossier share [--remove] [--json] <path> [<target>] [<role>]',
@@ -222,6 +222,7 @@ describe('the agent guide', () => {
       '4',
       '5',
       '6',
+      '7',
     ])
 
     expect(await current.run(['--agent-info'])).toBe(0)
@@ -252,7 +253,7 @@ describe('the frame', () => {
     current = await harness({ fetch: fetch.fetch })
 
     expect(await current.run(['--version'])).toBe(0)
-    expect(current.stdout()).toBe('1.0.4\n')
+    expect(current.stdout()).toBe('1.1.0\n')
   })
 
   it('ends quietly with 141 when the reader of its output goes away', () => {

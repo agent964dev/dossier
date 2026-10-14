@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 
 import { Args, Command, Options } from '@effect/cli'
 import {
+  DossierError,
   dossierError,
   parseShareSpec,
   type ShareSpec,
@@ -156,7 +157,23 @@ export const push = Command.make(
           force,
           share: shares,
         }),
-      ).pipe(Effect.provide(SyncLive), Effect.provideService(Remote, remote))
+      ).pipe(
+        Effect.provide(SyncLive),
+        Effect.provideService(Remote, remote),
+        // The deployment's fix says to pull, which drops this folder's
+        // changes; a merge keeps them.
+        Effect.mapError((error) =>
+          error instanceof DossierError && error.code === 'stale_head'
+            ? dossierError(
+                'stale_head',
+                error.message,
+                `Run \`dossier pull --merge ${target} ${dir}\`, resolve any ` +
+                  'conflicts it reports, then push again.',
+                error.path,
+              )
+            : error,
+        ),
+      )
       // Shares go with a commit; with nothing to commit, none was given.
       const shared = outcome.committed
         ? describePushShares(shares, ref.workspace)
@@ -173,6 +190,9 @@ export const push = Command.make(
 ).pipe(
   Command.withDescription(
     'Publish a local folder to a node of a tree, all at once. Exits 5 if ' +
-      'someone pushed there since this folder last pulled or pushed.',
+      'someone pushed there since this folder last pulled or pushed: run ' +
+      'dossier pull --merge, then push again. Exits 7, and sends nothing, ' +
+      'while a file dossier pull --merge left in conflict still has its ' +
+      'markers or its .theirs file.',
   ),
 )

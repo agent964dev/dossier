@@ -1,6 +1,6 @@
 {
   "name": "@agent964/dossier",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Push, pull and read Dossier trees, and sign in agents, from the command line.",
   "type": "module",
   "bin": {
@@ -38,7 +38,8 @@
     "@effect/cli": "0.77.1",
     "@effect/platform": "0.97.2",
     "@effect/platform-node": "0.108.2",
-    "effect": "3.22.2"
+    "effect": "3.22.2",
+    "node-diff3": "3.2.1"
   },
   "devDependencies": {
     "@dossier/contracts": "workspace:*",
