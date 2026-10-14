@@ -1405,20 +1405,8 @@ const mergeWith = (
       { discard: true },
     )
     const head = { treeId: ls.tree.id, seq: ls.seq }
-    // A merge that stops part way keeps the conflicts it already wrote, so
-    // push still waits for them.
-    yield* apply.pipe(
-      Effect.tapError(() =>
-        conflicts.length === 0
-          ? Effect.void
-          : Effect.ignore(
-              attempt(() => bases.addConflicts(baseKey, conflicts, head)),
-            ),
-      ),
-    )
-    files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     // The tree as merged is the next merge's base.
-    yield* saveBase(
+    const save = saveBase(
       bases,
       key,
       head,
@@ -1433,6 +1421,18 @@ const mergeWith = (
       },
       conflicts,
     )
+    // A merge that stops part way, or cannot keep its base, still keeps the
+    // conflicts it wrote, so push waits for them.
+    yield* Effect.zipRight(apply, save).pipe(
+      Effect.tapError(() =>
+        conflicts.length === 0
+          ? Effect.void
+          : Effect.ignore(
+              attempt(() => bases.addConflicts(baseKey, conflicts, head)),
+            ),
+      ),
+    )
+    files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     yield* attempt(() => heads.set(key, head))
     return {
       files,

@@ -199,21 +199,24 @@ export const baseStore = (configPath: string): BaseStore => {
       }
     },
     addConflicts: async (key, conflicts, fallback) => {
-      const list = await read(key)
-      await mkdir(folderOf(key), { recursive: true, mode: 0o700 })
-      await writeList(
-        key,
-        list === null
-          ? {
-              version: 1,
-              node: key.node,
-              folder: key.folder,
-              treeId: fallback.treeId,
-              seq: fallback.seq,
-              files: {},
-              conflicts,
-            }
-          : { ...list, conflicts: [...list.conflicts, ...conflicts] },
+      // Read and changed under the list's lock, so no conflict is lost.
+      await updateJsonFile<BaseList | null>(
+        join(folderOf(key), 'list.json'),
+        () => read(key),
+        (list) =>
+          list === null
+            ? {
+                version: 1,
+                node: key.node,
+                folder: key.folder,
+                treeId: fallback.treeId,
+                seq: fallback.seq,
+                files: {},
+                conflicts,
+              }
+            : { ...list, conflicts: [...list.conflicts, ...conflicts] },
+        {},
+        `the base copy of ${key.folder}`,
       )
     },
   }
