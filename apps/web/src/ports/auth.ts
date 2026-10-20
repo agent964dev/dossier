@@ -274,6 +274,7 @@ const diagnosticDue = (
 ): boolean => provider === 'microsoft' || reason === 'token_check'
 
 const CALLBACK = /^\/_\/auth\/callback\/([^/]+)$/
+const SIGN_IN = '/_/sign-in'
 
 /**
  * What a request did, read from its scope and Better Auth's answer. Better
@@ -287,10 +288,12 @@ const outcomeOf = (
 ): SignInOutcome => {
   const { provider, profile, claims } = scope
   const location = response.headers.get('location')
+  const landing = location === null ? null : new URL(location, request.url)
+  // Only the sign-in screen's error: a page a person returns to may carry
+  // its own.
   const error =
-    location === null
-      ? null
-      : new URL(location, request.url).searchParams.get('error')
+    landing?.pathname === SIGN_IN ? landing.searchParams.get('error') : null
+  const callback = CALLBACK.exec(new URL(request.url).pathname)?.[1]
   const diagnose = (
     on: SignInProviderId,
     reason: SignInDiagnostic['reason'],
@@ -303,7 +306,6 @@ const outcomeOf = (
 
   if (provider === undefined || claims === undefined) {
     // The sign-in failed before any profile was read.
-    const callback = CALLBACK.exec(new URL(request.url).pathname)?.[1]
     return error !== null && isProvider(callback)
       ? {
           ...none,
@@ -341,6 +343,14 @@ const outcomeOf = (
         refused.code === 'email_unconfirmed'
           ? null
           : diagnose(provider, guest ? 'guest' : refused.code),
+    }
+  }
+  if (error !== null && provider === 'microsoft' && callback === provider) {
+    // Any other failure once Microsoft's profile was read, such as a
+    // database that did not answer.
+    return {
+      ...none,
+      diagnostic: diagnose(provider, 'provider_error', { error }),
     }
   }
   return {
@@ -800,7 +810,12 @@ export const authOptions = (
         },
       },
     },
-    onAPIError: { errorURL: `${origin}/_/sign-in` },
+    onAPIError: { errorURL: `${origin}${SIGN_IN}` },
+    // Only Better Auth's own words reach the logs. What it passes along with
+    // them (a raw error, a provider's error response) can name the person.
+    logger: {
+      log: (level, message) => console[level](`[Better Auth] ${message}`),
+    },
     rateLimit: {
       enabled: true,
       storage: 'database',

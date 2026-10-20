@@ -37,6 +37,11 @@ export interface FakeMicrosoftIdentity {
    * `{ oid: undefined }` issues a token without `oid`.
    */
   readonly token?: Readonly<Record<string, unknown>>
+  /** The token endpoint answers 400 with this body instead of tokens. */
+  readonly tokenError?: {
+    readonly error: string
+    readonly error_description: string
+  }
 }
 
 export interface FakeMicrosoft {
@@ -271,7 +276,10 @@ const tokenEndpoint = async (request: Request, microsoft: FakeMicrosoft) => {
   ) {
     return refuse('PKCE verifier mismatch')
   }
-  const { photo, omit, ...identity } = payload.identity
+  const { photo, omit, tokenError, ...identity } = payload.identity
+  if (tokenError !== undefined) {
+    return Response.json(tokenError, { status: 400 })
+  }
   const claims = microsoftClaims(identity, microsoft.clientId)
   for (const claim of omit) delete claims[claim]
   const grant = {

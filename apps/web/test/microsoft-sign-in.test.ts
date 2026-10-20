@@ -4,12 +4,13 @@
 // person across Google and Microsoft, photos, and CLI logins.
 import type { TreeId } from '@dossier/contracts'
 import { SELF } from 'cloudflare:test'
+import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { SignIn, type Caller, type CurrentCaller } from '../src/core/index.ts'
 import { Browser, signedIn } from './support/browser.ts'
-import { count, exec, rows } from './support/d1.ts'
+import { count, exec, failingStatements, rows } from './support/d1.ts'
 import type { FakeIdentity } from './support/fake-google.ts'
 import {
   GRAPH_PHOTO,
@@ -328,6 +329,36 @@ const expectLine = (
     expect(text).not.toContain(identity.email.split('@')[0])
   }
   if (identity.name !== undefined) expect(text).not.toContain(identity.name)
+}
+
+const CONSOLE = ['log', 'info', 'warn', 'error', 'debug'] as const
+
+/** Everything a logged value holds, as text, including an error's own fields. */
+const textOf = (value: unknown, seen = new Set<object>()): string => {
+  if (typeof value === 'string') return value
+  if (value === null || typeof value !== 'object') return String(value)
+  if (seen.has(value)) return ''
+  seen.add(value)
+  return [
+    String(value),
+    ...Object.getOwnPropertyNames(value).map((key) =>
+      textOf((value as Record<string, unknown>)[key], seen),
+    ),
+  ].join(' ')
+}
+
+/** All that reached any console method while `body` runs, as text. */
+const consoleText = async <A>(body: () => Promise<A>) => {
+  const spies = CONSOLE.map((method) => vi.spyOn(console, method))
+  const result = await body()
+  const text = spies
+    .flatMap((spy) =>
+      spy.mock.calls.map((call) => call.map((arg) => textOf(arg))),
+    )
+    .flat()
+    .join('\n')
+  for (const spy of spies) spy.mockRestore()
+  return { result, text }
 }
 
 const photoBytes = (...tail: number[]) =>
@@ -925,6 +956,63 @@ describe('a Microsoft sign-in that fails before Dossier reads a profile', () => 
       { ...PROVIDER_ERROR, error: 'unable_to_get_user_info' },
       identity,
     )
+  })
+
+  it("writes none of the token endpoint's error text to the logs", async () => {
+    const sentinel = `sentinel-${crypto.randomUUID().slice(0, 8)}`
+    const identity = contoso(sentinel, {
+      name: `Sentinel ${sentinel}`,
+      tokenError: {
+        error: 'invalid_grant',
+        error_description: `AADSTS50126: ${sentinel}@contoso.test (Sentinel ${sentinel}) could not sign in.`,
+      },
+    })
+    const before = await everything()
+    const { result, text } = await consoleText(() => attempt(identity))
+    await expectGeneric(result.result)
+    expect(await everything()).toEqual(before)
+    expectLine(
+      result.lines,
+      { ...PROVIDER_ERROR, error: 'invalid_code' },
+      identity,
+    )
+    expect(text).not.toContain(sentinel)
+    expect(text).not.toContain('AADSTS50126')
+  })
+})
+
+describe('a Microsoft sign-in that fails after Dossier reads a profile', () => {
+  it('shows the generic notice and logs one provider_error line with the claims the token carried', async () => {
+    const known = contoso('d1-down', { name: 'Down Person' })
+    await signedIn(known)
+    const userId = await userIdOf(known.email ?? '')
+    harness.use(
+      testRuntime({
+        env: {
+          DB: failingStatements(env.DB, (sql) =>
+            sql.startsWith('select "email" from "user"'),
+          ),
+        },
+      }),
+    )
+    const before = await everything()
+    const { result, text } = await consoleText(() => attempt(known))
+    await expectGeneric(result.result)
+    expect(await everything()).toEqual(before)
+    expect((await storedUser(userId))?.email).toBe(known.email)
+    expectLine(
+      result.lines,
+      {
+        reason: 'provider_error',
+        error: 'validation_failed',
+        account: 'work',
+        carried: { email: true, xms_edov: true, idp: false },
+        xms_edov: true,
+      },
+      known,
+    )
+    expect(text).not.toContain(known.email)
+    expect(text).not.toContain(known.name)
   })
 })
 
