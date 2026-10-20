@@ -373,7 +373,14 @@ export const authOptions = (
     appName: config.deploymentName,
     basePath: '/_/auth',
     // A person's name and photo come only from Google, at sign-in.
-    disabledPaths: ['/update-user'],
+    // Sign-in accounts join only by signing in, and leave only through
+    // Dossier's disconnect, which ends what they opened.
+    disabledPaths: [
+      '/update-user',
+      '/link-social',
+      '/list-accounts',
+      '/unlink-account',
+    ],
     baseURL: config.origin.href,
     secret: Redacted.value(config.betterAuthSecret),
     // PUBLIC_ORIGIN, and the request's own origin, which Wrangler's local

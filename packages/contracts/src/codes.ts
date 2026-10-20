@@ -67,6 +67,10 @@ export const ERRORS = {
   email_unconfirmed: { status: 403, exit: 4 },
   /** A known account's new email belongs to another person. */
   email_in_use: { status: 409, exit: 4 },
+  /** The person's only sign-in account cannot be disconnected. */
+  last_account: { status: 409, exit: 4 },
+  /** The sign-in account this session uses cannot be disconnected from it. */
+  account_in_use: { status: 409, exit: 4 },
   /** Page client only: nothing was stored. */
   offline: {
     status: null,

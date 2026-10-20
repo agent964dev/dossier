@@ -44,6 +44,7 @@ export {
   type BrowserSession,
   type DevicePrompt,
   type KeyReach,
+  type SignInAccountView,
   type SignInNotice,
   type SignInService,
 } from './sign-in.ts'

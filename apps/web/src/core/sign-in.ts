@@ -16,7 +16,12 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer, Redacted } from 'effect'
 
 import { db, schema } from '../db/client.ts'
-import { Auth, type AuthHooks, type AuthPort } from '../ports/auth.ts'
+import {
+  Auth,
+  type AuthHooks,
+  type AuthPort,
+  type SignInProviderId,
+} from '../ports/auth.ts'
 import { Access } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
@@ -167,6 +172,43 @@ export interface SignInService {
     DossierError<'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
+  /** This session's account first, then by first sign-in. */
+  readonly signInAccounts: () => Effect.Effect<
+    readonly SignInAccountView[],
+    DossierError<'sign_in_required' | 'unavailable'>,
+    CurrentCaller
+  >
+  /**
+   * Ends what one of the person's sign-in accounts opened and removes it, in
+   * one batch. Browser sessions only; never the last account or the one this
+   * session uses.
+   */
+  readonly disconnectSignInAccount: (
+    accountId: string,
+  ) => Effect.Effect<
+    void,
+    DossierError<
+      | 'sign_in_required'
+      | 'not_found'
+      | 'last_account'
+      | 'account_in_use'
+      | 'unavailable'
+    >,
+    CurrentCaller
+  >
+}
+
+/** One of the person's sign-in accounts, as Settings lists it. */
+export interface SignInAccountView {
+  /** account.id */
+  readonly id: string
+  readonly provider: SignInProviderId
+  /** As the account last gave it. */
+  readonly email: string
+  /** The account this session uses. */
+  readonly current: boolean
+  /** Its live agent keys, for the confirmation. */
+  readonly agentKeys: number
 }
 
 export class SignIn extends Context.Tag('SignIn')<SignIn, SignInService>() {}
@@ -637,6 +679,45 @@ export const SignInLive: Layer.Layer<
         ),
       )
 
+    /** Why the person may not disconnect the account now, or null. */
+    const disconnectRefusal = (
+      userId: string,
+      accountId: string,
+      sessionId: SessionId,
+    ) =>
+      query(() =>
+        bindings.DB.prepare(
+          `select
+             exists (select 1 from account where id = ?1 and user_id = ?2) as theirs,
+             (select count(*) from account where user_id = ?2) as accounts,
+             (select sign_in_account_id from session where id = ?3) as current`,
+        )
+          .bind(accountId, userId, sessionId)
+          .first<{
+            theirs: number
+            accounts: number
+            current: string | null
+          }>(),
+      ).pipe(
+        Effect.map((row) =>
+          row === null || row.theirs !== 1
+            ? dossierError('not_found', 'No such sign-in account.')
+            : row.accounts <= 1
+              ? dossierError(
+                  'last_account',
+                  'This is your only sign-in account.',
+                  'To remove it, delete your account in account settings.',
+                )
+              : row.current === accountId
+                ? dossierError(
+                    'account_in_use',
+                    'This session uses this account.',
+                    'To disconnect this account, sign in with another one.',
+                  )
+                : null,
+        ),
+      )
+
     const service: SignInService = {
       handle: (request) =>
         Effect.promise(async () => {
@@ -1102,6 +1183,121 @@ export const SignInLive: Layer.Layer<
               })
               .run(),
           )
+        }),
+
+      signInAccounts: () =>
+        Effect.gen(function* () {
+          const { person, via } = yield* signedInPerson
+          const current =
+            via.kind === 'browser'
+              ? ((yield* query(() =>
+                  database
+                    .select({ id: schema.session.signInAccountId })
+                    .from(schema.session)
+                    .where(eq(schema.session.id, via.sessionId))
+                    .get(),
+                ))?.id ?? null)
+              : null
+          // An account still joining has no email details yet: the person's
+          // email is the one it signed in with.
+          const { results } = yield* query(() =>
+            bindings.DB.prepare(
+              `select a.id, a.provider_id as provider,
+                 coalesce(e.email, u.email) as email,
+                 (select count(*) from agent_keys k where k.created_by_account_id = a.id
+                    and k.revoked_at is null) as agentKeys
+               from account a
+               join "user" u on u.id = a.user_id
+               left join account_emails e on e.account_id = a.id
+               where a.user_id = ?
+               order by a.created_at, a.id`,
+            )
+              .bind(person.id)
+              .all<{
+                id: string
+                provider: string
+                email: string
+                agentKeys: number
+              }>(),
+          )
+          const views = results.map((row): SignInAccountView => ({
+            id: row.id,
+            provider: row.provider === 'microsoft' ? 'microsoft' : 'google',
+            email: row.email,
+            current: row.id === current,
+            agentKeys: row.agentKeys,
+          }))
+          return [
+            ...views.filter((view) => view.current),
+            ...views.filter((view) => !view.current),
+          ]
+        }),
+
+      disconnectSignInAccount: (accountId) =>
+        Effect.gen(function* () {
+          const { person, via } = yield* signedInPerson
+          if (via.kind !== 'browser') {
+            return yield* fail(
+              'sign_in_required',
+              'A sign-in account is disconnected in account settings.',
+              'Sign in and open account settings.',
+            )
+          }
+          const refused = yield* disconnectRefusal(
+            person.id,
+            accountId,
+            via.sessionId,
+          )
+          if (refused !== null) return yield* Effect.fail(refused)
+          const at = yield* Clock.currentTimeMillis
+          const DB = bindings.DB
+          // The same steps a takeover runs on the accounts it detaches, on
+          // this one account. Every statement checks, inside the batch, that
+          // the account is still the person's, is not their last, and is not
+          // the one this session uses, so a lost race changes nothing.
+          const guard = `exists (select 1 from account where id = ?1 and user_id = ?2)
+            and (select count(*) from account where user_id = ?2) > 1
+            and ?1 <> coalesce((select sign_in_account_id from session where id = ?4), '')`
+          const step = (sql: string) =>
+            DB.prepare(sql).bind(accountId, person.id, at, via.sessionId)
+          const results = yield* query(() =>
+            DB.batch([
+              DB.prepare(
+                `insert into person_history (id, user_id, kind, detail_json, created_at)
+                 select ?5, ?2, 'disconnected',
+                   json_object('accountId', id, 'provider', provider_id), ?3
+                 from account where id = ?1 and user_id = ?2 and ${guard}`,
+              ).bind(accountId, person.id, at, via.sessionId, newId()),
+              step(
+                `delete from session where user_id = ?2 and sign_in_account_id = ?1
+                   and ${guard}`,
+              ),
+              step(
+                `update agent_keys set revoked_at = ?3 where created_by_account_id = ?1
+                   and revoked_at is null and ${guard}`,
+              ),
+              step(
+                `update device_code set status = 'denied' where status = 'approved'
+                   and approved_by_account_id = ?1 and ${guard}`,
+              ),
+              step(
+                `delete from account_emails where account_id = ?1 and ${guard}`,
+              ),
+              // Last: every guard above reads the account.
+              step(
+                `delete from account where id = ?1 and user_id = ?2 and ${guard}`,
+              ),
+            ]),
+          )
+          if (results.at(-1)?.meta.changes === 1) return
+          // Another request changed the accounts since the read: say what
+          // stopped this one.
+          const stopped = yield* disconnectRefusal(
+            person.id,
+            accountId,
+            via.sessionId,
+          )
+          return yield* Effect.fail(stopped ?? unavailable())
         }),
     }
     return service

@@ -10,6 +10,7 @@ import {
   type AgentKeyView,
   type DeletionPreview,
   type KeyReach,
+  type SignInAccountView,
 } from '../core/index.ts'
 import { isScreenFailure } from './failure.ts'
 import { endSessionCookie, runScreen } from './run.ts'
@@ -26,6 +27,8 @@ export interface AccountView {
   readonly name: string
   /** The address of their profile photo, or null. */
   readonly image: string | null
+  /** This session's sign-in account first. */
+  readonly signInAccounts: readonly SignInAccountView[]
   readonly keys: readonly AgentKeyView[]
   readonly workspaces: readonly WorkspaceRowView[]
   /** Whether "Create workspace" is offered. */
@@ -42,6 +45,7 @@ export const accountView = createServerFn({ method: 'GET' }).handler(() =>
       const signIn = yield* SignIn
       const people = yield* People
       const keys = yield* signIn.keys()
+      const signInAccounts = yield* signIn.signInAccounts()
       const { person } = yield* CurrentCaller
       const memberships = yield* people.myWorkspaces()
       const teams = yield* people.myTeams()
@@ -57,6 +61,7 @@ export const accountView = createServerFn({ method: 'GET' }).handler(() =>
         email: person?.email ?? '',
         name: person?.name ?? '',
         image: person?.image ?? null,
+        signInAccounts,
         keys,
         workspaces: memberships.map((m) => ({
           name: m.workspace.name,
@@ -133,6 +138,19 @@ export const revokeKey = createServerFn({ method: 'POST' })
     runScreen(
       Effect.flatMap(SignIn, (signIn) =>
         signIn.revokeKey(data.id as AgentKeyId),
+      ),
+    ),
+  )
+
+/** Browser sessions only; an agent key is told to sign in. */
+export const disconnectSignInAccount = createServerFn({ method: 'POST' })
+  .validator((input: { readonly accountId: string }) => ({
+    accountId: String(input.accountId),
+  }))
+  .handler(({ data }) =>
+    runScreen(
+      Effect.flatMap(SignIn, (signIn) =>
+        signIn.disconnectSignInAccount(data.accountId),
       ),
     ),
   )

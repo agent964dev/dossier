@@ -19,6 +19,7 @@ import { AppHeader } from '../../components/app-header'
 import { Avatar } from '../../components/avatar'
 import { DeploymentSettings } from '../../components/deployment-settings'
 import { SectionLabel } from '../../components/section-label'
+import { SignInAccounts } from '../../components/sign-in-accounts'
 import { Button } from '../../components/ui/button'
 import { Refusal, refusalOf } from '../../components/settings-parts'
 import { Input, Label, Select } from '../../components/ui/input'
@@ -113,11 +114,16 @@ function AccountSettings() {
                   ·{' '}
                 </>
               )}
-              <span className="break-all">{view.email}</span> · signed in with
-              Google
+              <span className="break-all">{view.email}</span>
             </span>
           </p>
         </div>
+
+        <SignInAccounts
+          accounts={view.signInAccounts}
+          personEmail={view.email}
+          onChange={() => router.invalidate()}
+        />
 
         <Workspaces
           workspaces={view.workspaces}
