@@ -218,7 +218,14 @@ const keyWorks = async (secret: string) =>
 const diagnostics = async <A>(body: () => Promise<A>) => {
   const log = vi.spyOn(console, 'log')
   const result = await body()
-  const lines = log.mock.calls
+  const lines = refusalLines(log.mock.calls)
+  log.mockRestore()
+  return { result, lines }
+}
+
+/** The sign-in diagnostic lines among console.log calls. */
+const refusalLines = (calls: readonly (readonly unknown[])[]) =>
+  calls
     .map((call) => call[0])
     .filter((line): line is string => typeof line === 'string')
     .flatMap((line) => {
@@ -229,17 +236,20 @@ const diagnostics = async <A>(body: () => Promise<A>) => {
       }
     })
     .filter((line) => line.message === 'sign-in refused')
-  log.mockRestore()
-  return { result, lines }
+
+/** A sign-in in a new browser. */
+const signInFresh = async (
+  identity: FakeMicrosoftIdentity | FakeIdentity,
+  next = NEXT,
+) => {
+  const browser = new Browser()
+  const response = await browser.signIn(identity, next)
+  return { browser, response }
 }
 
 /** A sign-in in a new browser, with the lines it logged. */
 const attempt = (identity: FakeMicrosoftIdentity | FakeIdentity, next = NEXT) =>
-  diagnostics(async () => {
-    const browser = new Browser()
-    const response = await browser.signIn(identity, next)
-    return { browser, response }
-  })
+  diagnostics(() => signInFresh(identity, next))
 
 interface Attempt {
   readonly browser: Browser
@@ -347,7 +357,11 @@ const textOf = (value: unknown, seen = new Set<object>()): string => {
   ].join(' ')
 }
 
-/** All that reached any console method while `body` runs, as text. */
+/**
+ * All that reached any console method while `body` runs, as text, and the
+ * sign-in diagnostic lines among it. One capture serves both: a second spy on
+ * the same method would take its calls away from this one.
+ */
 const consoleText = async <A>(body: () => Promise<A>) => {
   const spies = CONSOLE.map((method) => vi.spyOn(console, method))
   const result = await body()
@@ -357,8 +371,9 @@ const consoleText = async <A>(body: () => Promise<A>) => {
     )
     .flat()
     .join('\n')
+  const lines = refusalLines(spies[0].mock.calls)
   for (const spy of spies) spy.mockRestore()
-  return { result, text }
+  return { result, text, lines }
 }
 
 const photoBytes = (...tail: number[]) =>
@@ -968,14 +983,12 @@ describe('a Microsoft sign-in that fails before Dossier reads a profile', () => 
       },
     })
     const before = await everything()
-    const { result, text } = await consoleText(() => attempt(identity))
-    await expectGeneric(result.result)
-    expect(await everything()).toEqual(before)
-    expectLine(
-      result.lines,
-      { ...PROVIDER_ERROR, error: 'invalid_code' },
-      identity,
+    const { result, text, lines } = await consoleText(() =>
+      signInFresh(identity),
     )
+    await expectGeneric(result)
+    expect(await everything()).toEqual(before)
+    expectLine(lines, { ...PROVIDER_ERROR, error: 'invalid_code' }, identity)
     expect(text).not.toContain(sentinel)
     expect(text).not.toContain('AADSTS50126')
   })
@@ -996,12 +1009,12 @@ describe('a Microsoft sign-in that fails after Dossier reads a profile', () => {
       }),
     )
     const before = await everything()
-    const { result, text } = await consoleText(() => attempt(known))
-    await expectGeneric(result.result)
+    const { result, text, lines } = await consoleText(() => signInFresh(known))
+    await expectGeneric(result)
     expect(await everything()).toEqual(before)
     expect((await storedUser(userId))?.email).toBe(known.email)
     expectLine(
-      result.lines,
+      lines,
       {
         reason: 'provider_error',
         error: 'validation_failed',
