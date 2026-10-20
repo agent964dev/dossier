@@ -1,9 +1,15 @@
 // The migration that gives sign-in accounts provider-neutral names, run on a
 // database seeded in the shape every earlier migration left. DB already has
 // every migration, so this file seeds MIGRATION_DB, an empty database.
+import type { PersonId, SessionId } from '@dossier/contracts'
 import { applyD1Migrations, type D1Migration } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
+import { Effect } from 'effect'
 import { beforeAll, describe, expect, it } from 'vitest'
+
+import { SignIn, type Caller } from '../src/core/index.ts'
+import { testRuntime, withRuntime } from './support/harness.ts'
+import { runAs } from './support/people.ts'
 
 const RENAME = '0029_sign_in_accounts.sql'
 const db = env.MIGRATION_DB
@@ -489,6 +495,98 @@ describe('the migration to provider-neutral sign-in account names', () => {
     )
   })
 
-  // One disconnect on the migrated schema is added here when Settings can
-  // disconnect a sign-in account.
+  it('disconnects a sign-in account whose rows came through the migration', async () => {
+    const now = Date.now()
+    // Lina signs in with Microsoft too, and opens Settings in that session.
+    await db.batch([
+      db
+        .prepare(
+          'insert into account (id, user_id, provider_id, account_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?)',
+        )
+        .bind('a-lina-ms', 'u-lina', 'microsoft', 'oid-lina', now, now),
+      db
+        .prepare(
+          'insert into account_emails (account_id, email, email_authority, organisation, observed_at) values (?, ?, ?, ?, ?)',
+        )
+        .bind('a-lina-ms', 'lina@acme.test', 'microsoft', null, now),
+      db
+        .prepare(
+          'insert into session (id, user_id, token, expires_at, sign_in_account_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)',
+        )
+        .bind(
+          's-ms',
+          'u-lina',
+          'token-ms',
+          now + 86_400_000,
+          'a-lina-ms',
+          now,
+          now,
+        ),
+      // A CLI login the migrated work account approved, not yet redeemed.
+      db.prepare(
+        `update device_code set status = 'approved', user_id = 'u-lina', approved_by_account_id = 'a-lina-work' where id = 'd-pending'`,
+      ),
+    ])
+    const caller: Caller = {
+      person: {
+        id: 'u-lina' as PersonId,
+        email: 'lina@acme.test',
+        name: 'Lina',
+        image: 'https://img.test/lina',
+      },
+      via: { kind: 'browser', sessionId: 's-ms' as SessionId },
+      requestId: 'test',
+    }
+
+    await withRuntime(testRuntime({ env: { DB: db } }), () =>
+      runAs(
+        caller,
+        Effect.flatMap(SignIn, (signIn) =>
+          signIn.disconnectSignInAccount('a-lina-work'),
+        ),
+      ),
+    )
+
+    expect(
+      await all('select id from account where id = ?', 'a-lina-work'),
+    ).toEqual([])
+    expect(
+      await all(
+        'select account_id from account_emails where account_id = ?',
+        'a-lina-work',
+      ),
+    ).toEqual([])
+    expect(
+      await all(
+        'select id from session where sign_in_account_id = ?',
+        'a-lina-work',
+      ),
+    ).toEqual([])
+    expect(await all('select id from session where id = ?', 's-ms')).toEqual([
+      { id: 's-ms' },
+    ])
+    const keys = await all<{ id: string; revoked_at: number | null }>(
+      'select id, revoked_at from agent_keys where id in (?, ?) order by id',
+      'k-old',
+      'k-work',
+    )
+    expect(keys[0]).toEqual({ id: 'k-old', revoked_at: 1_760_000_000_007 })
+    expect(keys[1]?.revoked_at).toEqual(expect.any(Number))
+    expect(await all('select id, status from device_code order by id')).toEqual(
+      [
+        { id: 'd-approved', status: 'approved' },
+        { id: 'd-pending', status: 'denied' },
+      ],
+    )
+    const disconnected = await all<{ detail_json: string }>(
+      `select detail_json from person_history where user_id = ? and kind = 'disconnected' and detail_json <> '{}'`,
+      'u-lina',
+    )
+    expect(
+      disconnected.map((row) => JSON.parse(row.detail_json) as unknown),
+    ).toEqual([{ accountId: 'a-lina-work', provider: 'google' }])
+    expect(
+      await all('select user_id from people where user_id = ?', 'u-lina'),
+    ).toEqual([{ user_id: 'u-lina' }])
+  })
 })
