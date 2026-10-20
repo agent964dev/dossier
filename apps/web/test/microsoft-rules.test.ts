@@ -323,15 +323,16 @@ describe('what Microsoft says about the email it sent', () => {
       trust: YES,
     },
     {
-      account: 'a guest from a personal account on outlook.com',
+      account:
+        'a guest from a personal account on outlook.com, whose email the inviting directory sets',
       profile: guest('live.com'),
-      trust: YES,
+      trust: NO,
     },
     {
       account:
         'a guest from a personal account on outlook.com, by the v2 issuer',
       profile: guest(issuerOf(PERSONAL)),
-      trust: YES,
+      trust: NO,
     },
     {
       account: 'a guest from a personal account on an outside address',

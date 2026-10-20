@@ -52,4 +52,14 @@ describe('the Microsoft profile photo from Graph', () => {
       expect(await graphPhoto('access-token', graph(answer).fetcher)).toBeNull()
     }
   })
+
+  it('is none when Graph does not answer in time, so the sign-in goes on', async () => {
+    const stalled = (async (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(init.signal?.reason),
+        )
+      })) as typeof fetch
+    expect(await graphPhoto('access-token', stalled, 20)).toBeNull()
+  })
 })

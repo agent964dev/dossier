@@ -712,28 +712,50 @@ describe('guests in a directory, each carrying xms_edov true', () => {
     { idp: `https://sts.windows.net/${PERSONAL_TID}/` },
     { idp: issuerOf(PERSONAL_TID) },
   ])(
-    'signs in a guest from a personal account on outlook.com (idp $idp)',
+    'refuses a guest from a personal account even on outlook.com (idp $idp)',
     async ({ idp }) => {
       const identity = msAccount(CONTOSO, 'outlook.com', 'guest', {
         idp,
         xms_edov: true,
       })
+      const email = identity.email ?? ''
+      const before = await everything()
       const { result, lines } = await attempt(identity)
-      expectSignedIn(result)
-      const userId = await userIdOf(identity.email ?? '')
-      expect((await msAccountOf(identity))?.user_id).toBe(userId)
-      expect(await observedOf((await msAccountOf(identity))?.id)).toMatchObject(
+      await expectRefusal(result, {
+        kind: 'not_confirmed',
+        provider: 'microsoft',
+        email,
+      })
+      expect(await everything()).toEqual(before)
+      expect(await userIdOf(email)).toBeUndefined()
+      expectLine(
+        lines,
         {
-          email: identity.email,
-          email_authority: 'microsoft',
-          organisation: CONTOSO,
+          reason: 'guest',
+          account: 'personal_guest',
+          carried: { email: true, xms_edov: true, idp: true },
+          xms_edov: true,
         },
+        identity,
       )
-      expect(lines).toEqual([])
     },
   )
 
   const REFUSED = [
+    {
+      guest:
+        'a guest from a personal account on outlook.com, whose email the inviting directory sets',
+      identity: () =>
+        msAccount(CONTOSO, 'outlook.com', 'guest', {
+          idp: 'live.com',
+          xms_edov: true,
+        }),
+      holder: (email: string): FakeIdentity => ({
+        sub: `sub-${crypto.randomUUID()}`,
+        email,
+      }),
+      line: { reason: 'guest', account: 'personal_guest' },
+    },
     {
       guest: 'a guest from a personal account on an outside address',
       identity: () =>
@@ -745,7 +767,7 @@ describe('guests in a directory, each carrying xms_edov true', () => {
         sub: `sub-${crypto.randomUUID()}`,
         email,
       }),
-      line: { reason: 'not_confirmed', account: 'personal_guest' },
+      line: { reason: 'guest', account: 'personal_guest' },
     },
     {
       guest: 'a guest from another directory',

@@ -136,10 +136,11 @@ const domainOf = (email: string): string =>
 
 /**
  * Microsoft confirms an email, and is its authority, for a personal account
- * (or a guest from one) on one of Microsoft's own consumer domains, and for a
- * native work or school account whose directory verified the email's domain
- * (`xms_edov`). Microsoft's `email_verified` and verified-email claims are
- * never read.
+ * on one of Microsoft's own consumer domains, and for a native work or school
+ * account whose directory verified the email's domain (`xms_edov`). A guest is
+ * never confirmed, a guest from a personal account included: the inviting
+ * directory's admin can change a guest's email. Microsoft's `email_verified`
+ * and verified-email claims are never read.
  */
 export const microsoftTrust = (
   profile: Readonly<Record<string, unknown>>,
@@ -148,7 +149,7 @@ export const microsoftTrust = (
   if (!email.includes('@')) return { confirmed: false, authority: false }
   const kind = microsoftAccountKind(profile)
   const confirmed =
-    kind === 'personal' || kind === 'personal_guest'
+    kind === 'personal'
       ? MICROSOFT_CONSUMER_DOMAINS.has(domainOf(email))
       : kind === 'work' && profile.xms_edov === true
   return { confirmed, authority: confirmed }

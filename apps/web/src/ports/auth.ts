@@ -330,12 +330,12 @@ const outcomeOf = (
         ? { code: 'not_confirmed' as const, provider, email: claims.email }
         : null)
   if (refused !== null) {
-    // A guest from another directory is never confirmed; its line says so.
+    // A guest is never confirmed; its line says so.
     const guest =
       refused.code === 'not_confirmed' &&
       provider === 'microsoft' &&
       profile !== undefined &&
-      microsoftAccountKind(profile) === 'guest'
+      ['guest', 'personal_guest'].includes(microsoftAccountKind(profile))
     return {
       refused,
       emailKept: null,
@@ -362,20 +362,25 @@ const outcomeOf = (
 
 const GRAPH_PHOTO = 'https://graph.microsoft.com/v1.0/me/photos/48x48/$value'
 
+/** How long a sign-in waits for the photo before it goes on without one. */
+const GRAPH_PHOTO_TIMEOUT = 3_000
+
 const base64Of = (bytes: Uint8Array): string => {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
   return btoa(binary)
 }
 
-/** The 48×48 Graph photo as a data URL, or null on any failure (404, network, non-image). */
+/** The 48×48 Graph photo as a data URL, or null on any failure (404, network, non-image, timeout). */
 export const graphPhoto = async (
   accessToken: string,
   fetcher: typeof fetch = fetch,
+  timeout: number = GRAPH_PHOTO_TIMEOUT,
 ): Promise<string | null> => {
   try {
     const response = await fetcher(GRAPH_PHOTO, {
       headers: { authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(timeout),
     })
     const type = (response.headers.get('content-type') ?? '')
       .split(';')[0]
