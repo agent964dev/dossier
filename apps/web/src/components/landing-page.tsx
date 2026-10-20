@@ -13,7 +13,6 @@ import {
 import type { ReactNode } from 'react'
 
 import { Route as Root } from '../routes/__root'
-import { GoogleMark } from './google-mark'
 import { HostName } from './host-name'
 import {
   CompanionFigure,
@@ -79,7 +78,7 @@ export function LandingPage({ deployment }: { deployment: string }) {
         <Feature
           id="sharing"
           kicker="03 · Sharing"
-          title="Share any folder or page with anyone who has a Google account."
+          title="Share any folder or page with anyone by email."
           figure={<SharingFigure />}
         >
           <p>
@@ -89,7 +88,7 @@ export function LandingPage({ deployment }: { deployment: string }) {
           </p>
           <p>
             A public page opens without signing in; answering its forms still
-            asks for Google. A guest sees only what is shared with them.
+            asks them to sign in. A guest sees only what is shared with them.
           </p>
         </Feature>
         <Feature
@@ -136,7 +135,7 @@ export function LandingPage({ deployment }: { deployment: string }) {
   )
 }
 
-/** The way in: Google's mark on the one solid button of its view. */
+/** The way in: the one solid button of its view. */
 function SignInButton() {
   return (
     <Button
@@ -145,10 +144,8 @@ function SignInButton() {
       className="h-12 px-5 text-[0.9375rem] shadow-[0_10px_32px_-12px_var(--glow-cyan)]"
     >
       <Link to="/_/sign-in">
-        <span className="flex size-5 items-center justify-center rounded-full bg-white">
-          <GoogleMark className="size-3.5" />
-        </span>
-        Sign in with Google
+        Sign in
+        <ArrowRight />
       </Link>
     </Button>
   )
@@ -269,8 +266,8 @@ function Hero({ deployment }: { deployment: string }) {
             </Button>
           </div>
           <p className="max-w-md text-sm leading-relaxed text-neutral-400">
-            Opening a link someone sent you? Sign in with the Google account
-            they shared it with.
+            Opening a link someone sent you? Sign in with the email they shared
+            it with.
           </p>
         </div>
         <div className="mx-auto w-full max-w-xl max-sm:-mx-2 max-sm:w-auto lg:max-w-none">
@@ -293,7 +290,7 @@ const STEPS: readonly {
   },
   {
     title: 'People open it and answer',
-    text: "They sign in with Google and see what is shared with them. A page's forms save each person's answers as they send them.",
+    text: "They sign in and see what is shared with them. A page's forms save each person's answers as they send them.",
     code: 'agent964/acme/questions',
   },
   {
@@ -532,8 +529,8 @@ function Closing() {
         Has someone shared a page with you?
       </h2>
       <p className="max-w-xl text-[1.0625rem] leading-relaxed text-neutral-300">
-        Sign in with the Google account they sent it to. You see everything
-        shared with that address, across workspaces.
+        Sign in with the email they sent it to. You see everything shared with
+        that address, across workspaces.
       </p>
       <SignInButton />
     </section>

@@ -95,7 +95,7 @@ export const WatchLive: Layer.Layer<
             dossierError(
               'sign_in_required',
               'Sign in to follow changes.',
-              'Sign in with Google, or send an agent key.',
+              'Sign in, or send an agent key.',
             ),
           )
         }
@@ -105,7 +105,7 @@ export const WatchLive: Layer.Layer<
             ? dossierError(
                 'sign_in_required',
                 'Sign in to follow changes here.',
-                'Sign in with Google.',
+                'Sign in.',
               )
             : dossierError(
                 'not_found',

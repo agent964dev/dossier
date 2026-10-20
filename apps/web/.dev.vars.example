@@ -8,8 +8,13 @@ DEPLOYMENT_NAME=localhost:8787
 BETTER_AUTH_SECRET=replace-with-openssl-rand-base64-32
 HANDLE_SECRET=replace-with-openssl-rand-base64-32
 SUPER_ADMINS=you@example.com
-# Google sign-in needs a client whose redirect URI is this origin's
-# /_/auth/callback/google. Without these the sign-in page says sign-in is not
-# set up yet.
+# Each sign-in provider needs a client whose redirect URI is this origin's
+# /_/auth/callback/<provider>. A provider is on only when both of its values
+# are set; with neither provider the sign-in page says sign-in is not set up
+# yet.
+# Google: https://localhost:8787/_/auth/callback/google
 # GOOGLE_CLIENT_ID=
 # GOOGLE_CLIENT_SECRET=
+# Microsoft: https://localhost:8787/_/auth/callback/microsoft
+# MICROSOFT_CLIENT_ID=
+# MICROSOFT_CLIENT_SECRET=

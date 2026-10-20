@@ -291,27 +291,23 @@ const productionConfig = () => ({
   ratelimits: [],
 })
 
-test('secret names: every production secret must be present, and a missing one is named', () => {
-  checkSecrets(production.secrets.map((name) => ({ name })))
-  checkSecrets([
-    ...production.secrets.map((name) => ({ name })),
-    { name: 'SESSION_SECRET' },
-  ])
+test('secret names: every core production secret must be present, and a missing one is named', () => {
+  const withGoogle = [
+    ...production.secrets,
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+  ].map((name) => ({ name }))
+  checkSecrets(withGoogle)
+  checkSecrets([...withGoogle, { name: 'SESSION_SECRET' }])
   assert.deepEqual(production.secrets, [
     'BETTER_AUTH_SECRET',
     'HANDLE_SECRET',
     'SUPER_ADMINS',
-    'GOOGLE_CLIENT_ID',
-    'GOOGLE_CLIENT_SECRET',
   ])
   assert.throws(
     () =>
-      checkSecrets(
-        production.secrets
-          .filter((name) => !name.startsWith('GOOGLE_'))
-          .map((name) => ({ name })),
-      ),
-    /Missing production Worker secrets: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET$/,
+      checkSecrets(withGoogle.filter(({ name }) => name !== 'HANDLE_SECRET')),
+    /Missing production Worker secrets: HANDLE_SECRET$/,
   )
   // Today's secrets alone are not enough.
   assert.throws(

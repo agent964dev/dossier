@@ -375,7 +375,7 @@ function ShareBody({
         {confirming ? (
           <Callout icon={<TriangleAlert />}>
             <p role="alert" className="font-semibold text-neutral-50">
-              Anyone with a Google account will be able to publish pages here.
+              Anyone who signs in will be able to publish pages here.
             </p>
             <div className="mt-2.5 flex justify-end gap-2">
               <Button

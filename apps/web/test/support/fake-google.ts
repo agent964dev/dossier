@@ -16,6 +16,13 @@ export interface FakeIdentity {
   readonly name?: string
   /** Google's photo address; null for an account Google sends none for. */
   readonly picture?: string | null
+  /**
+   * Claims that replace the ID token's own, such as `iss`, `aud` or `exp`
+   * (seconds), for a token Dossier must refuse.
+   */
+  readonly claims?: Readonly<Record<string, unknown>>
+  /** Claims the ID token leaves out, such as `email`. */
+  readonly omit?: readonly string[]
 }
 
 export interface FakeGoogle {
@@ -114,7 +121,9 @@ const signIdToken = async (
     exp: now + 3600,
     ...(identity.hd === undefined ? {} : { hd: identity.hd }),
     ...(nonce === undefined ? {} : { nonce }),
+    ...identity.claims,
   }
+  for (const claim of identity.omit ?? []) delete claims[claim]
   const input = `${encodeJson({ alg: 'RS256', kid: KID, typ: 'JWT' })}.${encodeJson(claims)}`
   const signature = await crypto.subtle.sign(
     'RSASSA-PKCS1-v1_5',

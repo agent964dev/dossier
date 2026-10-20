@@ -1,7 +1,7 @@
 import { Lock } from 'lucide-react'
 import { useState } from 'react'
 
-import { signOut, startGoogleSignIn } from '../lib/auth-client'
+import { switchAccount } from '../lib/auth-client'
 import { AppHeader } from './app-header'
 import { Button } from './ui/button'
 
@@ -14,8 +14,7 @@ export function NoAccessScreen({ email }: { email: string | null }) {
   const useAnotherAccount = async () => {
     setBusy(true)
     try {
-      await signOut()
-      await startGoogleSignIn(
+      await switchAccount(
         `${window.location.pathname}${window.location.search}`,
       )
     } catch {
@@ -50,7 +49,7 @@ export function NoAccessScreen({ email }: { email: string | null }) {
           disabled={busy}
           onClick={useAnotherAccount}
         >
-          Use another Google account
+          Use another account
         </Button>
       </main>
     </div>

@@ -20,7 +20,7 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { WorkspaceMenu } from '../components/workspace-menu'
 import { treeSharingLabel } from '../lib/sharing'
-import { signOut, startGoogleSignIn } from '../lib/auth-client'
+import { switchAccount } from '../lib/auth-client'
 import {
   homeView,
   type HomeTree,
@@ -51,7 +51,7 @@ export const Route = createFileRoute('/')({
       {
         name: 'description',
         content:
-          "Your agents write the page. Dossier handles the rest: pages that share a theme and layout, forms that keep each person's answers, sharing with any Google account, and a version agents can read.",
+          "Your agents write the page. Dossier handles the rest: pages that share a theme and layout, forms that keep each person's answers, sharing with anyone by email, and a version agents can read.",
       },
     ],
   }),
@@ -233,8 +233,7 @@ function Home({
   const useAnotherAccount = async () => {
     setBusy(true)
     try {
-      await signOut()
-      await startGoogleSignIn('/')
+      await switchAccount('/')
     } catch {
       setBusy(false)
     }
@@ -306,7 +305,7 @@ function Home({
                 disabled={busy}
                 onClick={useAnotherAccount}
               >
-                Use another Google account
+                Use another account
               </Button>
             </div>
           )}

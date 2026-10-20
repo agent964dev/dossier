@@ -8,22 +8,31 @@ import {
 } from '../../src/core/index.ts'
 import { AuthTest } from './auth.ts'
 import { installFakeGoogle } from './fake-google.ts'
+import { installFakeMicrosoft } from './fake-microsoft.ts'
 
 export const google = installFakeGoogle({
   clientId: env.GOOGLE_CLIENT_ID ?? '',
   clientSecret: env.GOOGLE_CLIENT_SECRET ?? '',
 })
 
+export const microsoft = installFakeMicrosoft({
+  clientId: env.MICROSOFT_CLIENT_ID ?? '',
+  clientSecret: env.MICROSOFT_CLIENT_SECRET ?? '',
+})
+
 export const ORIGIN = env.PUBLIC_ORIGIN
 
-/** A runtime over the test Worker's environment, with the stand-in Google. */
+/**
+ * A runtime over the test Worker's environment, with the stand-in Google and
+ * Microsoft.
+ */
 export const testRuntime = (
   options: { readonly env?: Partial<Env>; readonly overrides?: Overrides } = {},
 ): CoreRuntime =>
   ManagedRuntime.make(
     makeLayer(
       { ...env, ...options.env },
-      { auth: AuthTest(google), ...options.overrides },
+      { auth: AuthTest(google, microsoft), ...options.overrides },
     ),
   )
 

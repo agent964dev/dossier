@@ -28,7 +28,7 @@ const updatedAt = () =>
 export const user = sqliteTable('user', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
-  /** Lower-cased: the latest verified address Google returned. */
+  /** Lower-cased: the latest confirmed address a sign-in provider returned. */
   email: text('email').notNull().unique(),
   emailVerified: integer('email_verified', { mode: 'boolean' })
     .default(false)
@@ -49,8 +49,8 @@ export const session = sqliteTable(
     expiresAt: ms('expires_at').notNull(),
     ipAddress: text('ip_address'),
     userAgent: text('user_agent'),
-    /** The account that opened it, so a takeover revokes only its sessions. */
-    googleAccountId: text('google_account_id'),
+    /** The sign-in account that opened it, so a takeover revokes only its sessions. */
+    signInAccountId: text('sign_in_account_id'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -64,9 +64,9 @@ export const account = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
-    /** Always 'google'. */
+    /** The sign-in provider: 'google' or 'microsoft'. */
     providerId: text('provider_id').notNull(),
-    /** Google's subject. */
+    /** The provider's subject for the account. */
     accountId: text('account_id').notNull(),
     accessToken: text('access_token'),
     refreshToken: text('refresh_token'),
@@ -120,7 +120,7 @@ export const deviceCode = sqliteTable('device_code', {
    * The account whose session pressed Allow. A takeover denies the codes of
    * the accounts it detaches, and minting checks it again.
    */
-  approvedByGoogleAccountId: text('approved_by_google_account_id'),
+  approvedByAccountId: text('approved_by_account_id'),
 })
 
 export const rateLimit = sqliteTable('rate_limit', {
@@ -138,7 +138,7 @@ export const people = sqliteTable(
     userId: text('user_id')
       .primaryKey()
       .references(() => user.id, { onDelete: 'cascade' }),
-    /** Whether Google is the authority for the email, at the latest sign-in. */
+    /** The provider that is the authority for the email at the latest sign-in, or 'none'. */
     emailAuthority: text('email_authority').notNull(),
     firstSignInAt: integer('first_sign_in_at').notNull(),
     lastSignInAt: integer('last_sign_in_at').notNull(),
@@ -147,28 +147,29 @@ export const people = sqliteTable(
   (t) => [
     check(
       'people_email_authority_check',
-      sql`${t.emailAuthority} in ('google', 'none')`,
+      sql`${t.emailAuthority} in ('google', 'microsoft', 'none')`,
     ),
   ],
 )
 
-export const googleAccounts = sqliteTable(
-  'google_accounts',
+/** What a sign-in account last said about its email. */
+export const accountEmails = sqliteTable(
+  'account_emails',
   {
     accountId: text('account_id')
       .primaryKey()
       .references(() => account.id, { onDelete: 'cascade' }),
-    /** As Google last returned it, lower-cased. */
+    /** As the provider last returned it, lower-cased. */
     email: text('email').notNull(),
     emailAuthority: text('email_authority').notNull(),
-    /** Google's hosted domain claim, kept on the server only. */
-    hostedDomain: text('hosted_domain'),
+    /** The account's organisation as the provider names it, kept on the server only. */
+    organisation: text('organisation'),
     observedAt: integer('observed_at').notNull(),
   },
   (t) => [
     check(
-      'google_accounts_email_authority_check',
-      sql`${t.emailAuthority} in ('google', 'none')`,
+      'account_emails_email_authority_check',
+      sql`${t.emailAuthority} in ('google', 'microsoft', 'none')`,
     ),
   ],
 )
@@ -189,7 +190,7 @@ export const personHistory = sqliteTable(
     index('person_history_user_idx').on(t.userId, t.createdAt),
     check(
       'person_history_kind_check',
-      sql`${t.kind} in ('linked', 'takeover', 'email_kept', 'signed_out_everywhere', 'key_created', 'key_revoked', 'deleted', 'returned')`,
+      sql`${t.kind} in ('linked', 'takeover', 'email_kept', 'signed_out_everywhere', 'key_created', 'key_revoked', 'deleted', 'returned', 'disconnected')`,
     ),
   ],
 )
@@ -214,8 +215,8 @@ export const agentKeys = sqliteTable(
     /** Hex SHA-256 of the `dsk_` secret; the secret is never stored. */
     hashSha256: text('hash_sha256').notNull().unique(),
     createdVia: text('created_via').notNull(),
-    /** The account whose session created or approved it. */
-    googleAccountId: text('google_account_id'),
+    /** The sign-in account whose session created or approved it. */
+    createdByAccountId: text('created_by_account_id'),
     /** The node the key is limited to; null reaches the whole account. */
     scopeNodeId: text('scope_node_id').references(() => nodes.id),
     readOnly: integer('read_only', { mode: 'boolean' })

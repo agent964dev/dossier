@@ -28,7 +28,7 @@ import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { ChangeFeed, type CloseSockets } from './change-feed.ts'
 import { CurrentCaller } from './caller.ts'
-import { Config } from './config.ts'
+import { Config, signInProviders } from './config.ts'
 import { Data } from './data.ts'
 import { newId } from './ids.ts'
 import {
@@ -420,7 +420,7 @@ const signInRequired = () =>
   dossierError(
     'sign_in_required',
     'Sign in to continue.',
-    'Sign in with Google, or run dossier login.',
+    'Sign in, or run dossier login.',
   )
 
 const notFound = (path: string | null) =>
@@ -1720,7 +1720,7 @@ export const PeopleLive: Layer.Layer<
             dossierError(
               'sign_in_required',
               'An account is deleted in account settings.',
-              'Sign in with Google and open account settings.',
+              'Sign in and open account settings.',
             ),
           )
         }
@@ -1848,7 +1848,7 @@ export const PeopleLive: Layer.Layer<
                       dossierError(
                         'sign_in_required',
                         'This session has ended.',
-                        'Sign in with Google again.',
+                        'Sign in again.',
                       ),
                     )
                   : isAdminsGuard(error)
@@ -2064,7 +2064,10 @@ export const PeopleLive: Layer.Layer<
         // The generated text saved as it is stays generated, so it follows
         // later changes to what Dossier keeps.
         const value =
-          given === privacyTextOf(defaultPrivacyText(config.deploymentName))
+          given ===
+          privacyTextOf(
+            defaultPrivacyText(config.deploymentName, signInProviders(config)),
+          )
             ? null
             : given
         if (value !== null && value.length > PRIVACY_TEXT_LIMIT) {

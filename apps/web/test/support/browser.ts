@@ -1,8 +1,13 @@
 // A small browser over SELF: a cookie jar, manual redirects, the fetch
-// metadata a real browser sends, and the stand-in Google's consent.
+// metadata a real browser sends, and the stand-in Google's and Microsoft's
+// consent.
 import { SELF } from 'cloudflare:test'
 
 import { consent, type FakeIdentity } from './fake-google.ts'
+import {
+  consentMicrosoft,
+  type FakeMicrosoftIdentity,
+} from './fake-microsoft.ts'
 import { ORIGIN } from './harness.ts'
 
 export const SESSION_COOKIE = '__Secure-dossier.session_token'
@@ -83,10 +88,16 @@ export class Browser {
     })
   }
 
-  /** The whole Google sign-in: start, the stand-in consent, the callback. */
-  async signIn(identity: FakeIdentity, next = '/'): Promise<Response> {
+  /**
+   * Starts a provider's sign-in as the sign-in screen does, and returns the
+   * provider's authorization URL.
+   */
+  async startSignIn(
+    provider: 'google' | 'microsoft',
+    next = '/',
+  ): Promise<string> {
     const start = await this.postAuth('/_/auth/sign-in/social', {
-      provider: 'google',
+      provider,
       callbackURL: next,
       errorCallbackURL: `/_/sign-in?next=${encodeURIComponent(next)}`,
     })
@@ -96,13 +107,39 @@ export class Browser {
       )
     }
     const { url } = (await start.json()) as { url: string }
-    const callback = consent(url, identity)
-    return this.fetch(`${callback.pathname}${callback.search}`)
+    return url
+  }
+
+  /** Returns from the provider to Dossier's callback. */
+  callback(url: URL): Promise<Response> {
+    return this.fetch(`${url.pathname}${url.search}`)
+  }
+
+  /**
+   * The whole sign-in: start, the stand-in consent, the callback. A Microsoft
+   * identity (one with `tid`) signs in with Microsoft, any other with Google.
+   */
+  async signIn(
+    identity: FakeIdentity | FakeMicrosoftIdentity,
+    next = '/',
+  ): Promise<Response> {
+    if (isMicrosoft(identity)) {
+      const url = await this.startSignIn('microsoft', next)
+      return this.callback(consentMicrosoft(url, identity))
+    }
+    const url = await this.startSignIn('google', next)
+    return this.callback(consent(url, identity))
   }
 }
 
+const isMicrosoft = (
+  identity: FakeIdentity | FakeMicrosoftIdentity,
+): identity is FakeMicrosoftIdentity => 'tid' in identity
+
 /** A browser already signed in as `identity`. */
-export const signedIn = async (identity: FakeIdentity): Promise<Browser> => {
+export const signedIn = async (
+  identity: FakeIdentity | FakeMicrosoftIdentity,
+): Promise<Browser> => {
   const browser = new Browser()
   const response = await browser.signIn(identity)
   if (response.status !== 302 || browser.sessionToken() === undefined) {

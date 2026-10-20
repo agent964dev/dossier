@@ -107,11 +107,37 @@ export async function smoke(
   console.log('Content host verified')
 }
 
+/**
+ * Every name in production.secrets, at least one complete pair of
+ * production.signInProviders, and no pair with only one of its names.
+ */
 export function checkSecrets(secrets) {
   const names = new Set(secrets.map((secret) => secret.name))
   const missing = production.secrets.filter((name) => !names.has(name))
   if (missing.length)
     throw new Error(`Missing production Worker secrets: ${missing.join(', ')}`)
+  const halfSet = production.signInProviders.filter(
+    (pair) => pair.filter((name) => names.has(name)).length === 1,
+  )
+  if (halfSet.length)
+    throw new Error(
+      halfSet
+        .map(
+          ([id, secret]) =>
+            `${names.has(id) ? secret : id} is missing. Set both ${id} and ${secret}, or neither.`,
+        )
+        .join('\n'),
+    )
+  if (
+    !production.signInProviders.some((pair) =>
+      pair.every((name) => names.has(name)),
+    )
+  )
+    throw new Error(
+      `Set at least one sign-in provider: ${production.signInProviders
+        .map(([id, secret]) => `${id} and ${secret}`)
+        .join(', or ')}.`,
+    )
   console.log('Required production secret names are present')
 }
 
@@ -121,8 +147,14 @@ export function checkSecrets(secrets) {
  */
 export function checkConfig(config) {
   const vars = config.vars ?? {}
-  if (production.secrets.some((name) => Object.hasOwn(vars, name))) {
-    throw new Error('Production vars must not overwrite Worker secrets')
+  const overwritten = [
+    ...production.secrets,
+    ...production.signInProviders.flat(),
+  ].filter((name) => Object.hasOwn(vars, name))
+  if (overwritten.length) {
+    throw new Error(
+      `Production vars must not overwrite Worker secrets: ${overwritten.join(', ')}`,
+    )
   }
   const routes = config.routes ?? []
   const db = config.d1_databases?.find((entry) => entry.binding === 'DB')

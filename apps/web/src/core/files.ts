@@ -416,7 +416,7 @@ export const FilesLive: Layer.Layer<
             dossierError(
               'sign_in_required',
               'Sign in to see history.',
-              'Sign in with Google, or run dossier login.',
+              'Sign in, or run dossier login.',
               ref.path,
             ),
           )

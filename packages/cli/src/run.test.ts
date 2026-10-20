@@ -253,7 +253,7 @@ describe('the frame', () => {
     current = await harness({ fetch: fetch.fetch })
 
     expect(await current.run(['--version'])).toBe(0)
-    expect(current.stdout()).toBe('1.1.0\n')
+    expect(current.stdout()).toBe('1.1.1\n')
   })
 
   it('ends quietly with 141 when the reader of its output goes away', () => {

@@ -171,7 +171,7 @@ describe('the agent guide', () => {
         'Workspace admins hold write on every tree',
         'sara@acme.com --remove',
         '--share sara@acme.com:respond --share anyone:read',
-        'sign in with Google',
+        'answering a form asks them to sign in.',
         'never a\npage above it',
         "closes that person's live watches",
       ]) {

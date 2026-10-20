@@ -62,7 +62,7 @@ describe('a takeover racing the account it detaches', () => {
               ...hooks,
               afterSignIn: async (signIn) => {
                 await hooks.afterSignIn(signIn)
-                if (armed && signIn.claims.sub === lapsed.sub) {
+                if (armed && signIn.claims.subject === lapsed.sub) {
                   armed = false
                   await new Browser().signIn(owner)
                 }
@@ -152,7 +152,7 @@ const pausing = (sub: string, meanwhile: () => Promise<void>) => {
           {
             ...hooks,
             afterSignIn: async (signIn) => {
-              if (armed && signIn.claims.sub === sub) {
+              if (armed && signIn.claims.subject === sub) {
                 armed = false
                 await meanwhile()
               }
@@ -212,7 +212,7 @@ describe('takeovers happen only when an account joins', () => {
       email: second.email,
     })
     const [metadata] = await rows<{ email_authority: string }>(
-      'select email_authority from google_accounts where account_id = ?',
+      'select email_authority from account_emails where account_id = ?',
       await accountIdOf(second.sub),
     )
     expect(metadata?.email_authority).toBe('none')
@@ -242,7 +242,7 @@ describe('a join paused before its batch', () => {
         env: {
           DB: beforeBatch(
             env.DB,
-            (sql) => /insert into "?google_accounts/.test(sql),
+            (sql) => /insert into "?account_emails/.test(sql),
             async () => {
               harness.reset()
               await meanwhile()

@@ -210,7 +210,7 @@ export const NotificationsLive: Layer.Layer<
           dossierError(
             'sign_in_required',
             'Sign in to see your notifications.',
-            'Sign in with Google, or run dossier login.',
+            'Sign in, or run dossier login.',
             null,
           ),
         )

@@ -365,7 +365,7 @@ export const SearchLive: Layer.Layer<
             dossierError(
               'sign_in_required',
               'Sign in to search.',
-              'Sign in with Google, or run dossier login.',
+              'Sign in, or run dossier login.',
               null,
             ),
           )

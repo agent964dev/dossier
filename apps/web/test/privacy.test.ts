@@ -1,4 +1,5 @@
 import type { Person } from '@dossier/contracts'
+import { env } from 'cloudflare:workers'
 import { Effect } from 'effect'
 import { beforeAll, describe, expect, it } from 'vitest'
 
@@ -10,6 +11,7 @@ import {
   type Caller,
   type CurrentCaller,
 } from '../src/core/index.ts'
+import { parseConfig, signInProviders } from '../src/core/config.ts'
 import { settingsOf } from '../src/core/settings.ts'
 import { exec, rows } from './support/d1.ts'
 import { runAs, sessionFor } from './support/people.ts'
@@ -22,6 +24,8 @@ import {
 } from './support/trees.ts'
 
 const DEPLOYMENT = 'dossier.test'
+/** The sign-in providers the test Worker turned on. */
+const PROVIDERS = signInProviders(parseConfig(env))
 
 let chief: Caller
 let wsAdmin: Caller
@@ -64,7 +68,7 @@ const saved = () =>
   )
 
 describe('the generated privacy text', () => {
-  const text = defaultPrivacyText(DEPLOYMENT)
+  const text = defaultPrivacyText(DEPLOYMENT, PROVIDERS)
 
   it('names the deployment and what Dossier keeps', () => {
     expect(text.split('\n')[0]).toBe(`Privacy at ${DEPLOYMENT}`)
@@ -154,7 +158,7 @@ describe('a super admin’s privacy text', () => {
     expect(await saved()).toEqual([])
 
     await save(chief, 'Edited')
-    await save(chief, `${defaultPrivacyText(DEPLOYMENT)}\n\n`)
+    await save(chief, `${defaultPrivacyText(DEPLOYMENT, PROVIDERS)}\n\n`)
     expect(await saved()).toEqual([])
     expect(await privacyOf(member)).toBeNull()
   })

@@ -1,11 +1,11 @@
 import { useState } from 'react'
 
-/** The signed-in person as Google last described them. */
+/** The signed-in person as their sign-in provider last described them. */
 export interface SignedInPerson {
   readonly email: string
-  /** Empty when Google gave none. */
+  /** Empty when the provider gave none. */
   readonly name: string
-  /** The address of their Google profile picture, or null. */
+  /** The address of their profile photo, or null. */
   readonly image: string | null
 }
 
@@ -14,7 +14,7 @@ export const shownName = (person: SignedInPerson): string =>
   person.name.trim() === '' ? person.email : person.name.trim()
 
 /**
- * The person's Google photo, loaded straight from Google without a referrer.
+ * The person's profile photo, loaded straight from its address without a referrer.
  * The initial of what names them sits underneath, so it shows while the
  * photo loads, when there is none, and when it fails to load.
  */

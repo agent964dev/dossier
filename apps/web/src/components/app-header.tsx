@@ -93,7 +93,7 @@ export function AppHeader({
 }
 
 /**
- * The account chip, to account settings: the person's Google photo and name,
+ * The account chip, to account settings: the person's profile photo and name,
  * else the initial and the email. Beside another control, phones show the
  * photo or initial alone.
  */

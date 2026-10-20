@@ -16,7 +16,12 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { Clock, Context, Effect, Layer, Redacted } from 'effect'
 
 import { db, schema } from '../db/client.ts'
-import { Auth, type AuthHooks, type AuthPort } from '../ports/auth.ts'
+import {
+  Auth,
+  type AuthHooks,
+  type AuthPort,
+  type SignInProviderId,
+} from '../ports/auth.ts'
 import { Access } from './access.ts'
 import { Bindings } from './bindings.ts'
 import { CurrentCaller } from './caller.ts'
@@ -29,13 +34,14 @@ import {
   decideEmailChange,
   decideLink,
   type Authority,
+  type SignInDiagnostic,
 } from './sign-in-rules.ts'
 
 export interface BrowserSession {
   readonly person: Person
   readonly sessionId: SessionId
-  /** The account that opened the session. */
-  readonly googleAccountId: string | null
+  /** The sign-in account that opened the session. */
+  readonly signInAccountId: string | null
   readonly setCookie: readonly string[]
 }
 
@@ -72,8 +78,47 @@ export interface DevicePrompt {
 
 /** What the sign-in screen shows after Dossier refused or adjusted a sign-in. */
 export type SignInNotice =
-  | { readonly kind: 'email_unconfirmed'; readonly email: string }
-  | { readonly kind: 'email_in_use'; readonly email: string }
+  | {
+      readonly kind: 'email_unconfirmed'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+  | {
+      readonly kind: 'not_confirmed'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+  | { readonly kind: 'no_email'; readonly provider: SignInProviderId }
+  | {
+      readonly kind: 'email_in_use'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+  | {
+      readonly kind: 'kept_unconfirmed'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+
+/** Refusals travel as ?error=<kind>, kept emails as ?notice=<kind>. */
+const REFUSAL_KINDS: ReadonlySet<string> = new Set([
+  'email_unconfirmed',
+  'not_confirmed',
+  'no_email',
+])
+const NOTICE_KINDS: ReadonlySet<string> = new Set([
+  ...REFUSAL_KINDS,
+  'email_in_use',
+  'kept_unconfirmed',
+])
+
+const isNoticeKind = (kind: string): kind is SignInNotice['kind'] =>
+  NOTICE_KINDS.has(kind)
+
+/** Writes one diagnostic line for a refused or failed sign-in. */
+export const logSignInRefusal = (line: SignInDiagnostic): void => {
+  console.log(JSON.stringify(line))
+}
 
 export interface SignInService {
   /** Better Auth's routes under /_/auth, inside Dossier's rules. */
@@ -157,7 +202,7 @@ export interface SignInService {
   >
   /**
    * Revokes the person's agent keys, ends every session and device login,
-   * removes their Google accounts and marks them deleted, in one batch. The
+   * removes their sign-in accounts and marks them deleted, in one batch. The
    * person stays as a row: the versions they pushed name them.
    */
   readonly closeAccount: (detail?: {
@@ -167,6 +212,43 @@ export interface SignInService {
     DossierError<'sign_in_required' | 'unavailable'>,
     CurrentCaller
   >
+  /** This session's account first, then by first sign-in. */
+  readonly signInAccounts: () => Effect.Effect<
+    readonly SignInAccountView[],
+    DossierError<'sign_in_required' | 'unavailable'>,
+    CurrentCaller
+  >
+  /**
+   * Ends what one of the person's sign-in accounts opened and removes it, in
+   * one batch. Browser sessions only; never the last account or the one this
+   * session uses.
+   */
+  readonly disconnectSignInAccount: (
+    accountId: string,
+  ) => Effect.Effect<
+    void,
+    DossierError<
+      | 'sign_in_required'
+      | 'not_found'
+      | 'last_account'
+      | 'account_in_use'
+      | 'unavailable'
+    >,
+    CurrentCaller
+  >
+}
+
+/** One of the person's sign-in accounts, as Settings lists it. */
+export interface SignInAccountView {
+  /** account.id */
+  readonly id: string
+  readonly provider: SignInProviderId
+  /** As the account last gave it. */
+  readonly email: string
+  /** The account this session uses. */
+  readonly current: boolean
+  /** Its live agent keys, for the confirmation. */
+  readonly agentKeys: number
 }
 
 export class SignIn extends Context.Tag('SignIn')<SignIn, SignInService>() {}
@@ -191,7 +273,7 @@ const signedInPerson = Effect.flatMap(CurrentCaller, (caller) =>
     ? fail(
         'sign_in_required',
         'Sign in to continue.',
-        'Sign in with Google, or run dossier login.',
+        'Sign in, or run dossier login.',
       )
     : Effect.succeed({ person: caller.person, via: caller.via }),
 )
@@ -247,7 +329,7 @@ const decodeNotice = (value: string): unknown => {
 
 /**
  * The statements that close an account: its agent keys revoked, its device
- * logins denied, every session and Google account deleted, the person marked
+ * logins denied, every session and sign-in account deleted, the person marked
  * deleted, and the history written with `detail`.
  */
 export const closeStatements = (
@@ -265,7 +347,7 @@ export const closeStatements = (
      where user_id = ? and status in ('pending', 'approved')`,
   ).bind(personId),
   DB.prepare('delete from session where user_id = ?').bind(personId),
-  // Their Google details go with the accounts.
+  // Their account emails go with the accounts.
   DB.prepare('delete from account where user_id = ?').bind(personId),
   DB.prepare(
     `update people set deleted_at = ?2
@@ -299,21 +381,26 @@ export const SignInLive: Layer.Layer<
       database
         .select({
           accountId: schema.account.id,
-          authority: schema.googleAccounts.emailAuthority,
+          authority: schema.accountEmails.emailAuthority,
         })
         .from(schema.account)
         .leftJoin(
-          schema.googleAccounts,
-          eq(schema.googleAccounts.accountId, schema.account.id),
+          schema.accountEmails,
+          eq(schema.accountEmails.accountId, schema.account.id),
         )
         .where(eq(schema.account.userId, userId))
         .all()
 
     const toAuthority = (value: string | null): Authority =>
-      value === 'google' ? 'google' : 'none'
+      value === 'google' || value === 'microsoft' ? value : 'none'
 
     const hooks: AuthHooks = {
       beforeAccount: async ({ action, claims, existingUserId }) => {
+        // Creating a person or joining one needs an email the provider
+        // confirms; a known account signs in either way.
+        if (action !== 'sign-in' && !claims.confirmed) {
+          return { allow: false, code: 'not_confirmed', email: claims.email }
+        }
         if (action === 'create-user' || existingUserId === null) {
           return { allow: true }
         }
@@ -343,13 +430,18 @@ export const SignInLive: Layer.Layer<
           .from(schema.user)
           .where(eq(schema.user.email, claims.email))
           .get()
-        return decideEmailChange(
-          claims.email,
-          (holder?.id as PersonId | undefined) ?? null,
-          existingUserId as PersonId,
-        ) === 'keep-old'
-          ? { allow: true, keepEmail: stored.email }
-          : { allow: true }
+        const change = decideEmailChange({
+          confirmed: claims.confirmed,
+          holder: (holder?.id as PersonId | undefined) ?? null,
+          self: existingUserId as PersonId,
+        })
+        return change === 'update'
+          ? { allow: true }
+          : {
+              allow: true,
+              keepEmail: stored.email,
+              because: change === 'keep-in-use' ? 'in_use' : 'unconfirmed',
+            }
       },
 
       afterSignIn: async ({
@@ -361,12 +453,14 @@ export const SignInLive: Layer.Layer<
       }) => {
         const at = now()
         const authority = authorityOf(claims)
-        const seedSuperAdmin = newUser && config.superAdmins.has(claims.email)
+        // Only an email the provider confirms names a super admin.
+        const superAdmin =
+          claims.confirmed && config.superAdmins.has(claims.email)
+        const seedSuperAdmin = newUser && superAdmin
         // A configured super admin who deleted their account is one again.
-        const reseedSuperAdmin =
-          !newUser && config.superAdmins.has(claims.email)
+        const reseedSuperAdmin = !newUser && superAdmin
         const DB = bindings.DB
-        // An account's join is finished once its Google details are recorded,
+        // An account's join is finished once its email details are recorded,
         // which happens at the end of this batch. Every join statement below
         // checks, inside the batch, that the join is still unfinished, so a
         // takeover runs only while the account is joining, at most once, and
@@ -374,18 +468,18 @@ export const SignInLive: Layer.Layer<
         // Reading first only skips the join statements for accounts whose
         // join finished long ago: details are never removed from an account.
         const own = await database
-          .select({ id: schema.googleAccounts.accountId })
-          .from(schema.googleAccounts)
-          .where(eq(schema.googleAccounts.accountId, accountId))
+          .select({ id: schema.accountEmails.accountId })
+          .from(schema.accountEmails)
+          .where(eq(schema.accountEmails.accountId, accountId))
           .get()
         const maybeJoining = !newUser && own === undefined
         const unfinished =
-          'not exists (select 1 from google_accounts where account_id = ?1)'
-        // The person's other accounts with recorded details Google does not
-        // vouch for now; an account still joining has none and is not lapsed.
-        const lapsed = `select g.account_id from google_accounts g
-          join account a on a.id = g.account_id
-          where a.user_id = ?2 and a.id <> ?1 and g.email_authority = 'none'`
+          'not exists (select 1 from account_emails where account_id = ?1)'
+        // The person's other accounts with recorded details no provider
+        // vouches for now; an account still joining has none and is not lapsed.
+        const lapsed = `select e.account_id from account_emails e
+          join account a on a.id = e.account_id
+          where a.user_id = ?2 and a.id <> ?1 and e.email_authority = 'none'`
         const joinStatements = !maybeJoining
           ? []
           : [
@@ -394,7 +488,7 @@ export const SignInLive: Layer.Layer<
                 `insert into person_history (id, user_id, kind, detail_json, created_at)
                  select ?3, ?2, 'linked', ?4, ?5
                  where ${unfinished} and exists (
-                   select 1 from google_accounts g join account a on a.id = g.account_id
+                   select 1 from account_emails e join account a on a.id = e.account_id
                    where a.user_id = ?2 and a.id <> ?1)`,
               ).bind(
                 accountId,
@@ -403,7 +497,7 @@ export const SignInLive: Layer.Layer<
                 JSON.stringify({ accountId }),
                 at,
               ),
-              // An account Google vouches for takes over the lapsed ones.
+              // An account its provider vouches for takes over the lapsed ones.
               ...(decideLink(authority, []).kind !== 'link'
                 ? []
                 : [
@@ -416,37 +510,52 @@ export const SignInLive: Layer.Layer<
                     ).bind(accountId, userId, newId(), at),
                     DB.prepare(
                       `delete from session where user_id = ?2
-                         and google_account_id in (${lapsed}) and ${unfinished}`,
+                         and sign_in_account_id in (${lapsed}) and ${unfinished}`,
                     ).bind(accountId, userId),
                     DB.prepare(
                       `update agent_keys set revoked_at = ?3 where user_id = ?2
-                         and google_account_id in (${lapsed}) and revoked_at is null
+                         and created_by_account_id in (${lapsed}) and revoked_at is null
                          and ${unfinished}`,
                     ).bind(accountId, userId, at),
                     DB.prepare(
                       `update device_code set status = 'denied' where status = 'approved'
-                         and approved_by_google_account_id in (${lapsed}) and ${unfinished}`,
+                         and approved_by_account_id in (${lapsed}) and ${unfinished}`,
                     ).bind(accountId, userId),
                     DB.prepare(
                       `delete from account where user_id = ?2 and id in (${lapsed})
                          and ${unfinished}`,
                     ).bind(accountId, userId),
                     DB.prepare(
-                      `delete from google_accounts where not exists (
-                         select 1 from account where account.id = google_accounts.account_id)`,
+                      `delete from account_emails where not exists (
+                         select 1 from account where account.id = account_emails.account_id)`,
                     ),
                   ]),
             ]
+        // An email the provider does not confirm says nothing about the
+        // account: it keeps the email and authority it was last recorded with.
+        const observed =
+          emailKept?.because === 'unconfirmed'
+            ? 'observed_at = excluded.observed_at'
+            : `email = excluded.email, email_authority = excluded.email_authority,
+               organisation = excluded.organisation, observed_at = excluded.observed_at`
+        const personAuthority =
+          emailKept?.because === 'unconfirmed'
+            ? ''
+            : 'email_authority = excluded.email_authority,'
         // One batch: if any of it fails, Better Auth writes no session.
         await DB.batch([
           ...joinStatements,
           DB.prepare(
-            `insert into google_accounts (account_id, email, email_authority, hosted_domain, observed_at)
+            `insert into account_emails (account_id, email, email_authority, organisation, observed_at)
              values (?1, ?2, ?3, ?4, ?5)
-             on conflict (account_id) do update set email = excluded.email,
-               email_authority = excluded.email_authority,
-               hosted_domain = excluded.hosted_domain, observed_at = excluded.observed_at`,
-          ).bind(accountId, claims.email, authority, claims.hd ?? null, at),
+             on conflict (account_id) do update set ${observed}`,
+          ).bind(
+            accountId,
+            claims.email,
+            authority,
+            claims.organisation ?? null,
+            at,
+          ),
           // A person who deleted their account comes back with nothing.
           DB.prepare(
             `insert into person_history (id, user_id, kind, detail_json, created_at)
@@ -466,7 +575,7 @@ export const SignInLive: Layer.Layer<
           DB.prepare(
             `insert into people (user_id, email_authority, first_sign_in_at, last_sign_in_at)
              values (?1, ?2, ?3, ?3)
-             on conflict (user_id) do update set email_authority = excluded.email_authority,
+             on conflict (user_id) do update set ${personAuthority}
                last_sign_in_at = excluded.last_sign_in_at, deleted_at = null`,
           ).bind(userId, authority, at),
           ...(seedSuperAdmin
@@ -498,10 +607,12 @@ export const SignInLive: Layer.Layer<
 
     const auth: AuthPort = makeAuth(hooks)
 
-    const signNotice = async (kind: string, email: string) => {
+    /** The signed value a notice redirect carries: kind, provider and email. */
+    const signNotice = async (notice: SignInNotice) => {
       const payload = encodeNotice({
-        k: kind,
-        e: email,
+        k: notice.kind,
+        p: notice.provider,
+        e: 'email' in notice ? notice.email : '',
         x: now() + NOTICE_LIFETIME,
       })
       return `${payload}.${await hmacSha256(noticeSecret, payload)}`
@@ -510,24 +621,20 @@ export const SignInLive: Layer.Layer<
     /** Points Better Auth's redirect at Dossier's own notice on the sign-in screen. */
     const withNotice = async (
       response: Response,
-      kind: 'email_unconfirmed' | 'email_in_use',
-      email: string,
+      notice: SignInNotice,
     ): Promise<Response> => {
       const location = response.headers.get('location')
       if (location === null) return response
+      const refusal = REFUSAL_KINDS.has(notice.kind)
       const target = new URL('/_/sign-in', config.origin)
-      target.searchParams.set(
-        kind === 'email_unconfirmed' ? 'error' : 'notice',
-        kind,
-      )
-      target.searchParams.set('who', await signNotice(kind, email))
+      target.searchParams.set(refusal ? 'error' : 'notice', notice.kind)
+      target.searchParams.set('who', await signNotice(notice))
       // Keep where the person was going: Better Auth's success redirect, or
       // the next its error redirect carries.
       const redirect = new URL(location, config.origin)
-      const next =
-        kind === 'email_in_use'
-          ? `${redirect.pathname}${redirect.search}`
-          : redirect.searchParams.get('next')
+      const next = refusal
+        ? redirect.searchParams.get('next')
+        : `${redirect.pathname}${redirect.search}${redirect.hash}`
       if (redirect.origin === config.origin.origin && next !== null) {
         target.searchParams.set('next', next)
       }
@@ -637,23 +744,72 @@ export const SignInLive: Layer.Layer<
         ),
       )
 
+    /** Why the person may not disconnect the account now, or null. */
+    const disconnectRefusal = (
+      userId: string,
+      accountId: string,
+      sessionId: SessionId,
+    ) =>
+      query(() =>
+        bindings.DB.prepare(
+          `select
+             exists (select 1 from account where id = ?1 and user_id = ?2) as theirs,
+             (select count(*) from account where user_id = ?2) as accounts,
+             (select sign_in_account_id from session where id = ?3) as current`,
+        )
+          .bind(accountId, userId, sessionId)
+          .first<{
+            theirs: number
+            accounts: number
+            current: string | null
+          }>(),
+      ).pipe(
+        Effect.map((row) =>
+          row === null || row.theirs !== 1
+            ? dossierError('not_found', 'No such sign-in account.')
+            : row.accounts <= 1
+              ? dossierError(
+                  'last_account',
+                  'This is your only sign-in account.',
+                  'To remove it, delete your account in account settings.',
+                )
+              : row.current === accountId
+                ? dossierError(
+                    'account_in_use',
+                    'This session uses this account.',
+                    'To disconnect this account, sign in with another one.',
+                  )
+                : null,
+        ),
+      )
+
     const service: SignInService = {
       handle: (request) =>
         Effect.promise(async () => {
           const { response, outcome } = await auth.handle(request)
-          if (outcome.refused !== null) {
+          if (outcome.diagnostic !== null) logSignInRefusal(outcome.diagnostic)
+          const { refused, emailKept } = outcome
+          if (refused !== null) {
             return withNotice(
               response,
-              'email_unconfirmed',
-              outcome.refused.email,
+              refused.code === 'no_email'
+                ? { kind: 'no_email', provider: refused.provider }
+                : {
+                    kind: refused.code,
+                    provider: refused.provider,
+                    email: refused.email,
+                  },
             )
           }
-          if (outcome.emailKept !== null && response.status === 302) {
-            return withNotice(
-              response,
-              'email_in_use',
-              outcome.emailKept.attempted,
-            )
+          if (emailKept !== null && response.status === 302) {
+            return withNotice(response, {
+              kind:
+                emailKept.because === 'in_use'
+                  ? 'email_in_use'
+                  : 'kept_unconfirmed',
+              provider: emailKept.provider,
+              email: emailKept.attempted,
+            })
           }
           return response
         }),
@@ -665,7 +821,7 @@ export const SignInLive: Layer.Layer<
           // A session lasts only while the account that opened it still
           // belongs to its person: a takeover can detach the account while
           // the account's own sign-in is still writing its session.
-          const accountId = found.googleAccountId
+          const accountId = found.signInAccountId
           const attached =
             accountId !== null &&
             (yield* query(() =>
@@ -684,7 +840,7 @@ export const SignInLive: Layer.Layer<
           return {
             person: found.person,
             sessionId: found.sessionId,
-            googleAccountId: accountId,
+            signInAccountId: accountId,
             setCookie: found.setCookie,
           }
         }),
@@ -751,10 +907,7 @@ export const SignInLive: Layer.Layer<
 
       notice: (kind, signed) =>
         Effect.promise(async (): Promise<SignInNotice | null> => {
-          if (
-            signed === null ||
-            (kind !== 'email_unconfirmed' && kind !== 'email_in_use')
-          ) {
+          if (signed === null || kind === null || !isNoticeKind(kind)) {
             return null
           }
           const [payload = '', signature = ''] = signed.split('.')
@@ -762,19 +915,24 @@ export const SignInLive: Layer.Layer<
             return null
           const value = decodeNotice(payload) as {
             k?: unknown
+            p?: unknown
             e?: unknown
             x?: unknown
           } | null
           if (
             value === null ||
             value.k !== kind ||
+            (value.p !== 'google' && value.p !== 'microsoft') ||
             typeof value.e !== 'string' ||
             typeof value.x !== 'number' ||
             value.x < now()
           ) {
             return null
           }
-          return { kind, email: value.e }
+          const provider = value.p
+          return kind === 'no_email'
+            ? { kind, provider }
+            : { kind, provider, email: value.e }
         }),
 
       me: () =>
@@ -813,18 +971,18 @@ export const SignInLive: Layer.Layer<
       approveDevice: (userCode) =>
         Effect.gen(function* () {
           const { person, via } = yield* signedInPerson
-          const googleAccountId =
+          const signInAccountId =
             via.kind === 'browser'
               ? ((yield* query(() =>
                   database
-                    .select({ id: schema.session.googleAccountId })
+                    .select({ id: schema.session.signInAccountId })
                     .from(schema.session)
                     .where(eq(schema.session.id, via.sessionId))
                     .get(),
                 ))?.id ?? null)
               : null
           yield* auth.viewDevice(userCode, person.id)
-          yield* auth.approveDevice(userCode, person.id, googleAccountId)
+          yield* auth.approveDevice(userCode, person.id, signInAccountId)
         }),
 
       denyDevice: (userCode) =>
@@ -860,10 +1018,10 @@ export const SignInLive: Layer.Layer<
           }
           const refused = fail(
             'access_denied',
-            'The Google account that approved this sign-in no longer belongs to this person.',
+            'The account that approved this sign-in no longer belongs to this person.',
             'Run dossier login again.',
           )
-          const approver = redemption.approvedByGoogleAccountId
+          const approver = redemption.approvedByAccountId
           if (approver === null) return yield* refused
           // The code is spent from here on: a failure means starting again.
           const minted = yield* Effect.gen(function* () {
@@ -878,7 +1036,7 @@ export const SignInLive: Layer.Layer<
             const [inserted] = yield* Effect.tryPromise(() =>
               bindings.DB.batch([
                 bindings.DB.prepare(
-                  `insert into agent_keys (id, user_id, name, hash_sha256, created_via, google_account_id, created_at)
+                  `insert into agent_keys (id, user_id, name, hash_sha256, created_via, created_by_account_id, created_at)
                      select ?, ?, ?, ?, 'device', ?, ? where ${stillTheirs}`,
                 ).bind(
                   keyId,
@@ -952,7 +1110,7 @@ export const SignInLive: Layer.Layer<
             return yield* fail(
               'sign_in_required',
               'Agent keys are made in account settings.',
-              'Sign in with Google and open account settings.',
+              'Sign in and open account settings.',
             )
           }
           // A key reaches only what its person can open when it is made.
@@ -984,10 +1142,10 @@ export const SignInLive: Layer.Layer<
             bindings.DB.batch([
               bindings.DB.prepare(
                 `insert into agent_keys (id, user_id, name, hash_sha256, created_via,
-                   google_account_id, scope_node_id, read_only, created_at)
-                 select ?, ?, ?, ?, 'settings', s.google_account_id, ?, ?, ?
+                   created_by_account_id, scope_node_id, read_only, created_at)
+                 select ?, ?, ?, ?, 'settings', s.sign_in_account_id, ?, ?, ?
                  from session s
-                 join account a on a.id = s.google_account_id and a.user_id = s.user_id
+                 join account a on a.id = s.sign_in_account_id and a.user_id = s.user_id
                  where s.id = ? and s.user_id = ? and s.expires_at > ?`,
               ).bind(
                 keyId,
@@ -1023,7 +1181,7 @@ export const SignInLive: Layer.Layer<
             return yield* fail(
               'sign_in_required',
               'This session has ended.',
-              'Sign in with Google again.',
+              'Sign in again.',
             )
           }
           const key = { id: keyId }
@@ -1059,7 +1217,7 @@ export const SignInLive: Layer.Layer<
             return yield* fail(
               'sign_in_required',
               'An account is deleted in account settings.',
-              'Sign in with Google and open account settings.',
+              'Sign in and open account settings.',
             )
           }
           const at = yield* Clock.currentTimeMillis
@@ -1102,6 +1260,122 @@ export const SignInLive: Layer.Layer<
               })
               .run(),
           )
+        }),
+
+      signInAccounts: () =>
+        Effect.gen(function* () {
+          const { person, via } = yield* signedInPerson
+          const current =
+            via.kind === 'browser'
+              ? ((yield* query(() =>
+                  database
+                    .select({ id: schema.session.signInAccountId })
+                    .from(schema.session)
+                    .where(eq(schema.session.id, via.sessionId))
+                    .get(),
+                ))?.id ?? null)
+              : null
+          // An account still joining has no email details yet: the person's
+          // email is the one it signed in with.
+          const { results } = yield* query(() =>
+            bindings.DB.prepare(
+              `select a.id, a.provider_id as provider,
+                 coalesce(e.email, u.email) as email,
+                 (select count(*) from agent_keys k where k.created_by_account_id = a.id
+                    and k.revoked_at is null) as agentKeys
+               from account a
+               join "user" u on u.id = a.user_id
+               left join account_emails e on e.account_id = a.id
+               where a.user_id = ?
+               order by a.created_at, a.id`,
+            )
+              .bind(person.id)
+              .all<{
+                id: string
+                provider: string
+                email: string
+                agentKeys: number
+              }>(),
+          )
+          const views = results.map((row): SignInAccountView => ({
+            id: row.id,
+            provider: row.provider === 'microsoft' ? 'microsoft' : 'google',
+            email: row.email,
+            current: row.id === current,
+            agentKeys: row.agentKeys,
+          }))
+          return [
+            ...views.filter((view) => view.current),
+            ...views.filter((view) => !view.current),
+          ]
+        }),
+
+      disconnectSignInAccount: (accountId) =>
+        Effect.gen(function* () {
+          const { person, via } = yield* signedInPerson
+          if (via.kind !== 'browser') {
+            return yield* fail(
+              'sign_in_required',
+              'A sign-in account is disconnected in account settings.',
+              'Sign in and open account settings.',
+            )
+          }
+          const refused = yield* disconnectRefusal(
+            person.id,
+            accountId,
+            via.sessionId,
+          )
+          if (refused !== null) return yield* Effect.fail(refused)
+          const at = yield* Clock.currentTimeMillis
+          const DB = bindings.DB
+          // The same steps a takeover runs on the accounts it detaches, on
+          // this one account. Every statement checks, inside the batch, that
+          // the account is still the person's, is not their last, and is not
+          // the one this session uses, and that this session still exists
+          // (every session names its account), so a lost race changes nothing.
+          const guard = `exists (select 1 from account where id = ?1 and user_id = ?2)
+            and (select count(*) from account where user_id = ?2) > 1
+            and ?1 <> (select sign_in_account_id from session where id = ?4 and user_id = ?2)`
+          const step = (sql: string) =>
+            DB.prepare(sql).bind(accountId, person.id, at, via.sessionId)
+          const results = yield* query(() =>
+            DB.batch([
+              DB.prepare(
+                `insert into person_history (id, user_id, kind, detail_json, created_at)
+                 select ?5, ?2, 'disconnected',
+                   json_object('accountId', id, 'provider', provider_id), ?3
+                 from account where id = ?1 and user_id = ?2 and ${guard}`,
+              ).bind(accountId, person.id, at, via.sessionId, newId()),
+              step(
+                `delete from session where user_id = ?2 and sign_in_account_id = ?1
+                   and ${guard}`,
+              ),
+              step(
+                `update agent_keys set revoked_at = ?3 where created_by_account_id = ?1
+                   and revoked_at is null and ${guard}`,
+              ),
+              step(
+                `update device_code set status = 'denied' where status = 'approved'
+                   and approved_by_account_id = ?1 and ${guard}`,
+              ),
+              step(
+                `delete from account_emails where account_id = ?1 and ${guard}`,
+              ),
+              // Last: every guard above reads the account.
+              step(
+                `delete from account where id = ?1 and user_id = ?2 and ${guard}`,
+              ),
+            ]),
+          )
+          if (results.at(-1)?.meta.changes === 1) return
+          // Another request changed the accounts since the read: say what
+          // stopped this one.
+          const stopped = yield* disconnectRefusal(
+            person.id,
+            accountId,
+            via.sessionId,
+          )
+          return yield* Effect.fail(stopped ?? unavailable())
         }),
     }
     return service
