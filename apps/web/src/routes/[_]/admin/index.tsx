@@ -256,7 +256,7 @@ const CREATIONS: readonly {
 }[] = [
   { value: 'super_admins', label: 'Only super admins' },
   { value: 'listed', label: 'Listed people' },
-  { value: 'anyone', label: 'Anyone who signs in with Google' },
+  { value: 'anyone', label: 'Anyone who signs in' },
 ]
 
 function WhoMayCreate({

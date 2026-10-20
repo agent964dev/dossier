@@ -191,7 +191,7 @@ const signedInPerson = Effect.flatMap(CurrentCaller, (caller) =>
     ? fail(
         'sign_in_required',
         'Sign in to continue.',
-        'Sign in with Google, or run dossier login.',
+        'Sign in, or run dossier login.',
       )
     : Effect.succeed({ person: caller.person, via: caller.via }),
 )
@@ -860,7 +860,7 @@ export const SignInLive: Layer.Layer<
           }
           const refused = fail(
             'access_denied',
-            'The Google account that approved this sign-in no longer belongs to this person.',
+            'The account that approved this sign-in no longer belongs to this person.',
             'Run dossier login again.',
           )
           const approver = redemption.approvedByAccountId
@@ -952,7 +952,7 @@ export const SignInLive: Layer.Layer<
             return yield* fail(
               'sign_in_required',
               'Agent keys are made in account settings.',
-              'Sign in with Google and open account settings.',
+              'Sign in and open account settings.',
             )
           }
           // A key reaches only what its person can open when it is made.
@@ -1023,7 +1023,7 @@ export const SignInLive: Layer.Layer<
             return yield* fail(
               'sign_in_required',
               'This session has ended.',
-              'Sign in with Google again.',
+              'Sign in again.',
             )
           }
           const key = { id: keyId }
@@ -1059,7 +1059,7 @@ export const SignInLive: Layer.Layer<
             return yield* fail(
               'sign_in_required',
               'An account is deleted in account settings.',
-              'Sign in with Google and open account settings.',
+              'Sign in and open account settings.',
             )
           }
           const at = yield* Clock.currentTimeMillis

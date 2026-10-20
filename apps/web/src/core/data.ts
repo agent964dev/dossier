@@ -635,9 +635,7 @@ export const DataLive: Layer.Layer<
     const signedIn = (message: string, as?: string | null) =>
       Effect.flatMap(CurrentCaller, (caller) =>
         caller.person === null
-          ? Effect.fail(
-              dossierError('sign_in_required', message, 'Sign in with Google.'),
-            )
+          ? Effect.fail(dossierError('sign_in_required', message, 'Sign in.'))
           : as !== undefined &&
               as !== null &&
               as.toLowerCase() !== caller.person.email.toLowerCase()
@@ -645,7 +643,7 @@ export const DataLive: Layer.Layer<
                 dossierError(
                   'sign_in_required',
                   'This page was opened by someone else. Sign in again to send it.',
-                  'Sign in with Google.',
+                  'Sign in.',
                 ),
               )
             : Effect.succeed(caller.person),

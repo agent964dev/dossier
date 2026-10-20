@@ -130,7 +130,7 @@ export const describeSet = (
     ...response.shares.map((share) => shareLine(share, place)),
     ...(target.kind === 'anyone' ? reachLines(response.publicReach) : []),
     ...(target.kind === 'anyone' && role === 'write'
-      ? ['Anyone with a Google account can now publish pages here.']
+      ? ['Anyone who signs in can now publish pages here.']
       : []),
   ].join('\n')
 }

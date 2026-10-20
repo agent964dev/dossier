@@ -10,7 +10,7 @@ Dossier hosts trees of plain HTML.
 - Plain HTML forms keep each person's answers on the server, with drafts,
   closing and withdrawal. Pages read, watch and write that data live through a
   small page client.
-- People open what is shared with them by signing in with Google. Shares give
+- People open what is shared with them by signing in. Shares give
   read, respond or write to a person, a team, the workspace or anyone.
 - Every page has a version agents read: its companion file, or Markdown made
   from the page. `dossier read` prints it, and so does any link asked with an

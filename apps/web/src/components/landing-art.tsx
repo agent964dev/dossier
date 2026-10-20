@@ -1166,7 +1166,7 @@ export function SharingFigure() {
             </>
           }
           name="sara@acme.com"
-          about="Guest, signs in with Google"
+          about="Guest, outside the workspace"
           role="Respond"
           roleTone={[
             'fill-complement-400/10 stroke-complement-400/35',

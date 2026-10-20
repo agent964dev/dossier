@@ -27,10 +27,10 @@ write, and, through the folders above, its layouts, themes and components
 (`_` files). A page shared on its own carries the files its markup loads, not files referenced only from inside its stylesheets or scripts, or URLs its scripts build. Share the folder for those, or keep them in a `_` folder.
 
 A public share (`anyone`) lets anyone with the link open the node without
-signing in; answering a form asks them to sign in with Google. Public reach
+signing in; answering a form asks them to sign in. Public reach
 covers the node, the files its pages need and the `_` files above, never a
 page above it, and never people's answers unless the shared node is a data
-folder itself. `anyone` with `write` lets anyone with a Google account publish
+folder itself. `anyone` with `write` lets anyone who signs in publish
 pages there.
 
 Revoking a share closes that person's live watches on the tree.

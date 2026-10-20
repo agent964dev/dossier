@@ -420,7 +420,7 @@ const signInRequired = () =>
   dossierError(
     'sign_in_required',
     'Sign in to continue.',
-    'Sign in with Google, or run dossier login.',
+    'Sign in, or run dossier login.',
   )
 
 const notFound = (path: string | null) =>
@@ -1720,7 +1720,7 @@ export const PeopleLive: Layer.Layer<
             dossierError(
               'sign_in_required',
               'An account is deleted in account settings.',
-              'Sign in with Google and open account settings.',
+              'Sign in and open account settings.',
             ),
           )
         }
@@ -1848,7 +1848,7 @@ export const PeopleLive: Layer.Layer<
                       dossierError(
                         'sign_in_required',
                         'This session has ended.',
-                        'Sign in with Google again.',
+                        'Sign in again.',
                       ),
                     )
                   : isAdminsGuard(error)

@@ -21,8 +21,8 @@ dossier --help
 dossier login <host>
 ```
 
-`login` prints a link and a code and opens the link in your browser. Sign in
-with Google, check that the code matches, and press Allow. The CLI saves an
+`login` prints a link and a code and opens the link in your browser. Sign in,
+check that the code matches, and press Allow. The CLI saves an
 agent key named after this machine, such as `cli on m4`, in
 `~/.config/dossier/config.json` (or under `$XDG_CONFIG_HOME`), readable only by
 you. That deployment becomes the default for later commands. Without a host,

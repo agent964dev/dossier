@@ -51,7 +51,7 @@ export const Route = createFileRoute('/')({
       {
         name: 'description',
         content:
-          "Your agents write the page. Dossier handles the rest: pages that share a theme and layout, forms that keep each person's answers, sharing with any Google account, and a version agents can read.",
+          "Your agents write the page. Dossier handles the rest: pages that share a theme and layout, forms that keep each person's answers, sharing with anyone by email, and a version agents can read.",
       },
     ],
   }),
@@ -306,7 +306,7 @@ function Home({
                 disabled={busy}
                 onClick={useAnotherAccount}
               >
-                Use another Google account
+                Use another account
               </Button>
             </div>
           )}

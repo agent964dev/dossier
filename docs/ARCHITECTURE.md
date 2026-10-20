@@ -601,24 +601,25 @@ exports never receive it.
 
 Every deployment serves `/_/privacy`, linked from the sign-in page and the
 front page. It is plain text generated from what Dossier stores: a person's
-Google identity, name and email, sessions and agent keys, what they push, send
+sign-in accounts, name and email, sessions and agent keys, what they push, send
 and comment, who opened a page and when, and that Dossier's screens load
 nothing from third parties. A super admin can replace the text in `/_/admin`.
 An empty value returns to the generated text.
 
 ## Sign-in and agent keys
 
-People sign in only with Google, through Better Auth on D1 (`better-auth/minimal`
-with the Drizzle adapter). Its routes are under `/_/auth/`, and Google's
-redirect URI is `/_/auth/callback/google`.
+People sign in with the sign-in providers the deployment turned on, through
+Better Auth on D1 (`better-auth/minimal` with the Drizzle adapter). Its routes
+are under `/_/auth/`, and each provider's redirect URI is
+`/_/auth/callback/<provider>`.
 
-- A person is their email. A Google account joins a person only when Google
-  vouches for the email (a Gmail address or a hosted-domain claim). A takeover
+- A person is their email. A sign-in account joins a person only when its
+  provider is the email authority for the email (`GLOSSARY.md`). A takeover
   detaches accounts that no longer own the email and revokes only the sessions
   and keys those accounts opened.
 - Sessions last 30 days and renew on use once they are an hour old. The cookie
   is host-only on the main host. Database triggers refuse a session whose
-  Google account is not its person's.
+  sign-in account is not its person's.
 - Emails in `SUPER_ADMINS` become super admins at their first sign-in. Super
   admins can name others in `/_/admin`.
 - `dossier login` uses device authorization: the CLI asks
@@ -685,8 +686,8 @@ all.
 - `apps/web/test/`: the Worker under `@cloudflare/vitest-plugin`, in three
   projects. `web` runs the real edge through `SELF.fetch` with D1, R2 and the
   Cache API in Miniflare. `hub` runs real WebSocket upgrades against the tree
-  hub. `dom` renders screen components in happy-dom. Sign-in runs against a
-  stand-in Google that exists only in the test build.
+  hub. `dom` renders screen components in happy-dom. Sign-in runs against
+  stand-in sign-in providers that exist only in the test build.
 - `scripts/release/*.test.mjs`: the release checks, run with
   `bun run test:release` (`node --test`).
 

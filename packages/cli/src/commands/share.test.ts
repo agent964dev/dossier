@@ -206,7 +206,7 @@ describe('dossier share, setting', () => {
       [
         'agent964/acme/questions/ is shared with anyone with the link (write).',
         '- Anyone with the link · write',
-        'Anyone with a Google account can now publish pages here.',
+        'Anyone who signs in can now publish pages here.',
         '',
       ].join('\n'),
     )

@@ -63,7 +63,7 @@ export const ERRORS = {
   device_expired: { status: 400, exit: 4 },
   /** The person pressed Deny. */
   access_denied: { status: 400, exit: 4 },
-  /** Google cannot confirm this account still owns an email a person holds. */
+  /** The sign-in provider cannot confirm this account still owns an email a person holds. */
   email_unconfirmed: { status: 403, exit: 4 },
   /** A known account's new email belongs to another person. */
   email_in_use: { status: 409, exit: 4 },

@@ -105,9 +105,7 @@ describe('the front page', () => {
     expect(squash(headings[0]?.textContent)).toBe(
       'Your agents write the page. Dossier handles the rest.',
     )
-    expect(linkNamed('Sign in with Google')?.getAttribute('href')).toBe(
-      '/_/sign-in',
-    )
+    expect(linkNamed('Sign in')?.getAttribute('href')).toBe('/_/sign-in')
     expect(linkNamed('Privacy')?.getAttribute('href')).toBe('/_/privacy')
     expect(linkNamed('Dossier on GitHub')?.getAttribute('href')).toBe(
       'https://github.com/agent964dev/dossier',
@@ -180,7 +178,7 @@ describe('the front page', () => {
       'Nothing is shared with sara@acme.com',
     )
     expect(host.textContent).not.toContain('Your agents write the page.')
-    expect(linkNamed('Sign in with Google')).toBeUndefined()
+    expect(linkNamed('Sign in')).toBeUndefined()
   })
 
   it('gives each tree a menu of what the viewer may do on its root', async () => {

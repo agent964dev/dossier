@@ -339,7 +339,7 @@ const signInRequired = (path: string | null) =>
   dossierError(
     'sign_in_required',
     'Sign in to open this.',
-    'Sign in with Google, or run dossier login.',
+    'Sign in, or run dossier login.',
     path,
   )
 

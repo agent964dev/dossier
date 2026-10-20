@@ -142,7 +142,7 @@ Fill in these values first and use them everywhere below:
 | `<location>`        | Where D1 keeps its primary: `weur`, `eeur`, `apac`, `oc`, `wnam` or `enam` | `weur`                |
 | `<bucket>`          | The R2 bucket's name                                                       | `dossier`             |
 | `<queue>`           | The Queue's name                                                           | `dossier`             |
-| `<you@example.com>` | Your Google account's email, the first super admin                         | `sara@example.com`    |
+| `<you@example.com>` | The email you sign in with, the first super admin                          | `sara@example.com`    |
 
 ### 2.1 Accounts, domains and tools
 
@@ -365,7 +365,7 @@ error page means the route is missing.
 
 ### 2.10 First sign-in and the first-run screen
 
-Open `https://<main host>/` in a browser and sign in with Google as
+Open `https://<main host>/` in a browser and sign in as
 `<you@example.com>`. Because that email is in `SUPER_ADMINS`, you are a super
 admin, and Dossier sends you to `/_/admin`, which says "You are a super admin
 of <main host>, named in its configuration. Choose who may create
@@ -373,7 +373,7 @@ workspaces." Choose one of:
 
 - Only super admins,
 - Listed people (emails and email domains you list),
-- Anyone who signs in with Google.
+- Anyone who signs in.
 
 Press Save. Until this is saved, the home keeps sending super admins to
 `/_/admin`. The rest of `/_/admin` (health, limits, retention, super admins,

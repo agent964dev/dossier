@@ -333,7 +333,7 @@ export const serve = async (
           throw dossierError(
             'sign_in_required',
             'Sign in first.',
-            'Sign in with Google, or send an agent key.',
+            'Sign in, or send an agent key.',
           )
         }
         const handler = await apiHandlerFor(runtime)

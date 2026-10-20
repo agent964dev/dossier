@@ -1084,7 +1084,7 @@ export const PagesLive: Layer.Layer<
                 dossierError(
                   'sign_in_required',
                   'Sign in to open this.',
-                  'Sign in with Google.',
+                  'Sign in.',
                   path,
                 ),
               )
@@ -1848,7 +1848,7 @@ export const PagesLive: Layer.Layer<
               dossierError(
                 'sign_in_required',
                 'Sign in to download this page.',
-                'Sign in with Google, or send an agent key.',
+                'Sign in, or send an agent key.',
                 ref.path,
               ),
             )

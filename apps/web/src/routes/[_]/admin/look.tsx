@@ -607,7 +607,7 @@ function LivePreview({ draft }: { draft: Look }) {
               Open
             </Button>
             <Button variant="outline" size="sm" tabIndex={-1}>
-              Use another Google account
+              Use another account
             </Button>
           </div>
         </div>

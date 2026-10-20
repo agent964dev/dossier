@@ -24,7 +24,7 @@ export interface WorkspaceRowView {
 export interface AccountView {
   readonly email: string
   readonly name: string
-  /** The address of their Google profile picture, or null. */
+  /** The address of their profile photo, or null. */
   readonly image: string | null
   readonly keys: readonly AgentKeyView[]
   readonly workspaces: readonly WorkspaceRowView[]

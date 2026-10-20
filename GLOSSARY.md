@@ -10,8 +10,12 @@ Dossier hosts the pages agents make: plain HTML in folder trees that share their
 A coding or product agent acting through the CLI or plain HTTP with a person's agent key. Pushes, pulls, reads and watches.
 _Avoid_: bot, AI
 
+**Person**:
+Someone who has signed in to a deployment. Dossier knows a person by one email address; shares, invitations and answers are addressed to it.
+_Avoid_: user, identity, profile, member (a member belongs to a workspace)
+
 **Guest**:
-A person signed in with Google who is not a member of the workspace that holds a node. Sees only what is shared with them there. The same person can be a member of their own workspace and a guest in another.
+A person signed in to the deployment who is not a member of the workspace that holds a node. Sees only what is shared with them there. The same person can be a member of their own workspace and a guest in another.
 _Avoid_: customer (a guest's relationship to the owner, not a product role), external user, viewer
 
 **Member**:
@@ -59,12 +63,40 @@ A grant of a role on a node to a person (by email), a team, or the whole workspa
 _Avoid_: invite, visibility, grant (today's saved-value grants)
 
 **Public**:
-A node shared with anyone. Anyone can open it without signing in, along with every file its pages need to render. By default anyone may also respond after signing in with Google; the sharer can choose read only, or, rarely, write.
+A node shared with anyone. Anyone can open it without signing in, along with every file its pages need to render. By default anyone may also respond after signing in; the sharer can choose read only, or, rarely, write.
 _Avoid_: unlisted, open, world-readable
 
 **Agent key**:
 A credential the CLI or plain HTTP uses to act as its person, optionally limited to one tree or node and to read only.
 _Avoid_: API key, token (in product text)
+
+**Sign-in provider**:
+A company whose accounts people use to sign in to Dossier: Google and Microsoft. A deployment turns each one on with its own client ID and secret.
+_Avoid_: identity provider, IdP, social login, OAuth provider
+
+**Sign-in account**:
+One Google or Microsoft account that signs in as a person. A person can have several sign-in accounts, from one provider or both.
+_Avoid_: login, linked account, identity, account alone (in the glossary, account can mean a workspace)
+
+**Email authority**:
+A sign-in provider is the email authority for an address when it controls the address's domain, so it can say who holds the address now. Google is the authority for Gmail and for a Workspace domain; Microsoft for its own consumer domains and for a domain an organisation verified with it. Only an account whose provider is the authority may join a person who already holds the address.
+_Avoid_: verified (alone), trusted, owner
+
+**Confirmed email**:
+An email the sign-in provider says the account controls at this sign-in. A person can only be created, claim invitations, or change their email with a confirmed email.
+_Avoid_: verified email (Microsoft's "verified" means the domain, not the mailbox)
+
+**Takeover**:
+What happens when a sign-in account that is the email authority joins a person: the person's sign-in accounts that no provider vouches for now are detached. Their sessions end, their agent keys are revoked, and the CLI approvals they gave are denied. The person, their memberships and their pages stay.
+_Avoid_: merge, account merge
+
+**Personal Microsoft account**:
+A Microsoft account a person creates for themselves, such as Outlook.com or Hotmail. It can use any email address, a Gmail address too.
+_Avoid_: MSA, consumer account, Live account
+
+**Work or school account**:
+A Microsoft account an organisation creates and manages in its Microsoft Entra directory, as with Microsoft 365. The organisation's admin sets its email.
+_Avoid_: Entra account, AAD account, organisational account, tenant account
 
 ### The tree
 

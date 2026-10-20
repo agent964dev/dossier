@@ -39,7 +39,7 @@ const signInRequired = () =>
   dossierError(
     'sign_in_required',
     'Sign in to continue.',
-    'Sign in with Google, or run dossier login.',
+    'Sign in, or run dossier login.',
   )
 
 /** What the caller's roles let them do at a node; null when nothing. */

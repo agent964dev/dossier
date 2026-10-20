@@ -50,7 +50,7 @@ export function NoAccessScreen({ email }: { email: string | null }) {
           disabled={busy}
           onClick={useAnotherAccount}
         >
-          Use another Google account
+          Use another account
         </Button>
       </main>
     </div>

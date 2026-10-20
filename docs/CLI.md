@@ -158,7 +158,7 @@ Signs in through the browser and saves an agent key for the deployment.
 deployment comes from the rules above.
 
 The CLI prints a link and a code such as `WDJB-MJHT`, and opens the link in the
-browser when the link is on that deployment. Sign in with Google there, check
+browser when the link is on that deployment. Sign in there, check
 that the code matches, and press Allow. The CLI then saves the new key, and the
 deployment becomes the default for later commands. A code that expires before
 it is approved is replaced once with a new one.
@@ -446,7 +446,7 @@ everything inside it.
 
 `anyone` makes the node public: anyone with the link opens it without signing
 in, along with the files its pages need. Answering a form still asks them to
-sign in with Google. Exits 3 on a node you cannot share, 6 on a target or role
+sign in. Exits 3 on a node you cannot share, 6 on a target or role
 that is not one.
 
 ### `dossier ls`
