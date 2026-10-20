@@ -184,6 +184,9 @@ export default defineConfig(async () => {
             directory: testAssets(),
             binding: 'ASSETS',
           },
+          // An empty database beside DB, which gets every migration: the
+          // migration tests apply the earlier ones, seed, then the next.
+          d1Databases: { MIGRATION_DB: 'migration-test' },
           bindings: {
             TEST_MIGRATIONS: migrations,
             PUBLIC_ORIGIN: 'https://dossier.test',
