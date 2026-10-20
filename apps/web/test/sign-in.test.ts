@@ -228,7 +228,7 @@ describe('signing in with Google', () => {
     const browser = new Browser()
     const response = await browser.signIn(
       { sub: lina.sub, email: other.email },
-      '/next/page',
+      '/next/page?x=1#c',
     )
     expect(await userIdOf(lina.email)).toBe(linaId)
     expect(await count('user', 'email = ?', other.email)).toBe(1)
@@ -241,7 +241,7 @@ describe('signing in with Google', () => {
     const location = new URL(response.headers.get('location') ?? '', ORIGIN)
     expect(location.pathname).toBe('/_/sign-in')
     expect(location.searchParams.get('notice')).toBe('email_in_use')
-    expect(location.searchParams.get('next')).toBe('/next/page')
+    expect(location.searchParams.get('next')).toBe('/next/page?x=1#c')
     const body = (await (await me(browser)).json()) as {
       person: { email: string }
     }

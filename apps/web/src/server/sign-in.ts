@@ -16,6 +16,8 @@ export interface SignInView {
   /** The signed-in person's email, when there is one. */
   readonly signedInAs: string | null
   readonly notice: SignInNotice | null
+  /** The Deployment's own origin, PUBLIC_ORIGIN. */
+  readonly origin: string
 }
 
 export interface SignInQuery {
@@ -41,6 +43,7 @@ export const signInView = createServerFn({ method: 'GET' })
           ready: config.google !== null,
           signedInAs: person?.email ?? null,
           notice,
+          origin: config.origin.origin,
         } satisfies SignInView
       }),
     ),

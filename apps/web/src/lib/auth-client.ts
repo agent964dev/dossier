@@ -1,13 +1,26 @@
 // The browser's calls into Better Auth's own routes under /_/auth.
 
-/** A same-origin path to continue to after sign-in, or the home. */
-export const safeNext = (next: unknown): string =>
-  typeof next === 'string' &&
-  next.startsWith('/') &&
-  !next.startsWith('//') &&
-  !next.startsWith('/\\')
-    ? next
-    : '/'
+/** Any origin: a path that leaves it when resolved leaves every origin. */
+const PATH_BASE = 'https://path.invalid'
+
+/** A path that stays on the origin it is resolved against. */
+const isLocalPath = (path: string) =>
+  path.startsWith('/') &&
+  URL.canParse(path, PATH_BASE) &&
+  new URL(path, PATH_BASE).origin === PATH_BASE
+
+/**
+ * A path to continue to after sign-in: a same-origin path as given, an absolute URL on
+ * `origin` as its path, query and fragment, anything else '/'.
+ */
+export const safeNext = (next: unknown, origin: string): string => {
+  if (typeof next !== 'string') return '/'
+  if (next.startsWith('/')) return isLocalPath(next) ? next : '/'
+  if (!URL.canParse(next)) return '/'
+  const url = new URL(next)
+  const path = `${url.pathname}${url.search}${url.hash}`
+  return url.origin === origin && isLocalPath(path) ? path : '/'
+}
 
 const post = (path: string, body: unknown) =>
   fetch(path, {
@@ -19,7 +32,8 @@ const post = (path: string, body: unknown) =>
 
 /** Starts Google sign-in, always letting the person choose the account. */
 export async function startGoogleSignIn(next: string): Promise<void> {
-  const target = safeNext(next)
+  // Callers pass a path; the origin matters only for an absolute URL.
+  const target = safeNext(next, globalThis.location?.origin ?? '')
   const response = await post('/_/auth/sign-in/social', {
     provider: 'google',
     callbackURL: target,

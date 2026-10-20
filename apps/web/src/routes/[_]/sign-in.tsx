@@ -34,7 +34,7 @@ export const Route = createFileRoute('/_/sign-in')({
     if (isScreenFailure(view)) throw new Error(view.error.message)
     // Someone already signed in goes on, unless there is something to read.
     if (view.signedInAs !== null && view.notice === null) {
-      throw redirect({ href: safeNext(deps.next) })
+      throw redirect({ href: safeNext(deps.next, view.origin) })
     }
     return view
   },
@@ -48,7 +48,7 @@ export const Route = createFileRoute('/_/sign-in')({
 function SignInScreen() {
   const view = Route.useLoaderData()
   const { next, error } = Route.useSearch()
-  const target = safeNext(next)
+  const target = safeNext(next, view.origin)
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-6 px-6 py-12">
       <span className="inline-flex w-fit max-w-full items-center gap-1.5 truncate rounded-md border border-brand-300/35 bg-brand-300/10 px-2 py-0.5 font-mono text-[0.625rem] tracking-[0.16em] text-brand-200 uppercase">

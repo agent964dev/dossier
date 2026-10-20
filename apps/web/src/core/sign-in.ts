@@ -526,7 +526,7 @@ export const SignInLive: Layer.Layer<
       const redirect = new URL(location, config.origin)
       const next =
         kind === 'email_in_use'
-          ? `${redirect.pathname}${redirect.search}`
+          ? `${redirect.pathname}${redirect.search}${redirect.hash}`
           : redirect.searchParams.get('next')
       if (redirect.origin === config.origin.origin && next !== null) {
         target.searchParams.set('next', next)
