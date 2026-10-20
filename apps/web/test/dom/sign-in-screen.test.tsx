@@ -207,6 +207,22 @@ describe('the sign-in buttons', () => {
       for (const each of buttons()) expect(each.disabled).toBe(false)
     },
   )
+
+  it('lets the person choose again when Back shows the page as it was left', async () => {
+    // The start leaves for the provider's page and never comes back here.
+    vi.stubGlobal('fetch', () => new Promise<Response>(() => {}))
+    render(view(['google', 'microsoft']))
+    await click(button('Continue with Microsoft'))
+    for (const each of buttons()) expect(each.disabled).toBe(true)
+
+    const fresh = new Event('pageshow')
+    act(() => window.dispatchEvent(fresh))
+    for (const each of buttons()) expect(each.disabled).toBe(true)
+
+    const restored = Object.assign(new Event('pageshow'), { persisted: true })
+    act(() => window.dispatchEvent(restored))
+    for (const each of buttons()) expect(each.disabled).toBe(false)
+  })
 })
 
 describe('the notices about a Microsoft account', () => {

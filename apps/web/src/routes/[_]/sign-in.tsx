@@ -1,6 +1,6 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { AlertTriangle, Info } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { HostName } from '../../components/host-name'
 import { PrivacyLink } from '../../components/privacy-link'
@@ -180,6 +180,15 @@ function ProviderButtons({
   next: string
 }) {
   const [state, setState] = useState<'idle' | 'busy' | 'failed'>('idle')
+  // Back from the provider's page can show this page as it was left, still
+  // busy; the person may want the other provider.
+  useEffect(() => {
+    const restored = (event: PageTransitionEvent) => {
+      if (event.persisted) setState('idle')
+    }
+    window.addEventListener('pageshow', restored)
+    return () => window.removeEventListener('pageshow', restored)
+  }, [])
   const start = async (provider: Provider) => {
     setState('busy')
     try {
