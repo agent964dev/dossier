@@ -319,7 +319,7 @@ const photoEndpoint = (request: Request) => {
   }
   const bytes = bytesOf(grant.photo.bytes)
   const png = bytes[0] === 0x89 && bytes[1] === 0x50
-  return new Response(bytes, {
+  return new Response(bytes as Uint8Array<ArrayBuffer>, {
     headers: { 'content-type': png ? 'image/png' : 'image/jpeg' },
   })
 }
