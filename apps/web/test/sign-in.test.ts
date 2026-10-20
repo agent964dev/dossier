@@ -205,7 +205,11 @@ describe('signing in with Google', () => {
         signIn.notice('email_unconfirmed', location.searchParams.get('who')),
       ),
     )
-    expect(notice).toEqual({ kind: 'email_unconfirmed', email: holderEmail })
+    expect(notice).toEqual({
+      kind: 'email_unconfirmed',
+      provider: 'google',
+      email: holderEmail,
+    })
     // A tampered value names nobody.
     const forged = await run(
       Effect.flatMap(SignIn, (signIn) =>

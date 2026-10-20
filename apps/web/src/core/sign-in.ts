@@ -34,6 +34,7 @@ import {
   decideEmailChange,
   decideLink,
   type Authority,
+  type SignInDiagnostic,
 } from './sign-in-rules.ts'
 
 export interface BrowserSession {
@@ -77,8 +78,47 @@ export interface DevicePrompt {
 
 /** What the sign-in screen shows after Dossier refused or adjusted a sign-in. */
 export type SignInNotice =
-  | { readonly kind: 'email_unconfirmed'; readonly email: string }
-  | { readonly kind: 'email_in_use'; readonly email: string }
+  | {
+      readonly kind: 'email_unconfirmed'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+  | {
+      readonly kind: 'not_confirmed'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+  | { readonly kind: 'no_email'; readonly provider: SignInProviderId }
+  | {
+      readonly kind: 'email_in_use'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+  | {
+      readonly kind: 'kept_unconfirmed'
+      readonly provider: SignInProviderId
+      readonly email: string
+    }
+
+/** Refusals travel as ?error=<kind>, kept emails as ?notice=<kind>. */
+const REFUSAL_KINDS: ReadonlySet<string> = new Set([
+  'email_unconfirmed',
+  'not_confirmed',
+  'no_email',
+])
+const NOTICE_KINDS: ReadonlySet<string> = new Set([
+  ...REFUSAL_KINDS,
+  'email_in_use',
+  'kept_unconfirmed',
+])
+
+const isNoticeKind = (kind: string): kind is SignInNotice['kind'] =>
+  NOTICE_KINDS.has(kind)
+
+/** Writes one diagnostic line for a refused or failed sign-in. */
+export const logSignInRefusal = (line: SignInDiagnostic): void => {
+  console.log(JSON.stringify(line))
+}
 
 export interface SignInService {
   /** Better Auth's routes under /_/auth, inside Dossier's rules. */
@@ -352,10 +392,15 @@ export const SignInLive: Layer.Layer<
         .all()
 
     const toAuthority = (value: string | null): Authority =>
-      value === 'google' ? 'google' : 'none'
+      value === 'google' || value === 'microsoft' ? value : 'none'
 
     const hooks: AuthHooks = {
       beforeAccount: async ({ action, claims, existingUserId }) => {
+        // Creating a person or joining one needs an email the provider
+        // confirms; a known account signs in either way.
+        if (action !== 'sign-in' && !claims.confirmed) {
+          return { allow: false, code: 'not_confirmed', email: claims.email }
+        }
         if (action === 'create-user' || existingUserId === null) {
           return { allow: true }
         }
@@ -385,13 +430,18 @@ export const SignInLive: Layer.Layer<
           .from(schema.user)
           .where(eq(schema.user.email, claims.email))
           .get()
-        return decideEmailChange(
-          claims.email,
-          (holder?.id as PersonId | undefined) ?? null,
-          existingUserId as PersonId,
-        ) === 'keep-old'
-          ? { allow: true, keepEmail: stored.email }
-          : { allow: true }
+        const change = decideEmailChange({
+          confirmed: claims.confirmed,
+          holder: (holder?.id as PersonId | undefined) ?? null,
+          self: existingUserId as PersonId,
+        })
+        return change === 'update'
+          ? { allow: true }
+          : {
+              allow: true,
+              keepEmail: stored.email,
+              because: change === 'keep-in-use' ? 'in_use' : 'unconfirmed',
+            }
       },
 
       afterSignIn: async ({
@@ -403,10 +453,12 @@ export const SignInLive: Layer.Layer<
       }) => {
         const at = now()
         const authority = authorityOf(claims)
-        const seedSuperAdmin = newUser && config.superAdmins.has(claims.email)
+        // Only an email the provider confirms names a super admin.
+        const superAdmin =
+          claims.confirmed && config.superAdmins.has(claims.email)
+        const seedSuperAdmin = newUser && superAdmin
         // A configured super admin who deleted their account is one again.
-        const reseedSuperAdmin =
-          !newUser && config.superAdmins.has(claims.email)
+        const reseedSuperAdmin = !newUser && superAdmin
         const DB = bindings.DB
         // An account's join is finished once its email details are recorded,
         // which happens at the end of this batch. Every join statement below
@@ -423,8 +475,8 @@ export const SignInLive: Layer.Layer<
         const maybeJoining = !newUser && own === undefined
         const unfinished =
           'not exists (select 1 from account_emails where account_id = ?1)'
-        // The person's other accounts with recorded details Google does not
-        // vouch for now; an account still joining has none and is not lapsed.
+        // The person's other accounts with recorded details no provider
+        // vouches for now; an account still joining has none and is not lapsed.
         const lapsed = `select e.account_id from account_emails e
           join account a on a.id = e.account_id
           where a.user_id = ?2 and a.id <> ?1 and e.email_authority = 'none'`
@@ -445,7 +497,7 @@ export const SignInLive: Layer.Layer<
                 JSON.stringify({ accountId }),
                 at,
               ),
-              // An account Google vouches for takes over the lapsed ones.
+              // An account its provider vouches for takes over the lapsed ones.
               ...(decideLink(authority, []).kind !== 'link'
                 ? []
                 : [
@@ -479,16 +531,31 @@ export const SignInLive: Layer.Layer<
                     ),
                   ]),
             ]
+        // An email the provider does not confirm says nothing about the
+        // account: it keeps the email and authority it was last recorded with.
+        const observed =
+          emailKept?.because === 'unconfirmed'
+            ? 'observed_at = excluded.observed_at'
+            : `email = excluded.email, email_authority = excluded.email_authority,
+               organisation = excluded.organisation, observed_at = excluded.observed_at`
+        const personAuthority =
+          emailKept?.because === 'unconfirmed'
+            ? ''
+            : 'email_authority = excluded.email_authority,'
         // One batch: if any of it fails, Better Auth writes no session.
         await DB.batch([
           ...joinStatements,
           DB.prepare(
             `insert into account_emails (account_id, email, email_authority, organisation, observed_at)
              values (?1, ?2, ?3, ?4, ?5)
-             on conflict (account_id) do update set email = excluded.email,
-               email_authority = excluded.email_authority,
-               organisation = excluded.organisation, observed_at = excluded.observed_at`,
-          ).bind(accountId, claims.email, authority, claims.hd ?? null, at),
+             on conflict (account_id) do update set ${observed}`,
+          ).bind(
+            accountId,
+            claims.email,
+            authority,
+            claims.organisation ?? null,
+            at,
+          ),
           // A person who deleted their account comes back with nothing.
           DB.prepare(
             `insert into person_history (id, user_id, kind, detail_json, created_at)
@@ -508,7 +575,7 @@ export const SignInLive: Layer.Layer<
           DB.prepare(
             `insert into people (user_id, email_authority, first_sign_in_at, last_sign_in_at)
              values (?1, ?2, ?3, ?3)
-             on conflict (user_id) do update set email_authority = excluded.email_authority,
+             on conflict (user_id) do update set ${personAuthority}
                last_sign_in_at = excluded.last_sign_in_at, deleted_at = null`,
           ).bind(userId, authority, at),
           ...(seedSuperAdmin
@@ -540,10 +607,12 @@ export const SignInLive: Layer.Layer<
 
     const auth: AuthPort = makeAuth(hooks)
 
-    const signNotice = async (kind: string, email: string) => {
+    /** The signed value a notice redirect carries: kind, provider and email. */
+    const signNotice = async (notice: SignInNotice) => {
       const payload = encodeNotice({
-        k: kind,
-        e: email,
+        k: notice.kind,
+        p: notice.provider,
+        e: 'email' in notice ? notice.email : '',
         x: now() + NOTICE_LIFETIME,
       })
       return `${payload}.${await hmacSha256(noticeSecret, payload)}`
@@ -552,24 +621,20 @@ export const SignInLive: Layer.Layer<
     /** Points Better Auth's redirect at Dossier's own notice on the sign-in screen. */
     const withNotice = async (
       response: Response,
-      kind: 'email_unconfirmed' | 'email_in_use',
-      email: string,
+      notice: SignInNotice,
     ): Promise<Response> => {
       const location = response.headers.get('location')
       if (location === null) return response
+      const refusal = REFUSAL_KINDS.has(notice.kind)
       const target = new URL('/_/sign-in', config.origin)
-      target.searchParams.set(
-        kind === 'email_unconfirmed' ? 'error' : 'notice',
-        kind,
-      )
-      target.searchParams.set('who', await signNotice(kind, email))
+      target.searchParams.set(refusal ? 'error' : 'notice', notice.kind)
+      target.searchParams.set('who', await signNotice(notice))
       // Keep where the person was going: Better Auth's success redirect, or
       // the next its error redirect carries.
       const redirect = new URL(location, config.origin)
-      const next =
-        kind === 'email_in_use'
-          ? `${redirect.pathname}${redirect.search}${redirect.hash}`
-          : redirect.searchParams.get('next')
+      const next = refusal
+        ? redirect.searchParams.get('next')
+        : `${redirect.pathname}${redirect.search}${redirect.hash}`
       if (redirect.origin === config.origin.origin && next !== null) {
         target.searchParams.set('next', next)
       }
@@ -722,19 +787,29 @@ export const SignInLive: Layer.Layer<
       handle: (request) =>
         Effect.promise(async () => {
           const { response, outcome } = await auth.handle(request)
-          if (outcome.refused !== null) {
+          if (outcome.diagnostic !== null) logSignInRefusal(outcome.diagnostic)
+          const { refused, emailKept } = outcome
+          if (refused !== null) {
             return withNotice(
               response,
-              'email_unconfirmed',
-              outcome.refused.email,
+              refused.code === 'no_email'
+                ? { kind: 'no_email', provider: refused.provider }
+                : {
+                    kind: refused.code,
+                    provider: refused.provider,
+                    email: refused.email,
+                  },
             )
           }
-          if (outcome.emailKept !== null && response.status === 302) {
-            return withNotice(
-              response,
-              'email_in_use',
-              outcome.emailKept.attempted,
-            )
+          if (emailKept !== null && response.status === 302) {
+            return withNotice(response, {
+              kind:
+                emailKept.because === 'in_use'
+                  ? 'email_in_use'
+                  : 'kept_unconfirmed',
+              provider: emailKept.provider,
+              email: emailKept.attempted,
+            })
           }
           return response
         }),
@@ -832,10 +907,7 @@ export const SignInLive: Layer.Layer<
 
       notice: (kind, signed) =>
         Effect.promise(async (): Promise<SignInNotice | null> => {
-          if (
-            signed === null ||
-            (kind !== 'email_unconfirmed' && kind !== 'email_in_use')
-          ) {
+          if (signed === null || kind === null || !isNoticeKind(kind)) {
             return null
           }
           const [payload = '', signature = ''] = signed.split('.')
@@ -843,19 +915,24 @@ export const SignInLive: Layer.Layer<
             return null
           const value = decodeNotice(payload) as {
             k?: unknown
+            p?: unknown
             e?: unknown
             x?: unknown
           } | null
           if (
             value === null ||
             value.k !== kind ||
+            (value.p !== 'google' && value.p !== 'microsoft') ||
             typeof value.e !== 'string' ||
             typeof value.x !== 'number' ||
             value.x < now()
           ) {
             return null
           }
-          return { kind, email: value.e }
+          const provider = value.p
+          return kind === 'no_email'
+            ? { kind, provider }
+            : { kind, provider, email: value.e }
         }),
 
       me: () =>

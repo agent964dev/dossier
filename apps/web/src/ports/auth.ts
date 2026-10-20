@@ -23,33 +23,96 @@ import * as z from 'zod'
 
 import { Bindings } from '../core/bindings.ts'
 import { Config, type DeploymentConfig } from '../core/config.ts'
+import {
+  checkToken,
+  emailOf,
+  googleTrust,
+  signInDiagnostic,
+  type EmailTrust,
+  type SignInDiagnostic,
+  type TokenCheck,
+} from '../core/sign-in-rules.ts'
 import { db, schema } from '../db/client.ts'
 
 /** A sign-in provider Dossier can turn on. */
 export type SignInProviderId = 'google' | 'microsoft'
 
-/** The claims of a Google ID token Dossier reads. */
-export interface GoogleClaims {
-  readonly sub: string
-  /** Lower-cased. */
+/** What Dossier reads from a provider at sign-in. */
+export interface SignInClaims {
+  readonly provider: SignInProviderId
+  /** Google `sub`, Microsoft `oid`; Better Auth's `account.account_id`. */
+  readonly subject: string
+  /** Lower-cased; empty when the provider sent none. */
   readonly email: string
-  readonly email_verified: boolean
+  /** The provider says this account controls `email` now. */
+  readonly confirmed: boolean
+  /** The provider is the email authority for `email` now. */
+  readonly authority: boolean
   readonly name: string
+  /** Google's photo URL or Microsoft's Graph data URL. */
   readonly picture?: string
-  /** The hosted domain of a Workspace account. */
-  readonly hd?: string
+  /** Google `hd`, or Microsoft `tid`; absent for a personal Google account. */
+  readonly organisation?: string
 }
 
-/** What Better Auth is about to do with a Google sign-in. */
+const text = (value: unknown): string =>
+  typeof value === 'string' ? value : ''
+
+/** What each provider says about the email it sent. */
+const trustOf: Record<
+  SignInProviderId,
+  (profile: Readonly<Record<string, unknown>>) => EmailTrust
+> = {
+  google: googleTrust,
+  // No Microsoft email is confirmed until its trust rule is in place.
+  microsoft: () => ({ confirmed: false, authority: false }),
+}
+
+/** One reader per provider: the decoded ID token (plus Microsoft's photo) as SignInClaims. */
+export const readClaims = (
+  provider: SignInProviderId,
+  profile: Readonly<Record<string, unknown>>,
+): SignInClaims => {
+  const email = emailOf(profile)
+  const name = text(profile.name)
+  const picture = text(profile.picture)
+  const organisation =
+    provider === 'google' ? text(profile.hd).toLowerCase() : text(profile.tid)
+  return {
+    provider,
+    subject: text(provider === 'google' ? profile.sub : profile.oid),
+    email,
+    ...trustOf[provider](profile),
+    name: name === '' ? email : name,
+    ...(picture === '' ? {} : { picture }),
+    ...(organisation === '' ? {} : { organisation }),
+  }
+}
+
+/** What Better Auth is about to do with a sign-in. */
 export type SignInAction = 'create-user' | 'link-account' | 'sign-in'
+
+/** Why a sign-in was refused: a join the provider has no authority for, an unconfirmed email, no email. */
+export type SignInRefusal = 'email_unconfirmed' | 'not_confirmed' | 'no_email'
+
+/** A known account's new email that did not become the person's email. */
+export interface EmailKept {
+  readonly kept: string
+  readonly attempted: string
+  readonly because: 'in_use' | 'unconfirmed'
+}
 
 export type AccountDecision =
   | { readonly allow: true }
-  /** Sign in, but keep the person's stored email rather than Google's new one. */
-  | { readonly allow: true; readonly keepEmail: string }
+  /** Sign in, but keep the person's stored email rather than the provider's new one. */
+  | {
+      readonly allow: true
+      readonly keepEmail: string
+      readonly because: EmailKept['because']
+    }
   | {
       readonly allow: false
-      readonly code: 'email_unconfirmed'
+      readonly code: 'email_unconfirmed' | 'not_confirmed'
       readonly email: string
     }
 
@@ -58,32 +121,32 @@ export interface AuthHooks {
   /** Runs before Better Auth creates a person, links an account or signs in. */
   readonly beforeAccount: (i: {
     readonly action: SignInAction
-    readonly claims: GoogleClaims
+    readonly claims: SignInClaims
     readonly existingUserId: string | null
   }) => Promise<AccountDecision>
-  /** Runs after a Google sign-in, before its session is written. */
+  /** Runs after a sign-in, before its session is written. */
   readonly afterSignIn: (i: {
     readonly userId: string
     readonly accountId: string
-    readonly claims: GoogleClaims
+    readonly claims: SignInClaims
     readonly newUser: boolean
-    readonly emailKept: {
-      readonly kept: string
-      readonly attempted: string
-    } | null
+    readonly emailKept: EmailKept | null
   }) => Promise<void>
 }
 
 /** What a sign-in request did besides answering, for the redirect Dossier shows. */
 export interface SignInOutcome {
   readonly refused: {
-    readonly code: 'email_unconfirmed'
+    readonly code: SignInRefusal
+    readonly provider: SignInProviderId
+    /** Empty for `no_email`. */
     readonly email: string
   } | null
-  readonly emailKept: {
-    readonly kept: string
-    readonly attempted: string
-  } | null
+  readonly emailKept:
+    | (EmailKept & { readonly provider: SignInProviderId })
+    | null
+  /** The line to log for a refused or failed sign-in, when one is due. */
+  readonly diagnostic: SignInDiagnostic | null
 }
 
 export interface SessionLookup {
@@ -155,27 +218,123 @@ export const DEVICE_SCOPE = 'agent-key'
 const GRANT_KIND = 'dossier-agent-key'
 const THIRTY_DAYS = 60 * 60 * 24 * 30
 
+/** What one sign-in request learned on its way through Better Auth. */
 interface SignInScope {
+  /** The profile the provider sent, and what Dossier read from it. */
+  provider?: SignInProviderId
+  profile?: Readonly<Record<string, unknown>>
+  claims?: SignInClaims
+  /** Why the provider's token failed its check, or null when it passed. */
+  tokenCheck?: TokenCheck | null
   action?: SignInAction
-  claims?: GoogleClaims
   keepEmail?: string
-  refused?: { code: 'email_unconfirmed'; email: string }
-  emailKept?: { kept: string; attempted: string }
+  refused?: NonNullable<SignInOutcome['refused']>
+  emailKept?: EmailKept
 }
 
 const scopes = new AsyncLocalStorage<SignInScope>()
 
-const claimsFrom = (profile: Record<string, unknown>): GoogleClaims => {
-  const hd = typeof profile.hd === 'string' ? profile.hd.toLowerCase() : ''
-  const picture = typeof profile.picture === 'string' ? profile.picture : ''
-  const email = String(profile.email ?? '').toLowerCase()
+const isProvider = (value: unknown): value is SignInProviderId =>
+  value === 'google' || value === 'microsoft'
+
+/**
+ * Better Auth calls this with the decoded ID token. It reads the claims and
+ * checks the token for the rest of the request, and tells Better Auth whether
+ * the provider confirms the email, so Better Auth's own linking agrees.
+ */
+const mapProfileToUser =
+  (provider: SignInProviderId, clientId: string) => (decoded: object) => {
+    const profile = decoded as Readonly<Record<string, unknown>>
+    const claims = readClaims(provider, profile)
+    const scope = scopes.getStore()
+    if (scope !== undefined) {
+      scope.provider = provider
+      scope.profile = profile
+      scope.claims = claims
+      scope.tokenCheck = checkToken(
+        provider,
+        profile,
+        clientId,
+        Math.floor(Date.now() / 1000),
+      )
+    }
+    return { emailVerified: claims.confirmed }
+  }
+
+/** Whether a refusal of this kind writes a diagnostic line: every Microsoft one, and Google's token checks. */
+const diagnosticDue = (
+  provider: SignInProviderId,
+  reason: SignInDiagnostic['reason'],
+): boolean => provider === 'microsoft' || reason === 'token_check'
+
+const CALLBACK = /^\/_\/auth\/callback\/([^/]+)$/
+
+/**
+ * What a request did, read from its scope and Better Auth's answer. Better
+ * Auth refuses some sign-ins before Dossier's rules run, so its redirect error
+ * is turned into Dossier's refusal when the scope says why.
+ */
+const outcomeOf = (
+  request: Request,
+  response: Response,
+  scope: SignInScope,
+): SignInOutcome => {
+  const { provider, profile, claims } = scope
+  const location = response.headers.get('location')
+  const error =
+    location === null
+      ? null
+      : new URL(location, request.url).searchParams.get('error')
+  const diagnose = (
+    on: SignInProviderId,
+    reason: SignInDiagnostic['reason'],
+    detail: { readonly check?: TokenCheck; readonly error?: string } = {},
+  ) =>
+    diagnosticDue(on, reason)
+      ? signInDiagnostic(on, profile ?? null, reason, detail)
+      : null
+  const none = { refused: null, emailKept: null, diagnostic: null }
+
+  if (provider === undefined || claims === undefined) {
+    // The sign-in failed before any profile was read.
+    const callback = CALLBACK.exec(new URL(request.url).pathname)?.[1]
+    return error !== null && isProvider(callback)
+      ? {
+          ...none,
+          diagnostic: diagnose(callback, 'provider_error', { error }),
+        }
+      : none
+  }
+  if (scope.tokenCheck != null) {
+    // Whatever Better Auth refused, the token itself did not pass.
+    return {
+      ...none,
+      diagnostic: diagnose(provider, 'token_check', {
+        check: scope.tokenCheck,
+      }),
+    }
+  }
+  const refused =
+    scope.refused ??
+    (error === 'email_not_found'
+      ? { code: 'no_email' as const, provider, email: '' }
+      : error === 'account_not_linked' && !claims.confirmed
+        ? { code: 'not_confirmed' as const, provider, email: claims.email }
+        : null)
+  if (refused !== null) {
+    return {
+      refused,
+      emailKept: null,
+      diagnostic:
+        refused.code === 'email_unconfirmed'
+          ? null
+          : diagnose(provider, refused.code),
+    }
+  }
   return {
-    sub: String(profile.sub ?? ''),
-    email,
-    email_verified: profile.email_verified === true,
-    name: typeof profile.name === 'string' ? profile.name : email,
-    ...(picture === '' ? {} : { picture }),
-    ...(hd === '' ? {} : { hd }),
+    ...none,
+    emailKept:
+      scope.emailKept === undefined ? null : { ...scope.emailKept, provider },
   }
 }
 
@@ -325,30 +484,32 @@ const expired = () =>
 type Database = ReturnType<typeof db>
 
 const subjectLookups = (database: Database) => {
-  async function accountIdForSubject(sub: string): Promise<string | null> {
+  const bySubject = (provider: SignInProviderId, subject: string) =>
+    and(
+      eq(schema.account.providerId, provider),
+      eq(schema.account.accountId, subject),
+    )
+
+  async function accountIdForSubject(
+    provider: SignInProviderId,
+    subject: string,
+  ): Promise<string | null> {
     const row = await database
       .select({ id: schema.account.id })
       .from(schema.account)
-      .where(
-        and(
-          eq(schema.account.providerId, 'google'),
-          eq(schema.account.accountId, sub),
-        ),
-      )
+      .where(bySubject(provider, subject))
       .get()
     return row?.id ?? null
   }
 
-  async function userIdForSubject(sub: string): Promise<string | null> {
+  async function userIdForSubject(
+    provider: SignInProviderId,
+    subject: string,
+  ): Promise<string | null> {
     const row = await database
       .select({ userId: schema.account.userId })
       .from(schema.account)
-      .where(
-        and(
-          eq(schema.account.providerId, 'google'),
-          eq(schema.account.accountId, sub),
-        ),
-      )
+      .where(bySubject(provider, subject))
       .get()
     return row?.userId ?? null
   }
@@ -408,35 +569,71 @@ export const authOptions = (
               prompt: 'select_account',
               // The email follows Google at every sign-in.
               overrideUserInfoOnSignIn: true,
+              mapProfileToUser: mapProfileToUser(
+                'google',
+                config.google.clientId,
+              ),
             },
           },
     account: {
-      // Linking by email is on; Dossier's guard narrows it in validateUserInfo.
-      accountLinking: { enabled: true, trustedProviders: [] },
+      // Linking by email is on; Dossier's guard narrows it in
+      // validateUserInfo. The provider's authority decides a join, not the
+      // stored person's verified flag.
+      accountLinking: {
+        enabled: true,
+        trustedProviders: [],
+        requireLocalEmailVerified: false,
+      },
     },
     user: {
       validateUserInfo: async ({ user, source }) => {
-        if (source.method !== 'oauth' || source.oauth?.providerId !== 'google')
-          return
+        const provider =
+          source.method === 'oauth' ? source.oauth?.providerId : undefined
+        if (!isProvider(provider)) return
         const scope = scopes.getStore()
-        // A Google sign-in outside Dossier's scope could not be recorded.
-        if (scope === undefined) return { error: 'unavailable' }
-        const claims = claimsFrom(source.oauth.profile ?? {})
-        scope.action = source.action
-        scope.claims = claims
+        // A sign-in outside Dossier's scope, or whose profile Dossier did not
+        // read, could not be recorded.
+        if (scope?.claims === undefined || scope.provider !== provider) {
+          return { error: 'unavailable' }
+        }
+        // A token that failed its check is refused before any rule.
+        if (scope.tokenCheck != null) return { error: 'unavailable' }
+        const { claims } = scope
+        const { action } = source
+        scope.action = action
+        if (claims.email === '') {
+          scope.refused = { code: 'no_email', provider, email: '' }
+          return { error: 'no_email' }
+        }
+        // Creating a person or joining one needs a confirmed email.
+        if (
+          (action === 'create-user' || action === 'link-account') &&
+          !claims.confirmed
+        ) {
+          scope.refused = {
+            code: 'not_confirmed',
+            provider,
+            email: claims.email,
+          }
+          return { error: 'not_confirmed' }
+        }
         const existingUserId =
-          source.action === 'create-user'
+          action === 'create-user'
             ? null
-            : source.action === 'link-account'
+            : action === 'link-account'
               ? String(user.id)
-              : await userIdForSubject(claims.sub)
+              : await userIdForSubject(provider, claims.subject)
         const decision = await hooks.beforeAccount({
-          action: source.action,
+          action,
           claims,
           existingUserId,
         })
         if (!decision.allow) {
-          scope.refused = { code: decision.code, email: decision.email }
+          scope.refused = {
+            code: decision.code,
+            provider,
+            email: decision.email,
+          }
           return { error: decision.code }
         }
         if ('keepEmail' in decision) {
@@ -444,11 +641,12 @@ export const authOptions = (
           scope.emailKept = {
             kept: decision.keepEmail,
             attempted: claims.email,
+            because: decision.because,
           }
         }
       },
     },
-    // Only Google changes a person's email, so changeEmail stays off.
+    // Only a provider changes a person's email, so changeEmail stays off.
     session: {
       expiresIn: THIRTY_DAYS,
       // Renew on use at most once an hour, so reading a page writes nothing.
@@ -463,15 +661,19 @@ export const authOptions = (
         update: {
           before: async (data) => {
             const scope = scopes.getStore()
-            // The profile Google sent at this sign-in. Better Auth leaves out
-            // a photo Google no longer sends; the person has none now.
+            // The profile the provider sent at this sign-in. Better Auth
+            // leaves out a photo the provider no longer sends; the person has
+            // none now.
             const profile =
               scope?.claims !== undefined && 'name' in data
                 ? { image: scope.claims.picture ?? null }
                 : {}
+            // Keeping the stored email keeps its verified flag too. Better
+            // Auth merges this result over its own update, and writes neither
+            // field when both are undefined.
             const email =
               scope?.keepEmail !== undefined && 'email' in data
-                ? { email: scope.keepEmail }
+                ? { email: undefined, emailVerified: undefined }
                 : {}
             return { data: { ...data, ...profile, ...email } }
           },
@@ -482,7 +684,10 @@ export const authOptions = (
           before: async (session) => {
             const scope = scopes.getStore()
             if (scope?.claims === undefined) return
-            const accountId = await accountIdForSubject(scope.claims.sub)
+            const accountId = await accountIdForSubject(
+              scope.claims.provider,
+              scope.claims.subject,
+            )
             if (accountId === null) return
             await hooks.afterSignIn({
               userId: session.userId,
@@ -575,13 +780,10 @@ export const makeAuthPort = (
   return {
     handle: (request) => {
       const scope: SignInScope = {}
-      return scopes.run(scope, async () => ({
-        response: await auth.handler(request),
-        outcome: {
-          refused: scope.refused ?? null,
-          emailKept: scope.emailKept ?? null,
-        },
-      }))
+      return scopes.run(scope, async () => {
+        const response = await auth.handler(request)
+        return { response, outcome: outcomeOf(request, response, scope) }
+      })
     },
 
     getSession: (headers) =>

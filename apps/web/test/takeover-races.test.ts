@@ -62,7 +62,7 @@ describe('a takeover racing the account it detaches', () => {
               ...hooks,
               afterSignIn: async (signIn) => {
                 await hooks.afterSignIn(signIn)
-                if (armed && signIn.claims.sub === lapsed.sub) {
+                if (armed && signIn.claims.subject === lapsed.sub) {
                   armed = false
                   await new Browser().signIn(owner)
                 }
@@ -152,7 +152,7 @@ const pausing = (sub: string, meanwhile: () => Promise<void>) => {
           {
             ...hooks,
             afterSignIn: async (signIn) => {
-              if (armed && signIn.claims.sub === sub) {
+              if (armed && signIn.claims.subject === sub) {
                 armed = false
                 await meanwhile()
               }

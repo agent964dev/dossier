@@ -65,7 +65,8 @@ function SignInScreen() {
         view={view}
         genericError={error !== undefined && view.notice === null}
       />
-      {view.notice?.kind === 'email_in_use' ? (
+      {view.notice?.kind === 'email_in_use' ||
+      view.notice?.kind === 'kept_unconfirmed' ? (
         <Button asChild size="lg" className="w-full">
           <a href={target}>Continue</a>
         </Button>
@@ -82,6 +83,14 @@ function SignInScreen() {
   )
 }
 
+const PROVIDER_NAMES: Record<
+  NonNullable<SignInView['notice']>['provider'],
+  string
+> = {
+  google: 'Google',
+  microsoft: 'Microsoft',
+}
+
 function Notice({
   view,
   genericError,
@@ -89,30 +98,57 @@ function Notice({
   view: SignInView
   genericError: boolean
 }) {
-  if (view.notice?.kind === 'email_unconfirmed') {
-    return (
-      <Callout>
-        Another Google account already uses {view.notice.email} on{' '}
-        {view.deployment}, and Google can't confirm this one still owns the
-        address. Sign in with the other account, or ask an admin of your
-        workspace for help.
-      </Callout>
-    )
+  const { notice, deployment } = view
+  if (notice === null) {
+    return genericError ? (
+      <Callout>Sign-in did not finish. Try again.</Callout>
+    ) : null
   }
-  if (view.notice?.kind === 'email_in_use') {
-    return (
-      <Callout>
-        Google now gives this account the address {view.notice.email}, which
-        another person already uses on {view.deployment}. You stay signed in as{' '}
-        {view.signedInAs ?? 'before'}. Ask an admin of your workspace to sort
-        out the two addresses.
-      </Callout>
-    )
+  const provider = PROVIDER_NAMES[notice.provider]
+  switch (notice.kind) {
+    case 'not_confirmed':
+      return (
+        <Callout>
+          {provider} didn't confirm that this account owns {notice.email}, so
+          you can't use it to sign in to {deployment}. Sign in another way
+          {notice.provider === 'microsoft'
+            ? ", or ask your organisation's IT admin to verify the address's domain with Microsoft."
+            : '.'}
+        </Callout>
+      )
+    case 'no_email':
+      return (
+        <Callout>
+          {provider} didn't share an email address for this account, so you
+          can't use it to sign in to {deployment}. Sign in another way.
+        </Callout>
+      )
+    case 'email_unconfirmed':
+      return (
+        <Callout>
+          Another account already uses {notice.email} on {deployment}, and{' '}
+          {provider} can't confirm this one still owns the address. Sign in with
+          the other account, or ask an admin of your workspace for help.
+        </Callout>
+      )
+    case 'email_in_use':
+      return (
+        <Callout>
+          {provider} now gives this account the address {notice.email}, which
+          another person already uses on {deployment}. You stay signed in as{' '}
+          {view.signedInAs ?? 'before'}. Ask an admin of your workspace to sort
+          out the two addresses.
+        </Callout>
+      )
+    case 'kept_unconfirmed':
+      return (
+        <Callout>
+          {provider} didn't confirm that this account owns {notice.email}, so
+          you stay {view.signedInAs ?? 'with your current email'} on{' '}
+          {deployment}.
+        </Callout>
+      )
   }
-  if (genericError) {
-    return <Callout>Sign-in did not finish. Try again.</Callout>
-  }
-  return null
 }
 
 function Callout({ children }: { children: React.ReactNode }) {
