@@ -610,12 +610,10 @@ failing on the new schema: rerun the job at once (see Migrations in section 5).
   "customDomain": "dossier.agent964.com",
   "deployment": "dossier.agent964.com",
   "protocol": 1,
-  "secrets": [
-    "BETTER_AUTH_SECRET",
-    "HANDLE_SECRET",
-    "SUPER_ADMINS",
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET"
+  "secrets": ["BETTER_AUTH_SECRET", "HANDLE_SECRET", "SUPER_ADMINS"],
+  "signInProviders": [
+    ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+    ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
   ],
   "d1": {
     "name": "dossier-next-production",
@@ -632,8 +630,13 @@ failing on the new schema: rerun the job at once (see Migrations in section 5).
   origin, `CONTENT_HOST`, `DEPLOYMENT_NAME`, the custom domain, the content route with its zone,
   the D1 database by name and id, the bucket, the tree hub class, the Queue's
   producer and consumer and both crons, has no rate limiter bindings, and no
-  secret name among its variables.
-- `secrets` requires every secret name in `production.json`.
+  secret name among its variables, a sign-in provider's included.
+- `secrets` requires every name in `secrets`, and at least one complete pair of
+  `signInProviders`: production may turn on Google, Microsoft or both. A pair
+  with only one of its names set fails, naming the missing one, for example
+  "MICROSOFT_CLIENT_SECRET is missing. Set both MICROSOFT_CLIENT_ID and
+  MICROSOFT_CLIENT_SECRET, or neither." With no complete pair it fails with
+  "Set at least one sign-in provider: …".
 - `smoke` asks the health URL up to 12 times, 5 seconds apart, each with 10
   seconds to answer. It requires `ok: true`, `service: "dossier"`, the exact
   full SHA as `version`, the expected `protocol` and `deployment`, and

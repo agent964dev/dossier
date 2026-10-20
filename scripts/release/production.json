@@ -11,12 +11,10 @@
   "customDomain": "dossier.agent964.com",
   "deployment": "dossier.agent964.com",
   "protocol": 1,
-  "secrets": [
-    "BETTER_AUTH_SECRET",
-    "HANDLE_SECRET",
-    "SUPER_ADMINS",
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET"
+  "secrets": ["BETTER_AUTH_SECRET", "HANDLE_SECRET", "SUPER_ADMINS"],
+  "signInProviders": [
+    ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+    ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
   ],
   "d1": {
     "name": "dossier-next-production",
