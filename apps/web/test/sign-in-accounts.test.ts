@@ -521,6 +521,43 @@ describe('disconnecting a sign-in account', () => {
       },
     ])
   })
+
+  it('changes nothing when this session ends before the disconnect runs', async () => {
+    const { firstBrowser, secondBrowser, userId, firstId, secondId } =
+      await twoGmailAccounts()
+    const onFirst = await callerOf(firstBrowser)
+    const before = await stateOf(userId)
+    harness.use(
+      testRuntime({
+        env: {
+          DB: beforeBatch(
+            env.DB,
+            (sql) => /delete\s+from\s+["`]?account_emails/i.test(sql),
+            async () => {
+              // Signed out from another tab, after Disconnect read the accounts.
+              await exec(
+                'delete from session where user_id = ? and sign_in_account_id = ?',
+                userId,
+                firstId,
+              )
+            },
+          ),
+        },
+      }),
+    )
+    expect(await refusalOf(onFirst, secondId)).toBe('unavailable')
+    harness.reset()
+    const after = await stateOf(userId)
+    expect({ ...after, sessions: [] }).toEqual({ ...before, sessions: [] })
+    expect(after.sessions).toEqual(
+      before.sessions.filter(
+        (row) =>
+          (row as { sign_in_account_id: string }).sign_in_account_id !==
+          firstId,
+      ),
+    )
+    expect((await me(secondBrowser)).status).toBe(200)
+  })
 })
 
 describe('signing in again with a disconnected account', () => {

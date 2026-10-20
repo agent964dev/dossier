@@ -1331,10 +1331,11 @@ export const SignInLive: Layer.Layer<
           // The same steps a takeover runs on the accounts it detaches, on
           // this one account. Every statement checks, inside the batch, that
           // the account is still the person's, is not their last, and is not
-          // the one this session uses, so a lost race changes nothing.
+          // the one this session uses, and that this session still exists
+          // (every session names its account), so a lost race changes nothing.
           const guard = `exists (select 1 from account where id = ?1 and user_id = ?2)
             and (select count(*) from account where user_id = ?2) > 1
-            and ?1 <> coalesce((select sign_in_account_id from session where id = ?4), '')`
+            and ?1 <> (select sign_in_account_id from session where id = ?4 and user_id = ?2)`
           const step = (sql: string) =>
             DB.prepare(sql).bind(accountId, person.id, at, via.sessionId)
           const results = yield* query(() =>

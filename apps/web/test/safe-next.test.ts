@@ -35,6 +35,8 @@ describe('where sign-in continues to', () => {
       '//evil.test',
       '//evil.test/acme/plan',
       '/\\evil.test',
+      '//path.invalid/acme/plan',
+      '/\\path.invalid/acme/plan',
       'javascript:alert(1)',
     ]) {
       expect(safeNext(next, ORIGIN), next).toBe('/')

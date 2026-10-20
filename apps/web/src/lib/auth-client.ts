@@ -5,9 +5,13 @@ import type { SignInProviderId } from '../ports/auth.ts'
 /** Any origin: a path that leaves it when resolved leaves every origin. */
 const PATH_BASE = 'https://path.invalid'
 
-/** A path that stays on the origin it is resolved against. */
+/**
+ * A path that stays on the origin it is resolved against. A path starting
+ * `//` or `/\` names a host, even when it names `path.invalid`.
+ */
 const isLocalPath = (path: string) =>
   path.startsWith('/') &&
+  !/^\/[/\\]/.test(path) &&
   URL.canParse(path, PATH_BASE) &&
   new URL(path, PATH_BASE).origin === PATH_BASE
 
