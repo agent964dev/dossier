@@ -176,7 +176,8 @@ export default defineConfig(async () => {
     },
     plugins: [
       cloudflareTest({
-        // The test entry serves through the real edge with the stand-in Google.
+        // The test entry serves through the real edge with the stand-in Google
+        // and Microsoft.
         main: './test/support/worker.ts',
         wrangler: { configPath: './wrangler.jsonc' },
         miniflare: {
@@ -197,6 +198,8 @@ export default defineConfig(async () => {
             HANDLE_SECRET: 'test-handle-secret-0123456789abcdef',
             GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com',
             GOOGLE_CLIENT_SECRET: 'test-client-secret',
+            MICROSOFT_CLIENT_ID: '6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f',
+            MICROSOFT_CLIENT_SECRET: 'test-microsoft-client-secret',
           },
         },
       }),

@@ -3,5 +3,8 @@ declare namespace Cloudflare {
     TEST_MIGRATIONS: import('cloudflare:test').D1Migration[]
     /** Empty until a migration test applies migrations to it. */
     MIGRATION_DB: D1Database
+    /** The stand-in Microsoft's client. */
+    MICROSOFT_CLIENT_ID?: string
+    MICROSOFT_CLIENT_SECRET?: string
   }
 }
