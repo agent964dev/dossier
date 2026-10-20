@@ -55,6 +55,8 @@ type Photo = { readonly bytes: string } | null | 'network-error'
 interface CodePayload {
   readonly identity: Omit<FakeMicrosoftIdentity, 'photo'> & {
     readonly photo: Photo
+    /** The `token` claims set to undefined, which JSON would drop. */
+    readonly omit: readonly string[]
   }
   readonly client_id: string
   readonly redirect_uri: string
@@ -182,6 +184,9 @@ export const consentMicrosoft = (
   const payload: CodePayload = {
     identity: {
       ...rest,
+      omit: Object.entries(identity.token ?? {})
+        .filter(([, value]) => value === undefined)
+        .map(([claim]) => claim),
       photo:
         photo === undefined || photo === null
           ? null
@@ -266,8 +271,9 @@ const tokenEndpoint = async (request: Request, microsoft: FakeMicrosoft) => {
   ) {
     return refuse('PKCE verifier mismatch')
   }
-  const { photo, ...identity } = payload.identity
+  const { photo, omit, ...identity } = payload.identity
   const claims = microsoftClaims(identity, microsoft.clientId)
+  for (const claim of omit) delete claims[claim]
   const grant = {
     photo,
     sub: claims.sub,
