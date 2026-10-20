@@ -25,6 +25,9 @@ import { Bindings } from '../core/bindings.ts'
 import { Config, type DeploymentConfig } from '../core/config.ts'
 import { db, schema } from '../db/client.ts'
 
+/** A sign-in provider Dossier can turn on. */
+export type SignInProviderId = 'google' | 'microsoft'
+
 /** The claims of a Google ID token Dossier reads. */
 export interface GoogleClaims {
   readonly sub: string
@@ -86,8 +89,8 @@ export interface SignInOutcome {
 export interface SessionLookup {
   readonly sessionId: SessionId
   readonly person: Person
-  /** The account that opened the session. */
-  readonly googleAccountId: string | null
+  /** The sign-in account that opened the session. */
+  readonly signInAccountId: string | null
   /** The renewal cookies, when the session was renewed. */
   readonly setCookie: readonly string[]
 }
@@ -104,7 +107,7 @@ export type DeviceRedemption =
       readonly userId: string
       readonly deviceCodeId: string
       readonly deviceName: string
-      readonly approvedByGoogleAccountId: string | null
+      readonly approvedByAccountId: string | null
     }
 
 export interface AuthPort {
@@ -126,11 +129,11 @@ export interface AuthPort {
     userCode: string,
     userId: PersonId,
   ) => Effect.Effect<DeviceView, DossierError<'device_expired' | 'unavailable'>>
-  /** `googleAccountId`: the approving session's account, stored on the code. */
+  /** `signInAccountId`: the approving session's account, stored on the code. */
   readonly approveDevice: (
     userCode: string,
     userId: PersonId,
-    googleAccountId: string | null,
+    signInAccountId: string | null,
   ) => Effect.Effect<void, DossierError<'device_expired' | 'unavailable'>>
   readonly denyDevice: (
     userCode: string,
@@ -181,7 +184,7 @@ const deviceGrant = {
   deviceCodeSchemaFields: {
     deviceName: { type: 'string', required: false, input: false },
     grantKind: { type: 'string', required: false, input: false },
-    approvedByGoogleAccountId: {
+    approvedByAccountId: {
       type: 'string',
       required: false,
       input: false,
@@ -252,7 +255,7 @@ const deviceRedemption = {
             {
               deviceName?: string | null
               grantKind?: string | null
-              approvedByGoogleAccountId?: string | null
+              approvedByAccountId?: string | null
             },
             undefined,
             undefined
@@ -275,8 +278,7 @@ const deviceRedemption = {
             userId: user.id,
             deviceCodeId: claimedDeviceCode.id,
             deviceName: claimedDeviceCode.deviceName ?? 'device',
-            approvedByGoogleAccountId:
-              claimedDeviceCode.approvedByGoogleAccountId ?? null,
+            approvedByAccountId: claimedDeviceCode.approvedByAccountId ?? null,
           } satisfies DeviceRedemption)
         } catch (error) {
           const status = REDEMPTION_STATUS[errorCodeOf(error) ?? '']
@@ -293,7 +295,7 @@ interface AuthApi {
   getSession: (i: { headers: Headers; returnHeaders: true }) => Promise<{
     headers: Headers
     response: {
-      session: { id: string; googleAccountId?: string | null }
+      session: { id: string; signInAccountId?: string | null }
       user: { id: string; email: string; name: string; image?: string | null }
     } | null
   }>
@@ -446,7 +448,7 @@ export const authOptions = (
       updateAge: 60 * 60,
       cookieCache: { enabled: false },
       additionalFields: {
-        googleAccountId: { type: 'string', required: false, input: false },
+        signInAccountId: { type: 'string', required: false, input: false },
       },
     },
     databaseHooks: {
@@ -482,7 +484,7 @@ export const authOptions = (
               newUser: scope.action === 'create-user',
               emailKept: scope.emailKept ?? null,
             })
-            return { data: { ...session, googleAccountId: accountId } }
+            return { data: { ...session, signInAccountId: accountId } }
           },
         },
       },
@@ -548,7 +550,7 @@ export const makeAuthPort = (
     userCode: string,
     userId: string,
     change:
-      | { status: 'approved'; approvedByGoogleAccountId: string | null }
+      | { status: 'approved'; approvedByAccountId: string | null }
       | { status: 'denied' },
   ) =>
     attempt(() =>
@@ -590,7 +592,7 @@ export const makeAuthPort = (
                   name: response.user.name,
                   image: response.user.image ?? null,
                 },
-                googleAccountId: response.session.googleAccountId ?? null,
+                signInAccountId: response.session.signInAccountId ?? null,
                 setCookie: returned.getSetCookie(),
               },
         ),
@@ -637,10 +639,10 @@ export const makeAuthPort = (
         }
       }),
 
-    approveDevice: (userCode, userId, googleAccountId) =>
+    approveDevice: (userCode, userId, signInAccountId) =>
       decide(userCode, userId, {
         status: 'approved',
-        approvedByGoogleAccountId: googleAccountId,
+        approvedByAccountId: signInAccountId,
       }),
 
     denyDevice: (userCode, userId) =>

@@ -80,10 +80,10 @@ const keysOf = (email: string) =>
   rows<{
     name: string
     created_via: string
-    google_account_id: string
+    created_by_account_id: string
     hash_sha256: string
   }>(
-    `select k.name, k.created_via, k.google_account_id, k.hash_sha256 from agent_keys k
+    `select k.name, k.created_via, k.created_by_account_id, k.hash_sha256 from agent_keys k
        join "user" u on u.id = k.user_id where u.email = ?`,
     email,
   )
@@ -157,7 +157,7 @@ describe('dossier login', () => {
     expect(keys[0]).toMatchObject({
       name: 'cli on m4',
       created_via: 'device',
-      google_account_id: await accountIdOf(identity.sub),
+      created_by_account_id: await accountIdOf(identity.sub),
       hash_sha256: await sha256Hex(token.key),
     })
     const me = await SELF.fetch(`${ORIGIN}/_/api/me`, {

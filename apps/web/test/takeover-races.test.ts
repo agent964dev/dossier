@@ -212,7 +212,7 @@ describe('takeovers happen only when an account joins', () => {
       email: second.email,
     })
     const [metadata] = await rows<{ email_authority: string }>(
-      'select email_authority from google_accounts where account_id = ?',
+      'select email_authority from account_emails where account_id = ?',
       await accountIdOf(second.sub),
     )
     expect(metadata?.email_authority).toBe('none')
@@ -242,7 +242,7 @@ describe('a join paused before its batch', () => {
         env: {
           DB: beforeBatch(
             env.DB,
-            (sql) => /insert into "?google_accounts/.test(sql),
+            (sql) => /insert into "?account_emails/.test(sql),
             async () => {
               harness.reset()
               await meanwhile()

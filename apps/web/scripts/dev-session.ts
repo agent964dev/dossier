@@ -86,7 +86,7 @@ const person = `(select id from "user" where email = ${quote(email)})`
 // them as a real sign-in does (device approval needs it).
 const subject = `dev-session-${createHash('sha256').update(email).digest('hex').slice(0, 24)}`
 const accountRowId = alphanumeric(32)
-const googleAccount = `(select id from account where provider_id = 'google' and account_id = ${quote(subject)})`
+const signInAccount = `(select id from account where provider_id = 'google' and account_id = ${quote(subject)})`
 
 const replaced = [
   ...(values.name === undefined ? [] : [', name = excluded.name']),
@@ -103,13 +103,13 @@ const statements = [
   `insert into account (id, user_id, provider_id, account_id, created_at, updated_at)
      values (${quote(accountRowId)}, ${person}, 'google', ${quote(subject)}, ${now}, ${now})
      on conflict(provider_id, account_id) do update set updated_at = excluded.updated_at`,
-  `insert into google_accounts (account_id, email, email_authority, observed_at)
-     values (${googleAccount}, ${quote(email)}, 'none', ${now})
+  `insert into account_emails (account_id, email, email_authority, observed_at)
+     values (${signInAccount}, ${quote(email)}, 'none', ${now})
      on conflict(account_id) do update set observed_at = excluded.observed_at`,
-  `insert into "session" (id, user_id, token, expires_at, google_account_id, created_at, updated_at)
-     values (${quote(sessionId)}, ${person}, ${quote(token)}, ${now + THIRTY_DAYS}, ${googleAccount}, ${now}, ${now})`,
-  `insert into agent_keys (id, user_id, name, hash_sha256, created_via, google_account_id, created_at)
-     values (${quote(keyId)}, ${person}, 'dev-session', ${quote(keyHash)}, 'settings', ${googleAccount}, ${now})`,
+  `insert into "session" (id, user_id, token, expires_at, sign_in_account_id, created_at, updated_at)
+     values (${quote(sessionId)}, ${person}, ${quote(token)}, ${now + THIRTY_DAYS}, ${signInAccount}, ${now}, ${now})`,
+  `insert into agent_keys (id, user_id, name, hash_sha256, created_via, created_by_account_id, created_at)
+     values (${quote(keyId)}, ${person}, 'dev-session', ${quote(keyHash)}, 'settings', ${signInAccount}, ${now})`,
   ...(values['super-admin']
     ? [
         `insert into super_admins (user_id, added_by, created_at)

@@ -775,7 +775,7 @@ const guestWorld = async () => {
     Effect.flatMap(People, () => Effect.void),
   ).then(() => agent(guest.person as Person))
   const keyed = await exec(
-    'update agent_keys set google_account_id = (select id from account where user_id = ?) where id = ?',
+    'update agent_keys set created_by_account_id = (select id from account where user_id = ?) where id = ?',
     guest.person!.id,
     key.via.kind === 'agent' ? key.via.keyId : '',
   )

@@ -34,8 +34,8 @@ import {
 export interface BrowserSession {
   readonly person: Person
   readonly sessionId: SessionId
-  /** The account that opened the session. */
-  readonly googleAccountId: string | null
+  /** The sign-in account that opened the session. */
+  readonly signInAccountId: string | null
   readonly setCookie: readonly string[]
 }
 
@@ -157,7 +157,7 @@ export interface SignInService {
   >
   /**
    * Revokes the person's agent keys, ends every session and device login,
-   * removes their Google accounts and marks them deleted, in one batch. The
+   * removes their sign-in accounts and marks them deleted, in one batch. The
    * person stays as a row: the versions they pushed name them.
    */
   readonly closeAccount: (detail?: {
@@ -247,7 +247,7 @@ const decodeNotice = (value: string): unknown => {
 
 /**
  * The statements that close an account: its agent keys revoked, its device
- * logins denied, every session and Google account deleted, the person marked
+ * logins denied, every session and sign-in account deleted, the person marked
  * deleted, and the history written with `detail`.
  */
 export const closeStatements = (
@@ -265,7 +265,7 @@ export const closeStatements = (
      where user_id = ? and status in ('pending', 'approved')`,
   ).bind(personId),
   DB.prepare('delete from session where user_id = ?').bind(personId),
-  // Their Google details go with the accounts.
+  // Their account emails go with the accounts.
   DB.prepare('delete from account where user_id = ?').bind(personId),
   DB.prepare(
     `update people set deleted_at = ?2
@@ -299,12 +299,12 @@ export const SignInLive: Layer.Layer<
       database
         .select({
           accountId: schema.account.id,
-          authority: schema.googleAccounts.emailAuthority,
+          authority: schema.accountEmails.emailAuthority,
         })
         .from(schema.account)
         .leftJoin(
-          schema.googleAccounts,
-          eq(schema.googleAccounts.accountId, schema.account.id),
+          schema.accountEmails,
+          eq(schema.accountEmails.accountId, schema.account.id),
         )
         .where(eq(schema.account.userId, userId))
         .all()
@@ -366,7 +366,7 @@ export const SignInLive: Layer.Layer<
         const reseedSuperAdmin =
           !newUser && config.superAdmins.has(claims.email)
         const DB = bindings.DB
-        // An account's join is finished once its Google details are recorded,
+        // An account's join is finished once its email details are recorded,
         // which happens at the end of this batch. Every join statement below
         // checks, inside the batch, that the join is still unfinished, so a
         // takeover runs only while the account is joining, at most once, and
@@ -374,18 +374,18 @@ export const SignInLive: Layer.Layer<
         // Reading first only skips the join statements for accounts whose
         // join finished long ago: details are never removed from an account.
         const own = await database
-          .select({ id: schema.googleAccounts.accountId })
-          .from(schema.googleAccounts)
-          .where(eq(schema.googleAccounts.accountId, accountId))
+          .select({ id: schema.accountEmails.accountId })
+          .from(schema.accountEmails)
+          .where(eq(schema.accountEmails.accountId, accountId))
           .get()
         const maybeJoining = !newUser && own === undefined
         const unfinished =
-          'not exists (select 1 from google_accounts where account_id = ?1)'
+          'not exists (select 1 from account_emails where account_id = ?1)'
         // The person's other accounts with recorded details Google does not
         // vouch for now; an account still joining has none and is not lapsed.
-        const lapsed = `select g.account_id from google_accounts g
-          join account a on a.id = g.account_id
-          where a.user_id = ?2 and a.id <> ?1 and g.email_authority = 'none'`
+        const lapsed = `select e.account_id from account_emails e
+          join account a on a.id = e.account_id
+          where a.user_id = ?2 and a.id <> ?1 and e.email_authority = 'none'`
         const joinStatements = !maybeJoining
           ? []
           : [
@@ -394,7 +394,7 @@ export const SignInLive: Layer.Layer<
                 `insert into person_history (id, user_id, kind, detail_json, created_at)
                  select ?3, ?2, 'linked', ?4, ?5
                  where ${unfinished} and exists (
-                   select 1 from google_accounts g join account a on a.id = g.account_id
+                   select 1 from account_emails e join account a on a.id = e.account_id
                    where a.user_id = ?2 and a.id <> ?1)`,
               ).bind(
                 accountId,
@@ -416,24 +416,24 @@ export const SignInLive: Layer.Layer<
                     ).bind(accountId, userId, newId(), at),
                     DB.prepare(
                       `delete from session where user_id = ?2
-                         and google_account_id in (${lapsed}) and ${unfinished}`,
+                         and sign_in_account_id in (${lapsed}) and ${unfinished}`,
                     ).bind(accountId, userId),
                     DB.prepare(
                       `update agent_keys set revoked_at = ?3 where user_id = ?2
-                         and google_account_id in (${lapsed}) and revoked_at is null
+                         and created_by_account_id in (${lapsed}) and revoked_at is null
                          and ${unfinished}`,
                     ).bind(accountId, userId, at),
                     DB.prepare(
                       `update device_code set status = 'denied' where status = 'approved'
-                         and approved_by_google_account_id in (${lapsed}) and ${unfinished}`,
+                         and approved_by_account_id in (${lapsed}) and ${unfinished}`,
                     ).bind(accountId, userId),
                     DB.prepare(
                       `delete from account where user_id = ?2 and id in (${lapsed})
                          and ${unfinished}`,
                     ).bind(accountId, userId),
                     DB.prepare(
-                      `delete from google_accounts where not exists (
-                         select 1 from account where account.id = google_accounts.account_id)`,
+                      `delete from account_emails where not exists (
+                         select 1 from account where account.id = account_emails.account_id)`,
                     ),
                   ]),
             ]
@@ -441,11 +441,11 @@ export const SignInLive: Layer.Layer<
         await DB.batch([
           ...joinStatements,
           DB.prepare(
-            `insert into google_accounts (account_id, email, email_authority, hosted_domain, observed_at)
+            `insert into account_emails (account_id, email, email_authority, organisation, observed_at)
              values (?1, ?2, ?3, ?4, ?5)
              on conflict (account_id) do update set email = excluded.email,
                email_authority = excluded.email_authority,
-               hosted_domain = excluded.hosted_domain, observed_at = excluded.observed_at`,
+               organisation = excluded.organisation, observed_at = excluded.observed_at`,
           ).bind(accountId, claims.email, authority, claims.hd ?? null, at),
           // A person who deleted their account comes back with nothing.
           DB.prepare(
@@ -665,7 +665,7 @@ export const SignInLive: Layer.Layer<
           // A session lasts only while the account that opened it still
           // belongs to its person: a takeover can detach the account while
           // the account's own sign-in is still writing its session.
-          const accountId = found.googleAccountId
+          const accountId = found.signInAccountId
           const attached =
             accountId !== null &&
             (yield* query(() =>
@@ -684,7 +684,7 @@ export const SignInLive: Layer.Layer<
           return {
             person: found.person,
             sessionId: found.sessionId,
-            googleAccountId: accountId,
+            signInAccountId: accountId,
             setCookie: found.setCookie,
           }
         }),
@@ -813,18 +813,18 @@ export const SignInLive: Layer.Layer<
       approveDevice: (userCode) =>
         Effect.gen(function* () {
           const { person, via } = yield* signedInPerson
-          const googleAccountId =
+          const signInAccountId =
             via.kind === 'browser'
               ? ((yield* query(() =>
                   database
-                    .select({ id: schema.session.googleAccountId })
+                    .select({ id: schema.session.signInAccountId })
                     .from(schema.session)
                     .where(eq(schema.session.id, via.sessionId))
                     .get(),
                 ))?.id ?? null)
               : null
           yield* auth.viewDevice(userCode, person.id)
-          yield* auth.approveDevice(userCode, person.id, googleAccountId)
+          yield* auth.approveDevice(userCode, person.id, signInAccountId)
         }),
 
       denyDevice: (userCode) =>
@@ -863,7 +863,7 @@ export const SignInLive: Layer.Layer<
             'The Google account that approved this sign-in no longer belongs to this person.',
             'Run dossier login again.',
           )
-          const approver = redemption.approvedByGoogleAccountId
+          const approver = redemption.approvedByAccountId
           if (approver === null) return yield* refused
           // The code is spent from here on: a failure means starting again.
           const minted = yield* Effect.gen(function* () {
@@ -878,7 +878,7 @@ export const SignInLive: Layer.Layer<
             const [inserted] = yield* Effect.tryPromise(() =>
               bindings.DB.batch([
                 bindings.DB.prepare(
-                  `insert into agent_keys (id, user_id, name, hash_sha256, created_via, google_account_id, created_at)
+                  `insert into agent_keys (id, user_id, name, hash_sha256, created_via, created_by_account_id, created_at)
                      select ?, ?, ?, ?, 'device', ?, ? where ${stillTheirs}`,
                 ).bind(
                   keyId,
@@ -984,10 +984,10 @@ export const SignInLive: Layer.Layer<
             bindings.DB.batch([
               bindings.DB.prepare(
                 `insert into agent_keys (id, user_id, name, hash_sha256, created_via,
-                   google_account_id, scope_node_id, read_only, created_at)
-                 select ?, ?, ?, ?, 'settings', s.google_account_id, ?, ?, ?
+                   created_by_account_id, scope_node_id, read_only, created_at)
+                 select ?, ?, ?, ?, 'settings', s.sign_in_account_id, ?, ?, ?
                  from session s
-                 join account a on a.id = s.google_account_id and a.user_id = s.user_id
+                 join account a on a.id = s.sign_in_account_id and a.user_id = s.user_id
                  where s.id = ? and s.user_id = ? and s.expires_at > ?`,
               ).bind(
                 keyId,

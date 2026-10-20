@@ -69,7 +69,7 @@ export const sessionFor = async (who: Person): Promise<Caller> => {
        values (?, ?, 'google', ?, ?, ?)`,
     ).bind(accountId, who.id, `sub-${accountId}`, now, now),
     env.DB.prepare(
-      `insert into session (id, user_id, token, expires_at, google_account_id, created_at, updated_at)
+      `insert into session (id, user_id, token, expires_at, sign_in_account_id, created_at, updated_at)
        values (?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       sessionId,

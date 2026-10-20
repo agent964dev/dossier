@@ -70,18 +70,18 @@ describe('signing in with Google', () => {
       userId,
     )
     expect(person?.email_authority).toBe('google')
-    const [google] = await rows<{
+    const [observed] = await rows<{
       email: string
       email_authority: string
-      hosted_domain: string | null
+      organisation: string | null
     }>(
-      'select email, email_authority, hosted_domain from google_accounts where account_id = ?',
+      'select email, email_authority, organisation from account_emails where account_id = ?',
       await accountIdOf(identity.sub),
     )
-    expect(google).toEqual({
+    expect(observed).toEqual({
       email: identity.email,
       email_authority: 'google',
-      hosted_domain: null,
+      organisation: null,
     })
 
     const cookie = response.headers
@@ -147,9 +147,9 @@ describe('signing in with Google', () => {
     const ownerBrowser = await signedIn(owner)
 
     expect(await accountIdOf(lapsed.sub)).toBeUndefined()
-    expect(
-      await count('google_accounts', 'account_id = ?', lapsedAccount),
-    ).toBe(0)
+    expect(await count('account_emails', 'account_id = ?', lapsedAccount)).toBe(
+      0,
+    )
     expect((await me(lapsedBrowser)).status).toBe(401)
     expect(await keyWorks(key.secret)).toBe(false)
     expect((await me(ownerBrowser)).status).toBe(200)
@@ -184,7 +184,7 @@ describe('signing in with Google', () => {
       users: await count('user'),
       accounts: await count('account'),
       sessions: await count('session'),
-      google: await count('google_accounts'),
+      emails: await count('account_emails'),
       history: await count('person_history'),
     })
     const before = await counts()
@@ -383,7 +383,7 @@ describe('signing in with Google', () => {
     const token = 'abcdefghijklmnopqrstuvwxyz012345'
     const now = Date.now()
     await exec(
-      'insert into session (id, user_id, token, expires_at, google_account_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)',
+      'insert into session (id, user_id, token, expires_at, sign_in_account_id, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)',
       `minted-${now}`,
       userId,
       token,

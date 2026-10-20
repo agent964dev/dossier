@@ -497,6 +497,15 @@ Migrations run before the new code goes live, while the previous Worker still
 serves. `--no-x-provision` makes a missing database, bucket or Queue fail the
 release instead of being created.
 
+One release breaks this: the one with `0029_sign_in_accounts.sql`, which
+renames the sign-in tables and columns (`google_accounts` becomes
+`account_emails`, and `google_account_id` becomes `sign_in_account_id` on
+sessions and `created_by_account_id` on agent keys). The previous Worker still
+reads the old names, so from the migration until the new Worker is live,
+signed-in pages, sign-ins, making agent keys and `dossier login` fail with
+errors, for about a minute. Merge it at a quiet time. If its deploy fails, the old Worker keeps
+failing on the new schema: rerun the job at once (see Migrations in section 5).
+
 ### The checks
 
 `scripts/release/verify.mjs` reads every expectation from
@@ -834,6 +843,16 @@ the release applies it before the new code goes live. Add tables and nullable
 or defaulted columns, deploy code that uses them, and remove old shapes only in
 a later release once no deployed code reads them. Never edit a migration that
 has been applied anywhere.
+
+`0029_sign_in_accounts.sql` is the one exception. It renames the tables and
+columns that name Google where they mean any sign-in account, so the Worker
+before it cannot read the schema after it. A Deployment that applies it shows
+about a minute of errors between the migration and the new Worker going live:
+signed-in pages fail, nobody can sign in, and making agent keys and
+`dossier login` fail. Every row is kept, so people stay signed in once the new
+Worker is live. Self-hosted Deployments: apply it and deploy right
+after, at a quiet time. If the deploy fails, deploy again rather than rolling
+back; code from before it cannot read the new names.
 
 Generate one from the schema with `bun run --cwd apps/web db:generate`. Write
 triggers and FTS changes by hand with `bunx drizzle-kit generate --custom` from
