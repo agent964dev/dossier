@@ -28,7 +28,7 @@ import type { Background } from './background.ts'
 import { Bindings } from './bindings.ts'
 import { ChangeFeed, type CloseSockets } from './change-feed.ts'
 import { CurrentCaller } from './caller.ts'
-import { Config } from './config.ts'
+import { Config, signInProviders } from './config.ts'
 import { Data } from './data.ts'
 import { newId } from './ids.ts'
 import {
@@ -2064,7 +2064,10 @@ export const PeopleLive: Layer.Layer<
         // The generated text saved as it is stays generated, so it follows
         // later changes to what Dossier keeps.
         const value =
-          given === privacyTextOf(defaultPrivacyText(config.deploymentName))
+          given ===
+          privacyTextOf(
+            defaultPrivacyText(config.deploymentName, signInProviders(config)),
+          )
             ? null
             : given
         if (value !== null && value.length > PRIVACY_TEXT_LIMIT) {

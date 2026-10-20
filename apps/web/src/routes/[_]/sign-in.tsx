@@ -5,8 +5,9 @@ import { useState } from 'react'
 import { HostName } from '../../components/host-name'
 import { PrivacyLink } from '../../components/privacy-link'
 import { GoogleMark } from '../../components/google-mark'
+import { MicrosoftMark } from '../../components/microsoft-mark'
 import { Button } from '../../components/ui/button'
-import { safeNext, startGoogleSignIn } from '../../lib/auth-client'
+import { safeNext, startSignIn } from '../../lib/auth-client'
 import { isScreenFailure } from '../../server/failure'
 import { signInView, type SignInView } from '../../server/sign-in'
 
@@ -70,8 +71,8 @@ function SignInScreen() {
         <Button asChild size="lg" className="w-full">
           <a href={target}>Continue</a>
         </Button>
-      ) : view.ready ? (
-        <ContinueWithGoogle next={target} />
+      ) : view.providers.length > 0 ? (
+        <ProviderButtons providers={view.providers} next={target} />
       ) : (
         <p className="flex gap-2.5 rounded-xl border border-border bg-card px-4 py-3.5 text-neutral-300">
           <Info aria-hidden className="mt-1 size-4 shrink-0 text-neutral-500" />
@@ -83,12 +84,16 @@ function SignInScreen() {
   )
 }
 
-const PROVIDER_NAMES: Record<
-  NonNullable<SignInView['notice']>['provider'],
-  string
-> = {
+type Provider = SignInView['providers'][number]
+
+const PROVIDER_NAMES: Record<Provider, string> = {
   google: 'Google',
   microsoft: 'Microsoft',
+}
+
+const MARKS: Record<Provider, typeof GoogleMark> = {
+  google: GoogleMark,
+  microsoft: MicrosoftMark,
 }
 
 function Notice({
@@ -166,29 +171,43 @@ function Callout({ children }: { children: React.ReactNode }) {
   )
 }
 
-function ContinueWithGoogle({ next }: { next: string }) {
+/** One full-width button per provider, the same weight, Google first. */
+function ProviderButtons({
+  providers,
+  next,
+}: {
+  providers: readonly Provider[]
+  next: string
+}) {
   const [state, setState] = useState<'idle' | 'busy' | 'failed'>('idle')
-  const start = async () => {
+  const start = async (provider: Provider) => {
     setState('busy')
     try {
-      await startGoogleSignIn(next)
+      await startSignIn(provider, next)
     } catch {
       setState('failed')
     }
   }
   return (
-    <div className="flex flex-col gap-3">
-      <Button
-        size="lg"
-        className="w-full shadow-[0_8px_28px_-10px_var(--glow-cyan)]"
-        disabled={state === 'busy'}
-        onClick={start}
-      >
-        <span className="flex size-5 items-center justify-center rounded-full bg-white">
-          <GoogleMark className="size-3.5" />
-        </span>
-        Continue with Google
-      </Button>
+    <div className="flex flex-col gap-2.5">
+      {providers.map((provider) => {
+        const Mark = MARKS[provider]
+        return (
+          <Button
+            key={provider}
+            variant="secondary"
+            size="lg"
+            className="w-full"
+            disabled={state === 'busy'}
+            onClick={() => void start(provider)}
+          >
+            <span className="flex size-5 items-center justify-center rounded-full bg-white">
+              <Mark className="size-3.5" />
+            </span>
+            Continue with {PROVIDER_NAMES[provider]}
+          </Button>
+        )
+      })}
       {state === 'failed' ? (
         <p role="alert" className="text-sm text-error-300">
           Sign-in did not start. Try again.

@@ -3,18 +3,45 @@
 // stores: a new table or cookie that holds something about a person
 // belongs here.
 
+import type { SignInProviderId } from '../ports/auth.ts'
+
 /** The longest privacy text a super admin may save. */
 export const PRIVACY_TEXT_LIMIT = 20_000
 
-/** Plain text: paragraphs apart by a blank line, list items start "- ". */
-export const defaultPrivacyText = (deploymentName: string): string =>
+/** What Dossier keeps from each sign-in provider, as one list item. */
+const KEPT_FROM: Record<SignInProviderId, string> = {
+  google:
+    "- Your Google sign-in: your Google account's identifier, your name, your email address, the address of your profile picture, and the tokens Google issues when you sign in.",
+  microsoft:
+    "- Your Microsoft sign-in: your Microsoft account's identifier, your name, your email address, a 48×48 copy of your profile photo, and the tokens Microsoft issues when you sign in.",
+}
+
+const NAMES: Record<SignInProviderId, string> = {
+  google: 'Google',
+  microsoft: 'Microsoft',
+}
+
+/** "Google handles sign-in.", "Google and Microsoft handle sign-in.", or nothing. */
+const handlers = (providers: readonly SignInProviderId[]): string =>
+  providers.length === 0
+    ? ''
+    : ` ${providers.map((provider) => NAMES[provider]).join(' and ')} ${providers.length === 1 ? 'handles' : 'handle'} sign-in.`
+
+/**
+ * Plain text: paragraphs apart by a blank line, list items start "- ".
+ * `providers`: the sign-in providers the deployment turned on, Google first.
+ */
+export const defaultPrivacyText = (
+  deploymentName: string,
+  providers: readonly SignInProviderId[],
+): string =>
   `Privacy at ${deploymentName}
 
 ${deploymentName} runs Dossier. People and their agents publish pages here, share them with others, and collect the answers people send through them. This page says what Dossier keeps about you. The people who run ${deploymentName} can replace this text with their own.
 
 What Dossier keeps
 
-- Your Google sign-in: your Google account's identifier, your name, your email address, the address of your profile picture, and the tokens Google issues when you sign in. Your email is how Dossier knows you: shares, invitations and answers are addressed to it.
+${providers.map((provider) => `${KEPT_FROM[provider]}\n`).join('')}- Your email: it is how Dossier knows you. Shares, invitations and answers are addressed to it.
 - Sessions: each browser you sign in with has a session that ends 30 days after its last use. It records the IP address and the browser it signed in from.
 - Agent keys: the keys you create for the Dossier command line, with their names, what they may reach, and when they were last used.
 - What you publish: the files you or your agents push, every earlier version of them, and who pushed each version and when.
@@ -27,7 +54,7 @@ What Dossier keeps
 
 Cookies
 
-Dossier sets a session cookie when you sign in, and the visitor cookie above. While you sign in with Google, it also sets a sign-in cookie that protects the sign-in from forgery and lasts at most five minutes. It sets none for advertising or analytics.
+Dossier sets a session cookie when you sign in, and the visitor cookie above. While you sign in, it also sets a sign-in cookie that protects the sign-in from forgery and lasts at most five minutes. It sets none for advertising or analytics.
 
 No trackers
 
@@ -39,11 +66,11 @@ You see what is shared with you, and the people you share with see what you shar
 
 How long it is kept
 
-Files and answers that are deleted stay restorable from history for the retention period the super admins set, then they are purged. When you delete your account in your settings, Dossier withdraws your answers, empties your comments, ends your sessions and agent keys, and removes your Google sign-in. Your email stays as the author of what you published and in the history of the trees you changed.
+Files and answers that are deleted stay restorable from history for the retention period the super admins set, then they are purged. When you delete your account in your settings, Dossier withdraws your answers, empties your comments, ends your sessions and agent keys, and removes your sign-in accounts. Your email stays as the author of what you published and in the history of the trees you changed.
 
 Where it is kept
 
-On Cloudflare, which runs ${deploymentName}. Cloudflare also keeps the deployment's request logs for a short time. Google handles sign-in.
+On Cloudflare, which runs ${deploymentName}. Cloudflare also keeps the deployment's request logs for a short time.${handlers(providers)}
 
 Questions
 

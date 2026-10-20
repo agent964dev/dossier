@@ -1,7 +1,13 @@
 import { createServerFn } from '@tanstack/react-start'
 import { Effect } from 'effect'
 
-import { Config, defaultPrivacyText, People, Settings } from '../core/index.ts'
+import {
+  Config,
+  defaultPrivacyText,
+  People,
+  Settings,
+  signInProviders,
+} from '../core/index.ts'
 import { runScreen } from './run.ts'
 
 export interface PrivacyView {
@@ -20,7 +26,9 @@ export const privacyView = createServerFn({ method: 'GET' }).handler(() =>
       const current = yield* Effect.flatMap(Settings, (s) => s.current())
       return {
         deployment: config.deploymentName,
-        text: current.privacyText ?? defaultPrivacyText(config.deploymentName),
+        text:
+          current.privacyText ??
+          defaultPrivacyText(config.deploymentName, signInProviders(config)),
         custom: current.privacyText !== null,
       } satisfies PrivacyView
     }),

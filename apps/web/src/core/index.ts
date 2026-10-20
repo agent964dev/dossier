@@ -28,7 +28,7 @@ export {
   type WebhookView,
   type WebhooksService,
 } from './webhooks.ts'
-export { Config, type DeploymentConfig } from './config.ts'
+export { Config, signInProviders, type DeploymentConfig } from './config.ts'
 export { CurrentCaller, visitor, type Caller, type Via } from './caller.ts'
 export {
   makeLayer,

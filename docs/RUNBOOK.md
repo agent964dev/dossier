@@ -105,18 +105,23 @@ release sets the full SHA.
 
 ### Secrets
 
-Every environment has five secrets. A missing one makes the Worker answer every
-request with the plain error page, or `unavailable` on `/_/api/`, and log "The
-deployment is misconfigured" with the missing name. The Google values are the
-exception: without them the sign-in page says that sign-in is not set up.
+Every environment has three secrets, and a client ID and secret for each
+sign-in provider it turns on: Google, Microsoft, or both. A missing one of the
+three makes the Worker answer every request with the plain error page, or
+`unavailable` on `/_/api/`, and log "The deployment is misconfigured" with the
+missing name. A provider is on only when both of its values are set; one value
+alone counts as off. With no provider on, the sign-in page says that sign-in is
+not set up.
 
-| Secret                 | What it does                                                     | What rotating it does                                                                                                       |
-| ---------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET`   | Signs session cookies and sign-in notices.                       | Ends every browser session: everyone signs in again. Agent keys keep working.                                               |
-| `HANDLE_SECRET`        | Makes view handles and seals event cursors.                      | Each session gets a new view handle at its next view, and event cursors sealed earlier are refused. See below.              |
-| `SUPER_ADMINS`         | Comma-separated emails made super admins at their first sign-in. | Affects only people who sign in for the first time, or come back after deleting their account. Never removes a super admin. |
-| `GOOGLE_CLIENT_ID`     | The Google OAuth client.                                         | Sign-in uses the new client at once. Sessions stay.                                                                         |
-| `GOOGLE_CLIENT_SECRET` | The Google OAuth client's secret.                                | Sign-in uses the new secret at once. Delete the old one in Google after setting the new one.                                |
+| Secret                    | What it does                                                          | What rotating it does                                                                                                                         |
+| ------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`      | Signs session cookies and sign-in notices.                            | Ends every browser session: everyone signs in again. Agent keys keep working.                                                                 |
+| `HANDLE_SECRET`           | Makes view handles and seals event cursors.                           | Each session gets a new view handle at its next view, and event cursors sealed earlier are refused. See below.                                |
+| `SUPER_ADMINS`            | Comma-separated emails made super admins at their first sign-in.      | Affects only people who sign in for the first time, or come back after deleting their account. Never removes a super admin.                   |
+| `GOOGLE_CLIENT_ID`        | The Google OAuth client.                                              | Sign-in uses the new client at once. Sessions stay.                                                                                           |
+| `GOOGLE_CLIENT_SECRET`    | The Google OAuth client's secret.                                     | Sign-in uses the new secret at once. Delete the old one in Google after setting the new one.                                                  |
+| `MICROSOFT_CLIENT_ID`     | The Microsoft Entra app registration's Application (client) ID.       | Sign-in uses the new app at once. Sessions stay.                                                                                              |
+| `MICROSOFT_CLIENT_SECRET` | The app registration's client secret. It expires (24 months at most). | Sign-in uses the new secret at once. Delete the old one in Entra after setting the new one (section 5, Rotating the Microsoft client secret). |
 
 To name or remove super admins after the first sign-in, use `/_/admin`.
 
@@ -153,7 +158,10 @@ Fill in these values first and use them everywhere below:
    pages. The tree hosts are `<tree-id>.<content domain>`, one level under the
    zone, because the zone's free certificate covers the apex and one level of
    subdomains.
-3. A Google account that can create a Google Cloud project.
+3. For each sign-in provider you turn on: a Google account that can create a
+   Google Cloud project, or a work account in a Microsoft Entra directory that
+   may register applications. A personal Microsoft account alone cannot own a
+   registration.
 4. On your machine: git, Bun 1.3.14, Node.js 22.12 or newer, `openssl` and
    `xh`.
 5. The repository, with its dependencies, and Wrangler signed in:
@@ -190,7 +198,14 @@ nothing reaches it. The zone's free Universal SSL certificate covers
 record and certificate at the first deploy, as long as no record for that host
 exists yet.
 
-### 2.3 The Google OAuth client
+### 2.3 Sign-in providers
+
+Turn on Google, Microsoft, or both. The sign-in screen shows one button for
+each provider whose two values are set, Google first. Both providers use the
+same rules: a sign-in account joins a person who already holds its email only
+when its provider vouches for that address.
+
+#### Google
 
 In the Google Cloud console, in a project of your own:
 
@@ -212,6 +227,67 @@ In the Google Cloud console, in a project of your own:
    ```
 
 You publish the app in step 2.12, once `/_/privacy` answers.
+
+#### Microsoft
+
+Register one app in a Microsoft Entra directory, signed in with a work account
+that may register applications. People from any organisation, and people with
+personal Microsoft accounts, then sign in through it.
+
+1. In the Microsoft Entra admin center: Entra ID, App registrations, New
+   registration. Give it a name (people see it on Microsoft's consent screen).
+   Supported account types: "Accounts in any organizational directory and
+   personal Microsoft accounts" (some screens say "Any Entra ID Tenant +
+   Personal Microsoft accounts"; in the manifest, `signInAudience` is
+   `AzureADandPersonalMicrosoftAccount`). Redirect URI: platform Web,
+   `https://<main host>/_/auth/callback/microsoft`. Register, and keep the
+   Application (client) ID.
+2. Authentication, Web, Redirect URIs: the same path on every origin that signs
+   in with this app. For agent964's app these are three: the main host
+   `https://dossier.agent964.com/_/auth/callback/microsoft`, the dev deployment
+   `https://dossier-next-dev.tech964.workers.dev/_/auth/callback/microsoft`,
+   and the local Worker `https://localhost:8787/_/auth/callback/microsoft`. A
+   redirect that is not listed fails on Microsoft's page with an AADSTS error,
+   before Dossier is reached.
+3. Branding and properties: the home page `https://<main host>/` and the
+   privacy statement `https://<main host>/_/privacy`. Without these links
+   Microsoft's consent screen shows a warning.
+4. Token configuration, Add optional claim, token type ID: `email` and
+   `xms_edov`. Accept if the portal offers to add the Microsoft Graph `email`
+   permission. `xms_edov` says whether the organisation verified the email's
+   domain with Microsoft. Dossier lets a work or school account sign in only
+   when its token carries `xms_edov: true`; without the claim, every work or
+   school account is refused with "Microsoft didn't confirm that this account
+   owns …". A personal account counts only on Microsoft's own domains, such as
+   outlook.com and hotmail.com.
+5. API permissions: nothing to add. At sign-in Dossier asks for
+   `openid profile email User.Read offline_access`, all delegated and none
+   needing an administrator; `User.Read` reads the 48×48 profile photo.
+6. Certificates and secrets, Client secrets, New client secret: a description
+   and an expiry, at most 24 months. Copy its Value (shown only once), not its
+   Secret ID, and note the expiry date: section 5 says how to rotate it.
+7. Save the two values in a file only you can read, for example
+   `~/.config/dossier-deploy/microsoft.env`, with mode 600:
+
+   ```sh
+   MICROSOFT_CLIENT_ID=…
+   MICROSOFT_CLIENT_SECRET=…
+   ```
+
+There is nothing to publish. Two things people may see on Microsoft's side:
+
+- **"Unverified".** Microsoft's consent screen shows the publisher as
+  "Unverified" until the publisher is verified. Publisher verification needs a
+  verified Microsoft AI Cloud Partner Program account and removes the label;
+  it is optional, and agent964's app is not verified.
+- **"Approval required" and consent.** The first time someone signs in,
+  Microsoft asks them to consent to the permissions above. An organisation
+  whose admins limit user consent shows "Approval required" (or the error
+  AADSTS90094, "an admin to grant permission") instead, and the person never
+  reaches Dossier. An administrator of that organisation grants consent once
+  for everyone: in their Entra admin center, Enterprise applications, the
+  app's name, Permissions, Grant admin consent. Personal accounts consent for
+  themselves.
 
 ### 2.4 D1, R2 and the Queue
 
@@ -285,12 +361,20 @@ printf '%s' '<you@example.com>' | bunx wrangler secret put SUPER_ADMINS --config
 ( . ~/.config/dossier-deploy/google.env
   printf '%s' "$GOOGLE_CLIENT_ID" | bunx wrangler secret put GOOGLE_CLIENT_ID --config wrangler.jsonc
   printf '%s' "$GOOGLE_CLIENT_SECRET" | bunx wrangler secret put GOOGLE_CLIENT_SECRET --config wrangler.jsonc )
+( . ~/.config/dossier-deploy/microsoft.env
+  printf '%s' "$MICROSOFT_CLIENT_ID" | bunx wrangler secret put MICROSOFT_CLIENT_ID --config wrangler.jsonc
+  printf '%s' "$MICROSOFT_CLIENT_SECRET" | bunx wrangler secret put MICROSOFT_CLIENT_SECRET --config wrangler.jsonc )
 bunx wrangler secret list --config wrangler.jsonc
 ```
 
-`SUPER_ADMINS` takes several emails separated by commas. The Google values are
-read in a subshell, so they never stay in your shell. `secret list` prints the
-five names, never the values.
+Leave out the Google or the Microsoft lines for a provider you do not turn on;
+set both values of each provider you do. `SUPER_ADMINS` takes several emails
+separated by commas. The provider values are read in subshells, so they never
+stay in your shell. `secret list` prints the names, never the values.
+
+To turn Microsoft on later for a running deployment, set its two values the
+same way: `wrangler secret put` makes the Worker use them at once, and the
+sign-in screen offers "Continue with Microsoft".
 
 ### 2.7 Migrations
 
@@ -760,17 +844,18 @@ bunx wrangler tail --config wrangler.jsonc --format json --search "webhook"
 Workers Logs are also on in the dashboard (`observability`). Dossier logs one
 JSON line per event with a `message`:
 
-| `message`                         | Logged when                                                                                                                                                           |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tree event`                      | Every change to a tree: tree, sequence, type, path, actor, key, push                                                                                                  |
-| `share`                           | A share given or taken away                                                                                                                                           |
-| `refused`                         | A request refused (not found, sign in, forbidden, conflict, invalid and the rest): code, method, route, tree, path, actor, key, `via`; a frame by its tree and path   |
-| `purge`                           | A purge run starts and ends, with its counts                                                                                                                          |
-| `webhook delivery`                | Each delivery attempt and its result                                                                                                                                  |
-| `webhook sweep`                   | Each sweep run                                                                                                                                                        |
-| `webhook skipped`                 | A delivery dropped on its recheck: the webhook or event is gone, the tree moved, the workspace is not live, the event type is no longer chosen, or the URL is refused |
-| `The deployment is misconfigured` | A variable or secret is missing or wrong                                                                                                                              |
-| `Request failed`                  | An unexpected failure, with its request ID                                                                                                                            |
+| `message`                         | Logged when                                                                                                                                                                          |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tree event`                      | Every change to a tree: tree, sequence, type, path, actor, key, push                                                                                                                 |
+| `share`                           | A share given or taken away                                                                                                                                                          |
+| `refused`                         | A request refused (not found, sign in, forbidden, conflict, invalid and the rest): code, method, route, tree, path, actor, key, `via`; a frame by its tree and path                  |
+| `purge`                           | A purge run starts and ends, with its counts                                                                                                                                         |
+| `webhook delivery`                | Each delivery attempt and its result                                                                                                                                                 |
+| `webhook sweep`                   | Each sweep run                                                                                                                                                                       |
+| `webhook skipped`                 | A delivery dropped on its recheck: the webhook or event is gone, the tree moved, the workspace is not live, the event type is no longer chosen, or the URL is refused                |
+| `sign-in refused`                 | A sign-in Dossier refused or that failed: provider, reason, the failed check or the provider's error code, and for Microsoft which claims the token carried. Never the email or name |
+| `The deployment is misconfigured` | A variable or secret is missing or wrong                                                                                                                                             |
+| `Request failed`                  | An unexpected failure, with its request ID                                                                                                                                           |
 
 The request ID is Cloudflare's `cf-ray`, also sent back as `x-request-id`.
 
@@ -873,6 +958,36 @@ read, fix forward instead. Older base layers are still in R2, so pages keep
 loading. The health check then shows the older SHA, and the next merge deploys
 forward again. Prefer a forward fix.
 
+### Rotating the Microsoft client secret
+
+The Microsoft client secret expires, 24 months after it was made at most.
+Entra's recommendations warn the directory's application administrators about
+30 days ahead. Once it has expired, every Microsoft sign-in ends on the sign-in
+screen with "Sign-in did not finish. Try again.", and each logs a
+`sign-in refused` line with reason `provider_error` and error `invalid_code`.
+Google sign-in and existing sessions are not affected.
+
+Rotate before it expires. An app can hold two secrets at once, so nobody is
+refused while you do it:
+
+1. In the app registration: Certificates and secrets, New client secret. Copy
+   its Value and note its expiry.
+2. Put it in `~/.config/dossier-deploy/microsoft.env` and set it, from
+   `apps/web`:
+
+   ```sh
+   ( . ~/.config/dossier-deploy/microsoft.env
+     printf '%s' "$MICROSOFT_CLIENT_SECRET" | bunx wrangler secret put MICROSOFT_CLIENT_SECRET --config wrangler.jsonc )
+   ```
+
+   The Worker uses it at once; no release is needed.
+
+3. Sign in with Microsoft, or watch `wrangler tail` for `provider_error`
+   lines, to see that the new secret works.
+4. Delete the old secret in Certificates and secrets.
+
+For dev, add `--env dev` to the `secret put`.
+
 ### The Look and the privacy text
 
 Both are super admin settings and need no deploy.
@@ -883,8 +998,9 @@ Both are super admin settings and need no deploy.
   Look.
 - `/_/admin`, Privacy page, replaces the generated text of `/_/privacy` (up to
   20,000 characters). Reset, or saving it empty, returns to the generated text,
-  which names the deployment and what Dossier stores. Google's consent screen
-  links to this page, so keep it accurate.
+  which names the deployment, each sign-in provider turned on and what Dossier
+  stores. Google's and Microsoft's consent screens link to this page, so keep
+  it accurate.
 
 ## 6. The dev environment
 
@@ -893,7 +1009,7 @@ Both are super admin settings and need no deploy.
 `dossier-next-dev` runs at `https://dossier-next-dev.tech964.workers.dev`, and
 its trees at `https://<tree-id>-dev.dossier-content.com`. Its D1 database, R2
 bucket and Queue are all `dossier-next-dev`. Its Google client is in Testing,
-so only its test users can sign in with Google. Its secrets are the same five
+so only its test users can sign in with Google. Its secrets are the same
 names, with values of its own.
 
 Deploy the current checkout from the repository root:
@@ -926,8 +1042,10 @@ this machine.
 
 2. Copy `apps/web/.dev.vars.example` to `apps/web/.dev.vars` and fill in the
    two secrets (`openssl rand -base64 32`), your email in `SUPER_ADMINS`, and,
-   to sign in with Google locally, a client whose redirect URI is
-   `https://localhost:8787/_/auth/callback/google`. `.dev.vars` sets
+   to sign in locally, a Google client whose redirect URI is
+   `https://localhost:8787/_/auth/callback/google`, a Microsoft app whose
+   redirect URIs include `https://localhost:8787/_/auth/callback/microsoft`,
+   or both. `.dev.vars` sets
    `PUBLIC_ORIGIN`, `CONTENT_HOST` and `DEPLOYMENT_NAME` over the dev values.
 3. Apply the migrations to local D1, from `apps/web`:
 

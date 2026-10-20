@@ -1,10 +1,17 @@
 import { TREE_TOKEN } from '@dossier/contracts'
 import { Context, Effect, Layer, Redacted } from 'effect'
 
+import type { SignInProviderId } from '../ports/auth.ts'
 import { Bindings } from './bindings.ts'
 
 declare const __DOSSIER_BUILD_VERSION__: string | undefined
 declare const __BASE_VERSION__: string | undefined
+
+/** A sign-in provider's client: on only when both values are set. */
+export interface ProviderClient {
+  readonly clientId: string
+  readonly clientSecret: Redacted.Redacted<string>
+}
 
 /** The deployment's settings, parsed once from the Worker's environment. */
 export interface DeploymentConfig {
@@ -17,15 +24,21 @@ export interface DeploymentConfig {
   readonly superAdmins: ReadonlySet<string>
   readonly betterAuthSecret: Redacted.Redacted<string>
   readonly handleSecret: Redacted.Redacted<string>
-  readonly google: {
-    readonly clientId: string
-    readonly clientSecret: Redacted.Redacted<string>
-  } | null
+  readonly google: ProviderClient | null
+  readonly microsoft: ProviderClient | null
   /** The commit the Worker was built from. */
   readonly buildVersion: string
   /** The base layer version Static Assets hold. */
   readonly baseVersion: string
 }
+
+/** The sign-in providers the deployment turned on, Google first. */
+export const signInProviders = (
+  config: Pick<DeploymentConfig, 'google' | 'microsoft'>,
+): readonly SignInProviderId[] => [
+  ...(config.google === null ? [] : (['google'] as const)),
+  ...(config.microsoft === null ? [] : (['microsoft'] as const)),
+]
 
 export class Config extends Context.Tag('Config')<Config, DeploymentConfig>() {}
 
@@ -39,6 +52,18 @@ const required = (env: Env, name: keyof Env): string => {
     throw new ConfigProblem(`${name} is not set`)
   }
   return value.trim()
+}
+
+/** Both values trimmed; a half-set pair counts as off. */
+const pair = (
+  id: string | undefined,
+  secret: string | undefined,
+): ProviderClient | null => {
+  const clientId = id?.trim() ?? ''
+  const clientSecret = secret?.trim() ?? ''
+  return clientId !== '' && clientSecret !== ''
+    ? { clientId, clientSecret: Redacted.make(clientSecret) }
+    : null
 }
 
 /** The base layer's version: a hash of its built files, set by the build. */
@@ -70,8 +95,6 @@ export const parseConfig = (env: Env): DeploymentConfig => {
       'CONTENT_HOST must hold {tree} once, in its first label',
     )
   }
-  const clientId = env.GOOGLE_CLIENT_ID?.trim() ?? ''
-  const clientSecret = env.GOOGLE_CLIENT_SECRET?.trim() ?? ''
   const version = buildVersion()
   return {
     origin,
@@ -85,10 +108,8 @@ export const parseConfig = (env: Env): DeploymentConfig => {
     ),
     betterAuthSecret: Redacted.make(required(env, 'BETTER_AUTH_SECRET')),
     handleSecret: Redacted.make(required(env, 'HANDLE_SECRET')),
-    google:
-      clientId !== '' && clientSecret !== ''
-        ? { clientId, clientSecret: Redacted.make(clientSecret) }
-        : null,
+    google: pair(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET),
+    microsoft: pair(env.MICROSOFT_CLIENT_ID, env.MICROSOFT_CLIENT_SECRET),
     buildVersion: version,
     baseVersion: baseVersion(version),
   }

@@ -36,6 +36,124 @@ export const googleTrust = (
   }
 }
 
+/** The directory every personal Microsoft account's token names as its `tid`. */
+export const PERSONAL_MICROSOFT_TENANT = '9188040d-6c67-4c5b-b112-36a304b66dad'
+
+/** Microsoft's own consumer mail domains, matched on the whole lower-cased domain. */
+// Source: goals/microsoft-sign-in/research/reports/consumer-domains.md, read 2026-10-20.
+// Exact whole domains only; never extend by pattern or generated country forms.
+export const MICROSOFT_CONSUMER_DOMAINS: ReadonlySet<string> = new Set([
+  'hotmail.be',
+  'hotmail.ca',
+  'hotmail.co.jp',
+  'hotmail.co.uk',
+  'hotmail.com',
+  'hotmail.com.br',
+  'hotmail.de',
+  'hotmail.es',
+  'hotmail.fr',
+  'hotmail.hu',
+  'hotmail.it',
+  'hotmail.nl',
+  'live.be',
+  'live.ca',
+  'live.cn',
+  'live.co.uk',
+  'live.com',
+  'live.com.au',
+  'live.de',
+  'live.fr',
+  'live.it',
+  'live.jp',
+  'live.nl',
+  'msn.com',
+  'outlook.at',
+  'outlook.be',
+  'outlook.cl',
+  'outlook.co.id',
+  'outlook.co.il',
+  'outlook.co.nz',
+  'outlook.co.th',
+  'outlook.com',
+  'outlook.com.ar',
+  'outlook.com.au',
+  'outlook.com.br',
+  'outlook.com.gr',
+  'outlook.com.pe',
+  'outlook.com.tr',
+  'outlook.com.vn',
+  'outlook.cz',
+  'outlook.de',
+  'outlook.dk',
+  'outlook.es',
+  'outlook.fr',
+  'outlook.hu',
+  'outlook.ie',
+  'outlook.in',
+  'outlook.it',
+  'outlook.jp',
+  'outlook.kr',
+  'outlook.lv',
+  'outlook.my',
+  'outlook.ph',
+  'outlook.pt',
+  'outlook.sa',
+  'outlook.sg',
+  'outlook.sk',
+  'windowslive.com',
+])
+
+/** The issuers a guest from a personal Microsoft account names as its `idp`. */
+const PERSONAL_ACCOUNT_ISSUERS: ReadonlySet<unknown> = new Set([
+  'live.com',
+  `https://sts.windows.net/${PERSONAL_MICROSOFT_TENANT}/`,
+  `https://login.microsoftonline.com/${PERSONAL_MICROSOFT_TENANT}/v2.0`,
+])
+
+/**
+ * A personal account; a native work or school account of the directory that
+ * issued the token; a guest there from a personal account; or a guest from
+ * any other directory or provider.
+ */
+export type MicrosoftAccountKind =
+  | 'personal'
+  | 'work'
+  | 'personal_guest'
+  | 'guest'
+
+export const microsoftAccountKind = (
+  profile: Readonly<Record<string, unknown>>,
+): MicrosoftAccountKind => {
+  if (profile.tid === PERSONAL_MICROSOFT_TENANT) return 'personal'
+  const { idp } = profile
+  if (idp === undefined || idp === profile.iss) return 'work'
+  return PERSONAL_ACCOUNT_ISSUERS.has(idp) ? 'personal_guest' : 'guest'
+}
+
+/** The whole domain after the email's last `@`. */
+const domainOf = (email: string): string =>
+  email.slice(email.lastIndexOf('@') + 1)
+
+/**
+ * Microsoft confirms an email, and is its authority, for a personal account
+ * (or a guest from one) on one of Microsoft's own consumer domains, and for a
+ * native work or school account whose directory verified the email's domain
+ * (`xms_edov`). Microsoft's `email_verified` and verified-email claims are
+ * never read.
+ */
+export const microsoftTrust = (
+  profile: Readonly<Record<string, unknown>>,
+): EmailTrust => {
+  const email = emailOf(profile)
+  if (!email.includes('@')) return { confirmed: false, authority: false }
+  const kind = microsoftAccountKind(profile)
+  const confirmed =
+    kind === 'personal' || kind === 'personal_guest'
+      ? MICROSOFT_CONSUMER_DOMAINS.has(domainOf(email))
+      : kind === 'work' && profile.xms_edov === true
+  return { confirmed, authority: confirmed }
+}
+
 /** The authority recorded for an account: its provider when it vouches for the email now. */
 export const authorityOf = (
   claims: Pick<SignInClaims, 'provider' | 'authority'>,
@@ -161,13 +279,21 @@ const ERROR_CODE = /^[a-z_]{1,64}$/
 
 /** The claim fields of a diagnostic line, which only Microsoft's tokens fill. */
 const claimFields = (
-  _provider: SignInProviderId,
-  _profile: Readonly<Record<string, unknown>> | null,
-): Pick<SignInDiagnostic, 'account' | 'carried' | 'xms_edov'> => ({
-  account: null,
-  carried: null,
-  xms_edov: null,
-})
+  provider: SignInProviderId,
+  profile: Readonly<Record<string, unknown>> | null,
+): Pick<SignInDiagnostic, 'account' | 'carried' | 'xms_edov'> =>
+  provider !== 'microsoft' || profile === null
+    ? { account: null, carried: null, xms_edov: null }
+    : {
+        account: microsoftAccountKind(profile),
+        carried: {
+          email: emailOf(profile) !== '',
+          xms_edov: profile.xms_edov !== undefined,
+          idp: profile.idp !== undefined,
+        },
+        xms_edov:
+          typeof profile.xms_edov === 'boolean' ? profile.xms_edov : null,
+      }
 
 export const signInDiagnostic = (
   provider: SignInProviderId,

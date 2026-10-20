@@ -6,6 +6,7 @@ import {
   bytesText,
   Config,
   defaultPrivacyText,
+  signInProviders,
   LookSettings,
   People,
   Purge,
@@ -108,7 +109,8 @@ export const adminView = createServerFn({ method: 'GET' }).handler(() =>
         lastPurge,
         privacy: {
           text:
-            settings.privacyText ?? defaultPrivacyText(config.deploymentName),
+            settings.privacyText ??
+            defaultPrivacyText(config.deploymentName, signInProviders(config)),
           custom: settings.privacyText !== null,
         },
         limitRows: LIMITS.map(({ key, label, bytes }) => {

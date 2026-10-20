@@ -20,7 +20,7 @@ import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { WorkspaceMenu } from '../components/workspace-menu'
 import { treeSharingLabel } from '../lib/sharing'
-import { signOut, startGoogleSignIn } from '../lib/auth-client'
+import { switchAccount } from '../lib/auth-client'
 import {
   homeView,
   type HomeTree,
@@ -233,8 +233,7 @@ function Home({
   const useAnotherAccount = async () => {
     setBusy(true)
     try {
-      await signOut()
-      await startGoogleSignIn('/')
+      await switchAccount('/')
     } catch {
       setBusy(false)
     }

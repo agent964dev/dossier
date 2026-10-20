@@ -25,7 +25,9 @@
     "html_handling": "none",
   },
   // Secrets in every environment: BETTER_AUTH_SECRET, HANDLE_SECRET,
-  // SUPER_ADMINS, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+  // SUPER_ADMINS, and at least one sign-in provider's pair:
+  // GOOGLE_CLIENT_ID with GOOGLE_CLIENT_SECRET, MICROSOFT_CLIENT_ID with
+  // MICROSOFT_CLIENT_SECRET.
   "vars": {
     "PUBLIC_ORIGIN": "https://dossier.agent964.com",
     "DEPLOYMENT_NAME": "dossier.agent964.com",

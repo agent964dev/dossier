@@ -5,14 +5,16 @@ import {
   Config,
   CurrentCaller,
   SignIn,
+  signInProviders,
   type SignInNotice,
 } from '../core/index.ts'
+import type { SignInProviderId } from '../ports/auth.ts'
 import { runScreen } from './run.ts'
 
 export interface SignInView {
   readonly deployment: string
-  /** False until the deployment has its Google client. */
-  readonly ready: boolean
+  /** The providers turned on, Google first; none: sign-in is not set up yet. */
+  readonly providers: readonly SignInProviderId[]
   /** The signed-in person's email, when there is one. */
   readonly signedInAs: string | null
   readonly notice: SignInNotice | null
@@ -40,7 +42,7 @@ export const signInView = createServerFn({ method: 'GET' })
         )
         return {
           deployment: config.deploymentName,
-          ready: config.google !== null,
+          providers: signInProviders(config),
           signedInAs: person?.email ?? null,
           notice,
           origin: config.origin.origin,

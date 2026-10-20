@@ -16,17 +16,24 @@ import {
   redeemDeviceCode,
   type DeviceAuthorizationGrant,
 } from 'better-auth/plugins/device-authorization'
+import { microsoft } from 'better-auth/social-providers'
 import { tanstackStartCookies } from 'better-auth/tanstack-start'
 import { and, eq, gt, isNull } from 'drizzle-orm'
 import { Context, Effect, Layer, Redacted } from 'effect'
 import * as z from 'zod'
 
 import { Bindings } from '../core/bindings.ts'
-import { Config, type DeploymentConfig } from '../core/config.ts'
+import {
+  Config,
+  type DeploymentConfig,
+  type ProviderClient,
+} from '../core/config.ts'
 import {
   checkToken,
   emailOf,
   googleTrust,
+  microsoftAccountKind,
+  microsoftTrust,
   signInDiagnostic,
   type EmailTrust,
   type SignInDiagnostic,
@@ -64,8 +71,7 @@ const trustOf: Record<
   (profile: Readonly<Record<string, unknown>>) => EmailTrust
 > = {
   google: googleTrust,
-  // No Microsoft email is confirmed until its trust rule is in place.
-  microsoft: () => ({ confirmed: false, authority: false }),
+  microsoft: microsoftTrust,
 }
 
 /** One reader per provider: the decoded ID token (plus Microsoft's photo) as SignInClaims. */
@@ -322,19 +328,107 @@ const outcomeOf = (
         ? { code: 'not_confirmed' as const, provider, email: claims.email }
         : null)
   if (refused !== null) {
+    // A guest from another directory is never confirmed; its line says so.
+    const guest =
+      refused.code === 'not_confirmed' &&
+      provider === 'microsoft' &&
+      profile !== undefined &&
+      microsoftAccountKind(profile) === 'guest'
     return {
       refused,
       emailKept: null,
       diagnostic:
         refused.code === 'email_unconfirmed'
           ? null
-          : diagnose(provider, refused.code),
+          : diagnose(provider, guest ? 'guest' : refused.code),
     }
   }
   return {
     ...none,
     emailKept:
       scope.emailKept === undefined ? null : { ...scope.emailKept, provider },
+  }
+}
+
+const GRAPH_PHOTO = 'https://graph.microsoft.com/v1.0/me/photos/48x48/$value'
+
+const base64Of = (bytes: Uint8Array): string => {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/** The 48×48 Graph photo as a data URL, or null on any failure (404, network, non-image). */
+export const graphPhoto = async (
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<string | null> => {
+  try {
+    const response = await fetcher(GRAPH_PHOTO, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    })
+    const type = (response.headers.get('content-type') ?? '')
+      .split(';')[0]
+      ?.trim()
+      .toLowerCase()
+    if (!response.ok || type === undefined || !type.startsWith('image/')) {
+      return null
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    return bytes.length === 0 ? null : `data:${type};base64,${base64Of(bytes)}`
+  } catch {
+    return null
+  }
+}
+
+type MicrosoftTokens = Parameters<
+  ReturnType<typeof microsoft>['getUserInfo']
+>[0]
+
+/**
+ * Better Auth's Microsoft provider for `common`, with Dossier's rules. Its
+ * own photo download would stop the sign-in on a network failure, so Dossier
+ * fetches the photo first, best effort, and then runs a second built-in
+ * provider (a `getUserInfo` option replaces the built-in one whole). The photo
+ * goes on the profile the claims are read from, and on both outputs, because
+ * Better Auth builds the person's image and the stored profile from its own
+ * decoded token; no photo clears them.
+ */
+const microsoftProvider = (client: ProviderClient) => {
+  const options = {
+    clientId: client.clientId,
+    clientSecret: Redacted.value(client.clientSecret),
+    tenantId: 'common',
+    prompt: 'select_account' as const,
+    // The email, name and photo follow Microsoft at every sign-in.
+    overrideUserInfoOnSignIn: true,
+    disableProfilePhoto: true,
+  }
+  const toUser = mapProfileToUser('microsoft', client.clientId)
+  return {
+    ...options,
+    mapProfileToUser: toUser,
+    getUserInfo: async (token: MicrosoftTokens) => {
+      const picture =
+        token.accessToken === undefined || token.accessToken === ''
+          ? null
+          : await graphPhoto(token.accessToken)
+      const result = await microsoft({
+        ...options,
+        mapProfileToUser: (profile) =>
+          toUser({ ...profile, picture: picture ?? undefined }),
+      }).getUserInfo(token)
+      if (result === null) return null
+      return {
+        user: { ...result.user, image: picture ?? undefined },
+        // Better Auth's type says every profile has a picture; with its own
+        // download off, none has one unless Dossier's download found it.
+        data: {
+          ...result.data,
+          picture: picture ?? undefined,
+        } as typeof result.data,
+      }
+    },
   }
 }
 
@@ -518,7 +612,8 @@ const subjectLookups = (database: Database) => {
 }
 
 /**
- * Better Auth's options: Google and the device plugin, on D1 through Drizzle.
+ * Better Auth's options: the sign-in providers turned on and the device
+ * plugin, on D1 through Drizzle.
  * `extraPlugins` go before the cookie plugin, which must stay last.
  */
 export const authOptions = (
@@ -533,7 +628,7 @@ export const authOptions = (
   return {
     appName: config.deploymentName,
     basePath: '/_/auth',
-    // A person's name and photo come only from Google, at sign-in.
+    // A person's name and photo come only from a provider, at sign-in.
     // Sign-in accounts join only by signing in, and leave only through
     // Dossier's disconnect, which ends what they opened.
     disabledPaths: [
@@ -559,14 +654,14 @@ export const authOptions = (
         rateLimit: schema.rateLimit,
       },
     }),
-    socialProviders:
-      config.google === null
+    socialProviders: {
+      ...(config.google === null
         ? {}
         : {
             google: {
               clientId: config.google.clientId,
               clientSecret: Redacted.value(config.google.clientSecret),
-              prompt: 'select_account',
+              prompt: 'select_account' as const,
               // The email follows Google at every sign-in.
               overrideUserInfoOnSignIn: true,
               mapProfileToUser: mapProfileToUser(
@@ -574,7 +669,11 @@ export const authOptions = (
                 config.google.clientId,
               ),
             },
-          },
+          }),
+      ...(config.microsoft === null
+        ? {}
+        : { microsoft: microsoftProvider(config.microsoft) }),
+    },
     account: {
       // Linking by email is on; Dossier's guard narrows it in
       // validateUserInfo. The provider's authority decides a join, not the
@@ -737,7 +836,7 @@ export const authOptions = (
   } satisfies BetterAuthOptions
 }
 
-/** Better Auth with Google and the device plugin, on D1 through Drizzle. */
+/** Better Auth with the sign-in providers and the device plugin, on D1 through Drizzle. */
 export const makeAuthPort = (
   bindings: Env,
   config: DeploymentConfig,
@@ -870,7 +969,7 @@ export const makeAuthPort = (
 const normalizeUserCode = (userCode: string): string =>
   userCode.replaceAll('-', '').trim().toUpperCase()
 
-/** Better Auth against Google's real endpoints. */
+/** Better Auth against the providers' real endpoints. */
 export const AuthLive: Layer.Layer<Auth, never, Bindings | Config> =
   Layer.effect(
     Auth,
